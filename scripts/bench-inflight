@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Runs the in-flight marker benchmark. Argument: writes per repetition (default 3000).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+MIX_ENV=test exec mix run bench/inflight.exs "$@"

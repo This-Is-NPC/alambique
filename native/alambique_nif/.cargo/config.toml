@@ -1,0 +1,5 @@
+# Build options of the bundled SQLite (libsqlite3-sys reads LIBSQLITE3_FLAGS).
+# No default foreign keys and no double-quoted string literals, so cell
+# databases behave the same whatever SQLite the host would link.
+[env]
+LIBSQLITE3_FLAGS = "-USQLITE_DEFAULT_FOREIGN_KEYS -DSQLITE_DQS=0 -DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_FTS4 -DSQLITE_ENABLE_GEOPOLY"

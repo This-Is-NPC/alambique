@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Runs the routing-path benchmark. Argument: calls per repetition (default 100000).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+MIX_ENV=test exec mix run bench/router.exs "$@"

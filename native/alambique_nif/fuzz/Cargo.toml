@@ -1,0 +1,64 @@
+[package]
+name = "alambique_nif-fuzz"
+version = "0.1.0"
+publish = false
+license = "MIT"
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+alambique_nif = { path = "..", features = ["fuzzing"] }
+
+[workspace]
+
+[[bin]]
+name = "ltx_decode"
+path = "fuzz_targets/ltx_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ltx_roundtrip"
+path = "fuzz_targets/ltx_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "page_apply"
+path = "fuzz_targets/page_apply.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ltx_merge"
+path = "fuzz_targets/ltx_merge.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wal_scan"
+path = "fuzz_targets/wal_scan.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "capture_chain"
+path = "fuzz_targets/capture_chain.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lazy_plan"
+path = "fuzz_targets/lazy_plan.rs"
+test = false
+doc = false
+bench = false

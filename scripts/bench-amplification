@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Runs the amplification benchmark. Argument: simulated hours (default 1).
+# Speed, message rate and size, store latency and extra options come from the
+# ALAMBIQUE_BENCH_* variables of bench/amplification.exs.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+MIX_ENV=test exec mix run bench/amplification.exs "$@"

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Run the Rust unit tests of the native crate.
+set -euo pipefail
+cd "$(dirname "$0")/../native/alambique_nif"
+cargo test

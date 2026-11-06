@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Fuzzes the native crate with libFuzzer. Arguments: target (ltx_decode, lazy_plan,
+# ltx_roundtrip, page_apply, ltx_merge, wal_scan, capture_chain or all;
+# default all) and seconds per target (default $ALAMBIQUE_FUZZ_SECONDS, else 60).
+# $ALAMBIQUE_FUZZ_MAX_LEN caps the input size in bytes (default 4096).
+#
+# Inputs start from the seeds in native/alambique_nif/fuzz/corpus; what the
+# run finds goes to a temporary directory. A crashing input is kept in
+# native/alambique_nif/fuzz/artifacts (not committed): turn it into a regression
+# test and delete it.
+set -euo pipefail
+: "${ALAMBIQUE_NIGHTLY:?run through mise, which sets it}"
+all=(ltx_decode lazy_plan ltx_roundtrip page_apply ltx_merge wal_scan capture_chain)
+target=${1:-all}
+seconds=${2:-${ALAMBIQUE_FUZZ_SECONDS:-60}}
+max_len=${ALAMBIQUE_FUZZ_MAX_LEN:-4096}
+cd "$(dirname "$0")/.."
+scripts/native-tools
+cd native/alambique_nif
+
+if [ "$target" = all ]; then
+  targets=("${all[@]}")
+else
+  targets=("$target")
+fi
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+# The harnesses write scratch files to the temporary directory.
+mkdir "$work/tmp"
+export TMPDIR="$work/tmp"
+
+for t in "${targets[@]}"; do
+  mkdir "$work/$t"
+  echo "== $t: $seconds s, inputs up to $max_len bytes"
+  cargo "+$ALAMBIQUE_NIGHTLY" fuzz run "$t" "$work/$t" "fuzz/corpus/$t" -- \
+    -max_total_time="$seconds" -max_len="$max_len" -print_final_stats=1
+done

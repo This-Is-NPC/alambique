@@ -1,0 +1,13 @@
+_build
+deps
+native/**/target
+*.db*
+erl_crash.dump
+/priv/native
+/cover
+*.dump
+/tmp
+/results
+.claude/
+.env*
+*.pem

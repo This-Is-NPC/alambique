@@ -1,0 +1,42 @@
+[package]
+name = "alambique_nif"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[lib]
+name = "alambique_nif"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+libsqlite3-sys = { version = "0.38", features = ["bundled"] }
+lz4_flex = "0.14.0"
+rustler = "0.38"
+
+[features]
+# Test NIFs that panic (`mix test` builds with it; see design §2.1).
+test-panic = []
+# Entry points of the fuzz targets (`fuzz/`); also keeps the BEAM allocator out.
+fuzzing = []
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+# `fuzzing` is set by cargo-fuzz.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
+[dev-dependencies]
+proptest = { version = "1.12.0", default-features = false, features = ["std"] }
+tempfile = "3.27.0"
+
+# Panics unwind in every profile: rustler turns a panic in a NIF into an
+# Erlang exception and the callbacks C calls catch it (design §2.1). Never
+# "abort": the first panic would stop the whole VM.
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"

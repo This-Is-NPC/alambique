@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Prints the path of tla2tools.jar ($ALAMBIQUE_TLA_VERSION), downloading the
+# release into the cache when it is missing and checking its SHA-256
+# ($ALAMBIQUE_TLA_SHA256). Both are pinned in mise.toml.
+set -euo pipefail
+: "${ALAMBIQUE_TLA_VERSION:?run through mise, which sets it}"
+: "${ALAMBIQUE_TLA_SHA256:?run through mise, which sets it}"
+
+dir="${XDG_CACHE_HOME:-$HOME/.cache}/alambique/tla/$ALAMBIQUE_TLA_VERSION"
+jar="$dir/tla2tools.jar"
+
+verify() { echo "$ALAMBIQUE_TLA_SHA256  $1" | sha256sum --check --status; }
+
+if [ ! -f "$jar" ] || ! verify "$jar"; then
+  mkdir -p "$dir"
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  curl -fsSL -o "$tmp/tla2tools.jar" \
+    "https://github.com/tlaplus/tlaplus/releases/download/v$ALAMBIQUE_TLA_VERSION/tla2tools.jar" >&2
+  verify "$tmp/tla2tools.jar" || {
+    echo "tla2tools.jar v$ALAMBIQUE_TLA_VERSION does not match ALAMBIQUE_TLA_SHA256" >&2
+    exit 1
+  }
+  mv "$tmp/tla2tools.jar" "$jar"
+fi
+echo "$jar"

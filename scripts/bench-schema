@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Runs the schema creation benchmark. Argument: number of cells per mode (default 500).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+MIX_ENV=test exec mix run bench/schema.exs "$@"

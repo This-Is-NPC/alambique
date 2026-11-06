@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Installs what the native hardening tasks need when it is missing: the nightly
+# toolchain $ALAMBIQUE_NIGHTLY (with Miri and the standard library sources)
+# and cargo-fuzz $ALAMBIQUE_CARGO_FUZZ. Both versions are pinned in mise.toml.
+set -euo pipefail
+: "${ALAMBIQUE_NIGHTLY:?run through mise, which sets it}"
+: "${ALAMBIQUE_CARGO_FUZZ:?run through mise, which sets it}"
+
+if ! rustup toolchain list | grep -q "^${ALAMBIQUE_NIGHTLY}-"; then
+  rustup toolchain install "$ALAMBIQUE_NIGHTLY" --profile minimal \
+    -c miri -c rust-src -c llvm-tools-preview
+fi
+
+if ! cargo fuzz --version 2>/dev/null | grep -q " ${ALAMBIQUE_CARGO_FUZZ}\$"; then
+  cargo "+$ALAMBIQUE_NIGHTLY" install cargo-fuzz --version "$ALAMBIQUE_CARGO_FUZZ" --locked --force
+fi

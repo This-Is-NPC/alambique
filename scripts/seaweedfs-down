@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Remove the disposable SeaweedFS container and its data.
+set -euo pipefail
+docker rm -f -v alambique-seaweedfs >/dev/null 2>&1 || true
+echo "SeaweedFS removed"

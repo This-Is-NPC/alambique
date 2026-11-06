@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Runs the store round trips benchmark. Argument: jobs per case (default 100).
+# The matrix comes from the ALAMBIQUE_BENCH_* variables of bench/trips.exs.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+MIX_ENV=test exec mix run bench/trips.exs "$@"

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Runs the wake benchmark. Argument: wakes per cell (default 8).
+# Latency, modes, cells and extra options come from the ALAMBIQUE_BENCH_*
+# variables of bench/wake.exs.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+MIX_ENV=test exec mix run bench/wake.exs "$@"

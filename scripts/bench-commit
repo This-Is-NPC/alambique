@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Runs the commit latency benchmark. Argument: seconds per case (default 3).
+# The case matrix comes from the ALAMBIQUE_BENCH_* variables of bench/commit.exs.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+MIX_ENV=test exec mix run bench/commit.exs "$@"

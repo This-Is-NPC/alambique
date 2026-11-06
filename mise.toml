@@ -1,0 +1,134 @@
+[tools]
+erlang = "28.5.0.7"
+elixir = "1.20.4-otp-28"
+rust = "1.97.1"
+java = "openjdk-17.0.2"
+"aqua:taiki-e/cargo-llvm-cov" = "0.9.1"
+
+[env]
+# The nightly toolchain of the native hardening tasks (Miri, sanitizers and
+# fuzzing need unstable flags). The single place that pins it.
+ALAMBIQUE_NIGHTLY = "nightly-2026-10-20"
+ALAMBIQUE_CARGO_FUZZ = "0.13.2"
+# Minimum line coverage, in percent, of the Elixir and the Rust code
+# (scripts/test-coverage; mix.exs reads it too).
+ALAMBIQUE_COVERAGE_MIN = "90"
+# TLC, the TLA+ model checker (release v1.8.0 of github.com/tlaplus/tlaplus);
+# scripts/tla-tools downloads it into the cache and checks the hash.
+ALAMBIQUE_TLA_VERSION = "1.8.0"
+ALAMBIQUE_TLA_SHA256 = "011267fca25d0752cf18894dd585cd28b96960c112ea8a20b823ea770e7e10cd"
+
+[tasks."seaweedfs:up"]
+description = "Start the disposable SeaweedFS container on 127.0.0.1:18333"
+run = "scripts/seaweedfs-up"
+
+[tasks."seaweedfs:down"]
+description = "Remove the disposable SeaweedFS container"
+run = "scripts/seaweedfs-down"
+
+[tasks.test]
+description = "Run the default test suite (no external services)"
+run = "mix test"
+
+[tasks."test:native"]
+description = "Run the Rust unit tests of the native crate"
+run = "scripts/test-native"
+
+[tasks."test:coverage"]
+description = "Measure line coverage of the Elixir code and of the NIF the BEAM loads over the default suite; fails below $ALAMBIQUE_COVERAGE_MIN percent (default 90) in either"
+run = "scripts/test-coverage"
+
+[tasks."test:miri"]
+description = "Run the native tests under Miri, which checks the Rust code for undefined behavior (FFI-bound tests are skipped)"
+run = "scripts/test-native-checked miri"
+
+[tasks."test:asan"]
+description = "Run the native tests under AddressSanitizer and LeakSanitizer, SQLite's C code included (needs clang; CC overrides it)"
+run = "scripts/test-native-checked asan"
+
+[tasks."test:ubsan"]
+description = "Run the native tests with SQLite's C code built with UBSan, plus Rust overflow and unsafe-precondition checks (needs clang; CC overrides it)"
+run = "scripts/test-native-checked ubsan"
+
+[tasks.fuzz]
+description = "Fuzz a native target for some seconds: ltx_decode, lazy_plan, ltx_roundtrip, page_apply, ltx_merge, wal_scan, capture_chain or all (arguments: target, default all; seconds per target, default 60 or $ALAMBIQUE_FUZZ_SECONDS; $ALAMBIQUE_FUZZ_MAX_LEN, default 4096, caps the input size)"
+run = "scripts/fuzz"
+
+[tasks."check:tla"]
+description = "Model-check the pipelined-commit protocol (tla/Pipeline.tla) with TLC; downloads the pinned TLC once"
+run = "scripts/tla-check"
+
+[tasks."check:tla:mutations"]
+description = "Check that the TLA+ model catches each deliberate bug (each run must find a violation)"
+run = "scripts/tla-mutations"
+
+[tasks."test:seaweedfs"]
+description = "Run the store contract tests against SeaweedFS"
+depends = ["seaweedfs:up"]
+run = "mix test --only seaweedfs"
+
+[tasks."test:cluster"]
+description = "Run the failover properties on a cluster of peer nodes (slow)"
+run = "mix test --only cluster"
+
+[tasks."bench:cells"]
+description = "Wake thousands of cells on one node and report resource use (argument: number of cells)"
+run = "scripts/bench-cells"
+
+[tasks."bench:memory"]
+description = "Report the memory of awake cells by purpose and the read and write latency (arguments: cell counts, default 1 100 500; ALAMBIQUE_BENCH_ROWS, _OPS, _OPTS)"
+run = "scripts/bench-memory"
+
+[tasks."bench:query"]
+description = "Query thousands of cells cold and warm and report requests and time (argument: number of cells)"
+run = "scripts/bench-query"
+
+[tasks."bench:schema"]
+description = "Create the same schema in fresh cells with one Tx.execute per statement and with one Tx.script, and compare (argument: cells per mode)"
+run = "scripts/bench-schema"
+
+[tasks."bench:commit"]
+description = "Measure commit latency and throughput of one cell by store latency, pipeline depth and load (argument: seconds per case; matrix in bench/commit.exs)"
+depends = ["seaweedfs:up"]
+run = "scripts/bench-commit"
+
+[tasks."bench:amplification"]
+description = "Replay a mailbox of 13 messages of 75 KB per hour in compressed time and report the bytes put to the store and kept, by kind of object (argument: simulated hours, default 1; ALAMBIQUE_BENCH_SPEED, _MESSAGES, _BODY_BYTES, _STORE_MS, _STAGES, _OPTS)"
+run = "scripts/bench-amplification"
+
+[tasks."bench:stall"]
+description = "Write to 12 cells at fixed rates and print a per-second timeline of latency, run queues, NIF calls, spans, store requests and threads blocked in the kernel, to find stalls (argument: seconds per rate, default 60; ALAMBIQUE_BENCH_RATES, _CELLS, _STORE=memory|seaweedfs, _OPTS; TMPDIR picks the disk)"
+run = "scripts/bench-stall"
+
+[tasks."bench:lazy"]
+description = "Compare a lazy restore with a full restore of a large cell (argument: database size in MB)"
+depends = ["seaweedfs:up"]
+run = "scripts/bench-lazy"
+
+[tasks."bench:wal"]
+description = "Keep one cell awake under steady writes and report commits/s, p99, WAL size and memory per interval (argument: seconds)"
+run = "scripts/bench-wal"
+
+[tasks."bench:sums"]
+description = "Measure the commit of a single-row change in cells of many pages (ALAMBIQUE_BENCH_PAGES, default \"10000 100000 1000000\")"
+run = "scripts/bench-sums"
+
+[tasks."bench:router"]
+description = "Time the routing path of a local call and the awake.max_pending check (argument: calls per repetition)"
+run = "scripts/bench-router"
+
+[tasks."bench:routing"]
+description = "Time the cluster-view reads of a forwarded call for 1, 100 and 1000 group members (argument: operations per repetition)"
+run = "scripts/bench-routing"
+
+[tasks."bench:inflight"]
+description = "Time a write with the in-flight marker on and off (argument: writes per repetition)"
+run = "scripts/bench-inflight"
+
+[tasks."bench:trips"]
+description = "Count the store requests of a job (two commits in one awake cell) by kind, with the store at 25 and 100 ms, at concurrency 1 and 4 (argument: jobs per case)"
+run = "scripts/bench-trips"
+
+[tasks."bench:wake"]
+description = "Wake hibernated mailbox cells with latency on every store request and report the time of the first query and the requests of the wake, local, hydrated and lazy (argument: wakes per cell; ALAMBIQUE_BENCH_LATENCY, _MODES, _CELLS, _TAIL, _OPTS)"
+run = "scripts/bench-wake"

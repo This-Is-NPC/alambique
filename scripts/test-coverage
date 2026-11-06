@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Measures line coverage of the production code of both languages and fails
+# when either is below $ALAMBIQUE_COVERAGE_MIN percent (set in mise.toml).
+#
+#   Elixir  `mix test --cover` over the default suite; mix.exs sets the
+#           threshold from the same variable and ignores test support.
+#   Rust    the NIF that the BEAM loads during that same run, built with
+#           coverage instrumentation in a separate target directory, then
+#           reported by cargo-llvm-cov. Fuzz targets and the panic test NIFs
+#           are left out.
+#
+# The instrumented NIF replaces priv/native/alambique_nif.so for the run; the
+# file is removed afterwards so the next build compiles the normal one.
+set -euo pipefail
+: "${ALAMBIQUE_COVERAGE_MIN:?run through mise, which sets it}"
+root=$(cd "$(dirname "$0")/.." && pwd)
+crate=$root/native/alambique_nif
+target=$crate/target/llvm-cov-target
+nif=$root/priv/native/alambique_nif.so
+cd "$root"
+
+cleanup() { rm -f "$nif"; }
+trap cleanup EXIT
+cleanup
+rm -rf "$target"
+
+status=0
+(
+  # The wrapper variables instrument only this crate, not its dependencies.
+  eval "$(cd "$crate" && cargo llvm-cov show-env --sh 2>/dev/null | grep '^export')"
+  export CARGO_TARGET_DIR=$target
+  export LLVM_PROFILE_FILE=$target/alambique_nif-%p-%12m.profraw
+  mix test --cover
+) || status=$?
+
+echo
+echo "Rust (NIF loaded by the BEAM), minimum ${ALAMBIQUE_COVERAGE_MIN}% of lines:"
+(
+  cd "$crate"
+  CARGO_TARGET_DIR=$crate/target cargo llvm-cov report --release \
+    --ignore-filename-regex '(fuzzing|test_panic)\.rs' \
+    --fail-under-lines "$ALAMBIQUE_COVERAGE_MIN"
+) || status=$?
+
+exit "$status"

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Runs the page-sums benchmark. Page counts come from ALAMBIQUE_BENCH_PAGES.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+MIX_ENV=test exec mix run bench/sums.exs "$@"

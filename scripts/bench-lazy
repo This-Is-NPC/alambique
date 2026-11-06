@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Runs the lazy restore benchmark. Argument: database size in MB (default 2048).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+MIX_ENV=test exec mix run bench/lazy.exs "$@"

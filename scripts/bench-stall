@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Runs the stall benchmark. Argument: seconds per rate (default 60).
+# Rates, cells, store and extra options come from the ALAMBIQUE_BENCH_* variables of
+# bench/stall.exs; TMPDIR picks the disk of the cell files.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+MIX_ENV=test exec mix run bench/stall.exs "$@"

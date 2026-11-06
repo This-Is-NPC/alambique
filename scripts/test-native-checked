@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Runs the native unit tests under a checker. Arguments: miri, asan or ubsan,
+# then optional arguments for `cargo test` (a test name filter, for example).
+#
+#   miri   Rust code in an interpreter that reports undefined behavior; tests
+#          that call SQLite are skipped because Miri cannot run C.
+#   asan   AddressSanitizer and LeakSanitizer over Rust (with a rebuilt
+#          standard library) and over SQLite's C code.
+#   ubsan  SQLite's C code built with UBSan and trapping on any report; Rust
+#          has no UBSan, so its overflow and unsafe-precondition checks stay on.
+#
+# asan and ubsan compile SQLite with $CC (default clang).
+set -euo pipefail
+: "${ALAMBIQUE_NIGHTLY:?run through mise, which sets it}"
+mode=${1:?usage: test-native-checked miri|asan|ubsan [cargo test arguments]}
+shift
+cd "$(dirname "$0")/.."
+scripts/native-tools
+cd native/alambique_nif
+
+host=$(rustc "+$ALAMBIQUE_NIGHTLY" -vV | sed -n 's/^host: //p')
+export CARGO_TARGET_DIR="target/checked-$mode"
+
+case "$mode" in
+miri)
+  # The tests use temporary files, which Miri allows only without isolation.
+  MIRIFLAGS="-Zmiri-disable-isolation ${MIRIFLAGS:-}" \
+    exec cargo "+$ALAMBIQUE_NIGHTLY" miri test --lib "$@"
+  ;;
+asan)
+  export CC=${CC:-clang}
+  export CFLAGS="-fsanitize=address -fno-omit-frame-pointer -g"
+  export RUSTFLAGS="-Zsanitizer=address -Cdebuginfo=1"
+  export ASAN_OPTIONS="detect_leaks=1:abort_on_error=0:${ASAN_OPTIONS:-}"
+  exec cargo "+$ALAMBIQUE_NIGHTLY" test -Zbuild-std --target "$host" --lib "$@"
+  ;;
+ubsan)
+  export CC=${CC:-clang}
+  export CFLAGS="-fsanitize=undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g"
+  export RUSTFLAGS="-Clinker=$CC -Clink-arg=-fsanitize=undefined -Coverflow-checks=on"
+  export UBSAN_OPTIONS="print_stacktrace=1:${UBSAN_OPTIONS:-}"
+  exec cargo "+$ALAMBIQUE_NIGHTLY" test --target "$host" --lib "$@"
+  ;;
+*)
+  echo "unknown checker: $mode (miri, asan or ubsan)" >&2
+  exit 2
+  ;;
+esac

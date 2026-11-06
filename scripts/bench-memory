@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Runs the memory benchmark. Arguments: cell counts (default 1 100 500).
+# Notes per cell, operations and extra options come from the ALAMBIQUE_BENCH_*
+# variables of bench/memory.exs.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+MIX_ENV=test exec mix run bench/memory.exs "$@"

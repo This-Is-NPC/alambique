@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Model-checks tla/Pipeline.tla with TLC. Exits non-zero when a property is
+# violated. With --mutation NAME it checks the model with that deliberate bug
+# (see tla/Pipeline.tla, `Bugs`), which must be violated. TLC's output is
+# printed; its state directory and the trace spec it writes live in a
+# temporary directory that is removed.
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+bug=none
+if [ "${1:-}" = "--mutation" ]; then
+  bug="${2:?usage: tla-check [--mutation NAME]}"
+fi
+
+jar="$("$root/scripts/tla-tools")"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+cp "$root/tla/Pipeline.tla" "$work/"
+sed "s/^  Bug = .*/  Bug = \"$bug\"/" "$root/tla/Pipeline.cfg" > "$work/Pipeline.cfg"
+
+# -XX:-UseContainerSupport: JDK 17.0.2 fails to start TLC's state storage on
+# some cgroup v2 setups.
+cd "$work"
+java -XX:+UseParallelGC -XX:-UseContainerSupport -cp "$jar" tlc2.TLC \
+  -workers auto -metadir "$work/states" -config Pipeline.cfg Pipeline.tla

@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Checks that the Pipeline model is not vacuous. Each deliberate bug (the
+# `Bug` constant of tla/Pipeline.tla) must violate one of the properties
+# listed next to it. ChainNoPre (no checksum comparison in the chain) must
+# still pass: given the epoch rule and the fence, a segment whose epoch does
+# not decrease always has the right checksum. Exits non-zero when a result
+# differs.
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+out=$(mktemp)
+trap 'rm -f "$out"' EXIT
+
+status=0
+for entry in \
+  AckOutOfOrder:NoAckedCommitLost\|InOrderAck \
+  OverwriteAny:NoAckedCommitLost\|ChainPrefixStable \
+  NoFence:FenceEffective \
+  ChainNoEpoch:ChainEpochsMonotone\|ChainPrefixStable \
+  ChainNoEpochNoPre:ChainEpochsMonotone\|ChainPrefixStable \
+  RefuseSent:NoRefusedDurable \
+  ChainNoPre:; do
+  bug="${entry%%:*}"
+  want="${entry#*:}"
+  if "$root/scripts/tla-check" --mutation "$bug" >"$out" 2>&1; then
+    if [ -z "$want" ]; then
+      echo "ok   $bug is covered by the epoch rule (no violation)"
+    else
+      echo "FAIL $bug: no violation found"
+      status=1
+    fi
+  elif [ -n "$want" ] && grep -Eq "(Invariant|Action property|Temporal property) ($want) is violated" "$out"; then
+    echo "ok   $bug: $(grep -m1 'is violated' "$out")"
+  else
+    echo "FAIL $bug: unexpected result"
+    grep -m1 "is violated" "$out" || tail -5 "$out"
+    status=1
+  fi
+done
+exit $status
