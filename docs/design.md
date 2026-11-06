@@ -1244,8 +1244,9 @@ directories (`<data_dir>/work`, §20) are not part of the cache; `inflight`,
   cell nobody holds is forwarded to the preferred node among the remaining
   members, and a forwarded call that is refused is looked up again); then it
   hibernates every cell with a process on the node, a few at a time (the
-  instance option `:drain` sets concurrency, per-cell timeout, passes, listing
-  page and the supervisor's shutdown time), uploading
+  instance option `:drain` sets concurrency, per-cell timeout, the deadline of
+  the whole drain, passes, listing page and the supervisor's shutdown time),
+  uploading
   pending writes and releasing the leases, so other nodes serve the cells at
   once instead of after the lease expires. The group of the `node_id` and incarnation stays, so
   calls for cells that are still awake on the node keep reaching them. A
@@ -1265,7 +1266,15 @@ directories (`<data_dir>/work`, §20) are not part of the cache; `inflight`,
   the drain did not finish. A cell whose lease the store would not release is
   asleep but not released: the drain lists it as `{:release_failed, reason}` in
   `errors`, not in `hibernated`, because another node waits for the lease to
-  expire. A drain emits `[:alambique, :drain, :start]` and `[:alambique, :drain,
+  expire. **Deadline.** `:deadline_ms` (default 60 000, under the 75 000 of
+  `:shutdown_ms`, so the supervisor does not kill a drain that ends on time)
+  bounds the whole drain. After it no new hibernation starts, a call in flight
+  gets the time left, and every cell still awake is reported as `{cell,
+  :deadline}`. Those cells are left awake, not killed and not hibernated by
+  force: forcing gains nothing, since an acknowledged write is already durable
+  and a kill would only leave the leases unreleased. The node keeps serving them; another `drain/2` or the stop of
+  the instance hibernates them, and otherwise their leases expire as after a
+  crash. A drain emits `[:alambique, :drain, :start]` and `[:alambique, :drain,
   :stop]` (`docs/telemetry.md`), and `Alambique.drain_status/1` reads its
   progress from an ETS table that the drain child owns, so a caller on another
   process sees it while the drain runs.

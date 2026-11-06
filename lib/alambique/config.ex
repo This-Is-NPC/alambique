@@ -106,6 +106,7 @@ defmodule Alambique.Config do
   @drain_defaults [
     concurrency: 64,
     timeout_ms: 15_000,
+    deadline_ms: 60_000,
     rounds: 3,
     page_size: 1_000,
     shutdown_ms: 75_000

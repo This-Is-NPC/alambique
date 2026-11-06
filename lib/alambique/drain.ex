@@ -47,13 +47,14 @@ defmodule Alambique.Drain do
   """
   @spec run(Alambique.Config.t(), keyword) :: {:ok, %{hibernated: non_neg_integer, errors: list}}
   def run(config, opts) do
-    defaults = Map.take(config.drain, [:concurrency, :timeout_ms])
+    defaults = Map.take(config.drain, [:concurrency, :timeout_ms, :deadline_ms])
 
-    [concurrency: concurrency, timeout: timeout] =
+    [concurrency: concurrency, deadline: deadline, timeout: timeout] =
       opts
       |> Keyword.validate!(
         concurrency: defaults.concurrency,
-        timeout: defaults.timeout_ms
+        timeout: defaults.timeout_ms,
+        deadline: defaults.deadline_ms
       )
       |> Enum.sort()
 
@@ -64,7 +65,8 @@ defmodule Alambique.Drain do
     meta = %{instance: config.name, node_id: config.node_id}
     Telemetry.emit([:drain, :start], %{cells: cells}, meta)
 
-    summary = rounds(config, {concurrency, timeout}, %{}, config.drain.rounds)
+    limit = System.monotonic_time(:millisecond) + deadline
+    summary = rounds(config, {concurrency, timeout, limit}, %{}, config.drain.rounds)
     finish(config, summary)
 
     errors = length(summary.errors)
@@ -140,13 +142,15 @@ defmodule Alambique.Drain do
   defp released_failed(errors),
     do: Enum.count(errors, &match?({_, {:release_failed, _}}, &1))
 
-  defp rounds(config, bounds, results, left) do
+  defp rounds(config, {_, _, limit} = bounds, results, left) do
+    overdue? = System.monotonic_time(:millisecond) >= limit
+
     case cells(config, nil, config.drain.page_size) do
       [] ->
-        summary(results, [])
+        summary(results, [], overdue?)
 
-      awake when left == 0 ->
-        summary(results, awake)
+      awake when left == 0 or overdue? ->
+        summary(results, awake, overdue?)
 
       awake ->
         results = hibernate(config, bounds, awake, results)
@@ -154,9 +158,9 @@ defmodule Alambique.Drain do
     end
   end
 
-  defp hibernate(config, {concurrency, timeout}, awake, results) do
+  defp hibernate(config, {concurrency, timeout, limit}, awake, results) do
     awake
-    |> Task.async_stream(&{&1, Router.hibernate_local(config, &1, timeout)},
+    |> Task.async_stream(&{&1, hibernate_cell(config, &1, timeout, limit)},
       max_concurrency: concurrency,
       timeout: 2 * timeout,
       on_timeout: :kill_task,
@@ -168,6 +172,20 @@ defmodule Alambique.Drain do
     end)
   end
 
+  # A cell that starts after the deadline is not touched; one in flight gets
+  # what is left of it.
+  defp hibernate_cell(config, cell, timeout, limit) do
+    case limit - System.monotonic_time(:millisecond) do
+      left when left <= 0 -> {:error, :deadline}
+      left when left < timeout -> deadline_cut(Router.hibernate_local(config, cell, left))
+      _left -> Router.hibernate_local(config, cell, timeout)
+    end
+  end
+
+  # The call ran out of the time the deadline left it, not out of its own.
+  defp deadline_cut({:error, :timeout}), do: {:error, :deadline}
+  defp deadline_cut(result), do: result
+
   defp record(config, results, cell, result) do
     case result do
       :ok -> :ets.update_counter(config.drain_status, :done, 1)
@@ -177,10 +195,12 @@ defmodule Alambique.Drain do
     Map.put(results, cell, result)
   end
 
-  defp summary(results, awake) do
+  defp summary(results, awake, overdue?) do
+    left = if overdue?, do: :deadline, else: :awake
+
     results =
       Enum.reduce(awake, results, fn cell, acc ->
-        Map.update(acc, cell, {:error, :awake}, fn
+        Map.update(acc, cell, {:error, left}, fn
           :ok -> {:error, :awake}
           error -> error
         end)

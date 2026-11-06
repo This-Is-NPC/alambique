@@ -160,6 +160,41 @@ defmodule Alambique.DrainTest do
              Alambique.drain_status(a)
   end
 
+  test "the deadline ends the drain and leaves the rest awake", %{a: a, ctx: ctx} do
+    cells = for n <- 1..6, do: "late-#{n}"
+    for cell <- cells, do: assert({:ok, _} = insert(a, cell, 1))
+
+    # Each hibernation takes at least 300 ms, one at a time: three fit in 1 s.
+    fault =
+      MemoryStore.inject(ctx.store_config, kind: :latency, ops: [:put], ms: 300, key: ~r"/lease$")
+
+    assert {:ok, %{hibernated: done, errors: errors}} =
+             Alambique.drain(a, concurrency: 1, deadline: 1_000)
+
+    MemoryStore.remove(ctx.store_config, fault)
+
+    assert done in 1..5
+    assert length(errors) == 6 - done
+    assert Enum.all?(errors, &match?({_, :deadline}, &1))
+
+    # Nothing was killed: the cells that are awake were left. A cell cut off in
+    # flight may still have gone to sleep since.
+    left = for {cell, :deadline} <- errors, do: cell
+    assert %{cells: awake} = Alambique.cells(a)
+    assert awake != []
+    assert awake -- left == []
+    assert %{running: false, done: ^done} = Alambique.drain_status(a)
+
+    # A second drain finishes what the first left.
+    assert {:ok, %{errors: []}} = Alambique.drain(a)
+    assert %{cells: []} = Alambique.cells(a)
+  end
+
+  test "a deadline longer than the work does not change the result", %{a: a} do
+    for n <- 1..3, do: assert({:ok, _} = insert(a, "ontime-#{n}", 1))
+    assert {:ok, %{hibernated: 3, errors: []}} = Alambique.drain(a, deadline: 30_000)
+  end
+
   test "drain twice is safe", %{a: a} do
     assert {:ok, _} = insert(a, "once", 1)
     assert {:ok, %{hibernated: 1, errors: []}} = Alambique.drain(a)
@@ -302,6 +337,6 @@ defmodule Alambique.DrainTest do
     end
 
     config = Alambique.Config.build(store: ctx.store, data_dir: ctx.dir, drain: [rounds: 5])
-    assert %{rounds: 5, concurrency: 64, timeout_ms: 15_000} = config.drain
+    assert %{rounds: 5, concurrency: 64, timeout_ms: 15_000, deadline_ms: 60_000} = config.drain
   end
 end

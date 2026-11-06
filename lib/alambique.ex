@@ -144,7 +144,8 @@ defmodule Alambique do
       read with a page a query is waiting for, default 16).
     * `:drain` - how `drain/2` and the stop of the instance hibernate the cells
       (design §8): a keyword list with `:concurrency` (cells hibernating at
-      once, default 64), `:timeout_ms` (per cell, default 15 000), `:rounds`
+      once, default 64), `:timeout_ms` (per cell, default 15 000), `:deadline_ms`
+      (the whole drain, default 60 000), `:rounds`
       (passes over the cells still awake, default 3), `:page_size` (cells listed
       per request, default 1 000) and `:shutdown_ms` (time the supervisor gives
       the drain when the instance stops, default 75 000).
@@ -775,9 +776,18 @@ defmodule Alambique do
   could not be hibernated stays in `errors` (its lease then expires as after a
   crash), and so does a cell whose lease could not be released, with
   `{:release_failed, reason}`: it is asleep, but other nodes wait for the lease
-  to expire. `hibernated` counts only the cells that were released. Stopping the instance runs the same drain. Repeating the call is
-  safe. Options: `:concurrency` and `:timeout` (per cell, in milliseconds),
-  overriding `:timeout_ms` and `:concurrency` of the instance's `:drain` option.
+  to expire. `hibernated` counts only the cells that were released.
+
+  The drain ends at the deadline: cells that were not started are not
+  touched, and every cell still awake is reported as `{cell, :deadline}`. They
+  are neither killed nor hibernated by force: the node keeps serving them, and
+  `drain/2` again, or stopping the instance, hibernates them. Another node
+  takes them when their leases expire.
+
+  Stopping the instance runs the same drain. Repeating the call is safe.
+  Options: `:concurrency`, `:timeout` (per cell, in milliseconds) and
+  `:deadline` (the whole drain, in milliseconds), overriding `:concurrency`,
+  `:timeout_ms` and `:deadline_ms` of the instance's `:drain` option.
   `join/1` brings the node back into service, and `drain_status/1` tells how
   far a drain is. The telemetry events are in `docs/telemetry.md`.
   """
