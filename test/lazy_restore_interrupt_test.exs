@@ -15,6 +15,22 @@ defmodule Alambique.LazyRestoreInterruptTest do
     {1, "CREATE TABLE log (id INTEGER PRIMARY KEY AUTOINCREMENT, n INTEGER NOT NULL, v BLOB)"}
   ]
 
+  # The restarted node is a new instance: the cell is refused until the lease
+  # of the killed one expires (design §5).
+  defp query(c, name, inst, cell, sql) do
+    deadline = System.monotonic_time(:millisecond) + 30_000
+
+    Stream.repeatedly(fn ->
+      {:ok, result} = Cluster.call(c, name, Alambique, :query, [inst, cell, sql], 60_000)
+      if match?({:error, {:unavailable, _, _}}, result), do: Process.sleep(100)
+      result
+    end)
+    |> Enum.find(fn result ->
+      not match?({:error, {:unavailable, _, _}}, result) or
+        System.monotonic_time(:millisecond) > deadline
+    end)
+  end
+
   test "a kill on a page miss is followed by a wake with one dirty I/O scheduler" do
     {:ok, c} =
       Cluster.start_link(
@@ -65,15 +81,7 @@ defmodule Alambique.LazyRestoreInterruptTest do
       _ = Task.yield(task, 5_000)
       :ok = Cluster.restart(c, :n1)
 
-      assert {:ok, {:ok, %{rows: [[210]]}}} =
-               Cluster.call(
-                 c,
-                 :n1,
-                 Alambique,
-                 :query,
-                 [inst, cell, "SELECT sum(n) FROM log"],
-                 60_000
-               )
+      assert {:ok, %{rows: [[210]]}} = query(c, :n1, inst, cell, "SELECT sum(n) FROM log")
     after
       Process.unlink(c)
       Cluster.stop(c)
@@ -135,15 +143,7 @@ defmodule Alambique.LazyRestoreInterruptTest do
       :ok = Cluster.kill(c, :n1)
       :ok = Cluster.restart(c, :n1)
 
-      assert {:ok, {:ok, %{rows: [[20]]}}} =
-               Cluster.call(
-                 c,
-                 :n1,
-                 Alambique,
-                 :query,
-                 [inst, cell, "SELECT count(*) FROM log"],
-                 60_000
-               )
+      assert {:ok, %{rows: [[20]]}} = query(c, :n1, inst, cell, "SELECT count(*) FROM log")
 
       # Another node has no local file at all: it must return the same data.
       :ok = Cluster.kill(c, :n1)

@@ -127,7 +127,11 @@ defmodule Alambique.DrainTest do
 
     {:ok, _} = Alambique.drain(c)
     crash(c, Membership)
-    eventually(fn -> :pg.get_local_members(config.scope, {:node_id, "restart-drain"}) != [] end)
+
+    eventually(fn ->
+      :pg.get_local_members(config.scope, {:node_id, "restart-drain", config.incarnation}) != []
+    end)
+
     assert Membership.draining?(config)
     refute member?(config)
   end

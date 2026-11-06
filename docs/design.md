@@ -329,9 +329,30 @@ in [segment-format.md](segment-format.md).
 The lease object holds:
 
 ```json
-{"cell": "c", "epoch": 7, "owner": "node@host", "token": "<random>", "seq": 42,
- "expires_at_ms": 1790000000000, "released": false}
+{"cell": "c", "epoch": 7, "owner": "node@host", "incarnation": "<random>",
+ "token": "<random>", "seq": 42, "expires_at_ms": 1790000000000, "released": false}
 ```
+
+The holder of a lease is the pair `owner` (the `node_id`) and `incarnation`, a
+random 128-bit value drawn when an instance starts. It is never stored on disk,
+so every start of an instance is a new holder, even with the same `node_id` and
+the same `data_dir`. A lease is "ours" only when both match. Two instances with
+one `node_id`, started by a mistake or on purpose, are two holders: the second
+treats the lease of the first as another node's, and takes the cell after the
+release or the expiry, never before. A lease with no `incarnation` (an object
+written by a tool that holds no cell) is never ours. Fencing therefore does not
+depend on `node_id` being unique, and nothing checks that it is.
+
+The cost is the restart of a crashed node. A VM that dies leaves the leases of
+its awake cells unreleased, and the restarted instance is a new holder: it
+serves those cells after `lease_ttl_ms` plus `skew_margin_ms` (32 s by default)
+instead of at once. A graceful stop and `Alambique.drain/2` release the leases
+and cost nothing. Persisting the incarnation in `:data_dir` would let a restart
+on the same disk reclaim at once, but nothing locks `:data_dir`, so two
+instances that share one directory would share an incarnation and the fence
+would rest on documentation again; a copied disk would do the same. The
+incarnation stays in memory. A cell process that dies inside a running instance
+is still reclaimed at once, because the incarnation is the instance's.
 
 A lease can also carry `moved_to` (the id of the location the cell moved to;
 the lease is then released and acquiring it answers `{:error, {:moved, id}}`
@@ -397,7 +418,7 @@ long before its lease expires. `Alambique.take_over(instance, cell, reason)`
 runs on the calling node: if a process of this node holds the cell it answers
 `{:ok, node()}`; otherwise it starts the cell process with a takeover flag.
 That process wakes as in §7, except that step 1 is `take_over` instead of
-`acquire` (and a lease that names this node is not "reclaimed": it is simply
+`acquire` (and a lease that names this instance is not "reclaimed": it is simply
 replaced). The call returns after the wake, so after the fence segment of the
 new epoch is stored, and the owner hint of the cell is dropped on this node.
 
@@ -422,7 +443,7 @@ unaware. A segment of the old owner that is acknowledged to its caller after
 the fence, so its TXID is below the new owner's head.
 
 **Notification.** When the lease it replaced named a node that still runs the
-instance (the `node_id` is in the group of §8), the new cell sends that node
+instance (its `node_id` and incarnation are in the group of §8), the new cell sends that node
 an asynchronous message after the wake; the old cell then renews its lease at
 once, finds the 412 and stops. Nothing depends on the message: it only
 shortens the window below.
@@ -777,10 +798,12 @@ process creates its in-flight marker (§10). Wake order:
    at the same time (the three do not depend on each other; §7.2 says why that
    is safe):
    - Acquire the lease (§5), or take it over (§5.1) when the wake was started by
-     `Alambique.take_over/4`. A lease that names this node while no process of
-     this node holds the cell is a leftover of a dead process or VM: the wake
-     releases it on that owner's behalf and acquires again. `node_id` must
-     therefore be unique in the cluster. The lease that the router read to
+     `Alambique.take_over/4`. A lease that names this instance (`node_id` and
+     incarnation, §5) while no process of this node holds the cell is a
+     leftover of a dead cell process: the wake releases it on its behalf and
+     acquires again. A lease of the same `node_id` and another incarnation is
+     another instance's: the wake fails with `{:error, {:owned, owner,
+     expires_at_ms}}` and the lease stays. The lease that the router read to
      route the call is passed on, so the object is read once; the write is
      conditional on what was read, and an error with it is decided again from
      a fresh read.
@@ -1094,7 +1117,9 @@ directories (`<data_dir>/work`, §20) are not part of the cache; `inflight`,
   node with the highest `:erlang.phash2({cell, node}, 2^32)` among the nodes
   currently running the instance. Membership is a `:pg` scope per instance;
   each node's `Alambique.Membership` process joins the group of all members
-  and a group named by its `node_id`, which maps a lease owner back to a node.
+  and a group named by its `node_id` and incarnation, which maps a lease holder
+  back to a node. The same `node_id` with another incarnation is another group,
+  so a lease of another instance never resolves to this node.
   A node joins its store identity group before the group of members.
   `:pg` drops a member when its node goes down or disconnects.
 - **Join.** With the instance option `join: false` the node starts without
@@ -1145,11 +1170,11 @@ directories (`<data_dir>/work`, §20) are not part of the cache; `inflight`,
   plus one second, and the call carries a hop budget of two. A node that is
   asked and has no process for `c` reads the lease:
   - a live owner (the lease is unreleased, not expired by this node's clock
-    plus the skew margin, and its `node_id` is in the group) gets the call,
+    plus the skew margin, and its holder is in the group) gets the call,
     unless the hops ran out, which answers `{:error, {:owned, node}}`;
   - an owner that is not in the group answers `{:error, {:unavailable, owner,
     expires_at_ms}}` until the lease expires;
-  - a free lease (none, released, expired, or naming this node) means waking
+  - a free lease (none, released, expired, or naming this instance) means waking
     `c` here when this node is the preferred one or the hops ran out, and
     forwarding to the preferred node otherwise. If that node cannot be reached,
     this node wakes the cell.
@@ -1220,7 +1245,7 @@ directories (`<data_dir>/work`, §20) are not part of the cache; `inflight`,
   instance option `:drain` sets concurrency, per-cell timeout, passes, listing
   page and the supervisor's shutdown time), uploading
   pending writes and releasing the leases, so other nodes serve the cells at
-  once instead of after the lease expires. The group of the `node_id` stays, so
+  once instead of after the lease expires. The group of the `node_id` and incarnation stays, so
   calls for cells that are still awake on the node keep reaching them. A
   drained node serves nothing new until it restarts or until
   `Alambique.join/1`, which joins the group of members again and ends the

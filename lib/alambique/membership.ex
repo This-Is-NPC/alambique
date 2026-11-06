@@ -4,7 +4,8 @@ defmodule Alambique.Membership do
   # rendezvous ring over them, and the bounded owner-hint cache.
   #
   # Every node runs one process of this module. It joins a `:pg` group that
-  # maps a node id to its node, and the group of members unless the instance
+  # maps an instance (node id and
+  # incarnation) to its node, and the group of members unless the instance
   # starts with `join: false`. The state (`:not_joined`, `:member` or `:left`)
   # lives in a `:persistent_term` of the instance, so a restart of this process
   # or of the drain finds the groups as they were. It owns the hint table and
@@ -33,7 +34,7 @@ defmodule Alambique.Membership do
     :ets.new(config.locations, [:named_table, :public, :set, read_concurrency: true])
     Alambique.Admission.init(config)
     {_ref, _groups} = :pg.monitor_scope(config.scope)
-    :ok = :pg.join(config.scope, {:node_id, config.node_id}, self())
+    :ok = :pg.join(config.scope, {:node_id, config.node_id, config.incarnation}, self())
     # The identity first: a member over another store must be foreign when
     # peers first see it. `sync/1` stores the view after both joins.
     :ok = :pg.join(config.scope, {:alambique, :store, config.store_identity}, self())
@@ -175,7 +176,7 @@ defmodule Alambique.Membership do
     member? = state(config) == :member
     members = :pg.get_local_members(config.scope, @members)
 
-    for pid <- :pg.get_local_members(config.scope, {:node_id, config.node_id}) do
+    for pid <- :pg.get_local_members(config.scope, {:node_id, config.node_id, config.incarnation}) do
       cond do
         member? and pid not in members -> :ok = :pg.join(config.scope, @members, pid)
         not member? and pid in members -> :ok = :pg.leave(config.scope, @members, pid)
@@ -188,7 +189,7 @@ defmodule Alambique.Membership do
 
   # The Membership process stores the view; other callers ask it to.
   defp refresh_view(config) do
-    case :pg.get_local_members(config.scope, {:node_id, config.node_id}) do
+    case :pg.get_local_members(config.scope, {:node_id, config.node_id, config.incarnation}) do
       [pid | _] when pid == self() -> store_view(config)
       [pid | _] -> GenServer.call(pid, :refresh_view, config.op_timeout_ms)
       [] -> :ok
@@ -238,10 +239,14 @@ defmodule Alambique.Membership do
   @spec draining?(Config.t()) :: boolean
   def draining?(config), do: state(config) == :left
 
-  @doc "The node that runs the instance under `node_id`, if it is alive."
-  @spec node_of(Config.t(), String.t()) :: {:ok, node} | :error
-  def node_of(config, node_id) do
-    case :pg.get_members(config.scope, {:node_id, node_id}) do
+  @doc """
+  The node that runs the instance of `node_id` and `incarnation`, if it is
+  alive. The same node id with another incarnation is another instance (design
+  §5): it is not found, even when this node runs the instance of that id.
+  """
+  @spec node_of(Config.t(), String.t(), String.t() | nil) :: {:ok, node} | :error
+  def node_of(config, node_id, incarnation) do
+    case :pg.get_members(config.scope, {:node_id, node_id, incarnation}) do
       [pid | _] -> {:ok, node(pid)}
       [] -> :error
     end

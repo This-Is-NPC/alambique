@@ -91,15 +91,10 @@ instances that run host-supplied SQL. There is no per-call override of the
 `native/alambique_nif/src/sqlite.rs` cover the bounded paths; design §7,
 "Statements of callers".
 
-## Node ids and data directories are not checked
+## Data directories are not checked
 
-**What happens.** Three requirements of the instance are not enforced:
+**What happens.** Two requirements of the instance are not enforced:
 
-- `node_id` must be unique in the cluster. Without distribution `node()` is
-  `nonode@nohost`, so two VMs that use the default over one store and prefix
-  take each other's leases for their own leftovers: the epoch rises on every
-  call and writes fail with `:fenced` or `:lease_lost`. Data stays safe, because
-  fencing still holds.
 - `:data_dir` must belong to one instance. A second instance (or VM) on the
   same directory shares the files of cells with equal ids, and its start removes
   the first one's `read-replicas` and `work` directories.
@@ -107,13 +102,17 @@ instances that run host-supplied SQL. There is no per-call override of the
   one, ids that differ only in case (`Org`, `org`) have separate leases but one
   local file.
 
-**Workaround.** Set `node_id` explicitly when the VMs are not distributed, give
-every instance its own `data_dir`, and use a case-sensitive file system (Linux
-ext4, xfs; not a default macOS or Windows volume or a bind mount of one).
+A duplicate `node_id` is not a defect: leases name the instance by `node_id`
+and a random incarnation, so two instances with one `node_id` cannot take each
+other's cells (design §5). The cost is that a crashed node waits for its leases
+to expire after a restart.
 
-**Evidence.** None needed: the checks do not exist. They were left out because
-the first is a race against the asynchronous `:pg` view of other nodes, and the
-other two need a lock file or a case-insensitive mount to test.
+**Workaround.** Give every instance its own `data_dir`, and use a
+case-sensitive file system (Linux ext4, xfs; not a default macOS or Windows
+volume or a bind mount of one).
+
+**Evidence.** None needed: the checks do not exist. They need a lock file or a
+case-insensitive mount to test.
 
 ## Litestream has not been run on our replicas
 

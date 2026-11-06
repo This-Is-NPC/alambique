@@ -38,10 +38,13 @@ defmodule Alambique do
       instances (or two VMs) on one directory corrupt each other's files. The
       library creates it and the directories of the cells with mode 0700.
     * `:prefix` - key prefix in the store with `:store` (default `"alambique"`).
-    * `:node_id` - identifies the node in leases (default `Atom.to_string(node())`).
-      It must be unique in the cluster, and it is not checked: without
-      distribution `node()` is `:nonode@nohost`, so give each VM its own id when
-      several share a store.
+    * `:node_id` - names the node in leases and in the owner shown by
+      `lease/3` (default `Atom.to_string(node())`). Fencing does not depend on
+      it being unique: every start of an instance also draws a random
+      incarnation, and a lease of the same id and another incarnation belongs
+      to another instance (design §5). Keep it unique to read the owners; a
+      node that crashes and restarts waits `:lease_ttl_ms` plus
+      `:skew_margin_ms` for its old leases.
     * `:join` - whether the node joins the members at start (default `true`).
       With `false` it serves the calls made on it, but other nodes do not choose
       it as an owner or a preferred node until `join/1` (design §8).
@@ -1040,7 +1043,7 @@ defmodule Alambique do
 
   defp lease_view(config, lease) do
     owner =
-      case Membership.node_of(config, lease.owner) do
+      case Membership.node_of(config, lease.owner, lease.incarnation) do
         {:ok, node} -> node
         :error -> nil
       end

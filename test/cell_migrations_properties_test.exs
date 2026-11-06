@@ -130,7 +130,13 @@ defmodule Alambique.CellMigrationsPropertiesTest do
       # The namespace of "a.1-17" is "a".
       cells = for c <- @cells, do: "#{c}-#{System.unique_integer([:positive])}"
       names = Map.new(Enum.zip(@cells, cells))
-      state = %{seq: 0, acked: Map.new(cells, &{&1, []}), unknown: Map.new(cells, &{&1, []})}
+
+      state = %{
+        seq: 0,
+        restarted: false,
+        acked: Map.new(cells, &{&1, []}),
+        unknown: Map.new(cells, &{&1, []})
+      }
 
       state = Enum.reduce(ops, state, &step(&1, &2, ctx, name, names))
 
@@ -138,6 +144,7 @@ defmodule Alambique.CellMigrationsPropertiesTest do
       MemoryStore.clear(ctx.store_config)
       for cell <- cells, do: safely(fn -> Alambique.hibernate(name, cell) end)
       for _ <- 1..3, do: Alambique.sweep(name)
+      if state.restarted, do: settle(ctx, name, cells)
       for cell <- cells, do: safely(fn -> Alambique.hibernate(name, cell) end)
 
       for cell <- cells, durable_version(ctx, cell) > 0 do
@@ -150,6 +157,23 @@ defmodule Alambique.CellMigrationsPropertiesTest do
       stop_supervised(name)
       MemoryStore.clear(ctx.store_config)
     end
+  end
+
+  # A restart is a new instance: the leases that a crashed cell left are not
+  # its own and expire first (design §5). Sweep until every cell is migrated.
+  defp settle(ctx, name, cells) do
+    deadline = System.monotonic_time(:millisecond) + 10_000
+
+    Stream.repeatedly(fn ->
+      Process.sleep(200)
+      Alambique.sweep(name)
+      for cell <- cells, do: safely(fn -> Alambique.hibernate(name, cell) end)
+
+      Enum.all?(cells, fn cell ->
+        durable_version(ctx, cell) in [0, Lists.version(cell)]
+      end)
+    end)
+    |> Enum.find(&(&1 or System.monotonic_time(:millisecond) > deadline))
   end
 
   defp start(ctx, name),
@@ -171,7 +195,7 @@ defmodule Alambique.CellMigrationsPropertiesTest do
   defp step(:restart, state, ctx, name, _names) do
     :ok = stop_supervised(name)
     start(ctx, name)
-    state
+    %{state | restarted: true}
   end
 
   defp step({:run, fault, inner}, state, ctx, name, names) do

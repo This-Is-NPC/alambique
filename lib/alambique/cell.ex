@@ -154,8 +154,8 @@ defmodule Alambique.Cell do
   # Tells the node of the previous owner, if it is a member, that its cell
   # was taken over, so the old cell checks its lease at once instead of at
   # its next renewal. Only a shortcut: fencing does not depend on it.
-  defp notify_previous(%State{takeover: %{previous: %{owner: owner}}} = state) do
-    case Membership.node_of(state.config, owner) do
+  defp notify_previous(%State{takeover: %{previous: %{owner: owner, incarnation: inc}}} = state) do
+    case Membership.node_of(state.config, owner, inc) do
       {:ok, target} when target != node() ->
         :erpc.cast(target, __MODULE__, :superseded, [
           state.config.name,

@@ -11,6 +11,10 @@ defmodule Alambique.Lease do
   hashes). `token` identifies one acquisition; `{token, seq}` identifies one
   exact write.
 
+  `owner` is the node id and `incarnation` is random per start of an
+  instance (`t:ctx/0`). A holder is one `{owner, incarnation}`, never the node
+  id alone: two instances with one node id are two holders (design §5).
+
   A `put` that fails with anything but `:precondition_failed` may have been
   applied. Every function re-reads the object in that case and reports
   success only when the stored object is the caller's own write.
@@ -25,6 +29,7 @@ defmodule Alambique.Lease do
     :cell,
     :epoch,
     :owner,
+    :incarnation,
     :token,
     :seq,
     :expires_at_ms,
@@ -40,6 +45,7 @@ defmodule Alambique.Lease do
           cell: String.t(),
           epoch: pos_integer,
           owner: String.t(),
+          incarnation: String.t() | nil,
           token: String.t(),
           seq: pos_integer,
           expires_at_ms: integer,
@@ -57,13 +63,17 @@ defmodule Alambique.Lease do
     * `:prefix` - key prefix of the instance
     * `:ttl_ms` - lease duration granted by each acquire and renew
     * `:skew_margin_ms` - tolerated clock skew between nodes
+    * `:incarnation` - random id of the instance that writes (default `nil`,
+      for a reader or a tool that holds no cell). It is stored with every
+      lease the context writes.
   """
   @type ctx :: %{
           store: {module, term},
           clock: {module, term},
           prefix: String.t(),
           ttl_ms: pos_integer,
-          skew_margin_ms: non_neg_integer
+          skew_margin_ms: non_neg_integer,
+          incarnation: String.t() | nil
         }
 
   @type error :: {:error, term}
@@ -71,14 +81,18 @@ defmodule Alambique.Lease do
   @doc "Builds and validates a context from the keys of `t:ctx/0`."
   @spec ctx(keyword | map) :: ctx
   def ctx(opts) do
-    ctx = opts |> Map.new() |> Map.take([:store, :clock, :prefix, :ttl_ms, :skew_margin_ms])
+    ctx =
+      opts
+      |> Map.new()
+      |> Map.take([:store, :clock, :prefix, :ttl_ms, :skew_margin_ms, :incarnation])
+      |> Map.put_new(:incarnation, nil)
 
     valid? =
       match?(
         %{store: {_, _}, clock: {_, _}, prefix: p, ttl_ms: t, skew_margin_ms: s}
         when is_binary(p) and is_integer(t) and is_integer(s) and s >= 0 and t > 2 * s,
         ctx
-      )
+      ) and (is_nil(ctx.incarnation) or is_binary(ctx.incarnation))
 
     unless valid?, do: raise(ArgumentError, "invalid lease context: #{inspect(ctx)}")
     ctx
@@ -108,7 +122,7 @@ defmodule Alambique.Lease do
   its expiry (early takeover, design §5): epoch + 1 with `{:if_match, etag}`,
   so the old holder's next renewal fails and its uploads collide with the
   fence of the new epoch (design §6). Returns `{:ok, lease, previous}`, where
-  `previous` is `%{owner: owner, epoch: epoch}` of the lease that was
+  `previous` is `%{owner: owner, incarnation: incarnation, epoch: epoch}` of the lease that was
   replaced, or `nil` when there was none.
 
   A lease that changed between the read and the write gives
@@ -123,7 +137,8 @@ defmodule Alambique.Lease do
   A cell that moved gives `{:error, {:moved, to}}`.
   """
   @spec take_over(ctx, String.t(), String.t(), keyword) ::
-          {:ok, t, %{owner: String.t(), epoch: pos_integer} | nil} | error
+          {:ok, t, %{owner: String.t(), incarnation: String.t() | nil, epoch: pos_integer} | nil}
+          | error
   def take_over(ctx, cell, owner, opts \\ []) do
     started = System.monotonic_time()
     {result, previous} = do_take_over(ctx, cell, owner, opts[:epoch])
@@ -214,6 +229,7 @@ defmodule Alambique.Lease do
       cell: cell,
       epoch: epoch,
       owner: owner,
+      incarnation: ctx.incarnation,
       token: Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false),
       seq: 1,
       expires_at_ms: 0,
@@ -315,6 +331,14 @@ defmodule Alambique.Lease do
     end
   end
 
+  @doc """
+  Whether `lease` was written by the instance `{node_id, incarnation}`. A lease
+  without an incarnation is never held by anyone's instance: fail safe.
+  """
+  @spec held_by?(t, String.t(), String.t()) :: boolean
+  def held_by?(%__MODULE__{} = lease, node_id, incarnation),
+    do: lease.incarnation != nil and lease.owner == node_id and lease.incarnation == incarnation
+
   @doc "Owner-side validity: the lease may be used until `expires_at_ms - skew_margin_ms`."
   @spec valid?(ctx, t) :: boolean
   def valid?(ctx, %__MODULE__{} = lease),
@@ -374,7 +398,7 @@ defmodule Alambique.Lease do
         {{:error, {:moved, to}}, nil}
 
       {:ok, current} ->
-        previous = %{owner: current.owner, epoch: current.epoch}
+        previous = %{owner: current.owner, incarnation: current.incarnation, epoch: current.epoch}
 
         {check_epoch(current.epoch, expected, fn ->
            ctx |> successor(:take_over, current, owner) |> with_previous(previous)
@@ -408,6 +432,7 @@ defmodule Alambique.Lease do
       cell: cell,
       epoch: epoch,
       owner: owner,
+      incarnation: ctx.incarnation,
       token: Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false),
       seq: seq,
       expires_at_ms: now(ctx) + ctx.ttl_ms
@@ -524,6 +549,7 @@ defmodule Alambique.Lease do
       expires_at_ms: lease.expires_at_ms,
       released: lease.released
     }
+    |> put_unless_nil(:incarnation, lease.incarnation)
     |> put_unless_nil(:moved_to, lease.moved_to)
     |> put_unless_nil(:moved_from, lease.moved_from)
     |> put_unless_nil(:moved_at_ms, lease.moved_at_ms)
@@ -533,8 +559,8 @@ defmodule Alambique.Lease do
 
   defp put_unless_nil(map, _key, nil), do: map
   defp put_unless_nil(map, key, value), do: Map.put(map, key, value)
-  # Unknown fields are ignored.
-  # Unknown fields are ignored so older nodes read leases from newer ones.
+  # Unknown fields are ignored. A lease without an incarnation has none: it is
+  # never ours.
   defp decode(body, etag) do
     with {:ok, %{} = map} <- Jason.decode(body),
          %{
@@ -553,6 +579,7 @@ defmodule Alambique.Lease do
          cell: cell,
          epoch: epoch,
          owner: owner,
+         incarnation: incarnation(map["incarnation"]),
          token: token,
          seq: seq,
          expires_at_ms: expires,
@@ -567,6 +594,9 @@ defmodule Alambique.Lease do
       _ -> {:error, :corrupt_lease}
     end
   end
+
+  defp incarnation(value) when is_binary(value), do: value
+  defp incarnation(_value), do: nil
 
   # Telemetry and fault points
 

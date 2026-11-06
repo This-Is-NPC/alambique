@@ -86,7 +86,7 @@ defmodule Alambique.MembershipViewTest do
 
   test "a burst of group changes puts the view at most twice", %{inst: inst} do
     config = Alambique.Config.fetch!(inst)
-    [pid] = :pg.get_members(config.scope, {:node_id, config.node_id})
+    [pid] = :pg.get_members(config.scope, {:node_id, config.node_id, config.incarnation})
     group = :members
 
     # Each leave and join changes the view: 40 events, queued while the
@@ -109,7 +109,7 @@ defmodule Alambique.MembershipViewTest do
 
   test "a refresh that changes nothing puts nothing", %{inst: inst} do
     config = Alambique.Config.fetch!(inst)
-    [pid] = :pg.get_members(config.scope, {:node_id, config.node_id})
+    [pid] = :pg.get_members(config.scope, {:node_id, config.node_id, config.incarnation})
     assert puts(pid, fn -> for _ <- 1..20, do: Membership.sync(config) end) == 0
   end
 end

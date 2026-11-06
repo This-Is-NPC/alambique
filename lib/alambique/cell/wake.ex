@@ -152,18 +152,36 @@ defmodule Alambique.Cell.Wake do
     end
   end
 
-  # The lease names this node but no process of this node holds the cell, so
-  # a previous process or VM died with it: release it on its behalf.
+  # The lease names this instance (node id and incarnation) but no process of
+  # this node holds the cell, so a previous process died with it: release it on
+  # its behalf. The same node id with another incarnation is another instance,
+  # which holds the cell: the lease is not ours to release (design §5).
   defp reclaim(state) do
     ctx = state.lease_ctx
+    config = state.config
 
-    with {:ok, stale} <- Lease.read(ctx, state.id),
-         :ok <- Lease.release(ctx, stale),
+    case Lease.read(ctx, state.id) do
+      {:ok, stale} ->
+        if Lease.held_by?(stale, config.node_id, config.incarnation),
+          do: release_and_take(state, stale),
+          else: {:error, {:owned, stale.owner, stale.expires_at_ms}, state}
+
+      :none ->
+        {:error, :lease_unreadable, state}
+
+      {:error, reason} ->
+        {:error, reason, state}
+    end
+  end
+
+  defp release_and_take(state, stale) do
+    ctx = state.lease_ctx
+
+    with :ok <- Lease.release(ctx, stale),
          {:ok, lease} <- Lease.acquire(ctx, state.id, state.config.node_id) do
       {:ok, %{state | lease: lease}}
     else
       {:error, reason} -> {:error, reason, state}
-      :none -> {:error, :lease_unreadable, state}
     end
   end
 

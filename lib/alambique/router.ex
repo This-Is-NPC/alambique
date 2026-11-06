@@ -148,7 +148,7 @@ defmodule Alambique.Router do
 
       %{answer: {:ok, lease}} ->
         with true <- held_elsewhere?(config, lease) || :none do
-          case Membership.node_of(config, lease.owner) do
+          case Membership.node_of(config, lease.owner, lease.incarnation) do
             {:ok, node} -> {:ok, node}
             :error -> {:error, {:unavailable, lease.owner, lease.expires_at_ms}}
           end
@@ -272,15 +272,16 @@ defmodule Alambique.Router do
          do: %{location: location, answer: answer, trips: trips}
   end
 
-  # A lease that names this node while no process of this node holds the cell
-  # is a leftover of a process that died; waking the cell reclaims it.
+  # A lease of this instance (node id and incarnation) while no process of this
+  # node holds the cell is a leftover of a process that died; waking the cell
+  # reclaims it. The same node id with another incarnation is another holder.
   defp held_elsewhere?(config, lease) do
-    not lease.released and lease.owner != config.node_id and
+    not lease.released and not Lease.held_by?(lease, config.node_id, config.incarnation) and
       clock_ms(config) <= lease.expires_at_ms + config.skew_margin_ms
   end
 
   defp owned(lease, {config, _cell, _, _, hops, _} = args) do
-    case Membership.node_of(config, lease.owner) do
+    case Membership.node_of(config, lease.owner, lease.incarnation) do
       {:ok, node} when hops > 0 ->
         case forward(node, args) do
           {:ok, {nil, {:error, {:owned, _}}}} ->

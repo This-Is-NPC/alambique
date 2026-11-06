@@ -168,7 +168,8 @@ defmodule Alambique.ConfigPropertiesTest do
             ]
         )
 
-      assert Config.build(again) == config
+      # The incarnation is drawn at random by every build.
+      assert Map.delete(Config.build(again), :incarnation) == Map.delete(config, :incarnation)
     end
   end
 

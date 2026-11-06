@@ -150,6 +150,7 @@ defmodule Alambique.Config do
   @type t :: %{
           name: atom,
           node_id: String.t(),
+          incarnation: String.t(),
           join: boolean,
           placement: {module, term},
           data_dir: Path.t(),
@@ -315,6 +316,7 @@ defmodule Alambique.Config do
     %{
       name: name,
       node_id: node_id,
+      incarnation: Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false),
       join: join!(opts),
       placement: placement,
       data_dir: data_dir,
@@ -442,7 +444,8 @@ defmodule Alambique.Config do
       clock: config.clock,
       prefix: location.prefix,
       ttl_ms: config.ttl_ms,
-      skew_margin_ms: config.skew_margin_ms
+      skew_margin_ms: config.skew_margin_ms,
+      incarnation: config.incarnation
     )
   end
 
