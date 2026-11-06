@@ -2,8 +2,6 @@ defmodule Alambique.PositionClusterTest do
   @moduledoc "position/3 and isolated writes routed between peer nodes (design §8, §13)."
   use ExUnit.Case, async: false
 
-  import Alambique.CellHelpers, only: [eventually: 1]
-
   alias Alambique.ClusterFuns
   alias AlambiqueTestkit.Cluster
 
