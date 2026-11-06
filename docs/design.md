@@ -1295,7 +1295,15 @@ directories (`<data_dir>/work`, §20) are not part of the cache; `inflight`,
   moved_from}}` without waking or freezing the cell. It resolves the location
   like `owner/3`, answers epoch 0 for a cell that never had a lease, keeps the
   moved markers, and returns the guarded store error or `:timeout`. The epoch
-  is the one `take_over/4` expects.
+  is the one `take_over/4` expects. It is one store read of the lease object
+  and nothing else (`test/lease_api_test.exs` counts the requests), so a caller
+  may run it on every `{:unavailable, owner, expires_at_ms}` to compute a
+  retry delay: `expires_at_ms + skew_margin_ms - now`, or none when the lease is
+  released. `mise run bench:lease` measured 11 µs per call (median of 1 000)
+  on the in-memory store, against 3 µs for the bare `Lease.read/2`, and 26 003
+  µs with 25 ms of added latency on every store request, against 25 997 µs for
+  the bare read: one request, with no cache in between (p99 26 ms in one run
+  and 74 ms in another, on a shared machine).
 - **Live cells.** `Alambique.cells/2` lists the cells with a process on this
   node. `Alambique.Live` keeps an ordered ETS set `{id, pid}` per instance,
   fed by a registry listener that starts before the registry (it monitors each

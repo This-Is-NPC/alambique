@@ -46,6 +46,45 @@ defmodule Alambique.RouterErrorsTest do
       assert expected == insert(ctx.inst, ctx.cell, 1)
     end
 
+    test "the answer carries the holder and the expiry, and the cell is served after the margin",
+         ctx do
+      # A short lease; the instance applies its own skew margin (500 ms).
+      short = %{ctx.lease_ctx | ttl_ms: 1_200}
+      {:ok, held} = Lease.acquire(short, ctx.cell, "ghost")
+      expires = held.expires_at_ms
+      margin = ctx.config.skew_margin_ms
+
+      # Until `expires + margin` by this node's clock, every call is refused with
+      # the same expiry; nothing is woken.
+      assert {:error, {:unavailable, "ghost", ^expires}} = insert(ctx.inst, ctx.cell, 1)
+      assert {:error, {:unavailable, "ghost", ^expires}} = Alambique.touch(ctx.inst, ctx.cell)
+      assert Alambique.Cell.whereis(ctx.config, ctx.cell) == nil
+
+      # `lease/3` gives the same expiry, and no node for the holder.
+      assert {:ok, %{owner: nil, owner_id: "ghost", epoch: 1, expires_at_ms: ^expires} = view} =
+               Alambique.lease(ctx.inst, ctx.cell)
+
+      refute view.released
+
+      eventually(fn -> match?({:ok, _}, insert(ctx.inst, ctx.cell, 1)) end, 5_000)
+      assert System.os_time(:millisecond) > expires + margin
+      assert {:ok, %{owner_id: owner_id, epoch: 2}} = Alambique.lease(ctx.inst, ctx.cell)
+      assert owner_id == ctx.config.node_id
+    end
+
+    test "a lease the holder released is free at once, whoever held it", ctx do
+      {:ok, held} = Lease.acquire(ctx.lease_ctx, ctx.cell, "ghost")
+      assert {:error, {:unavailable, "ghost", _}} = insert(ctx.inst, ctx.cell, 1)
+
+      assert :ok = Lease.release(ctx.lease_ctx, held)
+
+      assert {:ok, %{released: true, expires_at_ms: expires}} =
+               Alambique.lease(ctx.inst, ctx.cell)
+
+      assert expires == held.expires_at_ms
+      assert {:ok, _} = insert(ctx.inst, ctx.cell, 1)
+    end
+
     test "a hint to a member answers without the store, a hint to a stranger is dropped", ctx do
       MemoryStore.inject(ctx.store_config, kind: :error, ops: [:get], key: ~r{/lease$})
       Membership.put_hint(ctx.config, ctx.cell, node())

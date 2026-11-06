@@ -353,8 +353,9 @@ defmodule Alambique do
   Every call accepts the option `:timeout` in milliseconds. The timeout
   applies to each hop. Calls return `{:error, reason}` when the cell cannot
   serve, for example `{:error, {:unavailable, owner, expires_at_ms}}` while a
-  dead owner's lease has not expired, or `{:error, :timeout}` when the outcome
-  of a write is unknown.
+  lease held by a node that is not a member has not expired (see `lease/3`
+  for what it promises), or `{:error, :timeout}` when the outcome of a write
+  is unknown.
 
   A cell that stops while a write's batch is in flight (`:lease_lost`,
   `:fenced`, `:lease_expired`, a failed upload) answers that write
@@ -993,9 +994,10 @@ defmodule Alambique do
   end
 
   @doc """
-  The node that owns the cell now, `:none` when it is asleep. An owner whose
-  node is gone but whose lease has not expired gives
-  `{:error, {:unavailable, owner, expires_at_ms}}`.
+  The node that owns the cell now, `:none` when it is asleep. An owner that
+  is not a member (gone, or running the instance without a link to this node)
+  and whose lease has not expired gives `{:error, {:unavailable, owner,
+  expires_at_ms}}`, as in `lease/3`.
 
   With `hint: true` the answer may come from the owner-hint cache: a local
   process answers `{:ok, node()}`, then a hint whose node still runs the
@@ -1045,6 +1047,32 @@ defmodule Alambique do
 
   Options: `:timeout` in milliseconds (default: the instance's
   `:call_timeout_ms`).
+
+  ## The lease of a node that is not a member
+
+  A call for a cell whose lease is held, and not expired, by a holder that is
+  not a member of this instance's group answers `{:error, {:unavailable,
+  owner, expires_at_ms}}` at once, without waking the cell or waiting. That
+  is the case of a node that runs the instance without a cluster link to this
+  one, of a node that is gone, and of the pseudo-holders `"relocate"` and
+  `"rewind"`. `owner` is the holder's `node_id` (a string, the `owner_id` of
+  this function) and `expires_at_ms` is the expiry stored in the lease, by the
+  clock of the instance that wrote it (the system clock by default).
+
+  The promise is only this: the cell is not served by this node until the
+  holder releases the lease or `expires_at_ms + skew_margin_ms` has passed by
+  this node's clock, whichever comes first. A holder that releases earlier
+  makes the next call succeed at once, so `expires_at_ms` is an upper bound of
+  the wait, not a prediction. After a graceful drain it is nearly always
+  early. To give a client a `Retry-After`, call this function on the refusal
+  and use `max(0, expires_at_ms + skew_margin_ms - now)` when `released` is
+  `false`, and `0` when it is `true`.
+
+  The call is one store read of the lease object and nothing else: the
+  location comes from the placement cache and nothing is written. In the
+  in-memory store it takes about 11 µs; with 25 ms of latency on every
+  store request it takes 26 ms, the time of one request
+  (`mise run bench:lease`, design §8). A caller may run it on every refusal.
   """
   @spec lease(instance, cell, keyword) :: {:ok, lease} | {:error, term}
   def lease(instance, cell, opts \\ []) do

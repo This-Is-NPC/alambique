@@ -42,6 +42,26 @@ defmodule Alambique.LeaseApiTest do
             }} = Alambique.lease(inst, unique_cell())
   end
 
+  test "lease/3 is one store read of the lease, whatever the number of calls", ctx do
+    counted = Alambique.CountingStore.wrap(ctx.store)
+    inst = instance(%{ctx | store: counted})
+    cell = unique_cell()
+    assert {:ok, _} = put(inst, cell, 1)
+
+    {_, store_config} = counted
+    Alambique.CountingStore.reset(store_config)
+
+    for _ <- 1..3, do: assert({:ok, %{epoch: 1}} = Alambique.lease(inst, cell))
+
+    assert Alambique.CountingStore.count(store_config, :get) == 3
+    assert Enum.uniq(Alambique.CountingStore.keys(store_config, :get)) == [lease_key(cell)]
+
+    for op <- [:get_range, :head, :list],
+        do: assert(Alambique.CountingStore.count(store_config, op) == 0)
+  end
+
+  defp lease_key(cell), do: "cells-test/cells/#{cell}/lease"
+
   test "an invalid id is an error", ctx do
     inst = instance(ctx)
     assert {:error, _reason} = Alambique.lease(inst, "bad/id")

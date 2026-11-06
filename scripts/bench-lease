@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Runs the lease/3 benchmark. Argument: calls per case (default 500).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+MIX_ENV=test exec mix run bench/lease.exs "$@"
