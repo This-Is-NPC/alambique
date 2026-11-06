@@ -43,3 +43,19 @@ The cluster tests start peer nodes on `127.0.0.1` and need `epmd` on the
 a compiled module such as `test/support/cluster_funs.ex`, because peers cannot
 load modules that exist only in memory.
 
+
+## Releases
+
+Releases are cut by [release-please](https://github.com/googleapis/release-please)
+from the Conventional Commits on `master` (`.github/workflows/release.yml`).
+Each push to `master` updates a release pull request with the next version and
+its `CHANGELOG.md` entry. Merging that pull request tags `vX.Y.Z` and publishes
+the GitHub release. Before 1.0, `feat` bumps the minor version and `fix` the
+patch. The version lives in `mix.exs` and `testkit/mix.exs`. The Rust crates
+under `native/` are internal and keep their own version.
+
+Applications depend on a release by tag:
+
+```elixir
+{:alambique, git: "https://github.com/This-Is-NPC/alambique.git", tag: "v0.1.0"}
+```
