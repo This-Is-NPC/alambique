@@ -778,11 +778,40 @@ defmodule Alambique do
   to expire. `hibernated` counts only the cells that were released. Stopping the instance runs the same drain. Repeating the call is
   safe. Options: `:concurrency` and `:timeout` (per cell, in milliseconds),
   overriding `:timeout_ms` and `:concurrency` of the instance's `:drain` option.
-  `join/1` brings the node back into service.
+  `join/1` brings the node back into service, and `drain_status/1` tells how
+  far a drain is. The telemetry events are in `docs/telemetry.md`.
   """
   @spec drain(instance, keyword) ::
           {:ok, %{hibernated: non_neg_integer, errors: [{cell, term}]}}
   def drain(instance, opts \\ []), do: Drain.run(Config.fetch!(instance), opts)
+
+  @doc """
+  How far the drain of this node is (design §8), readable while `drain/2`
+  runs in another process. It answers:
+
+    * `:draining` - the node left the members and refuses to wake cells
+    * `:running` - a drain is in progress
+    * `:started_at_ms` and `:finished_at_ms` - when the last drain began and
+      ended, by the instance's clock; `nil` before it began or while it runs
+    * `:cells_at_start` - cells with a process when it began
+    * `:done` - cells hibernated with their lease released
+    * `:errors` - `[{cell, reason}]` of the cells that failed so far
+    * `:left` - cells with a process now
+
+  A node that never drained answers `draining: false`, `running: false` and no
+  times. The numbers belong to the last drain: a new one starts them again.
+  """
+  @spec drain_status(instance) :: %{
+          draining: boolean,
+          running: boolean,
+          started_at_ms: integer | nil,
+          finished_at_ms: integer | nil,
+          cells_at_start: non_neg_integer,
+          done: non_neg_integer,
+          errors: [{cell, term}],
+          left: non_neg_integer
+        }
+  def drain_status(instance), do: Drain.status(Config.fetch!(instance))
 
   @doc """
   Makes this node a member of the instance (design §8): other nodes can choose

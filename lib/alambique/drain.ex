@@ -8,7 +8,7 @@ defmodule Alambique.Drain do
 
   use GenServer
 
-  alias Alambique.{Live, Membership, Router}
+  alias Alambique.{Live, Membership, Router, Telemetry}
 
   # Stops after the cells' supervisor and before the registry and the group
   # (the supervisor stops its children in reverse order).
@@ -25,6 +25,7 @@ defmodule Alambique.Drain do
   @impl true
   def init(config) do
     Process.flag(:trap_exit, true)
+    :ets.new(config.drain_status, [:named_table, :public, :set])
     # A restart of this child finds the state `terminate/2` restored.
     :ok = Membership.sync(config)
     {:ok, config}
@@ -40,20 +41,106 @@ defmodule Alambique.Drain do
     :ok
   end
 
+  @doc """
+  Drains this node (see `Alambique.drain/2`). The progress is in a table the
+  child owns, so `status/1` can be read while the drain runs.
+  """
   @spec run(Alambique.Config.t(), keyword) :: {:ok, %{hibernated: non_neg_integer, errors: list}}
   def run(config, opts) do
     defaults = Map.take(config.drain, [:concurrency, :timeout_ms])
 
     [concurrency: concurrency, timeout: timeout] =
       opts
-      |> Keyword.validate!(concurrency: defaults.concurrency, timeout: defaults.timeout_ms)
+      |> Keyword.validate!(
+        concurrency: defaults.concurrency,
+        timeout: defaults.timeout_ms
+      )
       |> Enum.sort()
 
+    started = System.monotonic_time()
     :ok = Membership.leave(config)
-    {:ok, rounds(config, concurrency, timeout, %{}, config.drain.rounds)}
+    cells = Registry.count(config.registry)
+    begin(config, cells)
+    meta = %{instance: config.name, node_id: config.node_id}
+    Telemetry.emit([:drain, :start], %{cells: cells}, meta)
+
+    summary = rounds(config, {concurrency, timeout}, %{}, config.drain.rounds)
+    finish(config, summary)
+
+    errors = length(summary.errors)
+
+    Telemetry.span_stop(
+      [:drain, :stop],
+      started,
+      %{
+        cells: cells,
+        hibernated: summary.hibernated + released_failed(summary.errors),
+        released: summary.hibernated,
+        errors: errors
+      },
+      meta
+    )
+
+    {:ok, summary}
   end
 
-  defp rounds(config, concurrency, timeout, results, left) do
+  @doc """
+  The state of the drain of this node: see `Alambique.drain_status/1`.
+  """
+  @spec status(Alambique.Config.t()) :: map
+  def status(config) do
+    table = config.drain_status
+
+    row = fn key, default ->
+      with [{_, v}] <- :ets.lookup(table, key), do: v, else: (_ -> default)
+    end
+
+    %{
+      draining: Membership.draining?(config),
+      running: row.(:running, false),
+      started_at_ms: row.(:started_at_ms, nil),
+      finished_at_ms: row.(:finished_at_ms, nil),
+      cells_at_start: row.(:cells_at_start, 0),
+      done: row.(:done, 0),
+      errors:
+        Enum.sort(
+          for [cell, reason] <- :ets.match(table, {{:error, :"$1"}, :"$2"}), do: {cell, reason}
+        ),
+      left: Registry.count(config.registry)
+    }
+  end
+
+  defp begin(config, cells) do
+    table = config.drain_status
+    :ets.delete_all_objects(table)
+
+    :ets.insert(table, [
+      {:running, true},
+      {:started_at_ms, now_ms(config)},
+      {:cells_at_start, cells},
+      {:done, 0}
+    ])
+  end
+
+  defp finish(config, summary) do
+    table = config.drain_status
+    :ets.match_delete(table, {{:error, :_}, :_})
+    errors = for {cell, reason} <- summary.errors, do: {{:error, cell}, reason}
+
+    :ets.insert(table, [
+      {:running, false},
+      {:finished_at_ms, now_ms(config)},
+      {:done, summary.hibernated} | errors
+    ])
+  end
+
+  defp now_ms(%{clock: {clock, clock_config}}), do: clock.now_ms(clock_config)
+
+  # Cells whose lease could not be released did hibernate.
+  defp released_failed(errors),
+    do: Enum.count(errors, &match?({_, {:release_failed, _}}, &1))
+
+  defp rounds(config, bounds, results, left) do
     case cells(config, nil, config.drain.page_size) do
       [] ->
         summary(results, [])
@@ -62,21 +149,32 @@ defmodule Alambique.Drain do
         summary(results, awake)
 
       awake ->
-        results =
-          awake
-          |> Task.async_stream(&{&1, Router.hibernate_local(config, &1, timeout)},
-            max_concurrency: concurrency,
-            timeout: 2 * timeout,
-            on_timeout: :kill_task,
-            zip_input_on_exit: true
-          )
-          |> Enum.reduce(results, fn
-            {:ok, {cell, result}}, acc -> Map.put(acc, cell, result)
-            {:exit, {cell, reason}}, acc -> Map.put(acc, cell, {:error, reason})
-          end)
-
-        rounds(config, concurrency, timeout, results, left - 1)
+        results = hibernate(config, bounds, awake, results)
+        rounds(config, bounds, results, left - 1)
     end
+  end
+
+  defp hibernate(config, {concurrency, timeout}, awake, results) do
+    awake
+    |> Task.async_stream(&{&1, Router.hibernate_local(config, &1, timeout)},
+      max_concurrency: concurrency,
+      timeout: 2 * timeout,
+      on_timeout: :kill_task,
+      zip_input_on_exit: true
+    )
+    |> Enum.reduce(results, fn
+      {:ok, {cell, result}}, acc -> record(config, acc, cell, result)
+      {:exit, {cell, reason}}, acc -> record(config, acc, cell, {:error, reason})
+    end)
+  end
+
+  defp record(config, results, cell, result) do
+    case result do
+      :ok -> :ets.update_counter(config.drain_status, :done, 1)
+      {:error, reason} -> :ets.insert(config.drain_status, {{:error, cell}, reason})
+    end
+
+    Map.put(results, cell, result)
   end
 
   defp summary(results, awake) do

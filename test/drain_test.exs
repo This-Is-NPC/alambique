@@ -74,6 +74,92 @@ defmodule Alambique.DrainTest do
     MemoryStore.remove(ctx.store_config, fault)
   end
 
+  test "drain emits start and stop events with the counts", %{a: a} do
+    capture([[:alambique, :drain, :start], [:alambique, :drain, :stop]])
+    for n <- 1..4, do: assert({:ok, _} = insert(a, "event-#{n}", 1))
+
+    assert {:ok, %{hibernated: 4, errors: []}} = Alambique.drain(a)
+
+    node_id = Config.fetch!(a).node_id
+
+    assert_receive {:telemetry, [:alambique, :drain, :start], %{cells: 4},
+                    %{instance: ^a, node_id: ^node_id}}
+
+    assert_receive {:telemetry, [:alambique, :drain, :stop],
+                    %{cells: 4, hibernated: 4, released: 4, errors: 0, duration: duration},
+                    %{instance: ^a}}
+
+    assert duration > 0
+  end
+
+  @tag capture_log: true
+  test "a release that fails counts as hibernated but not released", %{a: a, ctx: ctx} do
+    capture([[:alambique, :drain, :stop]])
+    for n <- 1..2, do: assert({:ok, _} = insert(a, "half-#{n}", 1))
+    MemoryStore.inject(ctx.store_config, kind: :error, ops: [:put], key: ~r"/half-1/lease$")
+
+    assert {:ok, %{hibernated: 1, errors: [{"half-1", {:release_failed, _}}]}} =
+             Alambique.drain(a)
+
+    assert_receive {:telemetry, [:alambique, :drain, :stop],
+                    %{cells: 2, hibernated: 2, released: 1, errors: 1}, _}
+  end
+
+  test "drain_status follows a drain from start to end", %{a: a, ctx: ctx} do
+    assert %{draining: false, running: false, started_at_ms: nil, finished_at_ms: nil, left: 0} =
+             Alambique.drain_status(a)
+
+    cells = for n <- 1..3, do: "status-#{n}"
+    for cell <- cells, do: assert({:ok, _} = insert(a, cell, 1))
+    assert %{draining: false, left: 3, done: 0, errors: []} = Alambique.drain_status(a)
+
+    # A slow release keeps the drain running while the status is read.
+    MemoryStore.inject(ctx.store_config,
+      kind: :latency,
+      ops: [:put],
+      key: ~r"/status-3/lease$",
+      ms: 600
+    )
+
+    began = System.os_time(:millisecond)
+    drain = Task.async(fn -> Alambique.drain(a) end)
+
+    running =
+      eventually(fn ->
+        status = Alambique.drain_status(a)
+        status.running and status
+      end)
+
+    assert %{draining: true, cells_at_start: 3} = running
+    assert running.started_at_ms >= began
+    assert running.finished_at_ms == nil
+
+    assert {:ok, %{hibernated: 3, errors: []}} = Task.await(drain)
+
+    assert %{
+             draining: true,
+             running: false,
+             cells_at_start: 3,
+             done: 3,
+             errors: [],
+             left: 0,
+             finished_at_ms: finished
+           } = Alambique.drain_status(a)
+
+    assert finished >= running.started_at_ms
+  end
+
+  @tag capture_log: true
+  test "drain_status lists the cells that failed", %{a: a, ctx: ctx} do
+    for n <- 1..2, do: assert({:ok, _} = insert(a, "bad-#{n}", 1))
+    MemoryStore.inject(ctx.store_config, kind: :error, ops: [:put], key: ~r"/bad-2/lease$")
+
+    assert {:ok, _} = Alambique.drain(a)
+
+    assert %{done: 1, errors: [{"bad-2", {:release_failed, _}}], left: 0} =
+             Alambique.drain_status(a)
+  end
+
   test "drain twice is safe", %{a: a} do
     assert {:ok, _} = insert(a, "once", 1)
     assert {:ok, %{hibernated: 1, errors: []}} = Alambique.drain(a)

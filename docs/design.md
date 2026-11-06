@@ -1262,7 +1262,13 @@ directories (`<data_dir>/work`, §20) are not part of the cache; `inflight`,
   instance's supervision tree runs the same drain when the instance stops
   (`Application.stop`, `System.stop`), before the cells' supervisor, the
   registry and the groups go; the supervisor's shutdown still hibernates what
-  the drain did not finish.
+  the drain did not finish. A cell whose lease the store would not release is
+  asleep but not released: the drain lists it as `{:release_failed, reason}` in
+  `errors`, not in `hibernated`, because another node waits for the lease to
+  expire. A drain emits `[:alambique, :drain, :start]` and `[:alambique, :drain,
+  :stop]` (`docs/telemetry.md`), and `Alambique.drain_status/1` reads its
+  progress from an ETS table that the drain child owns, so a caller on another
+  process sees it while the drain runs.
 - **Move**: the owner hibernates the cell, and the target wakes it with a hop
   budget of zero, so it wakes the cell itself. The target must run the instance.
 - Node join changes the preferred node only for future wakes. Node death

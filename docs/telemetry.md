@@ -25,6 +25,22 @@ lease is unchanged in both cases.
 is no longer the caller's. The matching `:renew` or `:release` event also
 reports `result: :lost`.
 
+## Drain events
+
+Emitted by `Alambique.drain/2` and by the drain of a stop (design §8), once
+per drain. `instance` is the instance name and `node_id` its node id.
+
+| Event | Measurements | Metadata |
+| --- | --- | --- |
+| `[:alambique, :drain, :start]` | `cells` (cells with a process when the drain began) | `instance`, `node_id` |
+| `[:alambique, :drain, :stop]` | `duration`, `cells` (as at the start), `hibernated` (cells written and asleep), `released` (of those, leases released), `errors` (cells in the `errors` of the result) | `instance`, `node_id` |
+
+`hibernated - released` is the number of leases that could not be released: the
+cell is asleep but another node waits for the lease to expire
+(`{:release_failed, reason}` in `errors`). A cell left awake at the deadline or
+by a failed call is in `errors` and in neither count.
+`Alambique.drain_status/1` reads the same counts while the drain runs.
+
 ## Replication events
 
 Emitted by `Alambique.Replication.Replicator` and `Alambique.Replication`.
