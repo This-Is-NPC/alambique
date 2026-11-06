@@ -1278,6 +1278,14 @@ directories (`<data_dir>/work`, §20) are not part of the cache; `inflight`,
   :stop]` (`docs/telemetry.md`), and `Alambique.drain_status/1` reads its
   progress from an ETS table that the drain child owns, so a caller on another
   process sees it while the drain runs.
+- **Swap.** Two instances over one store with no cluster between them hand
+  cells over through the lease alone. The new node reads the lease of a cell
+  the old one holds, finds its holder (node id and incarnation, §5) in no
+  group of its own, and answers `{:error, {:unavailable, owner,
+  expires_at_ms}}` without waiting; the old node's drain releases the lease and
+  the next call wakes the cell. Nothing is forwarded, so it also works when the
+  two share a `node_id`. `test/swap_cluster_test.exs` runs it under load; the
+  procedure is in [how-to-swap-a-node.md](how-to-swap-a-node.md).
 - **Move**: the owner hibernates the cell, and the target wakes it with a hop
   budget of zero, so it wakes the cell itself. The target must run the instance.
 - Node join changes the preferred node only for future wakes. Node death

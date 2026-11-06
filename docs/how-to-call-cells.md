@@ -80,6 +80,9 @@ too, from the schema index; pass `next` as `after:` for the next page.
 :ok = Alambique.join(MyApp.Cells)                                      # after join: false, or a drain
 ```
 
+`drain/2` hands the cells of a node over to another node that started beside
+it: [how-to-swap-a-node.md](how-to-swap-a-node.md).
+
 `take_over/4` fences the current owner at once, when a failure detector
 suspects it is gone, and keeps every acknowledged write even when the
 suspicion is wrong. `Alambique.freeze/3` keeps a cell from waking. See
