@@ -15,6 +15,17 @@ defmodule Alambique.SqliteTest do
 
   defp run(conn, sql, opts), do: Sqlite.run(conn, sql, [], opts)
 
+  defp insert_rows(conn) do
+    :ok =
+      Sqlite.execute(
+        conn,
+        """
+        WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 2000)
+          INSERT INTO m SELECT i, zeroblob(500) FROM s
+        """
+      )
+  end
+
   describe "values" do
     test "integers, floats, text, blobs and nil survive a round trip", %{conn: conn} do
       :ok = Sqlite.execute(conn, "CREATE TABLE v (i, f, t, b, n)")
@@ -115,30 +126,27 @@ defmodule Alambique.SqliteTest do
       assert {:ok, :idle} = Sqlite.transaction_status(conn)
     end
 
-    test "memory/1 reports the page cache, bounded by cache_size", %{conn: conn} do
+    test "memory/1 reports the page cache, bounded by cache_size", %{conn: conn, dir: dir} do
       :ok = Sqlite.execute(conn, "PRAGMA cache_size = -64")
       :ok = Sqlite.execute(conn, "CREATE TABLE m (a, b)")
       assert {:ok, %{cache_used: empty, schema_used: schema}} = Sqlite.memory(conn)
       assert schema > 0
 
-      :ok =
-        Sqlite.execute(
-          conn,
-          """
-          WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 2000)
-            INSERT INTO m SELECT i, zeroblob(500) FROM s
-          """
-        )
-
+      insert_rows(conn)
       {:ok, _} = Sqlite.run(conn, "SELECT sum(length(b)) FROM m", [])
 
       assert {:ok, %{cache_used: used, stmt_used: 0, lookaside_used: 0}} = Sqlite.memory(conn)
       assert used > empty
-      # cache_size is a soft limit: the dirty pages of the insert stay in the
-      # cache until it commits, and each page carries a header. Twice the limit
-      # leaves that slack, and is a tenth of the 1 MB of rows that sit in the
-      # default cache of 2 000 KiB when no cache_size is applied.
-      assert used <= 2 * 64 * 1024
+
+      # Compare with the default cache: its absolute size varies by build and run.
+      {:ok, default} = Sqlite.open(Path.join(dir, "default.db"))
+      :ok = Sqlite.execute(default, "CREATE TABLE m (a, b)")
+      insert_rows(default)
+      {:ok, _} = Sqlite.run(default, "SELECT sum(length(b)) FROM m", [])
+      assert {:ok, %{cache_used: default_used}} = Sqlite.memory(default)
+      :ok = Sqlite.close(default)
+
+      assert used * 4 < default_used
     end
 
     test "build options: no default foreign keys, math functions, no double-quoted strings", %{
