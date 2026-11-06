@@ -26,6 +26,18 @@ run = "scripts/seaweedfs-up"
 description = "Remove the disposable SeaweedFS container"
 run = "scripts/seaweedfs-down"
 
+[tasks.check]
+description = "Run the local gate: warnings-as-errors compile, format, clippy, docs links, then the default suite (ALAMBIQUE_CHECK_CLUSTER=1 and ALAMBIQUE_CHECK_COVERAGE=1 add the heavy checks)"
+run = "scripts/check"
+
+[tasks."check:links"]
+description = "Check the relative links and anchors of README.md, CHANGELOG.md, AGENTS.md and docs/*.md"
+run = "scripts/link-check"
+
+[tasks.local-check]
+description = "Run the gate on HEAD and post the local-check status master requires (--post-only --state=success for the release pull request; ALAMBIQUE_LOCAL_CHECK_DRY_RUN=1 posts nothing)"
+run = "scripts/local-check"
+
 [tasks.test]
 description = "Run the default test suite (no external services)"
 run = "mix test"

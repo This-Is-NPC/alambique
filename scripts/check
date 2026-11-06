@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# The local gate behind `mise run check` and scripts/local-check. Runs, in
+# order: warnings-as-errors compile, format checks, clippy, the docs link
+# check and the default suite. Stops at the first failure.
+#
+# Optional heavy checks, off by default:
+#   ALAMBIQUE_CHECK_CLUSTER=1   also run `mise run test:cluster`
+#   ALAMBIQUE_CHECK_COVERAGE=1  also run `mise run test:coverage`
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$root"
+
+step() { printf '\n==> %s\n' "$*"; }
+
+step "compile (warnings as errors)"
+MIX_ENV=test mix compile --warnings-as-errors --force
+
+step "mix format"
+mix format --check-formatted
+
+step "cargo fmt"
+cargo fmt --check --manifest-path native/alambique_nif/Cargo.toml
+cargo fmt --check --manifest-path native/alambique_nif/fuzz/Cargo.toml
+
+step "cargo clippy"
+cargo clippy --manifest-path native/alambique_nif/Cargo.toml --all-targets -- -D warnings
+
+step "docs links"
+"$root/scripts/link-check"
+
+step "tests"
+mise run test
+
+if [[ "${ALAMBIQUE_CHECK_CLUSTER:-0}" == 1 ]]; then
+  step "cluster tests"
+  mise run test:cluster
+fi
+if [[ "${ALAMBIQUE_CHECK_COVERAGE:-0}" == 1 ]]; then
+  step "coverage"
+  mise run test:coverage
+fi
+
+printf '\ncheck: passed\n'
