@@ -379,7 +379,14 @@ defmodule Alambique.RewindTest do
       ManualClock.advance(world, 60_000)
 
       ctx = %{Feed.ctx(inst) | settle_ms: 0}
-      {:ok, records, _} = Feed.read(ctx, nil, 100)
+
+      # The feed is published after the acknowledgement: wait for all three.
+      records =
+        eventually(fn ->
+          {:ok, records, _} = Feed.read(ctx, nil, 100)
+          length(records) == 3 && records
+        end)
+
       assert [%{values: %{"n" => 1}}, %{values: %{"n" => 2}}, %Rewind{txid: ^txid}] = records
     end
   end
