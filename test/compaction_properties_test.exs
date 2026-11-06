@@ -95,7 +95,10 @@ defmodule Alambique.CompactionPropertiesTest do
   # Model
 
   defp run(commands, opts) do
-    env = audited(setup_world(timeout_ms: 40))
+    # The owner's writes and fences keep the helper's long deadline: no fault
+    # targets level-0 puts, so a timeout there would be load, not a fault (an
+    # unknown outcome the model cannot follow). Each pass sets its own 40 ms.
+    env = audited(setup_world())
     Process.flag(:trap_exit, true)
     owner = new_owner(env, "w0.db")
     hold = hold_config(opts)
