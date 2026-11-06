@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Commit gate, installed by `mise run hooks:install`. Fast checks only: the
+# format checks, about a second. The full gate runs on push.
+# Bypass: `git commit --no-verify`, or ALAMBIQUE_SKIP_LOCAL_CHECK=1.
+set -uo pipefail
+
+[[ "${ALAMBIQUE_SKIP_LOCAL_CHECK:-0}" == 1 ]] && exit 0
+
+root="$(git rev-parse --show-toplevel)" || exit 1
+cd "$root" || exit 1
+
+mise exec -- mix format --check-formatted &&
+  mise exec -- cargo fmt --check --manifest-path native/alambique_nif/Cargo.toml &&
+  mise exec -- cargo fmt --check --manifest-path native/alambique_nif/fuzz/Cargo.toml

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Point git at the versioned hooks in .githooks. Safe to rerun.
+set -euo pipefail
+
+cd "$(cd "$(dirname "$0")/.." && pwd)"
+
+for hook in pre-commit pre-push; do
+  [[ -f .githooks/$hook ]] || { echo "missing .githooks/$hook" >&2; exit 1; }
+  chmod +x ".githooks/$hook"
+done
+git config core.hooksPath .githooks
+
+echo "Hooks installed: core.hooksPath=.githooks"
+echo "  pre-commit runs the format checks."
+echo "  pre-push runs scripts/local-check: red refuses the push, green posts local-check."

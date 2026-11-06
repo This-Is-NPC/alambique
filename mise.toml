@@ -38,6 +38,10 @@ run = "scripts/link-check"
 description = "Run the gate on HEAD and post the local-check status master requires (--post-only --state=success for the release pull request; ALAMBIQUE_LOCAL_CHECK_DRY_RUN=1 posts nothing)"
 run = "scripts/local-check"
 
+[tasks."hooks:install"]
+description = "Install the versioned git hooks: pre-commit checks formatting, pre-push runs local-check"
+run = "scripts/install-hooks"
+
 [tasks.test]
 description = "Run the default test suite (no external services)"
 run = "mix test"
