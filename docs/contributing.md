@@ -44,6 +44,67 @@ a compiled module such as `test/support/cluster_funs.ex`, because peers cannot
 load modules that exist only in memory.
 
 
+## The local gate
+
+`master` requires the status `local-check` on a pull request before it merges.
+Nothing on GitHub runs the tests: a local gate runs them and posts the status.
+Pull requests merge by rebase only.
+
+Install the hooks once per clone:
+
+```sh
+mise run hooks:install   # sets core.hooksPath to .githooks
+```
+
+`mise run check` is the gate. It stops at the first failure and runs, in order:
+
+1. `MIX_ENV=test mix compile --warnings-as-errors --force`
+2. `mix format --check-formatted`
+3. `cargo fmt --check` for `native/alambique_nif` and its `fuzz` crate
+4. `cargo clippy --all-targets -- -D warnings` on the NIF
+5. the documentation link check (`mise run check:links`): relative links and
+   `#anchors` in `README.md`, `CHANGELOG.md`, `AGENTS.md` and `docs/*.md`
+6. `mise run test`, the default suite
+
+The suite takes about four minutes on an idle machine and dominates the gate.
+The forced compile, the format checks, clippy and the link check add about a
+minute together once dependencies are built; clippy alone takes two seconds
+when warm and under two minutes the first time. A first run in a fresh
+checkout also compiles the dependencies, and a loaded machine makes timing
+tests in the suite fail, so rerun the failing file before suspecting your
+change. Two heavy checks are off by default:
+
+```sh
+ALAMBIQUE_CHECK_CLUSTER=1 mise run check    # adds mise run test:cluster
+ALAMBIQUE_CHECK_COVERAGE=1 mise run check   # adds mise run test:coverage
+```
+
+The hooks:
+
+- `pre-commit` runs only the format checks, about a second. The full gate is
+  too slow to run on every commit.
+- `pre-push` runs `scripts/local-check --pre-push` for each commit pushed. A
+  red gate refuses the push. A green gate posts `local-check` on the commit
+  through `gh api` once the push lands. The gate vouches only for the tree it
+  ran on, so the pushed commit must be `HEAD` with a clean working tree. Tags
+  and branch deletions pass. It needs `gh` logged in; without it the gate
+  still runs but posts nothing.
+
+`mise run local-check` gates `HEAD` and posts the status by hand. For a commit
+you did not push from here, such as the release pull request release-please
+opens, check out its branch, run `mise run check`, then post the result:
+
+```sh
+scripts/local-check --post-only --state=success --sha=<commit>
+```
+
+To skip on purpose, set `ALAMBIQUE_SKIP_LOCAL_CHECK=1` for one command, or
+use `git commit --no-verify` or `git push --no-verify`. A skipped push posts no
+status, so `master` refuses the merge until an admin bypasses it or you post
+one with `--post-only`. `ALAMBIQUE_LOCAL_CHECK_DRY_RUN=1` (or `--dry-run`) runs
+the gate but prints the API calls instead of posting them.
+
+
 ## Releases
 
 Releases are cut by [release-please](https://github.com/googleapis/release-please)
