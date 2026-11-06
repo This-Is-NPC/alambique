@@ -232,10 +232,9 @@ defmodule Alambique.ReplicaTest do
     for n <- 2..21,
         do: {:ok, _} = Alambique.execute(t.owner, t.cell, "INSERT INTO t (n) VALUES (#{n})")
 
-    MemoryStore.remove(store, hold)
-
     # Now only the newest segment is unreadable. Before, one failure threw
-    # away the 19 fetched before it, at every poll.
+    # away the 19 fetched before it, at every poll. It is set before the hold
+    # is lifted, so no poll can fetch all 20 in between.
     head = :sys.get_state(Cell.whereis(Config.fetch!(t.owner), t.cell)).repl.txid
 
     MemoryStore.inject(store,
@@ -244,23 +243,32 @@ defmodule Alambique.ReplicaTest do
       key: Regex.compile!("-#{Keys.hex(head)}\\.ltx")
     )
 
-    assert {_, _} = await_refreshed(19)
+    MemoryStore.remove(store, hold)
+
+    # A loaded host may split the 19 over several refreshes (each segment has
+    # a deadline of its own), so the applied segments are summed.
+    assert 19 = await_applied(19)
   end
 
-  defp await_refreshed(segments, deadline \\ System.monotonic_time(:millisecond) + 6_000) do
+  defp await_applied(total, applied \\ 0, deadline \\ deadline_in(15_000))
+
+  defp await_applied(total, applied, _deadline) when applied >= total, do: applied
+
+  defp await_applied(total, applied, deadline) do
     wait = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
-      {:telemetry, [:alambique, :replica, :refresh], %{segments: ^segments},
-       %{result: :ok} = meta} ->
-        {segments, meta}
+      {:telemetry, [:alambique, :replica, :refresh], %{segments: n}, %{result: :ok}} ->
+        await_applied(total, applied + n, deadline)
 
       {:telemetry, [:alambique, :replica, :refresh], _, _} ->
-        await_refreshed(segments, deadline)
+        await_applied(total, applied, deadline)
     after
-      wait -> flunk("the replica never applied #{segments} segments")
+      wait -> flunk("the replica applied #{applied} of #{total} segments")
     end
   end
+
+  defp deadline_in(ms), do: System.monotonic_time(:millisecond) + ms
 
   describe "a tail past a gap" do
     # An owner at depth 2 whose uploads of level-0 files are held after the
