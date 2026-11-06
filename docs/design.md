@@ -1067,7 +1067,9 @@ shutdown, and on supervisor shutdown as a last resort, the cell
 uploads what is pending, runs `Replicator.checkpoint/2`, closes the
 connection, removes the emptied WAL and its index (`-wal`, `-shm`), writes
 the `cell.db.meta` marker, releases the lease and exits; the in-flight marker (§10) is
-removed when the process ends. An awake cell has two timers
+removed when the process ends. A release the store refuses is logged, and
+`hibernate/3` and the drain report it as `{:release_failed, reason}`: the cell
+is asleep and its data durable, but its lease stays until it expires. An awake cell has two timers
 (renewal and idle); a hibernated cell has no process, file descriptor, timer
 or ETS row.
 

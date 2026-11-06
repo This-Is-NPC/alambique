@@ -294,7 +294,7 @@ defmodule Alambique.Cell do
 
   defp serve_call(:hibernate, _from, state) do
     case hibernate(state, :request) do
-      {:ok, state} -> {:stop, :normal, :ok, %{state | mode: :stopped}}
+      {:ok, state, released} -> {:stop, :normal, released, %{state | mode: :stopped}}
       {:stop, reason, state} -> stop_serving(state, reason, {:error, reason})
     end
   end
@@ -422,7 +422,7 @@ defmodule Alambique.Cell do
   defp info(:renew, %State{mode: :serving} = state) do
     if frozen?(state) do
       case hibernate(state, :frozen) do
-        {:ok, state} -> {:stop, :normal, %{state | mode: :stopped}}
+        {:ok, state, _released} -> {:stop, :normal, %{state | mode: :stopped}}
         {:stop, reason, state} -> stop_serving(state, reason)
       end
     else
@@ -476,7 +476,7 @@ defmodule Alambique.Cell do
 
       true ->
         case hibernate(state, :idle) do
-          {:ok, state} -> {:stop, :normal, %{state | mode: :stopped}}
+          {:ok, state, _released} -> {:stop, :normal, %{state | mode: :stopped}}
           {:stop, reason, state} -> stop_serving(state, reason)
         end
     end
@@ -786,13 +786,15 @@ defmodule Alambique.Cell do
 
   # Ending
 
-  # Hibernation (design §7): upload what is pending, checkpoint, release.
+  # Hibernation (design §7): upload what is pending, checkpoint, release. The
+  # third element is `:ok`, or the error of a release that failed: the cell
+  # is asleep and its lease expires as after a crash.
   defp hibernate(state, why) do
     started = System.monotonic_time()
 
     with {:ok, state} <- drain(state) do
       state = state |> Publisher.flush() |> finish_local()
-      release(state)
+      released = release(state)
 
       Telemetry.span_stop([:cell, :hibernate], started, %{}, %{
         cell: state.id,
@@ -801,7 +803,7 @@ defmodule Alambique.Cell do
         reason: why
       })
 
-      {:ok, state}
+      {:ok, state, released}
     end
   end
 
@@ -838,6 +840,7 @@ defmodule Alambique.Cell do
 
       {:error, reason} ->
         Logger.warning("Alambique could not release a lease: #{inspect(reason)}")
+        {:error, {:release_failed, reason}}
     end
   end
 
@@ -898,7 +901,7 @@ defmodule Alambique.Cell do
 
   defp finish(:shutdown, %State{mode: :serving} = state) do
     case hibernate(state, :shutdown) do
-      {:ok, _state} -> :ok
+      {:ok, _state, _released} -> :ok
       {:stop, _reason, state} -> abandon(state)
     end
   end

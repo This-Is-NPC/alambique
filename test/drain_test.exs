@@ -5,6 +5,7 @@ defmodule Alambique.DrainTest do
   import Alambique.CellHelpers
 
   alias Alambique.{Config, Lease, Membership, Placement}
+  alias AlambiqueTestkit.MemoryStore
 
   @schema [{1, "CREATE TABLE t (n INTEGER PRIMARY KEY)"}]
 
@@ -44,6 +45,33 @@ defmodule Alambique.DrainTest do
     assert {:ok, %{rows: [[1]]}} = Alambique.query(b, hd(cells), "SELECT n FROM t")
     assert System.monotonic_time(:millisecond) - started < 1_000
     assert %{epoch: 2} = lease(b, hd(cells))
+  end
+
+  @tag capture_log: true
+  test "a lease that cannot be released is an error, not a hibernation", %{
+    a: a,
+    b: b,
+    ctx: ctx
+  } do
+    cells = for n <- 1..3, do: "stuck-#{n}"
+    for cell <- cells, do: assert({:ok, _} = insert(a, cell, 1))
+
+    # Every release of the first cell fails; the writes and the others pass.
+    fault =
+      MemoryStore.inject(ctx.store_config, kind: :error, ops: [:put], key: ~r"/stuck-1/lease$")
+
+    assert {:ok, %{hibernated: 2, errors: [{"stuck-1", {:release_failed, :injected}}]}} =
+             Alambique.drain(a)
+
+    # The cell is asleep and its data durable, but the lease is still held.
+    assert %{cells: []} = Alambique.cells(a)
+    assert durable_rows(ctx, "stuck-1", "SELECT n FROM t") == [[1]]
+    assert %{released: false, epoch: 1} = lease(a, "stuck-1")
+    assert %{released: true} = lease(a, "stuck-2")
+
+    # Another node waits for the expiry, as after a crash.
+    assert {:error, {:unavailable, _owner, _expires}} = insert(b, "stuck-1", 2)
+    MemoryStore.remove(ctx.store_config, fault)
   end
 
   test "drain twice is safe", %{a: a} do

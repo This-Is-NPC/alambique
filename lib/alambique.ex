@@ -679,6 +679,11 @@ defmodule Alambique do
   @doc """
   Puts the cell to sleep: uploads what is pending, checkpoints, releases the
   lease and stops its process. `:ok` also when the cell was not awake.
+
+  When the store refuses the release, the cell is asleep and its data is
+  durable, but the lease stays until it expires: the answer is
+  `{:error, {:release_failed, reason}}`, so a caller that waits for another
+  node to take the cell knows it must wait for the expiry.
   """
   @spec hibernate(instance, cell, keyword) :: :ok | {:error, term}
   def hibernate(instance, cell, opts \\ []),
@@ -768,7 +773,9 @@ defmodule Alambique do
 
   Returns `{:ok, %{hibernated: n, errors: [{cell, reason}]}}`. A cell that
   could not be hibernated stays in `errors` (its lease then expires as after a
-  crash). Stopping the instance runs the same drain. Repeating the call is
+  crash), and so does a cell whose lease could not be released, with
+  `{:release_failed, reason}`: it is asleep, but other nodes wait for the lease
+  to expire. `hibernated` counts only the cells that were released. Stopping the instance runs the same drain. Repeating the call is
   safe. Options: `:concurrency` and `:timeout` (per cell, in milliseconds),
   overriding `:timeout_ms` and `:concurrency` of the instance's `:drain` option.
   `join/1` brings the node back into service.
