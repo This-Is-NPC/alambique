@@ -10,7 +10,7 @@ defmodule Alambique.Admission do
   # counter `:wakes`, the entries `{{:waking, pid}}` of cells that have not
   # finished waking, the entries `{{:failed, cell}, reason, until_ms}`, and,
   # with `awake.max_bytes`, the counter `:bytes` and one entry
-  # `{{:cell, pid}, bytes, last_active_ms, load, id}` per awake cell.
+  # `{{:cell, pid}, bytes}` per awake cell.
   #
   # A wake slot is reserved by the router and becomes the `{:waking, pid}`
   # entry when the cell starts (`waking/2`). Whoever takes that entry first,
@@ -106,19 +106,15 @@ defmodule Alambique.Admission do
   # what its connection holds after every call and at the end of its wake;
   # nothing is measured or kept without a budget.
 
-  @doc """
-  Records the memory of `conn` for the cell `pid` (`id`) with the time of its
-  last call (`now`, monotonic ms) and its `load` counter.
-  """
-  @spec track(Config.t(), pid, String.t(), Sqlite.conn(), :counters.counters_ref(), integer) ::
-          :ok
-  def track(%{awake: %{max_bytes: nil}}, _pid, _id, _conn, _load, _now), do: :ok
+  @doc "Records the memory of `conn` for the cell `pid`."
+  @spec track(Config.t(), pid, Sqlite.conn()) :: :ok
+  def track(%{awake: %{max_bytes: nil}}, _pid, _conn), do: :ok
 
-  def track(config, pid, id, conn, load, now) do
+  def track(config, pid, conn) do
     with {:ok, memory} <- Sqlite.memory(conn) do
       bytes = memory.cache_used + memory.schema_used + memory.stmt_used
       old = recorded(config, pid)
-      :ets.insert(config.admission, {{:cell, pid}, bytes, now, load, id})
+      :ets.insert(config.admission, {{:cell, pid}, bytes})
       if bytes != old, do: :ets.update_counter(config.admission, :bytes, bytes - old)
     end
 
@@ -127,7 +123,7 @@ defmodule Alambique.Admission do
 
   defp recorded(config, pid) do
     case :ets.lookup(config.admission, {:cell, pid}) do
-      [{_, bytes, _, _, _}] -> bytes
+      [{_, bytes}] -> bytes
       [] -> 0
     end
   end
@@ -138,7 +134,7 @@ defmodule Alambique.Admission do
   """
   @spec forget(Config.t(), pid) :: :ok
   def forget(config, pid) do
-    with [{_, bytes, _, _, _}] <- :ets.take(config.admission, {:cell, pid}),
+    with [{_, bytes}] <- :ets.take(config.admission, {:cell, pid}),
          do: :ets.update_counter(config.admission, :bytes, -bytes)
 
     :ok
@@ -156,15 +152,19 @@ defmodule Alambique.Admission do
   def bytes(config), do: :ets.lookup_element(config.admission, :bytes, 2)
 
   @doc """
-  The awake cells that report their memory, least recently used first, as
-  `{pid, load, id}`.
+  The cells that finished waking, least recently used first, as
+  `{pid, load, id}`. The last call is in the third slot of `load`.
   """
-  @spec least_recently_used(Config.t()) :: [{pid, :counters.counters_ref(), String.t()}]
+  @spec least_recently_used(Config.t()) :: [{pid, :atomics.atomics_ref(), String.t()}]
   def least_recently_used(config) do
-    config.admission
-    |> :ets.select([
-      {{{:cell, :"$1"}, :_, :"$2", :"$3", :"$4"}, [], [{{:"$2", :"$1", :"$3", :"$4"}}]}
-    ])
+    config.registry
+    |> Registry.select([{{:"$1", :"$2", :"$3"}, [], [{{:"$1", :"$2", :"$3"}}]}])
+    |> Enum.flat_map(fn {id, pid, load} ->
+      case :atomics.get(load, 3) do
+        0 -> []
+        last -> [{last, pid, load, id}]
+      end
+    end)
     |> Enum.sort()
     |> Enum.map(fn {_last, pid, load, id} -> {pid, load, id} end)
   end

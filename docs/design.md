@@ -946,8 +946,7 @@ Why each overlap is safe:
 - `max_bytes` (default `nil`: no budget) bounds the memory that the awake
   cells hold. Each awake cell records, in the admission table, the sum of
   `SQLITE_DBSTATUS_CACHE_USED`, `SCHEMA_USED` and `STMT_USED` of its connection
-  (`Alambique.Sqlite.memory/1`), the time of its last call and its load
-  counter, after every call and message, and at the end of its wake. The
+  (`Alambique.Sqlite.memory/1`), after every call and message, and at the end of its wake. The
   total is a counter in the same table; the entry goes away when the cell ends
   (by the cell, or by `Membership` for a cell killed). Nothing is measured when
   `max_bytes` is `nil`. The router checks the total before it reserves a wake
@@ -963,8 +962,9 @@ Why each overlap is safe:
   much, never too little. The woken cell may pass the budget as its cache
   fills; the next wake makes room. Each hibernation emits
   `[:alambique, :admission, :evict]`. Finding the oldest cells sorts the
-  records of the node (one entry per awake cell), which is paid only when the
-  total is over the budget.
+  counter of every awake cell and sorts them, which is paid only when the
+  total is over the budget. The time of the last call is the third slot of the
+  load counter of each cell, set when its wake ends.
 - `max_wakes` (default 256) counts wakes in progress, with an atomic counter:
   the router reserves a slot before it starts a cell and gives it back when no
   cell was started. A started cell holds it as an entry keyed by its pid until

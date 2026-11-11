@@ -43,7 +43,7 @@ defmodule Alambique.Cell do
 
   @doc false
   # The process of `id` and its load counter, from one registry lookup.
-  @spec find(Alambique.Config.t(), String.t()) :: {pid, :counters.counters_ref()} | nil
+  @spec find(Alambique.Config.t(), String.t()) :: {pid, :atomics.atomics_ref()} | nil
   def find(config, id) do
     # The registry drops a dead process a moment after its exit.
     case Registry.lookup(config.registry, id) do
@@ -68,25 +68,26 @@ defmodule Alambique.Cell do
 
   @doc false
   # Slot 1 counts the callers the cell accepted and has not answered; slot 2
-  # the calls the router sent that the cell has not finished with (`sent/1`).
-  @spec pending(pid, :counters.counters_ref()) :: {:ok, non_neg_integer} | :none
+  # the calls the router sent that the cell has not finished with (`sent/1`);
+  # slot 3 is the monotonic ms of the last call, 0 until the wake ends.
+  @spec pending(pid, :atomics.atomics_ref()) :: {:ok, non_neg_integer} | :none
   def pending(pid, load) do
     if Process.alive?(pid),
-      do: {:ok, :counters.get(load, 1) + :counters.get(load, 2)},
+      do: {:ok, :atomics.get(load, 1) + :atomics.get(load, 2)},
       else: :none
   end
 
   @doc false
-  @spec new_load() :: :counters.counters_ref()
-  def new_load, do: :counters.new(2, [])
+  @spec new_load() :: :atomics.atomics_ref()
+  def new_load, do: :atomics.new(3, [])
 
   @doc false
   # Counts a call before it is sent, so it counts while it waits in the
   # mailbox, while it runs and after its caller gave up. `handle_call/3`
   # takes it back.
   # A hibernation is not counted: callers outside the router send it too.
-  @spec sent(:counters.counters_ref()) :: :ok
-  def sent(load), do: :counters.add(load, 2, 1)
+  @spec sent(:atomics.atomics_ref()) :: :ok
+  def sent(load), do: :atomics.add(load, 2, 1)
 
   @impl true
   def init({config, id, opts, load}) do
@@ -188,6 +189,7 @@ defmodule Alambique.Cell do
     Process.send_after(self(), :renew, renew_interval(config))
     Process.send_after(self(), :idle, config.idle_timeout_ms)
     state = %{state | mode: :serving, last_active: System.monotonic_time(:millisecond)}
+    :atomics.put(state.load, 3, state.last_active)
     track(state)
     state
   end
@@ -208,7 +210,7 @@ defmodule Alambique.Cell do
   def handle_call(request, from, %State{mode: :serving} = state) do
     answer = state.inflight |> Inflight.busy(fn -> call(request, from, state) end) |> tracked()
     # Taken back once the call is parked or answered, so it counts all along.
-    if request != :hibernate, do: :counters.sub(state.load, 2, 1)
+    if request != :hibernate, do: :atomics.sub(state.load, 2, 1)
     answer
   end
 
@@ -224,10 +226,11 @@ defmodule Alambique.Cell do
   end
 
   defp track(state),
-    do: Admission.track(state.config, self(), state.id, state.conn, state.load, state.last_active)
+    do: Admission.track(state.config, self(), state.conn)
 
   defp call(request, from, state) do
     state = %{state | last_active: System.monotonic_time(:millisecond)}
+    :atomics.put(state.load, 3, state.last_active)
 
     if State.lease_valid?(state) do
       serve_call(request, from, state)
@@ -333,7 +336,7 @@ defmodule Alambique.Cell do
       {:ok, value} ->
         state = Publisher.committed(state)
         state = %{state | pending: [{:write, from, {:ok, value}} | state.pending]}
-        :counters.add(state.load, 1, 1)
+        :atomics.add(state.load, 1, 1)
         Fault.point(:cell_after_commit, %{cell: state.id, txid: state.repl.txid})
         if isolated?, do: encode_now(state), else: {:noreply, queue_flush(state)}
 
@@ -463,7 +466,7 @@ defmodule Alambique.Cell do
     idle = state.config.idle_timeout_ms
     elapsed = System.monotonic_time(:millisecond) - state.last_active
 
-    busy? = not idle?(state) or :counters.get(state.load, 2) != 0
+    busy? = not idle?(state) or :atomics.get(state.load, 2) != 0
 
     cond do
       elapsed < idle ->
@@ -517,12 +520,12 @@ defmodule Alambique.Cell do
   # Makes an item wait for the newest batch, which is the open one when it has
   # items. Its release implies that every earlier write is acknowledged.
   defp wait(%State{pending: []} = state, item) do
-    :counters.add(state.load, 1, 1)
+    :atomics.add(state.load, 1, 1)
     %{state | pipe: Pipe.attach(state.pipe, [item])}
   end
 
   defp wait(state, item) do
-    :counters.add(state.load, 1, 1)
+    :atomics.add(state.load, 1, 1)
     %{state | pending: [item | state.pending]}
   end
 
@@ -759,7 +762,7 @@ defmodule Alambique.Cell do
 
   # A checked read whose lease is lost gets no answer: it exits with the cell.
   defp answer(state, pending, verdict) do
-    :counters.sub(state.load, 1, length(pending))
+    :atomics.sub(state.load, 1, length(pending))
 
     # Items are kept newest first; callers are answered in arrival order.
     pending
