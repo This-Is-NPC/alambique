@@ -63,15 +63,18 @@ pub(crate) struct Control {
     timed_out: AtomicBool,
     /// `ATTACH`, `DETACH` and `VACUUM` are allowed (`attach: true`).
     allow_attach: bool,
+    /// Deadline in ms of a call that sets none; 0 for none.
+    default_timeout_ms: u64,
 }
 
 impl Control {
-    pub(crate) fn new(allow_attach: bool) -> Self {
+    pub(crate) fn new(allow_attach: bool, default_timeout_ms: u64) -> Self {
         Control {
             read_only: AtomicBool::new(false),
             deadline: AtomicU64::new(0),
             timed_out: AtomicBool::new(false),
             allow_attach,
+            default_timeout_ms,
         }
     }
 }
@@ -299,8 +302,13 @@ impl<'a> Call<'a> {
     fn new(ctl: &'a Control, db: *mut ffi::sqlite3, limits: &Limits) -> Self {
         ctl.timed_out.store(false, Relaxed);
         ctl.read_only.store(limits.read_only, Relaxed);
-        if limits.timeout_ms > 0 {
-            let deadline = now_us().saturating_add(limits.timeout_ms.saturating_mul(1000));
+        let timeout_ms = if limits.timeout_ms > 0 {
+            limits.timeout_ms
+        } else {
+            ctl.default_timeout_ms
+        };
+        if timeout_ms > 0 {
+            let deadline = now_us().saturating_add(timeout_ms.saturating_mul(1000));
             ctl.deadline.store(deadline, Relaxed);
         }
         let length = (limits.read_only && limits.max_bytes > 0).then(|| {
@@ -608,6 +616,8 @@ fn bind_one(s: *mut ffi::sqlite3_stmt, idx: c_int, term: Term) -> Result<c_int, 
 /// file for reading; otherwise the file is created when missing. `vfs` names
 /// a registered VFS, `None` is SQLite's default. `attach` allows `ATTACH`,
 /// `DETACH` and `VACUUM`, which the connection refuses otherwise.
+/// `timeout_ms` is the deadline of every `sqlite_run` and `sqlite_execute`
+/// call that sets none, 0 for none.
 #[rustler::nif(schedule = "DirtyIo")]
 fn sqlite_open<'a>(
     env: Env<'a>,
@@ -615,6 +625,7 @@ fn sqlite_open<'a>(
     readonly: bool,
     vfs: Option<String>,
     attach: bool,
+    timeout_ms: u64,
 ) -> Term<'a> {
     let _t = crate::stats::SQLITE_CALLS.time();
     let run = || -> Outcome<'a> {
@@ -690,7 +701,7 @@ fn sqlite_open<'a>(
         CONNECTIONS_OPEN.fetch_add(1, Relaxed);
         let conn = ResourceArc::new(Conn {
             db: RwLock::new(Some(DbPtr(db))),
-            control: Box::new(Control::new(attach)),
+            control: Box::new(Control::new(attach, timeout_ms)),
         });
         let ctx = &*conn.control as *const Control as *mut std::ffi::c_void;
         // SAFETY: `db` is live and not shared yet; `ctx` outlives it (see
@@ -728,12 +739,15 @@ fn sqlite_execute<'a>(env: Env<'a>, conn: ResourceArc<Conn>, sql: Binary) -> Ter
         let sql = CString::new(sql.as_slice())
             .map_err(|_| Failure::Message("sql contains a nul byte".into()))?;
         with_db(&conn, |db| {
+            let _call = Call::new(&conn.control, db, &Limits::default());
             // SAFETY: `db` is live and `sql` is NUL-terminated.
             let rc = unsafe {
                 ffi::sqlite3_exec(db, sql.as_ptr(), None, ptr::null_mut(), ptr::null_mut())
             };
             if rc == ffi::SQLITE_OK {
                 Ok(atoms::ok().encode(env))
+            } else if rc == ffi::SQLITE_INTERRUPT && conn.control.timed_out.load(Relaxed) {
+                Err(Failure::Timeout)
             } else {
                 Err(failure(db))
             }
@@ -1045,7 +1059,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "calls SQLite")]
     fn the_authorizer_reads_the_connection_mode() {
         let db = mem();
-        let ctl = Box::new(Control::new(false));
+        let ctl = Box::new(Control::new(false, 0));
         let ctx = &*ctl as *const Control as *mut std::ffi::c_void;
         // SAFETY: `db` is live and `ctl` outlives it.
         unsafe { ffi::sqlite3_set_authorizer(db, Some(authorize), ctx) };
@@ -1074,7 +1088,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "calls SQLite")]
     fn the_progress_handler_stops_a_statement_at_its_deadline() {
         let db = mem();
-        let ctl = Box::new(Control::new(false));
+        let ctl = Box::new(Control::new(false, 0));
         let ctx = &*ctl as *const Control as *mut std::ffi::c_void;
         // SAFETY: `db` is live and `ctl` outlives it.
         unsafe { ffi::sqlite3_progress_handler(db, PROGRESS_OPS, Some(progress), ctx) };
@@ -1092,6 +1106,45 @@ mod tests {
         assert!(run(db, "SELECT 1").is_ok());
         // SAFETY: `db` is live and not used afterwards.
         unsafe { close_v2(db) };
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(24))]
+
+        /// Whichever way the deadline is set, the call of the statement
+        /// (`Call`) arms it: a call's own, or the connection's when the call
+        /// sets none (migrations, scripts and the library's own statements).
+        /// The statement ends near it and never runs on.
+        #[test]
+        #[cfg_attr(miri, ignore = "calls SQLite")]
+        fn no_statement_runs_past_its_deadline(
+            call_ms in proptest::option::of(20u64..120),
+            default_ms in 0u64..120,
+        ) {
+            let expected = call_ms.unwrap_or(default_ms);
+            proptest::prop_assume!(expected > 0);
+            let db = mem();
+            let ctl = Box::new(Control::new(false, default_ms));
+            let ctx = &*ctl as *const Control as *mut std::ffi::c_void;
+            // SAFETY: `db` is live and `ctl` outlives it.
+            unsafe { ffi::sqlite3_progress_handler(db, PROGRESS_OPS, Some(progress), ctx) };
+            let limits = Limits { timeout_ms: call_ms.unwrap_or(0), ..Limits::default() };
+
+            let started = Instant::now();
+            let ran = {
+                let _call = Call::new(&ctl, db, &limits);
+                run(db, "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n \
+                         WHERE x < 1000000000) SELECT count(*) FROM n")
+            };
+            let took = started.elapsed().as_millis() as u64;
+
+            proptest::prop_assert!(ran.is_err());
+            proptest::prop_assert!(ctl.timed_out.load(Relaxed));
+            proptest::prop_assert!(took >= expected, "stopped after {took} ms, before {expected}");
+            proptest::prop_assert!(took < expected + 1000, "ran {took} ms for {expected}");
+            // SAFETY: `db` is live and not used afterwards.
+            unsafe { close_v2(db) };
+        }
     }
 
     #[test]

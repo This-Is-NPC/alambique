@@ -65,7 +65,7 @@ fn panic_in_callback(site: String, path: String) -> (i32, i32) {
     let sql = c"PRAGMA user_version; PRAGMA journal_mode = WAL; \
                 CREATE TABLE t (a); INSERT INTO t VALUES (1); SELECT a FROM t";
     let mut db = ptr::null_mut();
-    let control = sqlite::Control::new(false);
+    let control = sqlite::Control::new(false, 0);
     let _armed = probe::panic_at(site);
     // SAFETY: `path`, `sql` and the VFS name are NUL-terminated and outlive
     // the calls; `db` is closed once, below.

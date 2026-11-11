@@ -483,7 +483,8 @@ defmodule Alambique.Replica do
   defp open(state) do
     kib = state.settings.cache_kib
 
-    with {:ok, conn} <- Db.open_read_only(state.path),
+    with {:ok, conn} <-
+           Db.open_read_only(state.path, timeout_ms: Db.script_timeout_ms(state.config)),
          :ok <- Alambique.Sqlite.execute(conn, "PRAGMA cache_size = -#{kib}"),
          :ok <- Alambique.Sqlite.execute(conn, "PRAGMA mmap_size = 0") do
       {:ok, conn}

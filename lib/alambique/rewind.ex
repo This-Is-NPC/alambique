@@ -258,8 +258,10 @@ defmodule Alambique.Rewind do
   # The schema versions of both states, and the latest feed time of the
   # current one (the marker must not sort before records already published).
   defp compare(args, current, target_path) do
-    with {:ok, from_conn} <- Db.open_read_only(current),
-         {:ok, to_conn} <- Db.open_read_only(target_path) do
+    opts = [timeout_ms: Db.script_timeout_ms(args.config)]
+
+    with {:ok, from_conn} <- Db.open_read_only(current, opts),
+         {:ok, to_conn} <- Db.open_read_only(target_path, opts) do
       try do
         with {:ok, from} <- Db.user_version(from_conn),
              {:ok, to} <- Db.user_version(to_conn),
@@ -294,7 +296,8 @@ defmodule Alambique.Rewind do
       marker: %{from: now.txid, to: target.txid, target: args.target}
     }
 
-    with {:ok, conn} <- Db.open(target.path, attach: true) do
+    with {:ok, conn} <-
+           Db.open(target.path, attach: true, timeout_ms: Db.script_timeout_ms(args.config)) do
       try do
         Reconcile.run(conn, current, opts)
       after

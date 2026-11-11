@@ -22,7 +22,8 @@ defmodule Alambique.Scrub do
     * `:cells` - cells sampled per round (default 10)
     * `:concurrency` - cells restored at once (default 1)
     * `:rate` - cells started per second at most (default 1)
-    * `:timeout_ms` - time budget of one restore (default 120 000)
+    * `:timeout_ms` - time budget of one restore, and of its check (default
+      120 000)
     * `:check` - `:integrity_check` (default) or `:quick_check`
     * `:attempts` - restores of a cell before it counts as failed (default
       2); a restore that races with a deletion fails once and succeeds again
@@ -310,7 +311,7 @@ defmodule Alambique.Scrub do
     try do
       case Replication.restore(ctx, cell, path, :latest) do
         {:ok, %{txid: 0}} -> {:ok, :empty}
-        {:ok, result} -> verify(path, result, settings.check)
+        {:ok, result} -> verify(path, result, settings.check, settings.timeout_ms)
         {:error, reason} -> {:error, {:restore, reason}}
       end
     after
@@ -319,9 +320,9 @@ defmodule Alambique.Scrub do
   end
 
   @doc false
-  def verify(path, result, check) do
+  def verify(path, result, check, timeout_ms) do
     with :ok <- file_checksum(path, result),
-         :ok <- integrity(path, check) do
+         :ok <- integrity(path, check, timeout_ms) do
       {:ok, result.txid}
     end
   end
@@ -334,8 +335,8 @@ defmodule Alambique.Scrub do
     end
   end
 
-  defp integrity(path, check) do
-    with {:ok, conn} <- Db.open_read_only(path) do
+  defp integrity(path, check, timeout_ms) do
+    with {:ok, conn} <- Db.open_read_only(path, timeout_ms: timeout_ms) do
       try do
         case Sqlite.run(conn, "PRAGMA #{check}", []) do
           {:ok, %{rows: [["ok"]]}} -> :ok

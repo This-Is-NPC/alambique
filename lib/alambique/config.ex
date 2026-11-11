@@ -130,6 +130,7 @@ defmodule Alambique.Config do
 
   # `statement_timeout_ms` defaults to `op_timeout_ms`.
   @sql_defaults [
+    script_timeout_ms: 60_000,
     max_result_rows: 100_000,
     max_result_bytes: 67_108_864
   ]
@@ -216,6 +217,7 @@ defmodule Alambique.Config do
           },
           sql: %{
             statement_timeout_ms: pos_integer,
+            script_timeout_ms: pos_integer,
             max_result_rows: pos_integer,
             max_result_bytes: pos_integer
           },
