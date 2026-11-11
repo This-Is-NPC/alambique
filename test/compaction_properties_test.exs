@@ -178,6 +178,7 @@ defmodule Alambique.CompactionPropertiesTest do
       max_level: levels,
       snapshot_interval_txids: 5,
       snapshot_interval_ms: 300,
+      pitr_window_ms: model.opts.window,
       timeout_ms: 40,
       deletion_grace_ms: model.opts.deletion,
       batch_keys: 4,
@@ -370,6 +371,7 @@ defmodule Alambique.CompactionPropertiesTest do
       max_level: 3,
       snapshot_interval_txids: 5,
       snapshot_interval_ms: 300,
+      pitr_window_ms: model.opts.window,
       timeout_ms: 40,
       deletion_grace_ms: model.opts.deletion,
       batch_keys: 4,
@@ -433,6 +435,28 @@ defmodule Alambique.CompactionPropertiesTest do
       assert Enum.max(snapshots(env), fn -> 0 end) >= model.newest_snapshot,
              "newest snapshot kept #{when_}"
     end
+  end
+
+  # Found by the property: compaction that does not know the window thins the
+  # snapshot that retention takes as its anchor.
+  @tag :capture_log
+  test "compaction keeps the snapshot a window anchors on" do
+    run(
+      [
+        {:write, [{:put, 12, 5000}]},
+        {:write, [{:put, 10, 10}, :vacuum, {:fill, 1}]},
+        :zombie,
+        {:takeover, :remote},
+        {:write, [:vacuum]},
+        {:compact, 1},
+        {:write, [{:del, 1}, :vacuum]},
+        {:advance, 6000},
+        {:compact, 3},
+        {:write, [{:del, 7}, :vacuum]},
+        {:write, [{:fill, 2}, {:put, 9, 200}, {:del, 1}]}
+      ],
+      %{fanout: 2, window: 500, grace: 0, deletion: 300, hold_bytes: 0, hold_object_bytes: 300}
+    )
   end
 
   @tag :capture_log
