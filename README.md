@@ -12,7 +12,7 @@ store.
 
 Use it when you have many small databases, one per user, organization or
 mailbox, and want them to move between nodes without a database server. It
-replicates as LTX files (the format Litestream 0.5 writes), restores lazily,
+replicates as LTX files (the format Litestream 0.5 writes; Litestream 0.5.18 restores them, with [one limit](docs/segment-format.md#litestream-compatibility)), restores lazily,
 compacts its history, migrates schemas with an N-1 window, moves cells between
 locations and publishes a per-cell change feed.
 
