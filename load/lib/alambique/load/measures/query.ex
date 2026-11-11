@@ -12,6 +12,7 @@ defmodule Alambique.Load.Measures.Query do
   def latency, do: {:p99, Env.float("QUERY_P99_MS", 1_000)}
   def mem_fraction, do: 1.0
   def probe?, do: true
+  def holds_memory?, do: false
   def ramp_opts, do: [refine: Env.int("REFINE", 2)]
   def levels, do: "LEVELS" |> Env.numbers([1, 2, 4, 8, 16, 32, 64]) |> Enum.map(&round/1)
 
@@ -19,13 +20,16 @@ defmodule Alambique.Load.Measures.Query do
   defp per_query, do: Env.int("QUERY_CELLS", 20)
 
   def setup(ctx) do
-    Measure.populate(ctx, "q", population())
+    :ok = Measure.populate(ctx, "q", population())
     :ok = Measure.call(ctx, :await_asleep, [120_000], 150_000)
     all = for i <- 1..population(), do: Measure.cell("q", i)
     :ok = Measure.call(ctx, :cross_query, [all], 600_000)
   end
 
-  def prepare(_ctx, level), do: Measure.offsets(level, Measure.step_s(), level)
+  def prepare(_ctx, level), do: {:ok, Measure.offsets(level, Measure.step_s(), level)}
+
+  # A repeat queries again; nothing to undo.
+  def rewind(_ctx, _level), do: :ok
 
   def run(ctx, _level, offsets) do
     p = population()

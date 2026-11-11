@@ -5,7 +5,9 @@ defmodule Alambique.Load.Driver do
   # the container whose CPU and memory it measures.
 
   alias Alambique.Load.{
+    Capacity,
     Cgroup,
+    Cooldown,
     Env,
     Host,
     Measure,
@@ -40,7 +42,8 @@ defmodule Alambique.Load.Driver do
     {:ok, _} =
       Sampler.start_link(%{
         service: Cgroup.path(Env.get("SERVICE_ID")),
-        store: Cgroup.path(Env.get("STORE_ID"))
+        store: Cgroup.path(Env.get("STORE_ID")),
+        store_dir: if(Env.get("STORE_ON", "tmpfs") == "disk", do: Env.get("STORE_PATH"))
       })
 
     limits = %{
@@ -50,9 +53,19 @@ defmodule Alambique.Load.Driver do
       max_store_swap_mb: Env.float("MAX_STORE_SWAP_MB", 0),
       max_host_swap_mb: Env.float("MAX_HOST_SWAP_MB", 512),
       max_error_ratio: Env.float("MAX_ERROR_RATIO", 0),
+      max_busy_ratio: Env.float("MAX_BUSY_RATIO", 0.01),
       latency: mod.latency(),
       mem_limit_mb: Env.int("MEM_LIMIT_MB", 512),
       mem_fraction: mod.mem_fraction(),
+      cooldown_mem_fraction: Env.float("COOLDOWN_MEM_FRACTION", 0.8),
+      cooldown_max_s: Env.int("COOLDOWN_MAX_S", 300),
+      cooldown_memory?: not mod.holds_memory?(),
+      store_mb: Env.int("STORE_MB", 4096),
+      store_full_fraction: Env.float("STORE_FULL_FRACTION", 0.95),
+      store_min_free_mb: Env.float("STORE_MIN_FREE_MB", 1024),
+      suspect_throttle_fraction: Env.float("SUSPECT_THROTTLE_FRACTION", 0.1),
+      fit_min_r2: Env.float("FIT_MIN_R2", 0.8),
+      fit_min_span: Env.float("FIT_MIN_SPAN", 2),
       min_available_gib: Env.float("MIN_AVAILABLE_GIB", 6),
       settle_s: Env.int("SETTLE_S", 30),
       wait_quiet_step_s: Env.int("WAIT_QUIET_STEP_S", 1800),
@@ -101,32 +114,68 @@ defmodule Alambique.Load.Driver do
     end
   end
 
-  # Every attempt starts when the host is quiet. A step the host disturbed runs
-  # again, up to `limits.attempts` times in all; the disturbed attempts stay on
-  # disk, marked "repeat". `waited` is the time spent waiting for the host so
-  # far in this step, this attempt included in the step it is written to.
-  defp step_with_repeats(ctx, mod, level, phase, seq, out, meta, attempt \\ 1, waited \\ 0.0) do
+  # Every attempt starts when the service has cooled down from the previous
+  # step and the host is quiet. A step the host disturbed, or that started on a
+  # service that did not cool down, runs again, up to `limits.attempts` times
+  # in all; the disturbed attempts that ran stay on disk, marked "repeat".
+  # `waits` is the time spent waiting so far in this step, this attempt
+  # included in the step it is written to.
+  defp step_with_repeats(
+         ctx,
+         mod,
+         level,
+         phase,
+         seq,
+         out,
+         meta,
+         attempt \\ 1,
+         waits \\ %{quiet: 0.0, cooldown: 0.0}
+       ) do
     name = Results.step_name(seq, phase, level)
     key = {level, phase, seq, attempt}
 
-    case Quiet.wait(quiet_opts(ctx.limits), quiet_io()) do
-      {:quiet, wait_s} ->
-        waited = waited + wait_s
+    case wait_to_start(ctx, waits) do
+      {:ready, waits} ->
         {step, verdict} = run_step(ctx, mod, level, phase, seq, attempt)
-        step = Map.put(step, :quiet_wait_s, waited)
-        finish(ctx, mod, {step, verdict}, key, waited, out, meta, name)
+        step = Map.merge(step, %{quiet_wait_s: waits.quiet, cooldown_s: waits.cooldown})
+        finish(ctx, mod, {step, verdict}, key, waits, out, meta, name)
 
-      {:busy, wait_s, load} ->
-        unrun_step(ctx, key, waited + wait_s, {:invalid, {:host_busy, load}})
+      {:no_cooldown, waits, mb} when attempt < ctx.limits.attempts ->
+        IO.puts("#{meta.measure} #{level}: repeated, no cooldown (#{round(mb)} MB)")
+        step_with_repeats(ctx, mod, level, phase, seq, out, meta, attempt + 1, waits)
+
+      {:no_cooldown, waits, mb} ->
+        unrun_step(ctx, key, waits, {:invalid, {:no_cooldown, mb}}, %{})
         |> write_step(out, name, meta, mod)
 
-      {:low_memory, wait_s} ->
-        unrun_step(ctx, key, waited + wait_s, {:invalid, :host_low_memory})
-        |> write_step(out, name, meta, mod)
+      {:stop, waits, verdict} ->
+        unrun_step(ctx, key, waits, verdict, %{}) |> write_step(out, name, meta, mod)
     end
   end
 
-  defp finish(ctx, mod, {step, verdict}, {level, phase, seq, attempt}, waited, out, meta, name) do
+  # Cooldown first, then the quiet window: the service idles through both.
+  defp wait_to_start(ctx, waits) do
+    case Cooldown.wait(cooldown_opts(ctx.limits), cooldown_io(ctx)) do
+      {:cooled, s} ->
+        waits = %{waits | cooldown: waits.cooldown + s}
+
+        case Quiet.wait(quiet_opts(ctx.limits), quiet_io()) do
+          {:quiet, s} -> {:ready, %{waits | quiet: waits.quiet + s}}
+          {:busy, s, load} -> {:stop, add_quiet(waits, s), {:invalid, {:host_busy, load}}}
+          {:low_memory, s} -> {:stop, add_quiet(waits, s), {:invalid, :host_low_memory}}
+        end
+
+      {:no_cooldown, s, mb} ->
+        {:no_cooldown, %{waits | cooldown: waits.cooldown + s}, mb}
+
+      {:service_down, s} ->
+        {:stop, %{waits | cooldown: waits.cooldown + s}, {:invalid, :service_down}}
+    end
+  end
+
+  defp add_quiet(waits, s), do: %{waits | quiet: waits.quiet + s}
+
+  defp finish(ctx, mod, {step, verdict}, {level, phase, seq, attempt}, waits, out, meta, name) do
     case verdict do
       {:repeat, reason} when attempt < ctx.limits.attempts ->
         Results.write!(
@@ -135,7 +184,9 @@ defmodule Alambique.Load.Driver do
         )
 
         IO.puts("#{meta.measure} #{level}: repeated, #{inspect(reason)}")
-        step_with_repeats(ctx, mod, level, phase, seq, out, meta, attempt + 1, waited)
+        # What the disturbed attempt left is undone, so the repeat redoes all of it.
+        mod.rewind(ctx, level)
+        step_with_repeats(ctx, mod, level, phase, seq, out, meta, attempt + 1, waits)
 
       {:repeat, reason} ->
         step = %{step | verdict: "invalid", reason: inspect(reason)}
@@ -149,6 +200,13 @@ defmodule Alambique.Load.Driver do
   defp write_step({step, verdict}, out, name, meta, mod) do
     Results.write!(Path.join(out, name), step)
     IO.puts("#{meta.measure} #{step.level} #{mod.unit()}: #{step.verdict} #{step.reason}")
+
+    if verdict == {:invalid, :store_full},
+      do:
+        IO.puts(
+          "the store is out of space: stopping. Run the case again with ALAMBIQUE_LOAD_STORE_ON=disk (a store on disk needs at least #{round(meta.limits.store_min_free_mb)} MB free)"
+        )
+
     {step, verdict}
   end
 
@@ -170,8 +228,42 @@ defmodule Alambique.Load.Driver do
     }
   end
 
-  # The step of an attempt that never ran because the host was not quiet.
-  defp unrun_step(ctx, {level, phase, seq, attempt}, waited, verdict) do
+  defp cooldown_opts(limits) do
+    %{
+      max_mem_mb:
+        if(limits.cooldown_memory?, do: limits.mem_limit_mb * limits.cooldown_mem_fraction),
+      max_wait_s: limits.cooldown_max_s
+    }
+  end
+
+  # The service's process memory and the operations still running on it; nil
+  # when the container or the node is gone.
+  defp cooldown_io(ctx) do
+    read = fn ->
+      with {:ok, cgroup} <- Cgroup.read(Cgroup.path(Env.get("SERVICE_ID"))) do
+        %{process_mb: cgroup.process_mb, outstanding: Measure.call(ctx, :outstanding)}
+      else
+        :error -> nil
+      end
+    end
+
+    %{
+      read: fn ->
+        try do
+          read.()
+        catch
+          :error, {:erpc, _} -> nil
+        end
+      end,
+      now: fn -> System.system_time(:millisecond) end,
+      sleep: &Process.sleep/1,
+      log: &IO.puts/1
+    }
+  end
+
+  # The step of an attempt that never ran: the host or the service did not
+  # allow it, or its preparation failed. `extra` says why in detail.
+  defp unrun_step(ctx, {level, phase, seq, attempt}, waits, verdict, extra) do
     step = %{
       schema: 1,
       scenario: Env.get("SCENARIO"),
@@ -185,15 +277,28 @@ defmodule Alambique.Load.Driver do
       attempt: attempt,
       started_at: iso_now(),
       duration_s: 0.0,
-      quiet_wait_s: waited,
-      delivery: %{planned: 0, issued: 0, dropped: 0, completed: 0, ok: 0, errors: 0, ratio: nil},
+      quiet_wait_s: waits.quiet,
+      cooldown_s: waits.cooldown,
+      suspect: false,
+      delivery: %{
+        planned: 0,
+        issued: 0,
+        dropped: 0,
+        completed: 0,
+        ok: 0,
+        busy: 0,
+        errors: 0,
+        ratio: nil,
+        busy_ratio: nil
+      },
       latency_ms: %{},
       host: nil,
       swap: nil,
       cgroup: nil,
+      store: nil,
       service: nil,
       cost: nil,
-      extra: %{},
+      extra: extra,
       verdict: verdict_name(verdict),
       reason: reason(verdict)
     }
@@ -201,8 +306,41 @@ defmodule Alambique.Load.Driver do
     {step, verdict}
   end
 
+  # A level that cannot be prepared (or a store with no room left) is an
+  # invalid step with its reason, not a crash: the summary is always written.
   defp run_step(ctx, mod, level, phase, seq, attempt) do
-    prep = mod.prepare(ctx, level)
+    with :ok <- check_store(ctx.limits),
+         {:ok, prep} <- prepare(ctx, mod, level) do
+      measure_step(ctx, mod, prep, level, phase, seq, attempt)
+    else
+      {:invalid, reason, extra} ->
+        unrun_step(
+          ctx,
+          {level, phase, seq, attempt},
+          %{quiet: 0.0, cooldown: 0.0},
+          {:invalid, reason},
+          extra
+        )
+    end
+  end
+
+  defp check_store(limits) do
+    reading = Sampler.store()
+
+    if reading && Capacity.store_full?(reading, limits),
+      do: {:invalid, :store_full, %{store: reading}},
+      else: :ok
+  end
+
+  defp prepare(ctx, mod, level) do
+    mod.prepare(ctx, level)
+  rescue
+    error -> {:invalid, :prepare_failed, %{prepare_error: Exception.message(error)}}
+  catch
+    kind, reason -> {:invalid, :prepare_failed, %{prepare_error: inspect({kind, reason})}}
+  end
+
+  defp measure_step(ctx, mod, prep, level, phase, seq, attempt) do
     if mod.probe?(), do: Measure.call(ctx, :probe_begin)
     {:ok, cg0} = Cgroup.read(Cgroup.path(Env.get("SERVICE_ID")))
     snap0 = Measure.call(ctx, :snapshot)
@@ -219,6 +357,8 @@ defmodule Alambique.Load.Driver do
 
     step = build(ctx, result, samples, {cg0, cg1}, {snap0, snap1}, probe)
 
+    duration_s = (ended - started) / 1000
+
     step =
       Map.merge(step, %{
         seq: seq,
@@ -226,10 +366,17 @@ defmodule Alambique.Load.Driver do
         level: level,
         attempt: attempt,
         started_at: started_at,
-        duration_s: (ended - started) / 1000
+        duration_s: duration_s,
+        suspect:
+          step.cgroup != nil and
+            Verdict.suspect?(
+              step.cgroup.throttled_ms,
+              duration_s,
+              ctx.limits.suspect_throttle_fraction
+            )
       })
 
-    verdict = decide(ctx, result, step)
+    verdict = decide(ctx, result, step, cg1 == nil)
     {Map.merge(step, %{verdict: verdict_name(verdict), reason: reason(verdict)}), verdict}
   end
 
@@ -240,30 +387,24 @@ defmodule Alambique.Load.Driver do
     end
   end
 
-  defp decide(ctx, result, step) do
-    cond do
-      result.aborted in [:host_low_memory, :service_down] ->
-        {:invalid, result.aborted}
-
-      step.cgroup == nil ->
-        {:invalid, :service_down}
-
-      true ->
-        Verdict.judge(
-          %{
-            planned: result.planned,
-            completed: result.completed,
-            errors: result.errors,
-            store_full: Verdict.store_full?(Map.get(result, :error_samples, [])),
-            latency_ms: step.latency_ms,
-            net_load_max: step.host.net_load_max,
-            swap: swap_verdict_stats(step.swap),
-            mem_mb_max: step.cgroup.mem_process_mb.max,
-            aborted: result.aborted
-          },
-          ctx.limits
-        )
-    end
+  defp decide(ctx, result, step, service_gone?) do
+    Verdict.decide(
+      %{
+        planned: result.planned,
+        completed: result.completed,
+        ok: result.ok,
+        errors: result.errors,
+        busy: result.busy,
+        store_full: Verdict.store_full?(Map.get(result, :error_samples, [])),
+        latency_ms: step.latency_ms,
+        net_load_max: step.host.net_load_max,
+        swap: swap_verdict_stats(step.swap),
+        mem_mb_max: step.cgroup && step.cgroup.mem_process_mb.max,
+        aborted: result.aborted,
+        service_gone?: service_gone?
+      },
+      ctx.limits
+    )
   end
 
   defp swap_verdict_stats(swap) do
@@ -294,15 +435,18 @@ defmodule Alambique.Load.Driver do
         dropped: result.dropped,
         completed: result.completed,
         ok: result.ok,
+        busy: result.busy,
         errors: result.errors,
         error_samples: result.error_samples,
         ratio: Verdict.delivery_ratio(result),
+        busy_ratio: if(result.completed > 0, do: result.busy / result.completed),
         aborted: result.aborted
       },
       latency_ms: latency,
       host: host_stats(samples.host),
       swap: swap,
       cgroup: cgroup,
+      store: store_stats(samples.store),
       service: service_stats(snap0, snap1, probe),
       cost: cost(cgroup, snap0, snap1, ops),
       extra: Map.get(result, :extra, %{})
@@ -354,6 +498,7 @@ defmodule Alambique.Load.Driver do
     %{
       cpu_seconds: cpu_s,
       cpu_cores_mean: cpu_s / span_s,
+      throttled_usec: cg1.throttled_usec - cg0.throttled_usec,
       throttled_ms: (cg1.throttled_usec - cg0.throttled_usec) / 1000,
       throttled_periods: cg1.throttled_periods - cg0.throttled_periods,
       mem_process_mb: %{
@@ -365,6 +510,21 @@ defmodule Alambique.Load.Driver do
       anon_mb_max: samples |> Enum.map(& &1.anon_mb) |> Enum.max(),
       file_mb_max: samples |> Enum.map(& &1.file_mb) |> Enum.max(),
       samples: length(samples)
+    }
+  end
+
+  # The store's space: used MiB at the end of the step and at most, and for a
+  # store on disk the free MiB at least.
+  defp store_stats([]), do: nil
+
+  defp store_stats(samples) do
+    last = List.last(samples)
+
+    %{
+      kind: last.kind,
+      used_mb_end: last.used_mb,
+      used_mb_max: samples |> Enum.map(& &1.used_mb) |> Enum.max(),
+      free_mb_min: if(last.kind == :disk, do: samples |> Enum.map(& &1.free_mb) |> Enum.min())
     }
   end
 
@@ -405,6 +565,7 @@ defmodule Alambique.Load.Driver do
     fn ->
       host = Sampler.host()
       cgroup = Sampler.cgroup()
+      store = Sampler.store()
 
       cond do
         host && Host.low_memory?(host.mem_available_gib, limits.min_available_gib) ->
@@ -412,6 +573,9 @@ defmodule Alambique.Load.Driver do
 
         cgroup == :error ->
           :service_down
+
+        store && Capacity.store_full?(store, limits) ->
+          :store_full
 
         match?({:ok, _}, cgroup) and
             elem(cgroup, 1).process_mb >= limits.mem_limit_mb * limits.mem_fraction ->

@@ -54,7 +54,8 @@ defmodule Alambique.Load.Service.Ops do
 
   @doc """
   Writes `rows` rows of `row_bytes` bytes to each of `cells` in one transaction
-  and puts the cell to sleep. Returns the cells that failed.
+  and puts the cell to sleep. Returns the cells that failed, each with its
+  error as text.
   """
   def populate(cells, rows, row_bytes, concurrency) do
     pool = List.to_tuple(for i <- 1..@pool, do: Alambique.BenchText.body(i, row_bytes))
@@ -81,7 +82,29 @@ defmodule Alambique.Load.Service.Ops do
     )
     |> Enum.zip(cells)
     |> Enum.reject(fn {{:ok, result}, _cell} -> result == :ok end)
-    |> Enum.map(fn {_, cell} -> cell end)
+    |> Enum.map(fn {{:ok, result}, cell} -> {cell, inspect(result, limit: 10)} end)
+  end
+
+  @doc "Puts `cells` to sleep (an asleep cell answers `:ok`); returns how many failed."
+  def sleep_cells(cells, concurrency) do
+    cells
+    |> Task.async_stream(&Alambique.hibernate(@instance, &1),
+      max_concurrency: concurrency,
+      timeout: :infinity
+    )
+    |> Enum.count(fn {:ok, result} -> result != :ok end)
+  end
+
+  @doc """
+  Operations of the driver still running on this node: processes `:erpc` started
+  for a call, not counting this one.
+  """
+  def outstanding do
+    me = self()
+
+    Enum.count(Process.list(), fn pid ->
+      pid != me and Process.info(pid, :initial_call) == {:initial_call, {:erpc, :execute_call, 4}}
+    end)
   end
 
   @doc "Removes the local files of `cells`, so that the next wake restores them from the store."

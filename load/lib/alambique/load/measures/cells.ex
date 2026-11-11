@@ -14,6 +14,8 @@ defmodule Alambique.Load.Measures.Cells do
   def latency, do: nil
   def mem_fraction, do: Env.float("CELLS_MEM_FRACTION", 0.9)
   def probe?, do: false
+  # The awake cells are the state of the ramp: memory stays high by design.
+  def holds_memory?, do: true
   def ramp_opts, do: [refine: 0, confirm: false]
 
   def levels,
@@ -27,11 +29,26 @@ defmodule Alambique.Load.Measures.Cells do
   def prepare(_ctx, level) do
     rate = Env.int("CELLS_FILL_RATE", 100)
     added = max(level - Alambique.Load.State.get(:awake, 0), 0)
-    for i <- 0..(added - 1)//1, do: div(i * 1_000_000, rate)
+    {:ok, for(i <- 0..(added - 1)//1, do: div(i * 1_000_000, rate))}
+  end
+
+  @doc """
+  The cells a disturbed attempt woke, `a-(before + 1)` to `a-now`: put to sleep
+  before a repeat, so that the repeat wakes (and measures) them again.
+  """
+  def added_cells(before, now), do: for(i <- (before + 1)..now//1, do: Measure.cell("a", i))
+
+  # Called after a step that ran and is to be repeated.
+  def rewind(ctx, _level) do
+    before = Alambique.Load.State.get(:awake_before, 0)
+    now = Alambique.Load.State.get(:awake, 0)
+    _failed = Measure.call(ctx, :sleep_cells, [added_cells(before, now), 64], 600_000)
+    Alambique.Load.State.put(:awake, before)
   end
 
   def run(ctx, level, offsets) do
     have = Alambique.Load.State.get(:awake, 0)
+    Alambique.Load.State.put(:awake_before, have)
 
     result =
       Measure.open_loop(

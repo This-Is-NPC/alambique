@@ -9,7 +9,9 @@ defmodule Alambique.Load.OpenLoop do
 
   @doc """
   Runs `op.(index)` for each offset of `offsets` (microseconds from now).
-  `op` returns `:ok` or `{:error, reason}`; a raise or exit is an error.
+  `op` returns `:ok` or `{:error, reason}`; a raise or exit is an error. The
+  result counts `{:error, :busy}` refusals apart (`busy`) from the other
+  `errors`.
 
   Options: `:max_outstanding` (default 5 000), `:drain_ms` (wait for the
   stragglers after the last one is due, default 20 000), `:abort` (a function
@@ -95,7 +97,9 @@ defmodule Alambique.Load.OpenLoop do
   defp summarize(ctx, planned, issued, aborted) do
     rows = :ets.tab2list(ctx.results)
     ok = for {us, :ok} <- rows, do: us
-    errors = for {_us, {:error, reason}} <- rows, do: inspect(reason, limit: 10)
+    failed = for {_us, {:error, reason}} <- rows, do: reason
+    {busy, other} = Enum.split_with(failed, &busy?/1)
+    errors = Enum.map(other, &inspect(&1, limit: 10))
 
     %{
       planned: planned,
@@ -103,6 +107,7 @@ defmodule Alambique.Load.OpenLoop do
       dropped: :counters.get(ctx.counters, 2),
       completed: length(rows),
       ok: length(ok),
+      busy: length(busy),
       errors: length(errors),
       error_samples:
         errors
@@ -114,6 +119,12 @@ defmodule Alambique.Load.OpenLoop do
       aborted: aborted
     }
   end
+
+  # The library's refusal when its statement slots are taken (a read), alone or
+  # for one cell of a cross-cell query.
+  defp busy?(:busy), do: true
+  defp busy?({_cell, :busy}), do: true
+  defp busy?(_), do: false
 
   defp now, do: System.monotonic_time(:microsecond)
 end
