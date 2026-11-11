@@ -308,4 +308,33 @@ defmodule Alambique.LeaseFaultsTest do
       assert_received {:event, [:alambique, :lease, :renew], _, %{result: :lost}}
     end
   end
+
+  describe "a store that never answers" do
+    # The lease can be used for `ttl - skew margin`: 800 ms here.
+    setup %{store: store, world: world} do
+      ctx =
+        node_ctx({MemoryStore, store}, world, unique_prefix("hung"),
+          ttl_ms: 1_000,
+          skew_margin_ms: 200
+        )
+
+      {:ok, hung: ctx}
+    end
+
+    defp within(limit_ms, fun) do
+      started = System.monotonic_time(:millisecond)
+      result = fun.()
+      assert System.monotonic_time(:millisecond) - started < limit_ms
+      result
+    end
+
+    test "acquire, read and renew end at the bound of the lease", %{store: store, hung: ctx} do
+      {:ok, lease} = Lease.acquire(ctx, "c", "a")
+      MemoryStore.inject(store, kind: :latency, ms: 60_000, ops: [:put, :get])
+
+      assert {:error, :timeout} = within(1_300, fn -> Lease.read(ctx, "c") end)
+      assert {:error, _} = within(1_300, fn -> Lease.acquire(ctx, "c", "b") end)
+      assert {:error, _} = within(2_500, fn -> Lease.renew(ctx, lease) end)
+    end
+  end
 end

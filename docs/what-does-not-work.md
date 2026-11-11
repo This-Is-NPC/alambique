@@ -21,25 +21,6 @@ refreshing it, and keep the cache on a filesystem with fast copies.
 
 **Evidence.** `Alambique.Query.Replica` (`apply_chain`); design §14.
 
-## Some store calls have no hard deadline
-
-**What happens.** Store calls made through the retry loop (restore, segment
-upload and fetch, listings, the replica refresh, the freeze and replica
-switches, quarantine, schema and the change feed's sender) run each attempt
-under the operation deadline and are killed at it. Single requests outside that
-loop are not: the lease `GET` and `PUT` (acquire, renew, the checked read, the
-routing read), and the change feed's listing and deletes. A custom store that
-never answers one of those holds its caller until the store call returns; in a
-cell the lease then runs out and the cell stops, as for a store that answers
-with an error. `Alambique.Store.S3` ends every request after `:receive_timeout`
-(8 000 ms by default).
-
-**Workaround.** Give a custom store its own client timeout, below
-`op_timeout_ms`.
-
-**Evidence.** `lib/alambique/lease.ex`, `lib/alambique/replication/retry.ex`;
-design §3.
-
 ## Data directories are not checked
 
 **What happens.** Two requirements of the instance are not enforced:

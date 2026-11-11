@@ -34,6 +34,7 @@ defmodule Alambique.Feed do
 
   alias Alambique.{Location, Placement, Store, Telemetry}
   alias Alambique.Feed.{Keys, Record, Rejected, Rewind}
+  alias Alambique.Replication.Retry
 
   @typedoc "An opaque string that marks how far every shard of every location was read."
   @type position :: String.t() | nil
@@ -45,13 +46,16 @@ defmodule Alambique.Feed do
     * `:settle_ms` - objects younger than this are not read yet
     * `:max_object_bytes` - the most a compressed object may inflate to; a
       larger one is rejected
+    * `:timeout_ms` - the longest one store request of the consumer may take; it
+      is killed after that and answers `{:error, :timeout}`
   """
   @type ctx :: %{
           locations: [Location.t()],
           shards: pos_integer,
           clock: {module, term},
           settle_ms: non_neg_integer,
-          max_object_bytes: pos_integer
+          max_object_bytes: pos_integer,
+          timeout_ms: pos_integer
         }
 
   @doc """
@@ -66,7 +70,7 @@ defmodule Alambique.Feed do
 
   With a keyword list it takes the keys of `t:ctx/0` (`:clock` defaults to the
   system clock, `:shards` to the default of the instances, `:settle_ms` to
-  30 000 and `:max_object_bytes` to 268 435 456), for a consumer outside the instance. `:locations` may be one
+  30 000, `:max_object_bytes` to 268 435 456 and `:timeout_ms` to 10 000), for a consumer outside the instance. `:locations` may be one
   location or a list; `store: {module, config}, prefix: "..."` stands for the
   single location of `Alambique.Placement.Single`.
   """
@@ -93,17 +97,18 @@ defmodule Alambique.Feed do
         clock: {Alambique.Clock.System, nil},
         shards: Keys.default_shards(),
         settle_ms: 30_000,
-        max_object_bytes: Record.default_max_bytes()
+        max_object_bytes: Record.default_max_bytes(),
+        timeout_ms: 10_000
       }
-      |> Map.merge(Map.take(opts, [:clock, :shards, :settle_ms, :max_object_bytes]))
+      |> Map.merge(Map.take(opts, [:clock, :shards, :settle_ms, :max_object_bytes, :timeout_ms]))
       |> Map.put(:locations, Enum.map(locations, &guarded/1))
 
     valid? =
       locations != [] and Enum.all?(locations, &Location.valid?/1) and
         match?(
-          %{clock: {c, _}, shards: n, settle_ms: s, max_object_bytes: m}
+          %{clock: {c, _}, shards: n, settle_ms: s, max_object_bytes: m, timeout_ms: t}
           when is_atom(c) and is_integer(n) and n > 0 and is_integer(s) and s >= 0 and
-                 is_integer(m) and m > 0,
+                 is_integer(m) and m > 0 and is_integer(t) and t > 0,
           ctx
         )
 
@@ -128,7 +133,8 @@ defmodule Alambique.Feed do
           shards: config.feed.shards,
           clock: config.clock,
           settle_ms: config.feed.window_ms + config.op_timeout_ms + 2 * config.skew_margin_ms,
-          max_object_bytes: config.feed.max_object_bytes
+          max_object_bytes: config.feed.max_object_bytes,
+          timeout_ms: config.op_timeout_ms
         )
 
       {:error, reason} ->
@@ -216,7 +222,7 @@ defmodule Alambique.Feed do
          {:ok, pages} <- list_pages(ctx, positions, limit, cutoff) do
       pages
       |> merge(limit)
-      |> load(positions, ctx.max_object_bytes, [])
+      |> load(positions, ctx, [])
     end
   end
 
@@ -225,7 +231,7 @@ defmodule Alambique.Feed do
   # lists after its last one may come after objects the list still holds.
   defp list_pages(ctx, positions, limit, cutoff) do
     lists(ctx)
-    |> Task.async_stream(&list_page(&1, positions, limit, cutoff),
+    |> Task.async_stream(&list_page(&1, positions, limit, cutoff, ctx.timeout_ms),
       max_concurrency: 16,
       timeout: :infinity,
       ordered: true
@@ -241,11 +247,12 @@ defmodule Alambique.Feed do
     end)
   end
 
-  defp list_page({id, location, shard}, positions, limit, cutoff) do
+  defp list_page({id, location, shard}, positions, limit, cutoff, timeout) do
     {store, config} = location.store
     prefix = Keys.prefix(location.prefix, shard)
 
-    with {:ok, keys, _next} <- store.list(config, prefix, positions[id], limit) do
+    with {:ok, keys, _next} <-
+           Retry.once(timeout, fn -> store.list(config, prefix, positions[id], limit) end) do
       parsed =
         keys
         |> Enum.map(&{&1, Keys.parse(location.prefix, shard, &1)})
@@ -294,7 +301,7 @@ defmodule Alambique.Feed do
 
     result =
       Enum.reduce_while(lists(ctx), {:ok, 0}, fn {_id, location, shard}, {:ok, total} ->
-        case prune_page(location, shard, before, nil, 0) do
+        case prune_page(location, shard, before, nil, 0, ctx.timeout_ms) do
           {:ok, count} -> {:cont, {:ok, total + count}}
           {:error, _} = error -> {:halt, error}
         end
@@ -311,47 +318,49 @@ defmodule Alambique.Feed do
     result
   end
 
-  defp prune_page(location, shard, before, start, deleted) do
+  defp prune_page(location, shard, before, start, deleted, timeout) do
     {store, config} = location.store
 
     with {:ok, keys, next} <-
-           store.list(config, Keys.prefix(location.prefix, shard), start, 1000) do
+           Retry.once(timeout, fn ->
+             store.list(config, Keys.prefix(location.prefix, shard), start, 1000)
+           end) do
       expired =
         keys
         |> Enum.map(&{&1, Keys.parse(location.prefix, shard, &1)})
         |> Enum.take_while(fn {_key, parsed} -> parsed == nil or parsed.time < before end)
 
-      with {:ok, count} <- delete_all(store, config, expired, 0) do
+      with {:ok, count} <- delete_all(store, config, expired, 0, timeout) do
         if length(expired) == length(keys) and next != nil,
-          do: prune_page(location, shard, before, next, deleted + count),
+          do: prune_page(location, shard, before, next, deleted + count, timeout),
           else: {:ok, deleted + count}
       end
     end
   end
 
-  defp delete_all(_store, _config, [], count), do: {:ok, count}
+  defp delete_all(_store, _config, [], count, _timeout), do: {:ok, count}
 
-  defp delete_all(store, config, [{key, _} | rest], count) do
-    case store.delete(config, key) do
-      :ok -> delete_all(store, config, rest, count + 1)
+  defp delete_all(store, config, [{key, _} | rest], count, timeout) do
+    case Retry.once(timeout, fn -> store.delete(config, key) end) do
+      :ok -> delete_all(store, config, rest, count + 1, timeout)
       {:error, _} = error -> error
     end
   end
 
   # `positions` is the map of what is consumed so far.
-  defp load([], positions, _max, acc), do: done(acc, positions)
+  defp load([], positions, _ctx, acc), do: done(acc, positions)
 
-  defp load([item | rest], positions, max, acc) do
-    case item.store.get(item.config, item.key) do
+  defp load([item | rest], positions, ctx, acc) do
+    case Retry.once(ctx.timeout_ms, fn -> item.store.get(item.config, item.key) end) do
       {:ok, body, _etag, _meta} ->
-        records = Record.decode(item.key, body, item.parsed.time, max)
+        records = Record.decode(item.key, body, item.parsed.time, ctx.max_object_bytes)
         reject_event(records)
         positions = Map.put(positions, item.list, item.key)
-        load(rest, positions, max, [{encode(positions), records} | acc])
+        load(rest, positions, ctx, [{encode(positions), records} | acc])
 
       # Removed by retention between the listing and the read.
       {:error, :not_found} ->
-        load(rest, Map.put(positions, item.list, item.key), max, acc)
+        load(rest, Map.put(positions, item.list, item.key), ctx, acc)
 
       {:error, reason} ->
         if acc == [], do: {:error, reason}, else: done(acc, positions_of(acc))

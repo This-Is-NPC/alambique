@@ -25,6 +25,16 @@ defmodule Alambique.FeedTest do
   defp feed_ctx(%{store: store}, opts \\ []),
     do: Feed.ctx(Keyword.merge([store: store, prefix: "cells-test", settle_ms: 0], opts))
 
+  test "a store that never answers ends a read and a prune at timeout_ms", ctx do
+    MemoryStore.inject(ctx.store_config, kind: :latency, ms: 60_000, ops: [:list, :get, :delete])
+    feed = feed_ctx(ctx, timeout_ms: 200)
+    started = System.monotonic_time(:millisecond)
+
+    assert {:error, :timeout} = Feed.read(feed, nil, 10)
+    assert {:error, :timeout} = Feed.prune(feed, 1_000)
+    assert System.monotonic_time(:millisecond) - started < 1_500
+  end
+
   # Publication follows the answer to the caller, so tests wait for it.
   defp records(ctx, count, cell \\ nil) do
     eventually(fn ->

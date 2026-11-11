@@ -4,30 +4,51 @@ defmodule Alambique.Replication.Retry do
   # runs in its own process, killed at the deadline, so a store call that never
   # returns ends the operation in time (design §3).
 
-  # An attempt that starts at or past the deadline still gets this long.
-  @late_ms 50
-
   @doc "Monotonic deadline `ms` from now."
   def deadline_in(ms), do: System.monotonic_time(:millisecond) + ms
 
   @doc """
   Calls `fun` until it returns something other than `{:retry, reason}`. A
-  retry that would sleep past `deadline` ends with `{:error, reason}`, and an
-  attempt still running at `deadline` is killed and ends with
-  `{:error, :timeout}`. An attempt that raises, throws or exits does so in
-  the caller.
+  retry that would sleep past `deadline` ends with `{:error, reason}`. An
+  attempt still running at `deadline` is killed and ends with the reason of
+  the last failure, or `{:error, :timeout}` if there was none. An attempt that
+  starts at or past the deadline (`deadline_in(0)` asks for exactly one) gets
+  `ctx.backoff_ms`, the first backoff, before it is killed. An attempt that
+  raises, throws or exits does so in the caller.
   """
   @spec run(map, integer, (-> term)) :: term
-  def run(ctx, deadline, fun), do: loop(ctx.backoff_ms, ctx.max_backoff_ms, deadline, fun)
+  def run(ctx, deadline, fun),
+    do: loop(ctx.backoff_ms, ctx.max_backoff_ms, deadline, fun, ctx.backoff_ms)
 
-  defp loop(delay, max, deadline, fun) do
-    case attempt(deadline, fun) do
+  @doc """
+  One attempt of `fun`, killed after `timeout_ms` with `{:error, :timeout}`:
+  for a request that must not be repeated by the caller's loop, such as the
+  lease requests.
+  """
+  @spec once(pos_integer, (-> term)) :: term
+  def once(timeout_ms, fun) do
+    case attempt(timeout_ms, fun) do
+      :killed -> {:error, :timeout}
+      result -> result
+    end
+  end
+
+  defp loop(delay, max, deadline, fun, grace, last \\ :timeout) do
+    # An attempt that starts at or past the deadline (`deadline_in(0)` asks for
+    # exactly one) still gets `grace` ms, the first backoff.
+    remaining = max(deadline - System.monotonic_time(:millisecond), grace)
+
+    case attempt(remaining, fun) do
+      # Killed at the deadline: the reason of the last failure says more.
+      :killed ->
+        {:error, last}
+
       {:retry, reason} ->
         if System.monotonic_time(:millisecond) + delay >= deadline do
           {:error, reason}
         else
           Process.sleep(delay)
-          loop(min(delay * 2, max), max, deadline, fun)
+          loop(min(delay * 2, max), max, deadline, fun, grace, reason)
         end
 
       other ->
@@ -38,7 +59,7 @@ defmodule Alambique.Replication.Retry do
   # The worker is linked, so it dies with the caller; the link is dropped
   # before the caller reads the result, so a caller that traps exits sees no
   # `:EXIT`.
-  defp attempt(deadline, fun) do
+  defp attempt(timeout, fun) do
     ref = make_ref()
     parent = self()
 
@@ -49,8 +70,6 @@ defmodule Alambique.Replication.Retry do
         end,
         [:link, :monitor]
       )
-
-    timeout = max(deadline - System.monotonic_time(:millisecond), @late_ms)
 
     receive do
       {^ref, result} ->
@@ -68,7 +87,7 @@ defmodule Alambique.Replication.Retry do
         receive do
           {^ref, result} -> unwrap(result)
         after
-          0 -> {:error, :timeout}
+          0 -> :killed
         end
     end
   end

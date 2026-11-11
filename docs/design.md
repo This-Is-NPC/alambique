@@ -251,20 +251,26 @@ the panic tests abort the VM when `guard` does not catch.
   the same for its HTTP client with `{:error, {:request_crashed, kind, reason}}`,
   for example when the connection pool of Finch is exhausted; the pool settings
   go in its `:req_options` (`finch: [pool_timeout: ...]`).
-- **Hard deadline.** Calls made through `Replication.Retry.run/3` (everything
-  except the single lease requests, see
-  [what-does-not-work.md](what-does-not-work.md)) run each attempt in its own
-  process, linked to the caller and killed when the operation deadline
-  (`op_timeout_ms`, or less) passes; the call then returns `{:error, :timeout}`
-  (an attempt that starts at or past the deadline still gets 50 ms). The
-  deadline therefore binds a store that never returns, and not only the waits
-  between attempts. An attempt that raises, throws or exits does so in the
-  caller. Cost, measured with a function that returns at once: 2.6 us per
-  call against 0.07 us without the process, which is small next to a request.
-  A killed `put` may have been applied, as for any failed `put`.
-  `Alambique.Store.S3` ends a request after `:receive_timeout`, 8 000 ms by
-  default, below the default `op_timeout_ms` (10 000), so the client gives up
-  before the library does; raise the two together.
+- **Hard deadline.** Every store request of the library runs in its own
+  process, linked to the caller and killed when its time passes, and then
+  answers `{:error, :timeout}`; a store that never returns cannot hold a
+  caller. Calls through `Replication.Retry.run/3` are bounded by the operation
+  deadline (`op_timeout_ms`, or less); an attempt that starts at or past it
+  (`deadline_in(0)` asks for exactly one) gets `ctx.backoff_ms`, 50 ms by
+  default, before it is killed.
+  The lease `GET` and `PUT` (`Retry.once/2`, one attempt, no loop) are bounded
+  by `lease_ttl_ms - skew_margin_ms`, the time the lease can be used: a
+  request that outlives it cannot help, and the answer is the store error that
+  every caller already handles (a renewal reads the lease back,
+  `reconcile_renew/3`; a cell whose lease runs out stops). The change feed's
+  listings, reads and deletes are bounded by the `:timeout_ms` of `Feed.ctx/1`
+  (`op_timeout_ms` for an instance, 10 000 otherwise). An attempt that raises,
+  throws or exits does so in the caller. Cost, measured with a function that
+  returns at once: 2.6 us per call against 0.07 us without the process, which
+  is small next to a request. A killed `put` may have been applied, as for any
+  failed `put`. `Alambique.Store.S3` ends a request after `:receive_timeout`,
+  8 000 ms by default, below the default `op_timeout_ms` (10 000), so the
+  client gives up before the library does; raise the two together.
 - `Alambique.Store.S3` implements it with Req and AWS SigV4, with a
   path-style option. SeaweedFS is the only store it is tested on
   ([storage-compatibility.md](storage-compatibility.md)). It does not follow
@@ -707,9 +713,10 @@ recreate it. Only retention deletes level-0 files (compaction keeps them,
 minutes), and `deletion_grace_ms` after it was marked (default one day; 0
 deletes at once, §9.1). So with the defaults a put must stay in flight for
 more than a day to find its key gone, against `op_timeout_ms` (10 s) for the
-call and the `receive_timeout` of the S3 store (15 s) for a request. Nothing
-enforces that bound yet: a store call has no hard deadline, and the cell does
-not wait for or cancel a request it sent. If it happens, the resurrected
+call and the `receive_timeout` of the S3 store (8 s) for a request. Every
+store call is killed at its deadline (§3), so a call a cell gave up on does not
+outlive it, though a killed `put` may still have been applied. The cell does
+not wait for or cancel a request after that. If it happens, the resurrected
 object does not change what a restore returns. It has an old epoch and a TXID
 at or below the anchor; restore starts at a snapshot at or above the anchor
 and walks only files after it, and the compaction plans only blocks after the

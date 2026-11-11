@@ -23,6 +23,7 @@ defmodule Alambique.Lease do
   """
 
   alias Alambique.{Fault, Telemetry}
+  alias Alambique.Replication.Retry
 
   @enforce_keys [:cell, :epoch, :owner, :token, :seq, :expires_at_ms]
   defstruct [
@@ -527,11 +528,20 @@ defmodule Alambique.Lease do
 
   defp key(ctx, cell), do: "#{ctx.prefix}/cells/#{cell}/lease"
 
-  defp put(%{store: {store, config}} = ctx, lease, condition),
-    do: store.put(config, key(ctx, lease.cell), encode(lease), condition, %{})
+  # A request that outlives the lease cannot help: it is killed after the
+  # time the lease can be used (`ttl - skew margin`) and
+  # answers `{:error, :timeout}`, which every caller already handles as a store
+  # error (a `put` may or may not have landed: `reconcile_renew/3` reads it back).
+  defp bound(ctx), do: ctx.ttl_ms - ctx.skew_margin_ms
+
+  defp put(%{store: {store, config}} = ctx, lease, condition) do
+    Retry.once(bound(ctx), fn ->
+      store.put(config, key(ctx, lease.cell), encode(lease), condition, %{})
+    end)
+  end
 
   defp fetch(%{store: {store, config}} = ctx, cell) do
-    case store.get(config, key(ctx, cell)) do
+    case Retry.once(bound(ctx), fn -> store.get(config, key(ctx, cell)) end) do
       {:ok, body, etag, _meta} -> decode(body, etag)
       {:error, reason} -> {:error, reason}
     end
