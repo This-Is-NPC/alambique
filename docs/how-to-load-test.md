@@ -155,7 +155,9 @@ All are environment variables; set them before `mise run load`.
 | `ALAMBIQUE_LOAD_START_LOAD` | 8 | load average at most, to start a case |
 | `ALAMBIQUE_LOAD_WAIT_QUIET_S` | 600 | how long a case waits to start (a step waits by `_WAIT_QUIET_STEP_S`) |
 | `ALAMBIQUE_LOAD_STORE_LATENCY_MS` | 25 | added to every store request |
-| `ALAMBIQUE_LOAD_DATA_MB` / `_STORE_MB` | 1024 / 4096 | tmpfs of the service data and of the store |
+| `ALAMBIQUE_LOAD_DATA_MB` / `_STORE_MB` | 1024 / 4096 | tmpfs of the service data and of the store (`_STORE_MB` is ignored with `_STORE_ON=disk`) |
+| `ALAMBIQUE_LOAD_STORE_ON` | `tmpfs` | `tmpfs` or `disk`: where the store keeps its data (below) |
+| `ALAMBIQUE_LOAD_STORE_DIR` | `<case results dir>/store` | with `disk`, the directory the case creates for the store; it must not exist |
 | `ALAMBIQUE_LOAD_CACHE_KIB` | library default (512) | `awake.cache_kib` (set by `cache<N>`) |
 | `ALAMBIQUE_LOAD_IDLE_TIMEOUT_MS` | library default; 24 h for `cells`, 5 s for `wakes` | cell idle timeout |
 | `ALAMBIQUE_LOAD_MAX_CELLS` | library default; 10 000 000 for `cells` | `awake.max_cells` |
@@ -171,6 +173,43 @@ All are environment variables; set them before `mise run load`.
 
 Default levels: commits small 50 to 3200 (doubling), large 5 to 320; cells 500
 to 32 000; wakes 5 to 320; query 1 to 64.
+
+## Store on disk
+
+By default the store's data is on a tmpfs of `ALAMBIQUE_LOAD_STORE_MB`. Use
+`ALAMBIQUE_LOAD_STORE_ON=disk` when that tmpfs would not fit in the host's
+memory, or when a case filled it (see Troubleshooting): re-run that case with
+the store on disk and read its result as "store on disk". The store then
+writes to a fresh directory, bind mounted at `/data`: `ALAMBIQUE_LOAD_STORE_DIR`,
+or `store/` in the case's results directory. The script creates it (it fails
+if the directory exists) and writes its path to `store-dir.txt`.
+
+SeaweedFS runs as root, so its files may not be removable by you. At the end
+the script removes the store container, empties the directory with a
+throwaway container of the same SeaweedFS image (`find /d -mindepth 1
+-delete`), and then removes the empty directory itself. Nothing else is
+deleted and no `sudo` is used. If that fails, the script says so and leaves
+the directory.
+
+Disk is slower and more variable than a tmpfs, and the page cache competes
+with the service for memory, so compare disk results with tmpfs results
+knowingly. Each step's JSON has `store_on`, `summary.json` has `store_on` and
+`store_fstype` (from `findmnt -no FSTYPE -T`), and when the store was on disk
+the heading of `summary.md` says "store on disk (<fstype>)".
+
+## A small VM
+
+For a VM with 4 vCPUs and 5.9 GB of RAM the settings that were approved are:
+
+```sh
+ALAMBIQUE_LOAD_MIN_AVAILABLE_GIB=0.5 ALAMBIQUE_LOAD_STORE_MB=1536 \
+  ALAMBIQUE_LOAD_DATA_MB=768 mise run load -- A commits
+```
+
+The driver runs on the same VM, so it shares the VM's CPUs with the service
+and the store. Its CPU is not counted, but it can take CPU from them; the host
+guard still repeats a step when the host is busy. If the store's tmpfs fills,
+re-run the case with `ALAMBIQUE_LOAD_STORE_ON=disk`.
 
 ## What the numbers include
 
@@ -216,6 +255,14 @@ Not run yet.
 - Exit status 2 (invalid), 3 (host low on memory), 4 (service down). For 4,
   read the container's log; a case prints it when the service died.
 - A tmpfs full error in the service log: raise `ALAMBIQUE_LOAD_DATA_MB`.
+- A step bad with reason `:store_full`, and "the store is out of space" in
+  the summary: the store's tmpfs filled. The driver tells it from other errors
+  by words such as "no space", "volume full" or "quota" in the operation
+  errors (`error_samples` of the step JSON). A full store can also show only as
+  timeouts or a lower delivery; then check `docker logs` of the store container
+  (the id is in `started-containers.txt`) for "no space" or "volume full". Run
+  the case again with `ALAMBIQUE_LOAD_STORE_ON=disk`, or raise
+  `ALAMBIQUE_LOAD_STORE_MB`.
 
 Next: [how-to-size-a-node.md](how-to-size-a-node.md) turns memory per cell into
 node sizes; [contributing.md](contributing.md) lists the other benchmarks.
