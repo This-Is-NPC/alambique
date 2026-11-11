@@ -217,5 +217,44 @@ defmodule Alambique.AdmissionPropertiesTest do
         end)
       end
     end
+
+    property "the calls a cell admits never pass max_pending", ctx do
+      {:ok, gate} = AlambiqueTestkit.GatedStore.start_link()
+      on_exit(fn -> if Process.alive?(gate), do: GenServer.stop(gate) end)
+      store = AlambiqueTestkit.GatedStore.wrap(gate, ctx.store)
+
+      check all(
+              max <- integer(2..12),
+              callers <- integer(1..40),
+              max_runs: 12,
+              max_shrinking_steps: 3
+            ) do
+        inst =
+          start_instance(%{ctx | store: store},
+            migrations: [{1, "CREATE TABLE t (n INTEGER PRIMARY KEY)"}],
+            awake: [max_pending: max]
+          )
+
+        cell = unique_cell()
+        {:ok, _} = Alambique.execute(inst, cell, "INSERT INTO t (n) VALUES (0)", [])
+        AlambiqueTestkit.GatedStore.hold(gate, ~r{/0000/})
+
+        writer =
+          Task.async(fn -> Alambique.execute(inst, cell, "INSERT INTO t (n) VALUES (1)", []) end)
+
+        eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 1}} end)
+
+        replies = burst_queries(inst, cell, callers, 50)
+
+        # The writer holds one place; the rest go to the first callers, the others are refused.
+        assert Enum.count(replies, &(&1 == {:error, :timeout})) == min(callers, max - 1)
+        assert {:ok, %{pending: pending}} = Alambique.load(inst, cell)
+        assert pending == min(callers + 1, max)
+
+        AlambiqueTestkit.GatedStore.open(gate)
+        assert {:ok, _} = Task.await(writer, 10_000)
+        stop_supervised!(inst)
+      end
+    end
   end
 end

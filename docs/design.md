@@ -983,17 +983,15 @@ Why each overlap is safe:
 - `max_pending` (default 10 000) bounds the calls waiting on one cell: the
   calls sent and not yet run by the cell plus the callers it accepted
   and has not answered (`Cell.load/2`). Other messages of the mailbox, such as
-  the exit messages of the linked tasks of a wake, do not count. The router
-  counts a call in the cell's counter before it sends it and the cell takes it
-  back when it has answered or parked the call, so a call counts while it
-  waits in the mailbox or runs, even after its caller gave up. The router checks the limit before it
-  sends a call, so callers that time out
-  cannot grow the mailbox without limit, and a read that waits for a held
-  upload holds its result only while it counts. The check and the send are
-  not atomic, so the count can pass the limit by the number of callers that
-  check at the same moment. A hibernation is never refused. Requests whose
-  caller gave up are still run if they were accepted (`GenServer.call` does
-  not cancel); only the sender-side limit bounds them.
+  the exit messages of the linked tasks of a wake, do not count. The load
+  counter is an `:atomics` array; the router takes a place with one atomic
+  `add_get` before it sends a call (`Cell.admit/2`) and gives it back, with
+  `{:error, :busy}`, if the count passed the limit, so the check and the
+  reservation are one step and the limit is never passed, however many callers
+  arrive together. The cell gives the place back when it has answered or
+  parked the call, so a call counts while it waits in the mailbox or runs,
+  even after its caller gave up, and a read that waits for a held upload holds
+  its result only while it counts. A hibernation is never refused.
 
 **Serving.** A call checks `Lease.valid?` first and stops the cell with
 `:lease_expired` if it is false. A timer at `ttl / 3` first looks for the freeze marker (one `HEAD`; a frozen
@@ -2914,9 +2912,9 @@ average 4 to 12), medians of three repetitions per run. Only the trend counts.
   `Membership.foreign_nodes/1` and `Membership.preferred/2` with 1, 100 and 1 000
   members: 1.3, 3.2 and 22.3; 1.6, 3.6 and 23.2; 1.4, 3.2 and 23.6 before the
   cached view; 0.03 to 0.2 at every size after it.
-- **`awake.max_pending` check** (`mise run bench:router`). The router checks
-  the load of a cell before each local call. It reads the load counter from the
-  lookup the call already makes; a second registry lookup would cost 0.4 to
+- **`awake.max_pending` check** (`mise run bench:router`). The router takes
+  a place in the load of a cell before each local call. It uses the load
+  counter from the lookup the call already makes; a second registry lookup would cost 0.4 to
   0.6 us of a call of 10 to 14 us.
 - **In-flight marker** (`mise run bench:inflight`). A closed-loop writer on
   one cell with the marker on and off: the marker costs about 34 us of 197 us

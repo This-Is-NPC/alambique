@@ -415,11 +415,9 @@ defmodule Alambique.Router do
   # stopped cell never ran is looked up again; a crash during the call leaves
   # it unknown whether it ran, so that is reported and never retried.
   defp deliver(pid, load, {config, _, request, timeout, _, _} = args) do
-    if busy?(config, pid, load, request) do
-      {node(), {:error, :busy}}
-    else
-      if load && request != :hibernate, do: Cell.sent(load)
-      {node(), call_cell(pid, plain(request), timeout)}
+    case admit(config, load, request) do
+      :ok -> {node(), call_cell(pid, plain(request), timeout)}
+      :busy -> {node(), {:error, :busy}}
     end
   catch
     :exit, {reason, {GenServer, :call, _}} ->
@@ -435,20 +433,13 @@ defmodule Alambique.Router do
   end
 
   # A cell with `awake.max_pending` callers waiting refuses more, so its
-  # mailbox does not grow past the limit while the callers time out. A
-  # hibernation is not refused. Only calls count, not the other messages of
-  # the mailbox.
-  # `load` is the counter of the registry lookup the caller made, `nil` when
-  # the cell is gone.
-  defp busy?(_config, _pid, _load, :hibernate), do: false
-  defp busy?(_config, _pid, nil, _request), do: false
-
-  defp busy?(config, pid, load, _request) do
-    case Cell.pending(pid, load) do
-      {:ok, waiting} -> waiting >= config.awake.max_pending
-      :none -> false
-    end
-  end
+  # mailbox does not grow past the limit while the callers time out. The
+  # place is taken atomically (`Cell.admit/2`) and the cell gives it back.
+  # A hibernation is not counted. `load` is the counter of the registry lookup
+  # the caller made, `nil` when the cell is gone.
+  defp admit(_config, _load, :hibernate), do: :ok
+  defp admit(_config, nil, _request), do: :ok
+  defp admit(config, load, _request), do: Cell.admit(load, config.awake.max_pending)
 
   defp load_of({_pid, load}), do: load
   defp load_of(nil), do: nil

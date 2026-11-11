@@ -5,7 +5,7 @@ defmodule Alambique.Admission do
   # reason a retry cannot change. The cap on awake cells is the
   # `max_children` of the cell supervisor, which the router keeps free by
   # hibernating the least recently used cells (`crowded?/1`), and the cap on a
-  # cell's queue is checked by `Cell.load/2` in the router.
+  # cell's queue is taken by `Cell.admit/2` in the router.
   #
   # One public table per instance, created by `Alambique.Membership`: the
   # counter `:wakes`, the entries `{{:waking, pid}}` of cells that have not

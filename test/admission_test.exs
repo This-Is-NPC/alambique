@@ -118,47 +118,32 @@ defmodule Alambique.AdmissionTest do
     eventually(fn -> match?({:ok, _}, Alambique.touch(inst, unique_cell())) end)
   end
 
-  test "awake.max_pending refuses calls queued behind a cell that cannot answer", env do
+  test "awake.max_pending is never passed, however many callers check at once", env do
     {:ok, gate} = GatedStore.start_link()
     on_exit(fn -> if Process.alive?(gate), do: GenServer.stop(gate) end)
     store = GatedStore.wrap(gate, env.store)
-    inst = start_instance(%{env | store: store}, migrations: @schema, awake: [max_pending: 20])
-    cell = unique_cell()
-    {:ok, _} = Alambique.execute(inst, cell, @insert, [0])
+    inst = start_instance(%{env | store: store}, migrations: @schema, awake: [max_pending: 3])
 
-    GatedStore.hold(gate, ~r{/0000/})
-    writer = Task.async(fn -> Alambique.execute(inst, cell, @insert, [1]) end)
-    eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 1}} end)
+    # Reads wait for the held upload and count until it ends, even once their
+    # callers gave up: the writer and 2 of them fill the cell. Each round is a
+    # new chance for the callers to check at the same moment.
+    for _ <- 1..10 do
+      cell = unique_cell()
+      {:ok, _} = Alambique.execute(inst, cell, @insert, [0])
 
-    # Callers that check at the same moment all pass: the limit holds up to them.
-    callers = 8
-    pid = Alambique.Cell.whereis(Alambique.Config.fetch!(inst), cell)
+      GatedStore.hold(gate, ~r{/0000/})
+      writer = Task.async(fn -> Alambique.execute(inst, cell, @insert, [1]) end)
+      eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 1}} end)
 
-    replies =
-      1..500
-      |> Task.async_stream(
-        fn _ ->
-          {queued(pid), Alambique.query(inst, cell, "SELECT count(*) FROM t", [], timeout: 50)}
-        end,
-        max_concurrency: callers,
-        timeout: 10_000
-      )
-      |> Enum.map(fn
-        {:ok, reply} -> reply
-        other -> flunk(inspect(other))
-      end)
+      replies = burst_queries(inst, cell, 100, 50)
 
-    assert Enum.max(Enum.map(replies, &elem(&1, 0))) <= 20 + callers
-    assert Enum.any?(replies, &match?({_, {:error, :busy}}, &1))
-    {:ok, %{pending: pending}} = Alambique.load(inst, cell)
-    assert pending <= 20 + callers
+      assert Enum.count(replies, &(&1 == {:error, :timeout})) == 2
+      assert Enum.count(replies, &(&1 == {:error, :busy})) == 98
+      assert Alambique.load(inst, cell) == {:ok, %{pending: 3}}
 
-    GatedStore.open(gate)
-    assert {:ok, _} = Task.await(writer, 10_000)
-
-    eventually(fn ->
-      match?({:ok, %{rows: [[2]]}}, Alambique.query(inst, cell, "SELECT count(*) FROM t"))
-    end)
+      GatedStore.open(gate)
+      assert {:ok, _} = Task.await(writer, 10_000)
+    end
   end
 
   @doc false

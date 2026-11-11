@@ -77,6 +77,30 @@ defmodule Alambique.CellHelpers do
     Enum.count(messages, &(not match?({:feed_published, _, _, _, _}, &1)))
   end
 
+  @doc "The replies of `callers` queries that start at the same moment."
+  def burst_queries(inst, cell, callers, timeout) do
+    test_pid = self()
+
+    pids =
+      for _ <- 1..callers do
+        spawn_link(fn ->
+          receive do
+            :go ->
+              reply = Alambique.query(inst, cell, "SELECT count(*) FROM t", [], timeout: timeout)
+              send(test_pid, {self(), reply})
+          end
+        end)
+      end
+
+    Enum.each(pids, &send(&1, :go))
+
+    for pid <- pids,
+        do:
+          (receive do
+             {^pid, reply} -> reply
+           end)
+  end
+
   def unique_cell, do: "cell-#{System.unique_integer([:positive])}"
 
   @doc "Sends the given telemetry events to the calling process as `{:telemetry, event, measurements, meta}`."
