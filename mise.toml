@@ -99,6 +99,10 @@ run = "scripts/bench-memory"
 description = "Query thousands of cells cold and warm and report requests and time (argument: number of cells)"
 run = "scripts/bench-query"
 
+[tasks."bench:query-refresh"]
+description = "Refresh a large cached query replica after a small write and time each pass (argument: size in MiB)"
+run = "scripts/bench-query-refresh"
+
 [tasks."bench:schema"]
 description = "Create the same schema in fresh cells with one Tx.execute per statement and with one Tx.script, and compare (argument: cells per mode)"
 run = "scripts/bench-schema"
