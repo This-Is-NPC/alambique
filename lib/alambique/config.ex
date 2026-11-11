@@ -125,7 +125,8 @@ defmodule Alambique.Config do
     timeout_ms: 30_000,
     page_size: 1_000,
     stale_tmp_seconds: 600,
-    restore_attempts: 3
+    restore_attempts: 3,
+    reflink: true
   ]
 
   # `statement_timeout_ms` defaults to `op_timeout_ms`.
@@ -214,7 +215,8 @@ defmodule Alambique.Config do
             timeout_ms: pos_integer,
             page_size: pos_integer,
             stale_tmp_seconds: pos_integer,
-            restore_attempts: pos_integer
+            restore_attempts: pos_integer,
+            reflink: boolean
           },
           sql: %{
             statement_timeout_ms: pos_integer,
@@ -838,7 +840,8 @@ defmodule Alambique.Config do
       timeout_ms: pos_int!(query, :timeout_ms),
       page_size: pos_int!(query, :page_size),
       stale_tmp_seconds: pos_int!(query, :stale_tmp_seconds),
-      restore_attempts: pos_int!(query, :restore_attempts)
+      restore_attempts: pos_int!(query, :restore_attempts),
+      reflink: bool!(query, :reflink)
     }
   end
 
@@ -1047,6 +1050,12 @@ defmodule Alambique.Config do
   defp pos_int!(opts, key) do
     value = opts[key]
     unless is_integer(value) and value > 0, do: bad!("#{inspect(key)} must be a positive integer")
+    value
+  end
+
+  defp bool!(opts, key) do
+    value = opts[key]
+    unless is_boolean(value), do: bad!("#{inspect(key)} must be true or false")
     value
   end
 

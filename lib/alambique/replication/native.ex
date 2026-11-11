@@ -105,6 +105,13 @@ defmodule Alambique.Replication.Native do
   @spec sums_zeroed(non_neg_integer) :: sums
   def sums_zeroed(_pages), do: nif_error()
 
+  @doc """
+  Makes the existing empty file `dst` a copy-on-write clone of `src`.
+  `{:ok, false}` when the filesystem cannot (the caller copies instead).
+  """
+  @spec reflink(Path.t(), Path.t()) :: {:ok, boolean} | error
+  def reflink(_src, _dst), do: nif_error()
+
   @doc "Applies an LTX file to a database file; `page_size` 0 accepts any."
   @spec apply_ltx(Path.t(), binary, integer, non_neg_integer) ::
           {:ok, header, post_apply :: integer} | error

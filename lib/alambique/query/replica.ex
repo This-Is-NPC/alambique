@@ -9,7 +9,12 @@ defmodule Alambique.Query.Replica do
   alias Alambique.Query.Cache
   alias Alambique.Replication.{Chain, Keys, Native, Objects}
 
-  @type t :: %{path: Path.t(), txid: non_neg_integer, bytes: non_neg_integer}
+  @type t :: %{
+          required(:path) => Path.t(),
+          required(:txid) => non_neg_integer,
+          required(:bytes) => non_neg_integer,
+          optional(:copy) => :reflink | :copy
+        }
 
   @doc """
   A complete replica of `cell` at `target` and where it is.
@@ -31,13 +36,15 @@ defmodule Alambique.Query.Replica do
     result =
       refresh(ctx, dir, {cell, key}, target, cached, deadline, %{
         max_age_ms: Keyword.get(opts, :max_age_ms, 0),
-        attempts: config.query.restore_attempts
+        attempts: config.query.restore_attempts,
+        reflink: config.query.reflink
       })
 
     meta =
       case result do
         {:ok, replica, source, segments} ->
           %{cell: cell, result: :ok, source: source, txid: replica.txid, segments: segments}
+          |> Map.merge(Map.take(replica, [:copy]))
 
         {:error, reason} ->
           %{cell: cell, result: :error, reason: reason}
@@ -63,7 +70,7 @@ defmodule Alambique.Query.Replica do
         use_cached(cached, :hit)
 
       true ->
-        case advance(ctx, dir, cell_key, target, cached, deadline) do
+        case advance(ctx, dir, cell_key, target, cached, deadline, opts.reflink) do
           {:ok, _, _, _} = ok -> ok
           :unchanged -> use_cached(cached, :unchanged)
           :fallback -> restore(ctx, dir, cell_key, target, deadline, opts.attempts)
@@ -92,8 +99,8 @@ defmodule Alambique.Query.Replica do
     tmp = Cache.tmp(dir, key)
 
     case Replication.restore(ctx, cell, tmp, target, timeout_ms: remaining(deadline)) do
-      {:ok, %{txid: txid, epoch: epoch, segments: segments}} ->
-        publish(dir, key, tmp, txid, epoch, target, :restore, segments)
+      {:ok, %{txid: txid, epoch: epoch, checksum: checksum, segments: segments}} ->
+        publish(dir, key, tmp, {txid, epoch, checksum}, target, :restore, segments)
 
       {:error, reason} = error ->
         File.rm(tmp)
@@ -115,7 +122,7 @@ defmodule Alambique.Query.Replica do
   # file. A tail past a gap or a lower-epoch file ends the run (a pipeline in
   # flight, design §6, R3). Anything else unexpected returns `:fallback`, and
   # a full restore decides.
-  defp advance(ctx, dir, {cell, key}, target, cached, deadline) do
+  defp advance(ctx, dir, {cell, key}, target, cached, deadline, reflink?) do
     after_key = Keys.segment(ctx.prefix, cell, 0, cached.txid, cached.txid)
 
     with {:ok, snapshot_keys} <-
@@ -134,7 +141,7 @@ defmodule Alambique.Query.Replica do
           :unchanged
 
         {chain, false} when chain != [] ->
-          apply_chain(ctx, dir, {cell, key}, target, cached, chain, deadline)
+          apply_chain(ctx, dir, {cell, key}, target, cached, chain, deadline, reflink?)
 
         _ ->
           :fallback
@@ -148,16 +155,15 @@ defmodule Alambique.Query.Replica do
   defp limit({:txid, n}), do: n
   defp limit(:latest), do: :infinity
 
-  defp apply_chain(ctx, dir, {cell, key}, target, cached, chain, deadline) do
+  defp apply_chain(ctx, dir, {cell, key}, target, cached, chain, deadline, reflink?) do
     tmp = Cache.tmp(dir, key)
 
     try do
       with {:ok, page_size} <- page_size(cached.path),
-           :ok <- File.cp(cached.path, tmp),
-           {:ok, _sums, checksum, _pages} <- Native.file_state(tmp, page_size),
-           {:ok, txid, epoch} <-
+           {:ok, copy} <- Cache.clone(cached.path, tmp, reflink?),
+           {:ok, txid, epoch, checksum} <-
              apply_segments(ctx, cell, tmp, chain, deadline, %{
-               checksum: checksum,
+               checksum: cached.checksum,
                page_size: page_size,
                epoch: cached.epoch,
                txid: cached.txid
@@ -167,7 +173,7 @@ defmodule Alambique.Query.Replica do
           :unchanged
         else
           Fault.point(:query_refresh_applied, %{cell: cell, txid: txid})
-          publish(dir, key, tmp, txid, epoch, target, :refresh, length(chain))
+          publish(dir, key, tmp, {txid, epoch, checksum}, target, {:refresh, copy}, length(chain))
         end
       else
         :fallback -> :fallback
@@ -187,7 +193,8 @@ defmodule Alambique.Query.Replica do
     end
   end
 
-  defp apply_segments(_ctx, _cell, _tmp, [], _deadline, state), do: {:ok, state.txid, state.epoch}
+  defp apply_segments(_ctx, _cell, _tmp, [], _deadline, state),
+    do: {:ok, state.txid, state.epoch, state.checksum}
 
   defp apply_segments(ctx, cell, tmp, [seg | rest], deadline, state) do
     with {:ok, body, meta} <- fetch(ctx, seg.key, deadline),
@@ -202,7 +209,7 @@ defmodule Alambique.Query.Replica do
     else
       {:epoch, false} ->
         if Chain.tail?([seg | rest], [], state.txid),
-          do: {:ok, state.txid, state.epoch},
+          do: {:ok, state.txid, state.epoch, state.checksum},
           else: :fallback
 
       :fallback ->
@@ -225,9 +232,9 @@ defmodule Alambique.Query.Replica do
 
   # Moves the complete temporary file to its final name, and drops the
   # replicas it supersedes.
-  defp publish(dir, cell, tmp, txid, epoch, target, source, segments) do
+  defp publish(dir, cell, tmp, {txid, epoch, checksum}, target, source, segments) do
     Cache.sync(tmp)
-    final = Cache.path(dir, cell, txid, epoch)
+    final = Cache.path(dir, cell, txid, epoch, checksum)
     File.rename!(tmp, final)
 
     superseded =
@@ -237,7 +244,12 @@ defmodule Alambique.Query.Replica do
           do: entry
 
     Cache.remove(superseded)
-    {:ok, %{path: final, txid: txid, bytes: File.stat!(final).size}, source, segments}
+    replica = %{path: final, txid: txid, bytes: File.stat!(final).size}
+
+    case source do
+      {:refresh, copy} -> {:ok, Map.put(replica, :copy, copy), :refresh, segments}
+      source -> {:ok, replica, source, segments}
+    end
   end
 
   defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 1)
