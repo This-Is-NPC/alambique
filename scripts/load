@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Run the ramps of the load test: scenarios x measures x variants, one
+# scripts/load-case each, with the results of the run under
+# results/load/<run id>/. Usage: scripts/load [A|B|all] [commits|cells|wakes|query|all]
+# Set ALAMBIQUE_LOAD_VARIANT to run one variant only. Stops at once when the
+# host runs low on memory (exit 3); the results so far stay.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+scenarios=${1:-A}
+measures=${2:-all}
+[ "$scenarios" != all ] || scenarios="A B"
+[ "$measures" != all ] || measures="commits cells wakes query"
+
+# The settings the user made, to print the command that reproduces a case.
+user_env=$(env | grep '^ALAMBIQUE_LOAD_' | sort | tr '\n' ' ' || true)
+
+export ALAMBIQUE_LOAD_RUN_ID=${ALAMBIQUE_LOAD_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}
+echo "run ${ALAMBIQUE_LOAD_RUN_ID}, results in ${ALAMBIQUE_LOAD_RESULTS:-results/load}/${ALAMBIQUE_LOAD_RUN_ID}"
+
+variants_of() {
+  case "$1" in
+    commits) echo "small large" ;;
+    cells) echo "default cache256" ;;
+    *) echo "default" ;;
+  esac
+}
+
+failed=0
+for scenario in $scenarios; do
+  for measure in $measures; do
+    variants=${ALAMBIQUE_LOAD_VARIANT:-$(variants_of "$measure")}
+    for variant in $variants; do
+      export ALAMBIQUE_LOAD_COMMAND="${user_env}ALAMBIQUE_LOAD_VARIANT=$variant mise run load -- $scenario $measure"
+      status=0
+      ALAMBIQUE_LOAD_VARIANT=$variant scripts/load-case "$scenario" "$measure" "$variant" || status=$?
+      case "$status" in
+        0 | 2 | 4) ;;
+        3) echo "host low on memory: stopping, partial results kept" >&2; exit 3 ;;
+        *) echo "case $scenario $measure $variant failed ($status)" >&2; failed=1 ;;
+      esac
+    done
+  done
+done
+exit "$failed"

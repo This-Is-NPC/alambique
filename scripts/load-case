@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# One ramp of one measure on one scenario: start the store and the service in
+# their own containers, run the driver against them, remove the containers.
+# Usage: scripts/load-case <A|B> <commits|cells|wakes|query> <variant>
+# The settings are the ALAMBIQUE_LOAD_* variables of docs/how-to-load-test.md.
+# Exit status: 0 done, 2 stopped invalid, 3 host low on memory, 4 service down.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+scenario=${1:?scenario A or B}
+measure=${2:?measure}
+variant=${3:-default}
+
+case "$scenario" in
+  A) cpus=1 limit_mb=512 ;;
+  B) cpus=2 limit_mb=2048 ;;
+  *) echo "unknown scenario $scenario" >&2; exit 1 ;;
+esac
+
+run_id=${ALAMBIQUE_LOAD_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}
+tag=$scenario-$measure-$variant
+out=${ALAMBIQUE_LOAD_RESULTS:-results/load}/$run_id/$tag
+data_mb=${ALAMBIQUE_LOAD_DATA_MB:-1024}
+store_mb=${ALAMBIQUE_LOAD_STORE_MB:-4096}
+image=${ALAMBIQUE_LOAD_IMAGE:-alambique-load:local}
+cookie=$(head -c 24 /dev/urandom | base64 | tr -d '/+=')
+suffix=$run_id-$tag-$$
+min_gib=${ALAMBIQUE_LOAD_MIN_AVAILABLE_GIB:-6}
+quiet_load=${ALAMBIQUE_LOAD_START_LOAD:-8}
+
+mkdir -p "$out"
+containers=()   # ids of the containers this script started, the only ones it removes
+driver=""
+envfile=$(mktemp)
+# The ids and the driver pid are also written to files, so that a run that
+# dies can be cleaned by hand without matching names.
+started="$out/started-containers.txt"
+: >"$started"
+
+cleanup() {
+  status=$?
+  trap - EXIT INT TERM
+  [ -z "$driver" ] || kill "$driver" 2>/dev/null || true
+  for id in "${containers[@]}"; do docker rm -f "$id" >/dev/null 2>&1 || true; done
+  rm -f "$envfile" "$out/driver.pid"
+  exit "$status"
+}
+trap cleanup EXIT INT TERM
+
+# The host must be quiet and have memory before a case starts.
+deadline=$((SECONDS + ${ALAMBIQUE_LOAD_WAIT_QUIET_S:-600}))
+while :; do
+  load=$(cut -d' ' -f1 /proc/loadavg)
+  avail=$(awk '/^MemAvailable:/ {printf "%.1f", $2/1048576}' /proc/meminfo)
+  if awk -v l="$load" -v q="$quiet_load" -v a="$avail" -v m="$min_gib" \
+    'BEGIN { exit !(l <= q && a >= m) }'; then break; fi
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    echo "host not quiet: load $load (limit $quiet_load), $avail GiB available (need $min_gib)" >&2
+    exit 5
+  fi
+  sleep 10
+done
+
+# What the measure needs from the service. Variables already set win.
+export ALAMBIQUE_LOAD_VARIANT=$variant
+case "$measure" in
+  cells) # cells stay awake for the whole ramp
+    export ALAMBIQUE_LOAD_IDLE_TIMEOUT_MS=${ALAMBIQUE_LOAD_IDLE_TIMEOUT_MS:-86400000}
+    export ALAMBIQUE_LOAD_MAX_CELLS=${ALAMBIQUE_LOAD_MAX_CELLS:-10000000}
+    ;;
+  wakes) # woken cells go back to sleep soon
+    export ALAMBIQUE_LOAD_IDLE_TIMEOUT_MS=${ALAMBIQUE_LOAD_IDLE_TIMEOUT_MS:-5000}
+    ;;
+esac
+case "$variant" in
+  cache[0-9]*) export ALAMBIQUE_LOAD_CACHE_KIB=${variant#cache} ;;
+esac
+
+# The store: SeaweedFS on a tmpfs, in a container of its own, on a free port.
+port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+store=$(docker run -d --name "alambique-load-store-$suffix" \
+  --tmpfs "/data:rw,size=${store_mb}m" \
+  -p "127.0.0.1:${port}:8333" \
+  -e AWS_ACCESS_KEY_ID=alambique -e AWS_SECRET_ACCESS_KEY=alambique-secret \
+  chrislusf/seaweedfs:4.48 \
+  mini -dir=/data -ip=127.0.0.1 -ip.bind=0.0.0.0 -s3.port=8333 -admin.ui=false)
+containers+=("$store")
+echo "$store" >>"$started"
+for _ in $(seq 1 120); do
+  curl -s -o /dev/null "http://127.0.0.1:${port}/" && break
+  sleep 0.5
+done
+curl -s -o /dev/null "http://127.0.0.1:${port}/" || { docker logs --tail 30 "$store" >&2; exit 1; }
+
+# The service: limited CPU and memory. Its data directory is a tmpfs, whose
+# pages count as shared memory in the cgroup, so the cgroup limit is the
+# nominal one plus the tmpfs; the criteria use the nominal one.
+node="load$$@127.0.0.1"
+export ALAMBIQUE_LOAD_S3_ENDPOINT="http://127.0.0.1:${port}"
+env | grep '^ALAMBIQUE_LOAD_' >"$envfile" || true
+total_mb=$((limit_mb + data_mb))
+service=$(docker run -d --name "alambique-load-service-$suffix" \
+  --network host --cpus "$cpus" --memory "${total_mb}m" --memory-swap "${total_mb}m" \
+  --tmpfs "/data:rw,size=${data_mb}m" \
+  --env-file "$envfile" \
+  -e "RELEASE_NODE=$node" -e "RELEASE_COOKIE=$cookie" \
+  -e "ERL_AFLAGS=${ALAMBIQUE_LOAD_ERL_AFLAGS:-+Mdai max +MMmcs 0}" \
+  "$image")
+containers+=("$service")
+echo "$service" >>"$started"
+
+export ALAMBIQUE_LOAD_NODE=$node ALAMBIQUE_LOAD_SERVICE_ID=$service ALAMBIQUE_LOAD_STORE_ID=$store
+export ALAMBIQUE_LOAD_SCENARIO=$scenario ALAMBIQUE_LOAD_MEASURE=$measure ALAMBIQUE_LOAD_OUT=$out
+export ALAMBIQUE_LOAD_MEM_LIMIT_MB=$limit_mb ALAMBIQUE_LOAD_CPUS=$cpus
+export ALAMBIQUE_LOAD_COMMAND=${ALAMBIQUE_LOAD_COMMAND:-"scripts/load-case $scenario $measure $variant"}
+
+# The driver runs on the host, outside the limits it measures.
+MIX_ENV=test elixir --name "driver$$@127.0.0.1" --cookie "$cookie" \
+  -S mix run --no-start load/driver.exs &
+driver=$!
+echo "$driver" >"$out/driver.pid"
+status=0
+wait "$driver" || status=$?
+driver=""
+if [ "$status" -ne 0 ] && [ -z "$(docker ps -q --no-trunc -f "id=$service")" ]; then
+  docker logs --tail 40 "$service" >&2 || true
+fi
+exit "$status"
