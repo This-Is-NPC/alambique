@@ -199,11 +199,17 @@ defmodule Alambique.Compaction.Compactor do
 
   defp after_cleanup(_config, _cell, _location_id, {:ok, _}), do: :ok
 
-  # The cell is back, the location is no longer a source, or another cleanup
-  # runs: nothing to do. A marker still in the store is found by the next scan.
-  defp after_cleanup(_config, _cell, _location_id, {:error, reason})
-       when reason in [:live_location, :not_moved, :contended],
-       do: :ok
+  # The cell is live there or never moved: the marker is a stray once the
+  # deadline of a move has passed, and goes then; otherwise the next scan
+  # looks again.
+  defp after_cleanup(config, cell, location_id, {:error, reason})
+       when reason in [:live_location, :not_moved] do
+    _ = Cleanup.drop_stray(config, cell, location_id)
+    :ok
+  end
+
+  # Another cleanup runs: a marker still in the store is found by the next scan.
+  defp after_cleanup(_config, _cell, _location_id, {:error, :contended}), do: :ok
 
   defp after_cleanup(config, cell, location_id, {:error, reason}) do
     Logger.warning("Alambique cleanup of #{cell} at #{location_id} failed: #{inspect(reason)}")
