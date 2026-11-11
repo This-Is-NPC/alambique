@@ -191,6 +191,14 @@ defmodule Alambique.Replication.Native do
   @doc false
   def stats, do: nif_error()
 
+  @doc "Takes the exclusive lock on a data directory's lock file (design §1)."
+  @spec dir_lock(Path.t()) :: {:ok, reference} | {:error, :in_use | {:io, String.t()}}
+  def dir_lock(_path), do: nif_error()
+
+  @doc "Releases a `dir_lock/1` lock."
+  @spec dir_unlock(reference) :: :ok
+  def dir_unlock(_lock), do: nif_error()
+
   if @test_build do
     @doc false
     def panic_normal, do: nif_error()

@@ -34,9 +34,11 @@ defmodule Alambique do
     * `:placement` - `{module, opts}` implementing `Alambique.Placement`: where
       each cell lives and how ids look (design §18). Give this or `:store`.
     * `:data_dir` - directory for the local copies of cells (required). It must
-      be on a case-sensitive file system and belong to this instance alone: two
-      instances (or two VMs) on one directory corrupt each other's files. The
-      library creates it and the directories of the cells with mode 0700.
+      be on a case-sensitive file system and belong to this instance alone.
+      The start takes an exclusive lock on `<data_dir>/lock` and returns
+      `{:error, {:data_dir_in_use, path}}` when another live instance, in this
+      VM or another OS process, holds it.
+      The library creates it and the directories of the cells with mode 0700.
     * `:prefix` - key prefix in the store with `:store` (default `"alambique"`).
     * `:node_id` - names the node in leases and in the owner shown by
       `lease/3` (default `Atom.to_string(node())`). Fencing does not depend on

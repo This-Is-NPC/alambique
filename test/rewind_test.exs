@@ -342,7 +342,7 @@ defmodule Alambique.RewindTest do
 
       start_instance(store, name: :restarted, migrations: @schema)
 
-      assert data_dir |> File.ls!() |> Enum.sort() |> Enum.reject(&(&1 == "inflight")) ==
+      assert data_dir |> File.ls!() |> Enum.sort() |> Enum.reject(&(&1 in ["inflight", "lock"])) ==
                ["keep-me", "x.cell"]
     end
 

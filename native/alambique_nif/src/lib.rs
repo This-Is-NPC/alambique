@@ -5,6 +5,7 @@ mod alloc;
 mod capture;
 mod crc;
 mod dbsum;
+mod dir_lock;
 mod error;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
