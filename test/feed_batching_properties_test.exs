@@ -432,7 +432,8 @@ defmodule Alambique.FeedBatchingPropertiesTest do
       write_three(inst, cell)
 
       eventually(fn -> written(ctx, "idle", cell) == [1, 2, 3] end)
-      refute awake?(inst, cell)
+      # The flush precedes the checkpoint, the release and the exit.
+      eventually(fn -> not awake?(inst, cell) end)
     end
 
     test "a shutdown publishes a lingering queue", ctx do
