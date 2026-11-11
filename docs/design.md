@@ -932,9 +932,16 @@ Why each overlap is safe:
 `{:error, :overloaded}` and `{:error, :busy}`):
 
 - `max_cells` (default 20 000) is the `max_children` of the cell supervisor,
-  so the count is exact. Past it, a cell with a process is never evicted to make room;
-  the new cell is refused until another hibernates (the idle timeout, or
-  `Alambique.hibernate/3`). A host that chooses cell ids freely should size
+  so the count is exact. Before it reserves a wake slot, the router checks
+  whether the awake cells fill `max_cells` (the registry count, confirmed by
+  the supervisor, which drops an exited cell sooner than the registry does).
+  If they do, it hibernates the least recently used cell with no caller
+  waiting, the same way as for `max_bytes` (below; one implementation,
+  `Router.make_room/1`), so an idle cell gives its place to a new one. When
+  every awake cell has callers waiting, the wake is refused with
+  `{:error, :overloaded}`. Two wakes may both hibernate a cell for the same
+  place; the supervisor limit still holds, and the node is left one cell
+  below the ceiling. A host that chooses cell ids freely should size
   `max_cells` by the memory (about 165 KB per cell without data, up to
   `cache_kib` plus about 150 KiB with it, §12) and the file descriptors (3 per
   cell) of the node, or set `max_bytes`.
@@ -950,21 +957,23 @@ Why each overlap is safe:
   total is a counter in the same table; the entry goes away when the cell ends
   (by the cell, or by `Membership` for a cell killed). Nothing is measured when
   `max_bytes` is `nil`. The router checks the total before it reserves a wake
-  slot: while it is at or over `max_bytes` it hibernates the cells in the order
-  of their last call, oldest first, skipping a cell with callers waiting, and
+  slot: while it is at or over `max_bytes` (or at `max_cells`, above) it
+  hibernates the cells in the order of their last call, oldest first, skipping a cell with callers waiting, and
   re-reading the total after each (the same hibernation as
   `Alambique.hibernate/3`, so pending writes are uploaded first). When no cell
   is left to hibernate and the total is still over, the wake is refused with
-  `{:error, :overloaded}`, as past `max_cells`. A record is as old as the
+  `{:error, :overloaded}`. A record is as old as the
   last call or message of its cell (a lease renewal is a message, every
   `lease_ttl_ms / 3`), so a cell that was emptied by a checkpoint is counted
   at its old size for up to that long; this errs towards hibernating too
   much, never too little. The woken cell may pass the budget as its cache
   fills; the next wake makes room. Each hibernation emits
-  `[:alambique, :admission, :evict]`. Finding the oldest cells sorts the
-  counter of every awake cell and sorts them, which is paid only when the
-  total is over the budget. The time of the last call is the third slot of the
-  load counter of each cell, set when its wake ends.
+  `[:alambique, :admission, :evict]`. The time of the last call is the third
+  slot of the load counter of each cell (set when its wake ends, so a cell
+  that is still waking is never chosen). Finding the oldest cells reads the
+  counter of every awake cell and sorts them (O(n log n), n up to
+  `max_cells`), which is paid by each wake at the ceiling of `max_cells` or
+  over the `max_bytes` budget, and by no other.
 - `max_wakes` (default 256) counts wakes in progress, with an atomic counter:
   the router reserves a slot before it starts a cell and gives it back when no
   cell was started. A started cell holds it as an entry keyed by its pid until

@@ -374,22 +374,22 @@ defmodule Alambique.Router do
     end
   end
 
-  # With `awake.max_bytes`, a cell wakes only while the memory of the awake
-  # cells is under the budget: the least recently used cells without waiting
-  # callers hibernate until it is, and when none is left to hibernate the wake
-  # is refused like one past `awake.max_cells`.
+  # A cell wakes only while there is room: while the awake cells fill
+  # `awake.max_cells`, or their memory is over `awake.max_bytes`, the least
+  # recently used cells without waiting callers hibernate, and when none is
+  # left to hibernate the wake is refused.
   defp make_room(config) do
-    if Admission.over_budget?(config),
+    if Admission.crowded?(config),
       do: evict_lru(config, Admission.least_recently_used(config)),
       else: :ok
   end
 
   defp evict_lru(config, []),
-    do: if(Admission.over_budget?(config), do: {:error, :overloaded}, else: :ok)
+    do: if(Admission.crowded?(config), do: {:error, :overloaded}, else: :ok)
 
   defp evict_lru(config, [{pid, load, id} | rest]) do
     cond do
-      not Admission.over_budget?(config) ->
+      not Admission.crowded?(config) ->
         :ok
 
       Cell.pending(pid, load) == {:ok, 0} ->
@@ -405,6 +405,7 @@ defmodule Alambique.Router do
     with :ok <- hibernate_pid(pid, config.call_timeout_ms) do
       Telemetry.emit([:admission, :evict], %{bytes: Admission.bytes(config)}, %{
         cell: id,
+        max_cells: config.awake.max_cells,
         max_bytes: config.awake.max_bytes
       })
     end

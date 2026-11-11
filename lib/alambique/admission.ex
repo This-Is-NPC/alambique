@@ -3,8 +3,9 @@ defmodule Alambique.Admission do
   # Limits that protect a node from more cells than it can hold (design §7):
   # the cells waking at once, and a short memory of wakes that failed for a
   # reason a retry cannot change. The cap on awake cells is the
-  # `max_children` of the cell supervisor, and the cap on a cell's queue is
-  # checked by `Cell.load/2` in the router.
+  # `max_children` of the cell supervisor, which the router keeps free by
+  # hibernating the least recently used cells (`crowded?/1`), and the cap on a
+  # cell's queue is checked by `Cell.load/2` in the router.
   #
   # One public table per instance, created by `Alambique.Membership`: the
   # counter `:wakes`, the entries `{{:waking, pid}}` of cells that have not
@@ -140,11 +141,23 @@ defmodule Alambique.Admission do
     :ok
   end
 
-  @doc "The bytes recorded for the awake cells, and whether they reach `awake.max_bytes`."
-  @spec over_budget?(Config.t()) :: boolean
-  def over_budget?(%{awake: %{max_bytes: nil}}), do: false
+  @doc """
+  Whether a wake has to wait for a cell to hibernate: the awake cells fill
+  `awake.max_cells`, or their memory reaches `awake.max_bytes`.
+  """
+  @spec crowded?(Config.t()) :: boolean
+  def crowded?(config), do: full?(config) or over_budget?(config)
 
-  def over_budget?(config),
+  # The registry count is the cheap test; the supervisor is asked only at the
+  # ceiling, because it forgets an exited cell before the registry does.
+  defp full?(config) do
+    Registry.count(config.registry) >= config.awake.max_cells and
+      DynamicSupervisor.count_children(config.supervisor).active >= config.awake.max_cells
+  end
+
+  defp over_budget?(%{awake: %{max_bytes: nil}}), do: false
+
+  defp over_budget?(config),
     do: :ets.lookup_element(config.admission, :bytes, 2) >= config.awake.max_bytes
 
   @doc "The recorded bytes of the awake cells."

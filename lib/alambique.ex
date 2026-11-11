@@ -166,11 +166,12 @@ defmodule Alambique do
       acknowledged, default 67 108 864, 64 MiB; design §6).
     * `:awake` - limits that protect a node (design §7): `:max_cells` (cells
       with a process on this node, default 20 000; a call that would wake one
-      more gives `{:error, :overloaded}`), `:max_wakes` (cells waking at once,
-      default 256; also `{:error, :overloaded}`) and `:max_pending` (calls
-      waiting on one cell, queued or for an upload, default 10 000;
-      more give `{:error, :busy}`, and the count may pass the limit by the
-      number of callers that check at the same time). The memory of the awake
+      more hibernates the least recently used cell that has no caller waiting,
+      and gives `{:error, :overloaded}` if there is none), `:max_wakes` (cells
+      waking at once, default 256; also `{:error, :overloaded}`) and
+      `:max_pending` (calls waiting on one cell, queued or for an upload,
+      default 10 000; more give `{:error, :busy}`, and the count may pass the
+      limit by the number of callers that check at the same time). The memory of the awake
       cells is bounded by `:cache_kib` (page cache of each cell's SQLite
       connection, `PRAGMA cache_size`, default 512 KiB; SQLite's own default
       is 2 000) and by `:max_bytes` (default `nil`, no budget). With a

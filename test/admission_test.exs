@@ -1,8 +1,9 @@
 defmodule Alambique.AdmissionTest do
   @moduledoc """
   A node refuses work past its limits instead of taking it (design §7):
-  `awake.max_cells`, `awake.max_wakes`, `awake.max_pending` and the memory
-  budget of the awake cells, `awake.max_bytes` with `awake.cache_kib`.
+  `awake.max_cells` (after hibernating idle cells), `awake.max_wakes`,
+  `awake.max_pending` and the memory budget of the awake cells,
+  `awake.max_bytes` with `awake.cache_kib`.
   """
   use ExUnit.Case, async: false
 
@@ -21,25 +22,54 @@ defmodule Alambique.AdmissionTest do
 
   defp awake(inst), do: Registry.count(Alambique.Config.fetch!(inst).registry)
 
-  test "awake.max_cells refuses a new cell and serves the cells it holds", env do
-    inst = start_instance(env, migrations: @schema, awake: [max_cells: 5])
-    cells = for _ <- 1..12, do: unique_cell()
+  test "awake.max_cells hibernates the least recently used cell to make room", env do
+    inst = start_instance(env, migrations: @schema, awake: [max_cells: 3])
+    config = Alambique.Config.fetch!(inst)
+    [a, b, c, d] = cells = for _ <- 1..4, do: unique_cell()
 
-    results = for cell <- cells, do: {cell, Alambique.touch(inst, cell)}
-    {woken, refused} = Enum.split_with(results, &match?({_, {:ok, _}}, &1))
+    for cell <- [a, b, c] do
+      assert {:ok, _} = Alambique.execute(inst, cell, @insert, [1])
+      Process.sleep(5)
+    end
 
-    assert length(woken) == 5
-    assert Enum.all?(refused, &match?({_, {:error, :overloaded}}, &1))
-    assert awake(inst) == 5
+    # `b` is now the least recently used.
+    assert {:ok, _} = Alambique.touch(inst, a)
+    Process.sleep(5)
+    assert {:ok, _} = Alambique.touch(inst, d)
 
-    # A cell that is awake still answers; a refused one wakes once there is room.
-    [{held, _} | _] = woken
-    assert {:ok, _} = Alambique.execute(inst, held, @insert, [1])
-    {[{asleep, _} | _], _} = Enum.split(refused, 1)
-    assert {:error, :overloaded} = Alambique.execute(inst, asleep, @insert, [1])
-    :ok = Alambique.hibernate(inst, held)
-    eventually(fn -> awake(inst) == 4 end)
-    assert {:ok, _} = Alambique.execute(inst, asleep, @insert, [1])
+    eventually(fn ->
+      Enum.sort(Enum.filter(cells, &(Alambique.load(inst, &1) != :none))) == Enum.sort([a, c, d])
+    end)
+
+    assert awake(inst) == 3
+    assert Alambique.Cell.whereis(config, b) == nil
+
+    # The cell that hibernated wakes again, with its data, and takes another place.
+    assert {:ok, %{rows: [[1]]}} = Alambique.query(inst, b, "SELECT count(*) FROM t")
+    assert awake(inst) == 3
+  end
+
+  test "awake.max_cells refuses a wake when every awake cell has callers waiting", env do
+    {:ok, gate} = GatedStore.start_link()
+    on_exit(fn -> if Process.alive?(gate), do: GenServer.stop(gate) end)
+    store = GatedStore.wrap(gate, env.store)
+    inst = start_instance(%{env | store: store}, migrations: @schema, awake: [max_cells: 1])
+    [busy, other] = [unique_cell(), unique_cell()]
+    {:ok, _} = Alambique.execute(inst, busy, @insert, [0])
+
+    GatedStore.hold(gate, ~r{/0000/})
+    writer = Task.async(fn -> Alambique.execute(inst, busy, @insert, [1]) end)
+    eventually(fn -> Alambique.load(inst, busy) == {:ok, %{pending: 1}} end)
+
+    assert {:error, :overloaded} = Alambique.touch(inst, other)
+    assert awake(inst) == 1
+
+    GatedStore.open(gate)
+    assert {:ok, _} = Task.await(writer, 10_000)
+
+    # Idle again, the cell gives its place.
+    eventually(fn -> match?({:ok, _}, Alambique.touch(inst, other)) end)
+    assert awake(inst) == 1
   end
 
   test "awake.max_wakes refuses a wake while that many are in progress", env do

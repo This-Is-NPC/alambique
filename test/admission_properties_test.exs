@@ -3,7 +3,9 @@ defmodule Alambique.AdmissionPropertiesTest do
   The limits of a node (design §7) against a model, over random command
   sequences: the wake slots in use never pass `awake.max_wakes` and come back
   exactly once, a wake failure that a retry would repeat is remembered for the
-  backoff, and the cells awake never pass `awake.max_cells`.
+  backoff, the cells awake never pass `awake.max_cells` and a call that
+  would wake another one hibernates a cell that is idle, and the calls a
+  cell admits never pass `awake.max_pending`.
   """
   use ExUnit.Case, async: false
   use ExUnitProperties
@@ -171,12 +173,15 @@ defmodule Alambique.AdmissionPropertiesTest do
     end
   end
 
+  defp ids(registry), do: Registry.select(registry, [{{:"$1", :_, :_}, [], [:"$1"]}])
+
   describe "with an instance" do
     setup do
       setup_store()
     end
 
-    property "the cells awake never pass max_cells and a freed place can be taken", ctx do
+    property "the cells awake never pass max_cells and the oldest idle cell gives its place",
+             ctx do
       inst =
         start_instance(ctx,
           migrations: [{1, "CREATE TABLE t (n INTEGER PRIMARY KEY)"}],
@@ -190,31 +195,24 @@ defmodule Alambique.AdmissionPropertiesTest do
         one_of([{constant(:touch), member_of(cells)}, {constant(:sleep), member_of(cells)}])
 
       check all(commands <- list_of(command, max_length: 12), max_runs: 40) do
-        # Start from no cell awake.
+        # Start from no cell awake. `awake` lists the cells, most recent last.
         for cell <- cells, do: Alambique.hibernate(inst, cell)
         eventually(fn -> Registry.count(registry) == 0 end)
 
-        Enum.reduce(commands, MapSet.new(), fn
+        Enum.reduce(commands, [], fn
           {:touch, cell}, awake ->
-            cond do
-              cell in awake ->
-                assert {:ok, _} = Alambique.touch(inst, cell)
-                awake
-
-              MapSet.size(awake) < 3 ->
-                assert {:ok, _} = Alambique.touch(inst, cell)
-                MapSet.put(awake, cell)
-
-              true ->
-                assert {:error, :overloaded} = Alambique.touch(inst, cell)
-                awake
-            end
-            |> tap(fn awake -> assert Registry.count(registry) == MapSet.size(awake) end)
+            assert {:ok, _} = Alambique.touch(inst, cell)
+            Process.sleep(2)
+            awake = List.delete(awake, cell) ++ [cell]
+            awake = if length(awake) > 3, do: tl(awake), else: awake
+            eventually(fn -> Enum.sort(ids(registry)) == Enum.sort(awake) end)
+            assert Registry.count(registry) <= 3
+            awake
 
           {:sleep, cell}, awake ->
             :ok = Alambique.hibernate(inst, cell)
-            awake = MapSet.delete(awake, cell)
-            eventually(fn -> Registry.count(registry) == MapSet.size(awake) end)
+            awake = List.delete(awake, cell)
+            eventually(fn -> Enum.sort(ids(registry)) == Enum.sort(awake) end)
             awake
         end)
       end

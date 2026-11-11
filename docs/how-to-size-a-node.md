@@ -30,13 +30,17 @@ node memory  =  base  +  N × (min(database size, cache_kib) + schema + 150 KiB)
 the samples that led to this guide. Leave a quarter of the machine for the
 operating system, the file cache of the data directory and spikes.
 
-Two options turn the rule into a limit:
+Three options turn the rule into a limit:
 
+- `awake: [max_cells: ...]` bounds N. At the limit, a call that would wake
+  another cell hibernates the least recently used cell that has no caller
+  waiting; when every awake cell has callers waiting, the call gets
+  `{:error, :overloaded}`.
 - `awake: [cache_kib: ...]` bounds the first term of each cell.
 - `awake: [max_bytes: ...]` bounds the sum of page cache, schema and
   prepared statements of all awake cells. Past it, the least recently used
   cells without callers waiting hibernate before another wakes, and a call
-  that finds none to hibernate gets `{:error, :overloaded}`, as at `max_cells`.
+  that finds none to hibernate gets `{:error, :overloaded}`.
   `max_bytes` does not count the 150 KiB per cell, so bound the cells with
   `max_cells` too: `max_cells × 150 KiB` is the rest.
 
@@ -88,10 +92,10 @@ For example, the 2 GB row:
 - **`system` memory grows by about 2 MB per awake cell.** The options are not
   set and the cells have databases larger than SQLite's default cache
   (2 000 KiB). Set `cache_kib`.
-- **Calls get `{:error, :overloaded}` with `max_bytes` set.** Every awake cell
-  has callers waiting, or each cell is larger than `max_bytes` allows. Raise
-  `max_bytes`, add nodes, or lower `cache_kib`. A client should retry later,
-  as it does when `max_cells` is reached.
+- **Calls get `{:error, :overloaded}` with `max_cells` or `max_bytes` set.**
+  Every awake cell has callers waiting, or (`max_bytes`) each cell is larger
+  than the budget allows. Raise the limit, add nodes, or lower `cache_kib`. A
+  client should retry later.
 - **Memory grows but `sqlite_memory_used` does not.** The memory is not in the
   cells. Compare `:erlang.memory/0` by type: binaries, ETS and processes have
   their own entries. A data directory on a tmpfs (such as `/dev/shm`) also puts
