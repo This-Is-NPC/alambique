@@ -166,18 +166,6 @@ defmodule Alambique.Replication.Native do
   @doc false
   def sqlite_execute(_conn, _sql), do: nif_error()
   @doc false
-  def sqlite_prepare(_conn, _sql), do: nif_error()
-  @doc false
-  def sqlite_bind(_stmt, _params), do: nif_error()
-  @doc false
-  def sqlite_columns(_stmt), do: nif_error()
-  @doc false
-  def sqlite_step(_stmt), do: nif_error()
-  @doc false
-  def sqlite_fetch_all(_stmt), do: nif_error()
-  @doc false
-  def sqlite_release(_stmt), do: nif_error()
-  @doc false
   def sqlite_run(_conn, _sql, _params, _limits), do: nif_error()
   @doc false
   def sqlite_interrupt(_conn), do: nif_error()

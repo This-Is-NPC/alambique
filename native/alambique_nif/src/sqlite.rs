@@ -9,7 +9,7 @@ use std::ffi::{c_char, c_int, CStr, CString};
 use std::ptr;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::{OnceLock, RwLock};
 use std::time::Instant;
 
 use crate::guard::guard;
@@ -30,8 +30,8 @@ const PROGRESS_OPS: c_int = 1000;
 
 mod atoms {
     rustler::atoms! {
-        ok, error, row, done, blob, nil, undefined, idle, transaction,
-        connection_closed, invalid_statement, argument_error, busy,
+        ok, error, blob, nil, undefined, idle, transaction,
+        connection_closed, argument_error, busy,
         statement_timeout, result_too_large, not_authorized, cache_used,
         schema_used, stmt_used, lookaside_used,
     }
@@ -103,29 +103,9 @@ impl Drop for Conn {
 
 struct StmtPtr(*mut ffi::sqlite3_stmt);
 
-// SAFETY: a statement is only used under the `Mutex` of its `Stmt`, and
-// SQLite is serialized.
+// SAFETY: a statement is only used by the call that prepared it, and SQLite
+// is serialized.
 unsafe impl Send for StmtPtr {}
-
-/// A prepared statement. It keeps its connection alive. `None` once released
-/// (or for an empty statement).
-pub struct Stmt {
-    conn: ResourceArc<Conn>,
-    raw: Mutex<Option<StmtPtr>>,
-}
-
-#[rustler::resource_impl]
-impl Resource for Stmt {}
-
-impl Drop for Stmt {
-    fn drop(&mut self) {
-        guard("stmt_drop", (), || {
-            if let Some(StmtPtr(s)) = self.raw.get_mut().unwrap_or_else(|e| e.into_inner()).take() {
-                finalize(s);
-            }
-        });
-    }
-}
 
 /// Finalizes a statement that its owner took out of its slot.
 fn finalize(s: *mut ffi::sqlite3_stmt) {
@@ -136,7 +116,6 @@ fn finalize(s: *mut ffi::sqlite3_stmt) {
 /// Why a call failed: a term to return as `{:error, term}`.
 enum Failure {
     Closed,
-    Released,
     Message(String),
     Argument(String),
     Timeout,
@@ -148,7 +127,6 @@ impl Failure {
     fn term<'a>(self, env: Env<'a>) -> Term<'a> {
         let reason = match self {
             Failure::Closed => atoms::connection_closed().encode(env),
-            Failure::Released => atoms::invalid_statement().encode(env),
             Failure::Message(m) => m.encode(env),
             Failure::Argument(m) => (atoms::argument_error(), m).encode(env),
             Failure::Timeout => atoms::statement_timeout().encode(env),
@@ -371,17 +349,6 @@ fn with_db<T>(
         }
         None => Err(Failure::Closed),
     }
-}
-
-fn with_stmt<T>(
-    stmt: &ResourceArc<Stmt>,
-    f: impl FnOnce(*mut ffi::sqlite3, *mut ffi::sqlite3_stmt) -> Result<T, Failure>,
-) -> Result<T, Failure> {
-    let raw = stmt.raw.lock().unwrap_or_else(|e| e.into_inner());
-    with_db(&stmt.conn, |db| match raw.as_ref() {
-        Some(StmtPtr(s)) => f(db, *s),
-        None => Err(Failure::Released),
-    })
 }
 
 fn binary<'a>(env: Env<'a>, bytes: &[u8]) -> Term<'a> {
@@ -754,83 +721,6 @@ fn sqlite_execute<'a>(env: Env<'a>, conn: ResourceArc<Conn>, sql: Binary) -> Ter
         })
     };
     reply(env, run())
-}
-
-/// Prepares the first statement of `sql`.
-#[rustler::nif(schedule = "DirtyIo")]
-fn sqlite_prepare<'a>(env: Env<'a>, conn: ResourceArc<Conn>, sql: Binary) -> Term<'a> {
-    let _t = crate::stats::SQLITE_CALLS.time();
-    let run = || -> Outcome<'a> {
-        let raw = with_db(&conn, |db| prepare(db, sql.as_slice()))?;
-        let stmt = ResourceArc::new(Stmt {
-            conn: conn.clone(),
-            raw: Mutex::new(raw),
-        });
-        Ok((atoms::ok(), stmt).encode(env))
-    };
-    reply(env, run())
-}
-
-/// Binds a list of parameters to a prepared statement.
-#[rustler::nif(schedule = "DirtyIo")]
-fn sqlite_bind<'a>(env: Env<'a>, stmt: ResourceArc<Stmt>, params: Term<'a>) -> Term<'a> {
-    let _t = crate::stats::SQLITE_CALLS.time();
-    let run = || -> Outcome<'a> {
-        with_stmt(&stmt, |db, s| {
-            bind_all(db, s, params)?;
-            Ok(atoms::ok().encode(env))
-        })
-    };
-    reply(env, run())
-}
-
-#[rustler::nif(schedule = "DirtyIo")]
-fn sqlite_columns<'a>(env: Env<'a>, stmt: ResourceArc<Stmt>) -> Term<'a> {
-    let _t = crate::stats::SQLITE_CALLS.time();
-    let run = || -> Outcome<'a> {
-        with_stmt(&stmt, |_, s| {
-            Ok((atoms::ok(), column_names(env, s)).encode(env))
-        })
-    };
-    reply(env, run())
-}
-
-/// One step: `{:row, values}`, `:done` or `{:error, message}`.
-#[rustler::nif(schedule = "DirtyIo")]
-fn sqlite_step<'a>(env: Env<'a>, stmt: ResourceArc<Stmt>) -> Term<'a> {
-    let _t = crate::stats::SQLITE_CALLS.time();
-    let run = || -> Outcome<'a> {
-        // SAFETY: `s` is a live statement of `db`, held under the locks.
-        with_stmt(&stmt, |db, s| match unsafe { ffi::sqlite3_step(s) } {
-            ffi::SQLITE_ROW => Ok((atoms::row(), row(env, s)).encode(env)),
-            ffi::SQLITE_DONE => Ok(atoms::done().encode(env)),
-            _ => Err(Failure::Message(message(db))),
-        })
-    };
-    reply(env, run())
-}
-
-/// Steps to the end: `{:ok, rows}`.
-#[rustler::nif(schedule = "DirtyIo")]
-fn sqlite_fetch_all<'a>(env: Env<'a>, stmt: ResourceArc<Stmt>) -> Term<'a> {
-    let _t = crate::stats::SQLITE_CALLS.time();
-    let run = || -> Outcome<'a> {
-        with_stmt(&stmt, |db, s| {
-            let rows = all_rows(env, db, s, &stmt.conn.control, &Limits::default())?;
-            Ok((atoms::ok(), rows).encode(env))
-        })
-    };
-    reply(env, run())
-}
-
-/// Finalizes the statement.
-#[rustler::nif(schedule = "DirtyIo")]
-fn sqlite_release(stmt: ResourceArc<Stmt>) -> Atom {
-    let _t = crate::stats::SQLITE_CALLS.time();
-    if let Some(StmtPtr(s)) = stmt.raw.lock().unwrap_or_else(|e| e.into_inner()).take() {
-        finalize(s);
-    }
-    atoms::ok()
 }
 
 /// Prepares, binds, runs and finalizes one statement: `{:ok, columns, rows}`.
