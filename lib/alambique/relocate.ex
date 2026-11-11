@@ -16,7 +16,8 @@ defmodule Alambique.Relocate do
   #   5. Delete the source's objects once the grace period passed
   #      (`Relocate.Cleanup`), keeping its lease with `moved_to`. A try that
   #      stops here or finds the grace running leaves the job to the
-  #      compactor or to `Alambique.cleanup_moved/4`.
+  #      compactor, which also finds it again after a restart through the
+  #      marker written before step 3, or to `Alambique.cleanup_moved/4`.
   #
   # Between 3 and 4 the cell is unavailable: the source refuses and the
   # placement does not point at the destination yet.
@@ -86,6 +87,7 @@ defmodule Alambique.Relocate do
         Fault.point(:relocate_after_acquire, point)
 
         with {:ok, lease, version} <- copy(config, cell, source, dest, lease, deadline),
+             :ok <- Cleanup.record(config, source, cell),
              _ = Fault.point(:relocate_before_mark, point),
              :ok <- Lease.mark_moved(src_lease_ctx, lease, dest.id) do
           Fault.point(:relocate_after_mark, point)
@@ -190,7 +192,7 @@ defmodule Alambique.Relocate do
        ) do
     with {:ok, result} <- restore(src, cell, path, deadline),
          :ok <-
-           empty_or_ours(config, dst, dst_lease, cell, source.id, result.txid, deadline),
+           empty_or_ours(config, dst, dest, cell, source.id, result.txid, deadline),
          :ok <- Lease.install(dst_lease, cell, lease.epoch + 1, source.id, @owner),
          _ = Fault.point(:relocate_after_install, %{cell: cell, to: dest.id}),
          {:ok, version} <-
@@ -220,13 +222,13 @@ defmodule Alambique.Relocate do
   # `cleaned_at_ms` says that every data object there was marked for deletion;
   # objects a compaction wrote meanwhile are below the restored TXID too. The
   # check only lists the cell's prefix, never the trash prefix.
-  defp empty_or_ours(config, dst, dst_lease, cell, from, txid, deadline) do
-    case Lease.read(dst_lease, cell) do
+  defp empty_or_ours(config, dst, dest, cell, from, txid, deadline) do
+    case Lease.read(Config.lease_ctx(config, dest), cell) do
       {:ok, %{moved_from: ^from, moved_to: nil}} ->
         destination_files(dst, cell, txid, deadline, :bounded)
 
       {:ok, %{moved_to: to} = lease} when to != nil ->
-        with :ok <- cleaned?(config, lease),
+        with :ok <- cleaned?(config, lease, cell, dest),
              do: destination_files(dst, cell, txid, deadline, :bounded)
 
       {:ok, _} ->
@@ -240,11 +242,15 @@ defmodule Alambique.Relocate do
     end
   end
 
-  # No cleanup finished yet: run one. A recent one: wait, because cleaning
-  # again would restart the gap.
-  defp cleaned?(_config, %{cleaned_at_ms: nil}), do: {:error, :destination_not_cleaned}
+  # No cleanup finished yet: refuse, and queue it for the compactor so that a
+  # later try finds it done (the grace may still be running; the cleanup waits
+  # for it). A recent one: wait, because cleaning again would restart the gap.
+  defp cleaned?(config, %{cleaned_at_ms: nil}, cell, dest) do
+    Compactor.cleanup(config, cell, dest.id, 0)
+    {:error, :destination_not_cleaned}
+  end
 
-  defp cleaned?(config, %{cleaned_at_ms: at}) do
+  defp cleaned?(config, %{cleaned_at_ms: at}, _cell, _dest) do
     ready_at = at + Cleanup.gap(config) + config.skew_margin_ms
 
     if now_ms(config) >= ready_at,

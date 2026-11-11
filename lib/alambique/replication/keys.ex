@@ -12,6 +12,14 @@ defmodule Alambique.Replication.Keys do
   @spec cell_prefix(String.t(), String.t()) :: String.t()
   def cell_prefix(prefix, cell), do: "#{prefix}/cells/#{cell}"
 
+  @doc "Marker of a cell that moved away from the location `prefix` and awaits its cleanup (design §18)."
+  @spec moved(String.t(), String.t()) :: String.t()
+  def moved(prefix, cell), do: moved_prefix(prefix) <> cell
+
+  @doc "Prefix of the pending-cleanup markers of a location."
+  @spec moved_prefix(String.t()) :: String.t()
+  def moved_prefix(prefix), do: "#{prefix}/moved/"
+
   @spec hex(non_neg_integer) :: String.t()
   def hex(txid),
     do: txid |> Integer.to_string(16) |> String.downcase() |> String.pad_leading(16, "0")

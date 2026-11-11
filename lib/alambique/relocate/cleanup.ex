@@ -12,6 +12,11 @@ defmodule Alambique.Relocate.Cleanup do
   # `moved_at_ms + grace` must have passed: a restore that started before the
   # move finished within the grace, so no reader loses a file it listed.
   #
+  # The pending marker (`record/3`) is removed last, so a cleanup that stopped
+  # anywhere is found again by the compactors, of this node or of another one.
+  # Several nodes may run the same cleanup: the claim above lets only the last
+  # claimant stamp, and every step is idempotent.
+  #
   # A cleanup claims the lease object (`Lease.claim_cleanup/2`) before it
   # marks and stamps `cleaned_at_ms` after. A cell may move back to a location
   # with that stamp once it is older than `gap/1`, so a cleanup that was slow,
@@ -36,6 +41,43 @@ defmodule Alambique.Relocate.Cleanup do
   @doc "How old the `cleaned_at_ms` stamp must be before a cell may move back."
   @spec gap(Config.t()) :: pos_integer
   def gap(config), do: 8 * config.op_timeout_ms
+
+  @doc """
+  Records, at the location a cell is about to leave, that its cleanup is
+  pending. It is written before the move is marked, so a crash anywhere after
+  leaves the record; the compactor of any node finds it (`pending/3`).
+  """
+  @spec record(Config.t(), Location.t(), String.t()) :: :ok | {:error, term}
+  def record(config, source, cell) do
+    ctx = Config.repl_ctx(config, source)
+    {store, store_config} = ctx.store
+    key = Keys.moved(ctx.prefix, cell)
+
+    Retry.run(ctx, Retry.deadline_in(config.op_timeout_ms), fn ->
+      case store.put(store_config, key, "", :none, %{}) do
+        {:ok, _etag} -> :ok
+        {:error, reason} -> {:retry, reason}
+      end
+    end)
+  end
+
+  @doc """
+  One page of the cells with a pending cleanup at `location`, after the cell
+  `cursor`: `{:ok, cells, next}`, `next` being `nil` after the last page.
+  """
+  @spec pending(Config.t(), Location.t(), String.t() | nil, pos_integer) ::
+          {:ok, [String.t()], String.t() | nil} | {:error, term}
+  def pending(config, location, cursor, limit) do
+    ctx = Config.repl_ctx(config, location)
+    marker_prefix = Keys.moved_prefix(ctx.prefix)
+    after_key = cursor && marker_prefix <> cursor
+    deadline = Retry.deadline_in(config.op_timeout_ms)
+
+    with {:ok, keys, next} <- Objects.page(ctx, marker_prefix, deadline, after_key, limit) do
+      cells = Enum.map(keys, &String.replace_prefix(&1, marker_prefix, ""))
+      {:ok, cells, next && String.replace_prefix(next, marker_prefix, "")}
+    end
+  end
 
   @doc """
   One cleanup of `cell` at `from` (a location or its id). Options: `:grace_ms`
@@ -72,7 +114,8 @@ defmodule Alambique.Relocate.Cleanup do
          {:ok, count} <- delete_objects(config, ctx, cell, deadline),
          :ok <- drop_index(config, source, cell, deadline),
          _ = Fault.point(:cleanup_before_mark, %{cell: cell, location: source.id}),
-         :ok <- Lease.mark_cleaned(lease_ctx, lease) do
+         :ok <- Lease.mark_cleaned(lease_ctx, lease),
+         :ok <- Objects.delete(ctx, Keys.moved(ctx.prefix, cell), deadline) do
       {:ok, %{result: :cleaned, objects: count}}
     else
       {:waiting, ready_at} -> {:ok, %{result: :waiting, ready_at_ms: ready_at}}

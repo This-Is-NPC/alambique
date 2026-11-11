@@ -142,7 +142,7 @@ defmodule Alambique.PlacementTest do
                [[1], [2], [3], [4]]
 
       # The source got the fence and the moved mark, nothing from later writes.
-      added = keys(ctx.stores.a) -- before
+      added = (keys(ctx.stores.a) -- before) -- ["pa/moved/home-a"]
       assert added |> Enum.all?(&String.contains?(&1, "/0000/"))
       {:ok, lease} = Alambique.Lease.read(lease_ctx(inst, hd(ctx.locations)), cell)
       assert lease.moved_to == "b"
@@ -274,6 +274,7 @@ defmodule Alambique.PlacementTest do
 
     @grace_ms 5_000
     @settled_ms 30_000
+    @scan [moved_scan_ms: 50]
 
     defmodule Stale do
       @moduledoc false
@@ -573,6 +574,35 @@ defmodule Alambique.PlacementTest do
       assert {_, %{result: :ok, location: "a"}} =
                await_event([:alambique, :cell, :cleanup], cell, 5_000, &(&1.result == :ok))
 
+      assert numbers(inst, cell) == [1]
+    end
+
+    test "a restart before the grace ends keeps the pending cleanup", ctx do
+      opts = [moved_grace_ms: 1_000, compaction: [interval_ms: 50] ++ @scan]
+      inst = timed(ctx, opts)
+      cell = "home-a"
+      assert {:ok, _} = put(inst, cell, 1)
+      :ok = Alambique.hibernate(inst, cell)
+      assert {:ok, _} = Alambique.relocate(inst, cell, "b")
+      before = objects(ctx, :a)
+      assert before != []
+
+      stop_supervised!(inst)
+      capture([[:alambique, :cell, :cleanup]])
+      timed(ctx, [name: inst] ++ opts)
+
+      # The new node found the move and waits for the grace: nothing is deleted early.
+      {_, %{result: :waiting}} = await_event([:alambique, :cell, :cleanup], cell)
+      assert objects(ctx, :a) == before
+
+      # Past the grace the new node deletes without anyone asking.
+      elapse(ctx, 3_000)
+      eventually(fn -> objects(ctx, :a) == [] end, 10_000)
+      eventually(fn -> lease_at(inst, ctx, "a").cleaned_at_ms != nil end)
+
+      # And the cell can move back once the cleanup settled.
+      elapse(ctx, @settled_ms)
+      assert {:ok, %Location{id: "a"}} = Alambique.relocate(inst, cell, "a")
       assert numbers(inst, cell) == [1]
     end
 

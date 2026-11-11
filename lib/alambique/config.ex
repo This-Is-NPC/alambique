@@ -63,6 +63,8 @@ defmodule Alambique.Config do
     queue_limit: 10_000,
     max_age_ms: 300_000,
     retry_ms: 30_000,
+    moved_scan_ms: 60_000,
+    moved_scan_page: 100,
     batch_factor: 4,
     hold_bytes: 33_554_432,
     hold_object_bytes: 1_048_576
