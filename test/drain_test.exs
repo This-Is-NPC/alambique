@@ -156,8 +156,10 @@ defmodule Alambique.DrainTest do
 
     assert {:ok, _} = Alambique.drain(a)
 
-    assert %{done: 1, errors: [{"bad-2", {:release_failed, _}}], left: 0} =
-             Alambique.drain_status(a)
+    # `left` counts the registered cells, and a cell whose release failed
+    # leaves the registry when its process ends, a moment after the drain.
+    status = eventually(fn -> (s = Alambique.drain_status(a)).left == 0 and s end)
+    assert %{done: 1, errors: [{"bad-2", {:release_failed, _}}]} = status
   end
 
   test "the deadline ends the drain and leaves the rest awake", %{a: a, ctx: ctx} do
