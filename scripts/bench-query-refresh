@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Measures the refresh of a large query replica. Argument: size in MiB (default 128).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+MIX_ENV=test exec mix run bench/query_refresh.exs "$@"
