@@ -219,7 +219,8 @@ defmodule Alambique.Config do
             statement_timeout_ms: pos_integer,
             script_timeout_ms: pos_integer,
             max_result_rows: pos_integer,
-            max_result_bytes: pos_integer
+            max_result_bytes: pos_integer,
+            max_concurrent_statements: pos_integer
           },
           replicas:
             %{
@@ -349,7 +350,7 @@ defmodule Alambique.Config do
       compaction: compaction!(opts[:compaction]),
       retention: retention!(opts[:retention]),
       query: query,
-      sql: options!(:sql, opts[:sql], [statement_timeout_ms: op_timeout] ++ @sql_defaults),
+      sql: sql(opts[:sql], op_timeout),
       routing: options!(:routing, opts[:routing], @routing_defaults),
       wake: options!(:wake, opts[:wake], @wake_defaults),
       wal: options!(:wal, opts[:wal], @wal_defaults),
@@ -838,6 +839,19 @@ defmodule Alambique.Config do
       restore_attempts: pos_int!(query, :restore_attempts)
     }
   end
+
+  # Statements of callers run on the dirty IO schedulers, which the commits of
+  # the node share; the default leaves two for them, like the query default.
+  defp sql(opts, op_timeout) do
+    options!(
+      :sql,
+      opts,
+      [statement_timeout_ms: op_timeout, max_concurrent_statements: default_statement_slots()] ++
+        @sql_defaults
+    )
+  end
+
+  defp default_statement_slots, do: max(:erlang.system_info(:dirty_io_schedulers) - 2, 1)
 
   # Every SQLite call of a query runs on a dirty IO scheduler. Leaving two of
   # them free keeps the commits of the cells on this node from queueing behind

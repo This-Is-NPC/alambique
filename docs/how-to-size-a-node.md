@@ -71,6 +71,24 @@ For example, the 2 GB row:
  awake: [cache_kib: 512, max_bytes: 805_306_368, max_cells: 4_000]}
 ```
 
+## Dirty IO schedulers
+
+Every SQLite call runs on a dirty IO scheduler, and the VM has 10 by default
+(`+SDio`). Reads, cross-cell queries and the statements of a write share a
+node-wide limit, `sql: [max_concurrent_statements:]`, which defaults to the
+dirty IO schedulers minus two. A read over the limit gets `{:error, :busy}` at
+once, and the other schedulers stay free for commits, leases and the library's
+own statements. A node with 10 schedulers allows 8 reads at once. The count is shared by
+every Alambique instance in the VM, while the limit is set per instance: each
+instance refuses its reads when the shared count reaches its own limit. Give
+the instances of one VM the same value; with different values the lower one
+is refused first.
+
+Set it lower when slow reads on many cells hurt the commits, or raise the
+pool with `+SDio` and the limit with it. `query: [concurrency:]` defaults to
+the same bound, so a single query never takes more than the limit. A client
+that gets `:busy` should retry later.
+
 ## Check it
 
 1. Run `mise run bench:memory` with your `cache_kib` in
@@ -82,7 +100,10 @@ For example, the 2 GB row:
 2. In production, compare `:erlang.memory(:system)` with
    `Alambique.NativeStats.read()`: `sqlite_memory_used` is SQLite's share, and
    it should be most of the growth per awake cell.
-3. Watch `[:alambique, :admission, :evict]` (see [telemetry.md](telemetry.md)).
+3. Compare `Alambique.Sqlite.user_statements/0`, the user statements running
+   now, with the limit: a value that sits at the limit while callers get
+   `{:error, :busy}` means the reads are slower than the node can serve.
+4. Watch `[:alambique, :admission, :evict]` (see [telemetry.md](telemetry.md)).
    Evictions that never stop mean the budget is smaller than the working set of
    the cells your users touch: raise the memory of the node, or accept the
    cost of waking cells again.
@@ -102,6 +123,10 @@ For example, the 2 GB row:
   every database and WAL in RAM; this is an inference from a `shmem` column
   that grew with the cells in a downstream node's samples, not something this
   guide measured.
+- **Reads get `{:error, :busy}` while the node is idle.** The limit is lower
+  than the reads in flight: slow statements hold every slot. Lower
+  `sql: [statement_timeout_ms:]`, or raise `max_concurrent_statements` with
+  `+SDio`.
 - **Full scans got slower after lowering `cache_kib`.** The scan reads the
   pages that no longer fit from the operating system's file cache. Raise
   `cache_kib` for those cells, or accept about 7 % at 512 KiB on a 4.6 MB

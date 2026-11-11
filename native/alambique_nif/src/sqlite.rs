@@ -7,7 +7,7 @@
 
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::ptr;
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{OnceLock, RwLock};
 use std::time::Instant;
@@ -121,6 +121,7 @@ enum Failure {
     Timeout,
     TooLarge,
     Denied,
+    Busy,
 }
 
 impl Failure {
@@ -132,6 +133,7 @@ impl Failure {
             Failure::Timeout => atoms::statement_timeout().encode(env),
             Failure::TooLarge => atoms::result_too_large().encode(env),
             Failure::Denied => atoms::not_authorized().encode(env),
+            Failure::Busy => atoms::busy().encode(env),
         };
         (atoms::error(), reason).encode(env)
     }
@@ -257,6 +259,34 @@ unsafe extern "C" fn progress(ctx: *mut std::ffi::c_void) -> c_int {
             0
         }
     })
+}
+
+/// User statements running now, node-wide (design §7). The slot is taken and
+/// given back inside the NIF, so it is exact even when the caller is killed
+/// while the dirty scheduler runs the call.
+static USER_STATEMENTS: AtomicU64 = AtomicU64::new(0);
+
+struct Slot;
+
+impl Slot {
+    /// Takes a slot when fewer than `max` are taken; 0 takes none and
+    /// counts nothing (the library's own statements).
+    fn take(max: u64) -> Result<Option<Slot>, Failure> {
+        if max == 0 {
+            return Ok(None);
+        }
+        // A refused call never raises the count, so it never exceeds `max`.
+        USER_STATEMENTS
+            .fetch_update(AcqRel, Acquire, |n| (n < max).then_some(n + 1))
+            .map(|_| Some(Slot))
+            .map_err(|_| Failure::Busy)
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        USER_STATEMENTS.fetch_sub(1, AcqRel);
+    }
 }
 
 /// The limits of one `sqlite_run` call; 0 is no limit.
@@ -724,16 +754,19 @@ fn sqlite_execute<'a>(env: Env<'a>, conn: ResourceArc<Conn>, sql: Binary) -> Ter
 }
 
 /// Prepares, binds, runs and finalizes one statement: `{:ok, columns, rows}`.
-/// `limits` is `{read_only, timeout_ms, max_rows, max_bytes}`, 0 for no limit.
+/// `limits` is `{read_only, timeout_ms, max_rows, max_bytes, max_concurrent}`,
+/// 0 for no limit; over `max_concurrent` user statements running the call
+/// gives `{:error, :busy}` without touching the connection.
 #[rustler::nif(schedule = "DirtyIo")]
 fn sqlite_run<'a>(
     env: Env<'a>,
     conn: ResourceArc<Conn>,
     sql: Binary,
     params: Term<'a>,
-    limits: (bool, u64, u64, u64),
+    limits: (bool, u64, u64, u64, u64),
 ) -> Term<'a> {
     let _t = crate::stats::SQLITE_CALLS.time();
+    let max_concurrent = limits.4;
     let limits = Limits {
         read_only: limits.0,
         timeout_ms: limits.1,
@@ -741,6 +774,7 @@ fn sqlite_run<'a>(
         max_bytes: limits.3,
     };
     let run = || -> Outcome<'a> {
+        let _slot = Slot::take(max_concurrent)?;
         with_db(&conn, |db| {
             let _call = Call::new(&conn.control, db, &limits);
             let Some(StmtPtr(s)) = prepare(db, sql.as_slice())? else {
@@ -760,6 +794,12 @@ fn sqlite_run<'a>(
         })
     };
     reply(env, run())
+}
+
+/// User statements running now (`sqlite_run` calls with a `max_concurrent`).
+#[rustler::nif]
+fn sqlite_user_statements() -> u64 {
+    USER_STATEMENTS.load(Acquire)
 }
 
 /// Makes the statement that is running on this connection stop with
