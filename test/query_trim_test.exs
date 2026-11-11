@@ -46,7 +46,7 @@ defmodule Alambique.QueryTrimTest do
     dir = Alambique.TestDirs.new("trim")
     on_exit(fn -> File.rm_rf(dir) end)
 
-    done = Path.join(Cache.cell_dir(dir, "a"), "0000000000000001-1.db")
+    done = Path.join(Cache.cell_dir(dir, "a"), "0000000000000001-1-00000000000000aa.db")
     File.mkdir_p!(Path.dirname(done))
     File.write!(done, String.duplicate("x", 600))
     building = Cache.tmp(dir, "b")
@@ -55,5 +55,20 @@ defmodule Alambique.QueryTrimTest do
     assert {1, 600} = Cache.trim(dir, 1_000, 600)
     refute File.exists?(done)
     assert File.exists?(building)
+  end
+
+  test "a file with the name of an older version is removed" do
+    dir = Alambique.TestDirs.new("trim")
+    on_exit(fn -> File.rm_rf(dir) end)
+
+    old = Path.join(Cache.cell_dir(dir, "a"), "0000000000000001-1.db")
+    kept = Path.join(Cache.cell_dir(dir, "a"), "0000000000000002-1-00000000000000aa.db")
+    File.mkdir_p!(Path.dirname(old))
+    File.write!(old, String.duplicate("x", 100))
+    File.write!(kept, String.duplicate("y", 100))
+
+    assert {1, 100} = Cache.trim(dir, 1_000, 600)
+    refute File.exists?(old)
+    assert File.exists?(kept)
   end
 end
