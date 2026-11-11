@@ -52,6 +52,17 @@ defmodule Alambique.Load.Cgroup do
     end
   end
 
+  @doc "Swap of a cgroup in MiB (`memory.swap.current`), or nil when the file is missing."
+  @spec swap_mb(Path.t()) :: float | nil
+  def swap_mb(dir) do
+    with {:ok, text} <- File.read(Path.join(dir, "memory.swap.current")),
+         {bytes, _} <- Integer.parse(String.trim(text)) do
+      bytes / @mib
+    else
+      _ -> nil
+    end
+  end
+
   @doc "The pids in the cgroup, as strings."
   @spec pids(Path.t()) :: [String.t()]
   def pids(dir) do

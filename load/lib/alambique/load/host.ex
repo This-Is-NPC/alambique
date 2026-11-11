@@ -31,6 +31,57 @@ defmodule Alambique.Load.Host do
     String.to_integer(kib) / 1_048_576
   end
 
+  @doc "Swap in use (SwapTotal - SwapFree), in MiB, from the text of /proc/meminfo."
+  @spec parse_swap_used_mb(String.t()) :: float
+  def parse_swap_used_mb(text) do
+    [_, total] = Regex.run(~r/^SwapTotal:\s+(\d+) kB/m, text)
+    [_, free] = Regex.run(~r/^SwapFree:\s+(\d+) kB/m, text)
+    (String.to_integer(total) - String.to_integer(free)) / 1024
+  end
+
+  @doc "VmSwap, in MiB, from the text of /proc/<pid>/status; nil when the line is missing."
+  @spec parse_vmswap_mb(String.t()) :: float | nil
+  def parse_vmswap_mb(text) do
+    case Regex.run(~r/^VmSwap:\s+(\d+) kB/m, text) do
+      [_, kib] -> String.to_integer(kib) / 1024
+      nil -> nil
+    end
+  end
+
+  @doc "Swap in use on the host, in MiB."
+  @spec swap_used_mb() :: float
+  def swap_used_mb, do: "/proc/meminfo" |> File.read!() |> parse_swap_used_mb()
+
+  @doc "Swap in use by this VM (the driver), in MiB, or nil."
+  @spec own_swap_mb() :: float | nil
+  def own_swap_mb do
+    case File.read("/proc/self/status") do
+      {:ok, text} -> parse_vmswap_mb(text)
+      _ -> nil
+    end
+  end
+
+  @swap_keys [:host_mb, :driver_mb, :store_mb, :service_mb]
+
+  @doc """
+  What the swap samples of a step say. Each sample has `host_mb`, `driver_mb`,
+  `store_mb` and `service_mb` (nil when unreadable). Per key: `start`, `max`,
+  `end` and `growth` (max minus start), or nil when it was never readable.
+  """
+  @spec swap_stats([map]) :: map
+  def swap_stats(samples) do
+    for key <- @swap_keys, into: %{} do
+      case samples |> Enum.map(& &1[key]) |> Enum.reject(&is_nil/1) do
+        [] ->
+          {key, nil}
+
+        [first | _] = values ->
+          max = Enum.max(values)
+          {key, %{start: first, max: max, end: List.last(values), growth: max - first}}
+      end
+    end
+  end
+
   @doc "The state letter of /proc/<pid>/task/<tid>/stat text (the field after the command in parentheses)."
   @spec task_state(String.t()) :: String.t()
   def task_state(stat) do

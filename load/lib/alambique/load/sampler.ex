@@ -16,7 +16,7 @@ defmodule Alambique.Load.Sampler do
   @doc "Starts a window."
   def mark, do: GenServer.call(__MODULE__, :mark)
 
-  @doc "The samples since `mark/0`: `%{cgroup: [reading], host: [reading]}`."
+  @doc "The samples since `mark/0`: `%{cgroup: [reading], host: [reading], swap: [reading]}`."
   def collect, do: GenServer.call(__MODULE__, :collect)
 
   @doc "The latest host reading, or nil before the first."
@@ -29,12 +29,13 @@ defmodule Alambique.Load.Sampler do
   def init(%{service: service, store: store}) do
     state = %{
       service: service,
+      store: store,
       pids: [service, store],
       ticks: 0,
       ema: nil,
       cgroup: Cgroup.read(service),
       host: nil,
-      window: %{cgroup: [], host: []}
+      window: %{cgroup: [], host: [], swap: []}
     }
 
     send(self(), :tick)
@@ -43,11 +44,17 @@ defmodule Alambique.Load.Sampler do
 
   @impl true
   def handle_call(:mark, _from, state),
-    do: {:reply, :ok, %{state | window: %{cgroup: [], host: []}}}
+    do: {:reply, :ok, %{state | window: %{cgroup: [], host: [], swap: []}}}
 
   def handle_call(:collect, _from, state) do
-    {:reply, %{cgroup: Enum.reverse(state.window.cgroup), host: Enum.reverse(state.window.host)},
-     state}
+    window = state.window
+
+    {:reply,
+     %{
+       cgroup: Enum.reverse(window.cgroup),
+       host: Enum.reverse(window.host),
+       swap: Enum.reverse(window.swap)
+     }, state}
   end
 
   def handle_call(:host, _from, state), do: {:reply, state.host, state}
@@ -64,6 +71,15 @@ defmodule Alambique.Load.Sampler do
         {:ok, r} -> update_in(state.window.cgroup, &[Map.put(r, :at, now_ms()) | &1])
         :error -> state
       end
+
+    swap = %{
+      host_mb: Host.swap_used_mb(),
+      driver_mb: Host.own_swap_mb(),
+      store_mb: Cgroup.swap_mb(state.store),
+      service_mb: Cgroup.swap_mb(state.service)
+    }
+
+    state = update_in(state.window.swap, &[swap | &1])
 
     {:noreply,
      if(rem(state.ticks, @host_every) == 0, do: host_tick(state), else: state)

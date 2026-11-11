@@ -46,6 +46,7 @@ defmodule Alambique.Load.Driver do
     limits = %{
       delivery_min: Env.float("DELIVERY_MIN", 0.95),
       max_net_load: Env.float("MAX_NET_LOAD", 6),
+      max_swap_mb: Env.float("MAX_SWAP_MB", 0),
       max_error_ratio: Env.float("MAX_ERROR_RATIO", 0),
       latency: mod.latency(),
       mem_limit_mb: Env.int("MEM_LIMIT_MB", 512),
@@ -186,6 +187,7 @@ defmodule Alambique.Load.Driver do
       delivery: %{planned: 0, issued: 0, dropped: 0, completed: 0, ok: 0, errors: 0, ratio: nil},
       latency_ms: %{},
       host: nil,
+      swap: nil,
       cgroup: nil,
       service: nil,
       cost: nil,
@@ -253,6 +255,7 @@ defmodule Alambique.Load.Driver do
             store_full: Verdict.store_full?(Map.get(result, :error_samples, [])),
             latency_ms: step.latency_ms,
             net_load_max: step.host.net_load_max,
+            swap: swap_verdict_stats(step.swap),
             mem_mb_max: step.cgroup.mem_process_mb.max,
             aborted: result.aborted
           },
@@ -261,9 +264,18 @@ defmodule Alambique.Load.Driver do
     end
   end
 
+  defp swap_verdict_stats(swap) do
+    %{
+      driver_growth_mb: swap.driver_mb && swap.driver_mb.growth,
+      store_growth_mb: swap.store_mb && swap.store_mb.growth,
+      service_mb: swap.service_mb && swap.service_mb.max
+    }
+  end
+
   defp build(ctx, result, samples, {cg0, cg1}, {snap0, snap1}, probe) do
     latency = latency_ms(result.latencies_us)
     cgroup = cgroup_stats(samples.cgroup, cg0, cg1)
+    swap = Host.swap_stats(samples.swap)
     ops = result.ok
 
     %{
@@ -286,6 +298,7 @@ defmodule Alambique.Load.Driver do
       },
       latency_ms: latency,
       host: host_stats(samples.host),
+      swap: swap,
       cgroup: cgroup,
       service: service_stats(snap0, snap1, probe),
       cost: cost(cgroup, snap0, snap1, ops),
