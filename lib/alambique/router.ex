@@ -502,7 +502,13 @@ defmodule Alambique.Router do
     end
   end
 
-  defp call_cell(pid, request, timeout), do: GenServer.call(pid, request, timeout)
+  # The cell drops the call if it reaches it after the caller gave up.
+  defp call_cell(pid, request, :infinity), do: GenServer.call(pid, request, :infinity)
+
+  defp call_cell(pid, request, timeout) do
+    at = System.monotonic_time(:millisecond) + timeout
+    GenServer.call(pid, {:deadline, at, request}, timeout)
+  end
 
   defp again({config, cell, request, timeout, hops, attempts}, {:error, _} = last) do
     if attempts > 1,

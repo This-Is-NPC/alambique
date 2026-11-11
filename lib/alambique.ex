@@ -170,7 +170,8 @@ defmodule Alambique do
       and gives `{:error, :overloaded}` if there is none), `:max_wakes` (cells
       waking at once, default 256; also `{:error, :overloaded}`) and
       `:max_pending` (calls waiting on one cell, queued or for an upload,
-      default 10 000; more give `{:error, :busy}`, never passed). The memory of the awake
+      default 10 000; more give `{:error, :busy}`, never passed; a call whose
+      caller gave up before the cell reached it is not run). The memory of the awake
       cells is bounded by `:cache_kib` (page cache of each cell's SQLite
       connection, `PRAGMA cache_size`, default 512 KiB; SQLite's own default
       is 2 000) and by `:max_bytes` (default `nil`, no budget). With a

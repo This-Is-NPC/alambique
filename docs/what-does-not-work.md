@@ -5,24 +5,6 @@ Known defects that are still open. Limits that follow from the design are in
 entry says what happens,
 what to do about it, and where the evidence is.
 
-## A node refuses new cells instead of hibernating idle ones
-
-**What happens.** At `awake.max_cells` awake cells a call that would wake
-another cell gets `{:error, :overloaded}`, even if some awake cells have been
-idle for a long time. The node does not hibernate the least recently used cell
-to make room. Calls to a cell with `awake.max_pending` calls waiting get
-`{:error, :busy}`; the check is made by the sender, so a call whose caller
-already gave up is still run if the cell accepted it, and the limit can be
-passed by the number of callers that check at the same moment.
-
-**Workaround.** Lower `idle_timeout_ms` for hosts that cycle many cell ids, or
-call `Alambique.hibernate/3` for cells that are known to be done, and set
-`awake.max_cells` below what the memory and the file descriptors of the node
-allow. To bound memory instead of the count, set `awake.max_bytes`: it does
-hibernate the least recently used cells to make room (design §7).
-
-**Evidence.** `test/admission_test.exs`; design §7, "Admission".
-
 ## Cross-cell queries and cell reads can still fill the dirty IO pool
 
 **What happens.** Every SQLite call runs on a dirty IO scheduler (10 by
