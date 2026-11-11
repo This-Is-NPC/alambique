@@ -1144,8 +1144,8 @@ the connection, in the NIF, and not by looking at the SQL text:
   - `:max_result_rows` and `:max_result_bytes` count what the statement
     returns, so a scan that returns no rows is bounded by the deadline only.
     A statement can scan a large table inside SQLite until its deadline.
-  - Only `sqlite_run` and `sqlite_execute` are armed; the prepared-statement
-    calls (`sqlite_step`, `sqlite_fetch_all`) are not used by the library.
+  - `sqlite_run` and `sqlite_execute` are the only calls that run a
+    statement, so all of them are armed.
     The checkpoint (`Sqlite.checkpoint/1`) is not a statement: it is bounded
     by the readers that keep it from finishing (`{:error, :busy}`).
 - *Result size.* `sqlite_run` counts rows and bytes while it builds the

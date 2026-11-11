@@ -20,7 +20,6 @@ defmodule Alambique.Sqlite do
   alias Alambique.Replication.Native
 
   @type conn :: reference
-  @type stmt :: reference
   @type row :: [integer | float | binary | nil]
 
   @doc """
@@ -44,7 +43,7 @@ defmodule Alambique.Sqlite do
     )
   end
 
-  @doc "Closes the connection. Open statements then fail with `:connection_closed`."
+  @doc "Closes the connection. "
   @spec close(conn) :: :ok
   def close(conn), do: Native.sqlite_close(conn)
 
@@ -54,29 +53,6 @@ defmodule Alambique.Sqlite do
   """
   @spec execute(conn, iodata) :: :ok | {:error, term}
   def execute(conn, sql), do: Native.sqlite_execute(conn, IO.iodata_to_binary(sql))
-
-  @doc "Prepares the first statement of `sql`."
-  @spec prepare(conn, iodata) :: {:ok, stmt} | {:error, term}
-  def prepare(conn, sql), do: Native.sqlite_prepare(conn, IO.iodata_to_binary(sql))
-
-  @doc "Binds a list of parameters. Raises `ArgumentError` for a wrong count or type."
-  @spec bind(stmt, list | nil) :: :ok | {:error, term}
-  def bind(stmt, params), do: stmt |> Native.sqlite_bind(params || []) |> raise_argument_error()
-
-  @spec columns(stmt) :: {:ok, [String.t()]} | {:error, term}
-  def columns(stmt), do: Native.sqlite_columns(stmt)
-
-  @doc "One step: `{:row, row}`, `:done` or `{:error, message}`."
-  @spec step(stmt) :: {:row, row} | :done | {:error, term}
-  def step(stmt), do: Native.sqlite_step(stmt)
-
-  @doc "Steps to the end and returns every row."
-  @spec fetch_all(stmt) :: {:ok, [row]} | {:error, term}
-  def fetch_all(stmt), do: Native.sqlite_fetch_all(stmt)
-
-  @doc "Finalizes the statement."
-  @spec release(stmt) :: :ok
-  def release(stmt), do: Native.sqlite_release(stmt)
 
   @doc """
   Prepares, binds, runs and finalizes one statement.

@@ -81,25 +81,7 @@ defmodule Alambique.SqliteTest do
   end
 
   describe "statements" do
-    test "prepare, bind, step, columns and release", %{conn: conn} do
-      :ok = Sqlite.execute(conn, "CREATE TABLE s (a, b); INSERT INTO s VALUES (1, 'x'), (2, 'y')")
-      {:ok, stmt} = Sqlite.prepare(conn, "SELECT a, b FROM s WHERE a >= ? ORDER BY a")
-      :ok = Sqlite.bind(stmt, [1])
-      assert {:ok, ["a", "b"]} = Sqlite.columns(stmt)
-      assert {:row, [1, "x"]} = Sqlite.step(stmt)
-      assert {:row, [2, "y"]} = Sqlite.step(stmt)
-      assert :done = Sqlite.step(stmt)
-
-      :ok = Sqlite.bind(stmt, [2])
-      assert {:ok, [[2, "y"]]} = Sqlite.fetch_all(stmt)
-
-      :ok = Sqlite.release(stmt)
-      assert {:error, :invalid_statement} = Sqlite.step(stmt)
-      assert :ok = Sqlite.release(stmt)
-    end
-
     test "errors carry SQLite's message", %{conn: conn} do
-      assert {:error, "no such table: nope"} = Sqlite.prepare(conn, "SELECT * FROM nope")
       assert {:error, "no such table: nope"} = Sqlite.run(conn, "SELECT * FROM nope", [])
       assert {:error, "no such table: nope"} = Sqlite.execute(conn, "DELETE FROM nope")
 
@@ -161,13 +143,10 @@ defmodule Alambique.SqliteTest do
   describe "connections" do
     test "a closed connection reports it, and closing twice is fine", %{dir: dir} do
       {:ok, conn} = Sqlite.open(Path.join(dir, "closed.db"))
-      {:ok, stmt} = Sqlite.prepare(conn, "SELECT 1")
       :ok = Sqlite.close(conn)
       assert :ok = Sqlite.close(conn)
       assert {:error, :connection_closed} = Sqlite.execute(conn, "SELECT 1")
       assert {:error, :connection_closed} = Sqlite.run(conn, "SELECT 1", [])
-      assert {:error, :connection_closed} = Sqlite.step(stmt)
-      assert :ok = Sqlite.release(stmt)
     end
 
     test "read-only opens need an existing file and refuse writes", %{dir: dir, conn: conn} do
@@ -302,14 +281,12 @@ defmodule Alambique.SqliteTest do
 
       {:ok, reader} = Sqlite.open(Path.join(dir, "t.db"))
       :ok = Sqlite.execute(reader, "BEGIN")
-      {:ok, stmt} = Sqlite.prepare(reader, "SELECT a FROM w")
-      assert {:row, [1]} = Sqlite.step(stmt)
+      assert {:ok, %{rows: [[1]]}} = Sqlite.run(reader, "SELECT a FROM w", [])
 
       :ok = Sqlite.execute(conn, "INSERT INTO w VALUES (2)")
       assert {:error, :busy} = Sqlite.checkpoint(conn)
       assert File.stat!(Path.join(dir, "t.db-wal")).size > 0
 
-      Sqlite.release(stmt)
       :ok = Sqlite.execute(reader, "COMMIT")
       Sqlite.close(reader)
       assert :ok = Sqlite.checkpoint(conn)

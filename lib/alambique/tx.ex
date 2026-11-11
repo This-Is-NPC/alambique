@@ -6,7 +6,7 @@ defmodule Alambique.Tx do
   that runs it (the cell process, on the node that owns the cell). Using it
   anywhere else returns `{:error, :inactive_transaction}`.
 
-  Parameters are bound as in `Alambique.Sqlite.bind/2`: integers, floats,
+  Parameters are bound as in `Alambique.Sqlite.run/4`: integers, floats,
   `nil`, binaries as text and `{:blob, binary}` as blobs. Results are
   `%{columns: [String.t()], rows: [[term]]}`. `script/2` creates a schema with
   one change-capture cycle.
