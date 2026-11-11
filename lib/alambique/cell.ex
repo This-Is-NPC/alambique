@@ -68,7 +68,7 @@ defmodule Alambique.Cell do
 
   @doc false
   # Slot 1 counts the callers the cell accepted and has not answered; slot 2
-  # the calls the router sent that the cell has not finished with (`sent/1`);
+  # the calls the router sent that the cell has not finished with (`admit/2`);
   # slot 3 is the monotonic ms of the last call, 0 until the wake ends.
   @spec pending(pid, :atomics.atomics_ref()) :: {:ok, non_neg_integer} | :none
   def pending(pid, load) do
@@ -83,11 +83,21 @@ defmodule Alambique.Cell do
 
   @doc false
   # Counts a call before it is sent, so it counts while it waits in the
-  # mailbox, while it runs and after its caller gave up. `handle_call/3`
-  # takes it back.
+  # mailbox, while it runs and after its caller gave up; `handle_call/3`
+  # takes it back. The increment is atomic, so no more than `max` calls are
+  # ever admitted: the one that finds the count past `max` gives its place
+  # back and is refused. The callers the cell accepted (slot 1) only grow
+  # from calls already admitted, so the sum never under-counts.
   # A hibernation is not counted: callers outside the router send it too.
-  @spec sent(:atomics.atomics_ref()) :: :ok
-  def sent(load), do: :atomics.add(load, 2, 1)
+  @spec admit(:atomics.atomics_ref(), pos_integer) :: :ok | :busy
+  def admit(load, max) do
+    if :atomics.add_get(load, 2, 1) + :atomics.get(load, 1) <= max do
+      :ok
+    else
+      :atomics.sub(load, 2, 1)
+      :busy
+    end
+  end
 
   @impl true
   def init({config, id, opts, load}) do
