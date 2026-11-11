@@ -73,15 +73,23 @@ Order of decision: host busy, swap, memory, delivery, errors, latency.
 
 **Swap guard.** The service container runs with `--memory-swap` equal to
 `--memory`, so it cannot swap. The store container has no memory limit, and the
-driver is a process on the host; either could be pushed to swap on a host that
-has some (a zram swap, for example), which would slow it and spoil the step.
-Every second the driver reads the host's swap in use (`SwapTotal - SwapFree`),
-its own `VmSwap`, and `memory.swap.current` of the store and the service
-cgroups (null when a file is missing). A step whose driver or store swap grew
-by more than `ALAMBIQUE_LOAD_MAX_SWAP_MB` (default 0) over its value at the
-start of the step is repeated after the quiet wait, like a busy host, up to
-the attempts, and is then invalid with reason `swap`. Any swap of the service
-makes the step invalid with `swap` at once. Each step's JSON has a `swap`
+driver is a process on the host. On a host with swap (a zram swap, for
+example) idle processes drift into swap, so the host's total is not a criterion
+by itself; what matters is whether the measured parts are swapped. Every second
+the driver reads the host's swap in use (`SwapTotal - SwapFree`), its own
+`VmSwap`, and `memory.swap.current` of the store and the service cgroups (null
+when a file is missing). A step is repeated after the quiet wait, like a busy
+host, up to the attempts, and is then invalid with reason `swap`, when:
+
+- the driver's `VmSwap` at its maximum during the step is above
+  `ALAMBIQUE_LOAD_MAX_DRIVER_SWAP_MB` (default 16, absolute);
+- the store's swap grew during the step (maximum minus its value at the start)
+  by more than `ALAMBIQUE_LOAD_MAX_STORE_SWAP_MB` (default 0);
+- the host's swap in use at its maximum during the step is above
+  `ALAMBIQUE_LOAD_MAX_HOST_SWAP_MB` (default 512, absolute).
+
+A value exactly at its limit is valid. Any swap of the service makes the step
+invalid with `swap` at once, with no repeat. Each step's JSON has a `swap`
 object: for `host_mb`, `driver_mb`, `store_mb` and `service_mb`, the `start`,
 `max`, `end` and `growth` (max minus start), in MB. The summary table has the
 host swap maximum of each step.
@@ -166,7 +174,9 @@ All are environment variables; set them before `mise run load`.
 | `ALAMBIQUE_LOAD_SETTLE_S` | 30 | seconds of quiet readings before each step (one reading per 5 s) |
 | `ALAMBIQUE_LOAD_WAIT_QUIET_STEP_S` | 1800 | longest wait for a quiet host before a step; then the step is invalid (`host_busy`) |
 | `ALAMBIQUE_LOAD_ATTEMPTS` | 5 | times a step the host disturbed runs before it is invalid |
-| `ALAMBIQUE_LOAD_MAX_SWAP_MB` | 0 | growth of the driver's or the store's swap allowed within a step (max minus value at its start) |
+| `ALAMBIQUE_LOAD_MAX_DRIVER_SWAP_MB` | 16 | the driver's `VmSwap` allowed (max during a step); above it the step is repeated, then `swap` |
+| `ALAMBIQUE_LOAD_MAX_STORE_SWAP_MB` | 0 | growth of the store's swap allowed within a step (max minus value at its start) |
+| `ALAMBIQUE_LOAD_MAX_HOST_SWAP_MB` | 512 | the host's swap in use allowed (max during a step) |
 | `ALAMBIQUE_LOAD_MIN_AVAILABLE_GIB` | 6 | clean stop below this |
 | `ALAMBIQUE_LOAD_START_LOAD` | 8 | load average at most, to start a case |
 | `ALAMBIQUE_LOAD_WAIT_QUIET_S` | 600 | how long a case waits to start (a step waits by `_WAIT_QUIET_STEP_S`) |
@@ -223,8 +233,10 @@ ALAMBIQUE_LOAD_MIN_AVAILABLE_GIB=0.5 ALAMBIQUE_LOAD_STORE_MB=1536 \
 ```
 
 The VM has 11.8 GB of zram swap. The service container keeps `--memory-swap`
-equal to `--memory`, so it never swaps, and a step in which the driver or the
-store goes to swap is repeated and then invalid (see the swap guard above).
+equal to `--memory`, so it never swaps. Idle processes of the VM drift into
+swap, so the host's swap only counts above 512 MB; a step in which the driver
+or the store goes to swap is repeated and then invalid (see the swap guard
+above).
 The driver runs on the same VM, so it shares the VM's CPUs with the service
 and the store. Its CPU is not counted, but it can take CPU from them; the host
 guard still repeats a step when the host is busy. If the store's tmpfs fills,
@@ -273,9 +285,9 @@ Not run yet.
   `ALAMBIQUE_LOAD_WAIT_QUIET_STEP_S` or `ALAMBIQUE_LOAD_ATTEMPTS`.
 - Exit status 2 (invalid), 3 (host low on memory), 4 (service down). For 4,
   read the container's log; a case prints it when the service died.
-- A step repeated or invalid with `{:swap, :driver, ...}` or `{:swap, :store,
-  ...}`: the host pushed the driver or the store to swap. Free memory on the
-  host, or lower `ALAMBIQUE_LOAD_STORE_MB` / `ALAMBIQUE_LOAD_DATA_MB`. With
+- A step repeated or invalid with `{:swap, :driver, ...}`, `{:swap, :store,
+  ...}` or `{:swap, :host, ...}`: the host pushed the driver or the store to
+  swap, or its swap in use is high. Free memory on the host, or lower `ALAMBIQUE_LOAD_STORE_MB` / `ALAMBIQUE_LOAD_DATA_MB`. With
   `{:swap, :service, ...}` the service container is not limited as
   intended; check its `memory.swap.max`.
 - A tmpfs full error in the service log: raise `ALAMBIQUE_LOAD_DATA_MB`.
