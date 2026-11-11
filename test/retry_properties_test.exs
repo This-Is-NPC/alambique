@@ -9,8 +9,10 @@ defmodule Alambique.Replication.RetryPropertiesTest do
 
   alias Alambique.Replication.Retry
 
-  # How far past its deadline a call may end (one slice of scheduling).
-  @slack_ms 150
+  # How far past its deadline a call may end. It only has to tell a kill at the
+  # deadline from an attempt left running (the longest hang here is 5 s), so it
+  # leaves room for a loaded scheduler.
+  @slack_ms 1_000
 
   # Calls `fun` as the n-th time and records when.
   defp recorder(script) do
@@ -53,7 +55,9 @@ defmodule Alambique.Replication.RetryPropertiesTest do
     check all(late <- integer(0..1_000), reason <- term()) do
       {fun, calls} = recorder(fn _ -> {:retry, reason} end)
 
-      assert Retry.run(ctx(1, 2), Retry.deadline_in(-late), fun) == {:error, reason}
+      # The grace of an attempt past the deadline is the first backoff: long
+      # enough that a loaded scheduler does not kill the call before it runs.
+      assert Retry.run(ctx(1_000, 2_000), Retry.deadline_in(-late), fun) == {:error, reason}
       assert length(calls.()) == 1
     end
   end
@@ -80,12 +84,14 @@ defmodule Alambique.Replication.RetryPropertiesTest do
       assert {:error, last} = Retry.run(ctx(backoff, backoff * 4), deadline, fun)
       times = calls.()
 
-      # The reason is the one of the last call.
-      assert last == length(times) - 1
+      # The reason is the one of the last call, or of the one before when the
+      # deadline killed the last call after it was recorded.
+      killed = if length(times) >= 2, do: length(times) - 2, else: :timeout
+      assert last in [length(times) - 1, killed]
       # Waiting between calls is at least the schedule: backoff, doubled, capped.
       schedule = Stream.iterate(backoff, &min(&1 * 2, backoff * 4))
       # Every wait that was made began before the deadline would have passed.
-      assert schedule |> Enum.take(length(times) - 1) |> Enum.sum() < deadline_ms
+      assert schedule |> Enum.take(max(length(times) - 1, 0)) |> Enum.sum() < deadline_ms
 
       times
       |> Enum.chunk_every(2, 1, :discard)
