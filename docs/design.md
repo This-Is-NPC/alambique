@@ -1072,6 +1072,12 @@ Why each overlap is safe:
   file. It is the largest part of an awake cell's memory: SQLite's default is
   2 000 KiB per connection, and the NIF hands SQLite's allocations to the BEAM
   (`enif_alloc`, `alloc.rs`), so they count in `:erlang.memory(:system)`.
+  The bundled SQLite is built with `SQLITE_ENABLE_MEMORY_MANAGEMENT`, which
+  gives all connections of the VM one page cache pool: the bound is the sum of
+  the connections' `cache_size`, and one connection can hold more than its own
+  share while the others hold less (`cache_used` of a cell can pass
+  `cache_kib`; the sum does not). `test/sqlite_memory_test.exs` is not async
+  for this reason.
 - `max_bytes` (default `nil`: no budget) bounds the memory that the awake
   cells hold. Each awake cell records, in the admission table, the sum of
   `SQLITE_DBSTATUS_CACHE_USED`, `SCHEMA_USED` and `STMT_USED` of its connection
