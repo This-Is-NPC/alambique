@@ -14,7 +14,7 @@ defmodule Alambique.Store.S3 do
     * `:region` - signing region, default `"us-east-1"` (R2 uses `"auto"`)
     * `:path_style` - `true` (default) puts the bucket in the path, as
       SeaweedFS needs; `false` uses `bucket.host`
-    * `:receive_timeout` - milliseconds, default `15_000`
+    * `:receive_timeout` - milliseconds, default `8_000`, below the default `:op_timeout_ms` (10 000) so that the client gives up before the library does; raise it only together with `:op_timeout_ms`
     * `:req_options` - extra options merged into every `Req` request, for
       example `finch: [pool_timeout: 5_000]` for the wait for a pooled connection
 
@@ -31,7 +31,7 @@ defmodule Alambique.Store.S3 do
   """
   @behaviour Alambique.Store
 
-  @default_timeout 15_000
+  @default_timeout 8_000
   @credentials [:access_key_id, :secret_access_key]
 
   @impl true

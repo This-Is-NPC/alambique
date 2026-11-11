@@ -65,7 +65,10 @@ defmodule Alambique do
       keeps its page cache until it sleeps (see `:awake`, and
       `docs/how-to-size-a-node.md`).
     * `:op_timeout_ms` - time budget of one store operation such as an upload or
-      a restore, capped by the lease (default 10 000).
+      a restore, capped by the lease (default 10 000). Every attempt of a store
+      call runs under this deadline and is killed when it passes, so a store
+      that never answers cannot hold a cell longer. A store with its own client
+      timeout (`Alambique.Store.S3` `:receive_timeout`) should keep it below this.
     * `:pipeline_depth` - how many batches a cell may have uploading at once,
       1 to 16 (default 8; 1 uploads one batch at a time). Above 1 a cell
       encodes the next batch while the previous ones upload and answers

@@ -251,6 +251,20 @@ the panic tests abort the VM when `guard` does not catch.
   the same for its HTTP client with `{:error, {:request_crashed, kind, reason}}`,
   for example when the connection pool of Finch is exhausted; the pool settings
   go in its `:req_options` (`finch: [pool_timeout: ...]`).
+- **Hard deadline.** Calls made through `Replication.Retry.run/3` (everything
+  except the single lease requests, see
+  [what-does-not-work.md](what-does-not-work.md)) run each attempt in its own
+  process, linked to the caller and killed when the operation deadline
+  (`op_timeout_ms`, or less) passes; the call then returns `{:error, :timeout}`
+  (an attempt that starts at or past the deadline still gets 50 ms). The
+  deadline therefore binds a store that never returns, and not only the waits
+  between attempts. An attempt that raises, throws or exits does so in the
+  caller. Cost, measured with a function that returns at once: 2.6 us per
+  call against 0.07 us without the process, which is small next to a request.
+  A killed `put` may have been applied, as for any failed `put`.
+  `Alambique.Store.S3` ends a request after `:receive_timeout`, 8 000 ms by
+  default, below the default `op_timeout_ms` (10 000), so the client gives up
+  before the library does; raise the two together.
 - `Alambique.Store.S3` implements it with Req and AWS SigV4, with a
   path-style option. SeaweedFS is the only store it is tested on
   ([storage-compatibility.md](storage-compatibility.md)). It does not follow

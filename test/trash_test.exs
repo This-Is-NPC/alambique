@@ -301,7 +301,11 @@ defmodule Alambique.TrashTest do
       repl = repl_ctx(inst, cell)
 
       {:ok, keys} =
-        Alambique.Replication.Objects.list(repl, Keys.files_prefix(repl.prefix, cell), 5_000)
+        Alambique.Replication.Objects.list(
+          repl,
+          Keys.files_prefix(repl.prefix, cell),
+          Alambique.Replication.Retry.deadline_in(5_000)
+        )
 
       segment = Enum.find(keys, &String.contains?(&1, "/0000/"))
 
