@@ -508,6 +508,14 @@ answer. A lease never goes back to an older
 token, so a read that finds the cell's token has seen no takeover so far. The
 cost is one `GET` per checked read, which a plain read does not pay.
 
+The `GET` cannot be answered from the lease the cell already knows (valid by
+its own clock, minus the skew margin): that lease says nothing about a newer
+one. A takeover (§5.1) or a move writes a newer lease at once and does not wait
+for the old one to expire, and the window above (`ttl - skew_margin` at worst)
+is exactly the time during which the cell's own view is valid and wrong. A
+checked read exists to close that window, so only the stored lease can answer
+it.
+
 ## 6. Replication and fencing
 
 The awake cell is the only writer of its SQLite file. It opens it in WAL
@@ -1197,6 +1205,13 @@ the connection, in the NIF, and not by looking at the SQL text:
   already run. `test/statement_slots_properties_test.exs` checks that the
   running statements never exceed the limit and that the count returns to 0
   with callers killed mid-call.
+- *Prepare cost.* Every call prepares its statement again; there is no
+  statement cache in the NIF. Measured through `Sqlite.run/4` on a file
+  database (1 000 rows, an indexed `SELECT ... WHERE w = ? AND n > ? ORDER BY n
+  LIMIT 10`): preparing and releasing takes about 4 us and the whole call
+  about 11 us. Next to the cell call, and for a write the upload of its
+  batch, that is not measurable, so a cache (which would also have to be
+  dropped at every schema change) is not built.
 - *Parameters.* A wrong number or type of parameters is
   `{:error, {:bad_params, message}}` from `Db.run/4` and `Db.read/4`; the
   cell process does not crash. Lengths over 2 GiB are refused in the NIF.
