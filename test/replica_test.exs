@@ -39,6 +39,16 @@ defmodule Alambique.ReplicaTest do
 
   defp rows({:ok, %{rows: rows}}), do: List.flatten(rows)
 
+  # Inserts `n` on the owner and returns once the write is older than `bound`
+  # ms on the monotonic clock. The bound promises the writes acknowledged more
+  # than `bound` ms before the read started (design §21), so a read with this
+  # bound must see `n`; one started within `bound` ms of the write may not.
+  defp write_older_than(t, n, bound) do
+    {:ok, _} = Alambique.execute(t.owner, t.cell, "INSERT INTO t (n) VALUES (#{n})")
+    acked = System.monotonic_time(:millisecond)
+    eventually(fn -> System.monotonic_time(:millisecond) - acked > bound + 1 end)
+  end
+
   # Reads until the replica answers.
   defp ready(t) do
     Enum.find_value(1..400, fn _ ->
@@ -98,17 +108,18 @@ defmodule Alambique.ReplicaTest do
     calls = for op <- [:list, :get, :head], do: Alambique.CountingStore.count(counts, op)
     assert Enum.sum(calls) < 90, "store calls of an idle replica: #{inspect(calls)}"
 
-    {:ok, _} = Alambique.execute(t.owner, t.cell, "INSERT INTO t (n) VALUES (2)")
-    assert {:ok, %{rows: [[1], [2]]}} = read.(1)
+    write_older_than(t, 2, 50)
+    assert {:ok, %{rows: [[1], [2]]}} = read.(50)
   end
 
   test "the replica follows the owner within the bound", t do
     :ok = Alambique.replicas(t.reader, t.cell, true)
     ready(t)
 
-    {:ok, _} = Alambique.execute(t.owner, t.cell, "INSERT INTO t (n) VALUES (2)")
-    # A bound of 1 ms cannot be met by the last poll: the read waits for a refresh.
-    assert [1, 2] = rows(bounded(t, 1))
+    # The bound is shorter than the 50 ms poll: the read cannot rely on the
+    # last poll when it is older, and waits for a refresh.
+    write_older_than(t, 2, 20)
+    assert [1, 2] = rows(bounded(t, 20))
   end
 
   test "on_stale: :owner sends a stale read to the owner at once", t do
