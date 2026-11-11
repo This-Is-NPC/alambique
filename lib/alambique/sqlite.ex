@@ -69,6 +69,10 @@ defmodule Alambique.Sqlite do
     * `:max_rows` and `:max_bytes` - `{:error, :result_too_large}` when the
       result has more rows, or more bytes of text, blobs and (8 each) other
       values.
+    * `:max_concurrent` - a user statement: `{:error, :busy}` at once when
+      this many user statements already run on the node (design §7). The
+      call is counted while it runs on the dirty scheduler, so a caller that
+      dies mid-call cannot leak a slot. `user_statements/0` is the count.
   """
   @spec run(conn, iodata, list, keyword) ::
           {:ok, %{columns: [String.t()], rows: [row]}} | {:error, term}
@@ -77,7 +81,8 @@ defmodule Alambique.Sqlite do
       Keyword.get(opts, :read_only, false),
       Keyword.get(opts, :timeout_ms, 0),
       Keyword.get(opts, :max_rows, 0),
-      Keyword.get(opts, :max_bytes, 0)
+      Keyword.get(opts, :max_bytes, 0),
+      Keyword.get(opts, :max_concurrent, 0)
     }
 
     case Native.sqlite_run(conn, IO.iodata_to_binary(sql), params || [], limits) do
@@ -85,6 +90,10 @@ defmodule Alambique.Sqlite do
       other -> raise_argument_error(other)
     end
   end
+
+  @doc "User statements running now on the node (`:max_concurrent` of `run/4`)."
+  @spec user_statements() :: non_neg_integer
+  def user_statements, do: Native.sqlite_user_statements()
 
   @doc """
   Makes the statement running on `conn` stop with `{:error, "interrupted"}`.

@@ -214,6 +214,13 @@ defmodule Alambique do
       `:max_result_bytes` (text and blobs by length, other values as 8 bytes;
       default 67 108 864, 64 MiB). A statement over a limit gives
       `{:error, :statement_timeout}` or `{:error, :result_too_large}`.
+      `:max_concurrent_statements` is the most reads (owner, replica and
+      cross-cell) that run on the node at once, so that commits keep dirty IO
+      schedulers (default the dirty IO schedulers minus two, at least 1); a
+      read over it gets `{:error, :busy}` at once. The count is VM-wide,
+      shared by every instance in the VM, and the limit is per instance: an
+      instance refuses its reads when the shared count reaches its own limit,
+      so instances in one VM should use the same value.
     * `:query` - defaults of `Alambique.Query`: `:cache_bytes` (default 1 GiB),
       `:concurrency` (cells read at once, default the schedulers online, at most
       two fewer than the dirty IO schedulers so that commits do not queue behind

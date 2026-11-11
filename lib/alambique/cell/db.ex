@@ -67,15 +67,27 @@ defmodule Alambique.Cell.Db do
   Statement limits from the `:sql` option of the instance: the options of
   `Alambique.Sqlite.run/4` for a statement run for a caller. `ms` is the
   caller's own deadline; it never exceeds `statement_timeout_ms`.
+  `max_concurrent` is the node-wide limit on user statements, the limit of reads.
   """
   @spec limits(map, pos_integer | nil) :: keyword
   def limits(%{sql: sql}, ms \\ nil) do
     [
       timeout_ms: min(ms || sql.statement_timeout_ms, sql.statement_timeout_ms),
       max_rows: sql.max_result_rows,
-      max_bytes: sql.max_result_bytes
+      max_bytes: sql.max_result_bytes,
+      max_concurrent: sql.max_concurrent_statements
     ]
   end
+
+  @doc """
+  `limits/2` for the statements of a write transaction. They are counted, so
+  reads see them, but only a full pool refuses one: a write is not refused
+  because reads hold the slots (design §7).
+  """
+  @spec write_limits(map, pos_integer | nil) :: keyword
+  def write_limits(config, ms \\ nil),
+    do:
+      Keyword.put(limits(config, ms), :max_concurrent, :erlang.system_info(:dirty_io_schedulers))
 
   @doc """
   The deadline of the statements of migrations, `Alambique.Tx.script/2` and

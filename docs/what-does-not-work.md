@@ -5,23 +5,6 @@ Known defects that are still open. Limits that follow from the design are in
 entry says what happens,
 what to do about it, and where the evidence is.
 
-## Cross-cell queries and cell reads can still fill the dirty IO pool
-
-**What happens.** Every SQLite call runs on a dirty IO scheduler (10 by
-default). The default `query: [concurrency:]` leaves two free, but several
-`Alambique.Query` runs at once, or slow reads on many cells, can still hold all
-of them, and the commits of other cells then wait for a free scheduler. A
-statement is bounded by `sql: [statement_timeout_ms:]`, so the wait ends when
-the statements do. There is no node-wide limit on concurrent user statements:
-it needs a semaphore with a monitor on every read path, and it would make a
-read wait for a slot on the cell process.
-
-**Workaround.** Raise the dirty IO pool (`+SDio`), lower
-`query: [concurrency:]` and `sql: [statement_timeout_ms:]` on nodes that run
-both, or keep cross-cell queries on a node that owns few cells.
-
-**Evidence.** Design §14 and `Alambique.Config` (`default_query_concurrency`).
-
 ## A query replica refresh costs the size of the database
 
 **What happens.** `Alambique.Query` refreshes a cached replica by copying the

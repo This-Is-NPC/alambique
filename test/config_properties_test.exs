@@ -44,6 +44,7 @@ defmodule Alambique.ConfigPropertiesTest do
     {:sql, :script_timeout_ms},
     {:sql, :max_result_rows},
     {:sql, :max_result_bytes},
+    {:sql, :max_concurrent_statements},
     {:drain, :concurrency},
     {:drain, :timeout_ms},
     {:drain, :rounds},

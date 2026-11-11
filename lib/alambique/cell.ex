@@ -353,7 +353,7 @@ defmodule Alambique.Cell do
     case Db.transaction(state.conn, txid, Publisher.wrap(state, fun),
            select: state.config.feed,
            isolated: isolated?,
-           limits: Db.limits(state.config, ms)
+           limits: Db.write_limits(state.config, ms)
          ) do
       {:ok, value} ->
         state = Publisher.committed(state)

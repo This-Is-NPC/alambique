@@ -1155,6 +1155,34 @@ the connection, in the NIF, and not by looking at the SQL text:
   serves the owner path, replicas and cross-cell queries, so all of them are
   capped. The cap bounds the result a caller gets, not the work of the
   statement (see "Deadline").
+- *Slots.* Every SQLite call runs on a dirty IO scheduler (`+SDio`, 10 by
+  default), shared with the commits, leases and the library's own
+  statements. `sqlite_run` takes a slot before it touches the connection and
+  gives it back when it returns: a node-wide counter in the NIF, raised by a
+  compare-and-swap that never passes the limit. A user statement with no free
+  slot gets `{:error, :busy}` at once, so the cell process never waits for
+  one. Owner reads (checked or not), replica reads and `Alambique.Query` use
+  `sql: [max_concurrent_statements:]` as the limit (default: the dirty IO
+  schedulers minus two, at least 1). The count is VM-wide (the dirty IO pool
+  is per VM, so the counter is shared by every Alambique instance in the
+  BEAM), while the limit is per instance: each instance refuses its reads when
+  the shared count reaches its own limit. Instances in one VM should use the
+  same value; with different values the lower one is refused first and the
+  higher one can use the slots the others leave. The statements of a write transaction
+  are counted too, but their limit is the whole pool: reads never make a write
+  fail, while writes take slots from reads. The library's statements (`BEGIN`,
+  `COMMIT`, migrations, `Tx.script/2`, scrub, restore) take none, and the
+  schedulers left over are theirs. The slot belongs to the call inside the
+  NIF, not to the caller, so nothing needs a monitor: a caller killed
+  mid-call leaves a statement that still runs on the scheduler, and its slot
+  comes back when that statement ends, at the deadline at the latest.
+  `:max_concurrent` made no measurable difference to a `SELECT 1` (about
+  2.3 us per call, differences within 0.1 us). Statements that wait in the
+  dirty queue are not counted: a user call that starts with no free slot
+  returns at once, so the wait of a commit is bounded by the calls that
+  already run. `test/statement_slots_properties_test.exs` checks that the
+  running statements never exceed the limit and that the count returns to 0
+  with callers killed mid-call.
 - *Parameters.* A wrong number or type of parameters is
   `{:error, {:bad_params, message}}` from `Db.run/4` and `Db.read/4`; the
   cell process does not crash. Lengths over 2 GiB are refused in the NIF.
@@ -2877,7 +2905,12 @@ cell that fails
 reason}` and the others go on. The connection is `query_only`, and the
 statement also goes through `Alambique.Cell.Db.read/4` (§7), so writes,
 `ATTACH`, `PRAGMA` with a value and transaction statements give `:read_only`,
-and a result over the `:sql` caps gives `:result_too_large`.
+and a result over the `:sql` caps gives `:result_too_large`. The statement
+takes a slot of the node-wide limit on user statements (§7, "Slots"), so
+queries and owner reads together never hold more than
+`sql: [max_concurrent_statements:]` dirty IO schedulers; a cell that finds none
+free gives `{:error, cell, :busy}`. `:concurrency` defaults to the same bound,
+so a query alone never meets it.
 Rows of a cell are returned when that cell is done; a cell's result is held in
 memory.
 
