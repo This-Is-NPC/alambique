@@ -12,6 +12,10 @@ defmodule Alambique.Load.Host do
   @tick_s 5
   @decay :math.exp(-@tick_s / 60)
 
+  @doc "Seconds between host samples."
+  @spec tick_s() :: pos_integer
+  def tick_s, do: @tick_s
+
   @doc "The 1-minute load average from the text of /proc/loadavg."
   @spec parse_loadavg(String.t()) :: float
   def parse_loadavg(text) do

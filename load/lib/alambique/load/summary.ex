@@ -15,6 +15,7 @@ defmodule Alambique.Load.Summary do
     meta
     |> Map.merge(%{
       finished_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+      quiet_wait_s: steps |> Enum.map(& &1.quiet_wait_s) |> Enum.sum(),
       outcome: outcome,
       stopped_by: stopped_by(outcome, steps),
       rows: Enum.map(steps, &row/1),
@@ -84,6 +85,7 @@ defmodule Alambique.Load.Summary do
       level: s.level,
       verdict: s.verdict,
       reason: s.reason,
+      quiet_wait_s: s.quiet_wait_s,
       delivery_ratio: s.delivery.ratio,
       latency_ms: s.latency_ms,
       cpu_ms_per_op: s.cost && s.cost.cpu_ms_per_op,
@@ -151,6 +153,7 @@ defmodule Alambique.Load.Summary do
       "- Stopped by: #{summary.stopped_by}.",
       last_good_line(summary),
       fit_line(summary),
+      wait_line(summary),
       "- Reproduce: `#{summary.command}`"
     ]
 
@@ -174,6 +177,11 @@ defmodule Alambique.Load.Summary do
         else: ""
       )
   end
+
+  defp wait_line(%{quiet_wait_s: seconds}) when seconds > 0,
+    do: "- Waited #{num(seconds)} s in all for the host to be quiet."
+
+  defp wait_line(_), do: nil
 
   defp fit_line(%{memory_fit: nil}), do: nil
 
