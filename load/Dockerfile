@@ -3,9 +3,11 @@
 # The build stage compiles the dependencies and the Rust crate's dependencies
 # in their own layers, so a change to the sources rebuilds only what it touches.
 
-ARG ERLANG
-ARG ELIXIR
-ARG DEBIAN
+# scripts/load-image passes the real values; these only keep FROM valid for
+# a build without them (which fails at the pull, naming the missing version).
+ARG ERLANG=unset
+ARG ELIXIR=unset
+ARG DEBIAN=unset
 FROM hexpm/elixir:${ELIXIR}-erlang-${ERLANG}-debian-${DEBIAN} AS build
 ARG RUST
 
