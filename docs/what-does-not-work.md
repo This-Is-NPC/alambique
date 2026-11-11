@@ -5,23 +5,6 @@ Known defects that are still open. Limits that follow from the design are in
 entry says what happens,
 what to do about it, and where the evidence is.
 
-## A case-insensitive data directory is not checked
-
-**What happens.** `:data_dir` must be on a case-sensitive file system. On a
-case-insensitive one, ids that differ only in case (`Org`, `org`) have separate
-leases but one local file.
-
-A duplicate `node_id` is not a defect: leases name the instance by `node_id`
-and a random incarnation, so two instances with one `node_id` cannot take each
-other's cells (design §5). The cost is that a crashed node waits for its leases
-to expire after a restart.
-
-**Workaround.** Use a case-sensitive file system (Linux ext4, xfs; not a
-default macOS or Windows volume or a bind mount of one).
-
-**Evidence.** None needed: the check does not exist. It needs a case-insensitive
-mount to test.
-
 ## Litestream has not been run on our replicas
 
 **What happens.** The key layout, the level-9 snapshots and the

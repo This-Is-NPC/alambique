@@ -1,10 +1,10 @@
 defmodule Alambique.DataDirLockTest do
-  @moduledoc "One live instance per data directory, (design §1)."
+  @moduledoc "One live instance per data directory, on a case-sensitive file system (design §1)."
   use ExUnit.Case, async: false
 
   import Alambique.CellHelpers
 
-  alias Alambique.Replica
+  alias Alambique.{DataDir, Replica}
 
   setup do
     %{ctx: setup_store()}
@@ -93,5 +93,33 @@ defmodule Alambique.DataDirLockTest do
       unless alive, do: :done, else: Process.sleep(20) && :alive
     end)
     |> Enum.find(&(&1 == :done or System.monotonic_time(:millisecond) > deadline))
+  end
+
+  describe "case sensitivity" do
+    test "a case-sensitive file system passes the probe and leaves no file behind", %{ctx: ctx} do
+      refute DataDir.case_insensitive?(ctx.dir)
+      assert File.ls!(ctx.dir) == []
+    end
+
+    # No case-insensitive mount is available to tests (it needs root), so the
+    # lookup of the flipped name is replaced by one that folds case.
+    test "the probe sees a lookup that folds case and removes its file", %{ctx: ctx} do
+      folding = fn path ->
+        File.exists?(Path.join(Path.dirname(path), String.downcase(Path.basename(path))))
+      end
+
+      assert DataDir.case_insensitive?(ctx.dir, folding)
+      assert File.ls!(ctx.dir) == []
+    end
+
+    test "a directory that folds case is refused and its lock released", %{ctx: ctx} do
+      dir = Path.join(ctx.dir, "folding")
+
+      assert {:error, {:data_dir_case_insensitive, ^dir}} =
+               DataDir.acquire(dir, &Alambique.Replication.Native.dir_lock/1, fn _ -> true end)
+
+      # The refusal released the lock.
+      assert {:ok, _} = DataDir.acquire(dir)
+    end
   end
 end

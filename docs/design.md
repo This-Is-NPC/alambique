@@ -35,6 +35,15 @@ for SQLite. `test/data_dir_lock_test.exs` covers two instances in one VM, a
 lock held by another OS process, and the release after a stop;
 `test/data_dir_lock_properties_test.exs` checks a model of starts and stops.
 
+The directory must also be case-sensitive: on a case-insensitive file system
+ids that differ only in case (`Org`, `org`) have separate leases and one local
+file. Each start creates a probe file with a lower-case name, looks for the
+upper-case name, and removes the probe; a hit refuses the start with
+`{:error, {:data_dir_case_insensitive, path}}`. The check refuses because
+the failure is silent corruption of two cells. A real case-insensitive mount
+needs root, so the tests replace the lookup of the flipped name
+(`Alambique.DataDir.case_insensitive?/2`) and have not run on such a mount.
+
 ## 2. Packages and layout
 
 | Path | Package | Purpose |
