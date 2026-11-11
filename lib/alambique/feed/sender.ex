@@ -27,7 +27,8 @@ defmodule Alambique.Feed.Sender do
       ctx: state.repl_ctx,
       config: state.config,
       prefix: state.location.prefix,
-      epoch: state.lease.epoch
+      epoch: state.lease.epoch,
+      floor: state.feed_floor
     }
 
     spawn_link(fn -> init(args) end)
@@ -39,7 +40,7 @@ defmodule Alambique.Feed.Sender do
     loop(
       Map.merge(args, %{
         queue: :queue.new(),
-        bump: nil,
+        floor: args.floor,
         failures: 0,
         logged: nil,
         flush: nil,
@@ -50,8 +51,8 @@ defmodule Alambique.Feed.Sender do
 
   defp loop(w) do
     if :queue.is_empty(w.queue) do
-      # The run of late batches ends with the queue. An idle sender hibernates.
-      :erlang.hibernate(__MODULE__, :resume, [%{flushed(w) | bump: nil}])
+      # The floor stays: keys never go back, however long the sender idles.
+      :erlang.hibernate(__MODULE__, :resume, [flushed(w)])
     else
       w = linger(w)
       {batches, rest} = take(w.queue, w.size)
@@ -161,33 +162,37 @@ defmodule Alambique.Feed.Sender do
   defp rewind?(%{changes: [{"", "rewind", _, _}]}), do: true
   defp rewind?(_), do: false
 
-  # `bump` is the time late batches take. Once a batch is late, every later
-  # one takes it too, so keys keep the commit order of the cell. A group is
-  # late when its oldest batch is; its on-time key is the one its last batch
-  # would have had alone (design §13).
+  # `floor` is the latest time a key took; a new sender starts at the cell's
+  # floor, which has the times of published objects and of stamped batches. A
+  # key never takes a time below it, so keys keep the commit order of the cell
+  # across late groups, an emptied queue and restarts (design §13).
+  # A group is late when its oldest batch is; it then takes the time now. A
+  # group whose time is not its last batch's own is "lifted": its object may
+  # already exist under the own time, from a previous owner.
   defp publish(w, batches) do
     {clock, clock_config} = w.config.clock
     now = clock.now_ms(clock_config)
     {first, last} = {hd(batches), List.last(batches)}
-    late? = w.bump != nil or now - first.ts > w.config.feed.window_ms
-    bump = if late?, do: max(w.bump || now, last.ts), else: nil
+    late? = now - first.ts > w.config.feed.window_ms
+    time = Enum.max([last.ts, w.floor | if(late?, do: [now], else: [])])
+    lifted? = time != last.ts
     started = System.monotonic_time()
     count = length(batches)
     Fault.point(:feed_before_group_put, %{cell: w.id, txid: last.txid, batches: count})
 
-    case put(w, batches, last, bump) do
-      {:ok, result, time, bytes} ->
+    case put(w, batches, last, time) do
+      {:ok, result, put_time, bytes} ->
         Fault.point(:feed_after_put, %{cell: w.id, txid: last.txid, pid: w.cell})
 
         Telemetry.span_stop(
           [:feed, :publish],
           started,
           %{records: records(batches), bytes: bytes},
-          meta(w, last, late?, result, count)
+          meta(w, last, lifted?, result, count)
         )
 
-        send(w.cell, {:feed_published, self(), last.txid, time, count})
-        {:ok, %{w | bump: bump, failures: 0}}
+        send(w.cell, {:feed_published, self(), last.txid, put_time, count})
+        {:ok, %{w | floor: max(w.floor, put_time), failures: 0}}
 
       {:error, reason} ->
         failures = w.failures + 1
@@ -198,23 +203,23 @@ defmodule Alambique.Feed.Sender do
           started,
           %{records: records(batches), bytes: 0},
           w
-          |> meta(last, late?, :error, count)
+          |> meta(last, lifted?, :error, count)
           |> Map.merge(%{reason: reason, failures: failures, retry_in_ms: delay})
         )
 
-        {:error, warn(%{w | bump: bump, failures: failures}, reason), delay}
+        {:error, warn(%{w | floor: time, failures: failures}, reason), delay}
     end
   end
 
   defp records(batches), do: Enum.reduce(batches, 0, &(length(&1.changes) + &2))
 
-  defp meta(w, last, late?, result, count),
+  defp meta(w, last, lifted?, result, count),
     do: %{
       cell: w.id,
       txid: last.txid,
       epoch: w.epoch,
       result: result,
-      late: late?,
+      late: lifted?,
       batches: count
     }
 
@@ -239,14 +244,14 @@ defmodule Alambique.Feed.Sender do
     end
   end
 
-  # A group published on time goes to the key of its last batch's time; a
+  # A group at its own time goes to the key of its last batch's time; a
   # duplicate (412) means an earlier attempt landed, and with it every batch
-  # before that key, because the sender puts in order. A late one first looks
+  # before that key, because the sender puts in order. A lifted one first looks
   # for that key, because the previous owner may have published it in time.
-  defp put(w, batches, last, nil),
-    do: store_put(w, batches, object_key(w, last.ts, last.txid), last.ts)
+  defp put(w, batches, %{ts: time} = last, time),
+    do: store_put(w, batches, object_key(w, time, last.txid), time)
 
-  defp put(w, batches, last, bump) do
+  defp put(w, batches, last, time) do
     {store, config} = w.ctx.store
     original = object_key(w, last.ts, last.txid)
 
@@ -261,7 +266,7 @@ defmodule Alambique.Feed.Sender do
 
     case found do
       :found -> {:ok, :exists, last.ts, 0}
-      :missing -> store_put(w, batches, object_key(w, bump, last.txid), bump)
+      :missing -> store_put(w, batches, object_key(w, time, last.txid), time)
       {:error, _} = error -> error
     end
   end
