@@ -2887,7 +2887,9 @@ statement (`immutable=1`, so no locks and no `-wal`/`-shm`), and closes it.
   copy-on-write clone (`ioctl(FICLONE)`, Linux btrfs, xfs and the like) when the
   filesystem has them, so it shares the unchanged blocks and costs the
   metadata, not the database; otherwise a plain copy.
-  `query: [reflink: false]` always copies. The starting checksum is the one in
+  `query: [reflink: false]` always copies. `trim` deletes the files of a cache
+  directory whose name is not a replica's, such as those a version before
+  the checksum in the name left. The starting checksum is the one in
   the cache name, and each segment's trailer gives the next, so no pass reads
   the file; the only data written are the pages of the segments, and the flush
   before the rename writes back only those on a clone. A refresh costs one

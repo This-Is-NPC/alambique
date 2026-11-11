@@ -139,7 +139,8 @@ defmodule Alambique.Query.Cache do
 
   @doc """
   Deletes the least recently used replicas until the cache holds at most
-  `max_bytes`, and temporary files older than `stale_tmp_seconds`. Replicas
+  `max_bytes`, temporary files older than `stale_tmp_seconds`, and files whose
+  name is not a replica's (those of an older version). Replicas
   still being built count against `max_bytes` and are not deleted. Returns the
   number of files deleted and the bytes that remain.
   """
@@ -150,7 +151,7 @@ defmodule Alambique.Query.Cache do
     files = scan(dir)
 
     {stale, live} =
-      Enum.split_with(files, &(&1.tmp? and now - &1.mtime > stale_tmp_seconds))
+      Enum.split_with(files, &(stale_tmp?(&1, now, stale_tmp_seconds) or &1.unknown?))
 
     Enum.each(stale, &File.rm(&1.path))
     # Replicas being built count against the bound, but only finished ones
@@ -163,6 +164,8 @@ defmodule Alambique.Query.Cache do
     for dir <- cell_dirs(dir), do: File.rmdir(dir)
     {length(stale) + length(evicted), remaining}
   end
+
+  defp stale_tmp?(file, now, seconds), do: file.tmp? and now - file.mtime > seconds
 
   defp evict(files, total, max) do
     {evicted, remaining} =
@@ -188,7 +191,15 @@ defmodule Alambique.Query.Cache do
         path = Path.join(cell_dir, name),
         not String.ends_with?(name, ["-wal", "-shm"]),
         {:ok, %{size: size, mtime: mtime}} <- [File.stat(path, time: :posix)] do
-      %{path: path, size: size, mtime: mtime, tmp?: String.starts_with?(name, ".tmp-")}
+      tmp? = String.starts_with?(name, ".tmp-")
+
+      %{
+        path: path,
+        size: size,
+        mtime: mtime,
+        tmp?: tmp?,
+        unknown?: not tmp? and parse(cell_dir, name) == nil
+      }
     end
   end
 end
