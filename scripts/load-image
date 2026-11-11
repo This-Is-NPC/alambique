@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Build the image of the load test service (load/Dockerfile) at the versions
+# pinned in mise.toml. The image is tagged alambique-load:local.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# The Debian release of the hexpm base images; the one place that pins it.
+debian="${ALAMBIQUE_LOAD_DEBIAN:-trixie-20261005-slim}"
+
+pinned() { sed -n "s/^$1 = \"\(.*\)\"/\1/p" mise.toml | head -n1; }
+erlang=$(pinned erlang)
+elixir=$(pinned elixir)
+rust=$(pinned rust)
+# mise names Elixir 1.20.4-otp-28; the base image tag drops the OTP suffix.
+elixir=${elixir%-otp-*}
+
+start=$(date +%s)
+docker build -f load/Dockerfile \
+  --build-arg "ERLANG=${erlang}" --build-arg "ELIXIR=${elixir}" \
+  --build-arg "DEBIAN=${debian}" --build-arg "RUST=${rust}" \
+  --label "alambique.revision=$(git rev-parse HEAD)" \
+  -t alambique-load:local .
+echo "built alambique-load:local in $(($(date +%s) - start)) s," \
+  "$(docker image inspect -f '{{.Size}}' alambique-load:local | awk '{printf "%.0f MB", $1/1048576}')"

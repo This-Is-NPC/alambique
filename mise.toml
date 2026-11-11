@@ -159,6 +159,15 @@ run = "scripts/bench-lease"
 description = "Count the store requests of a job (two commits in one awake cell) by kind, with the store at 25 and 100 ms, at concurrency 1 and 4 (argument: jobs per case)"
 run = "scripts/bench-trips"
 
+[tasks."load:image"]
+description = "Build the image of the load test service (alambique-load:local) at the versions pinned here"
+run = "scripts/load-image"
+
+[tasks.load]
+description = "Load-test one node as a service in a CPU- and memory-limited container (arguments: scenario A|B|all, measure commits|cells|wakes|query|all; ALAMBIQUE_LOAD_* settings; results in results/load/; see docs/how-to-load-test.md)"
+depends = ["load:image"]
+run = "scripts/load"
+
 [tasks."bench:wake"]
 description = "Wake hibernated mailbox cells with latency on every store request and report the time of the first query and the requests of the wake, local, hydrated and lazy (argument: wakes per cell; ALAMBIQUE_BENCH_LATENCY, _MODES, _CELLS, _TAIL, _OPTS)"
 run = "scripts/bench-wake"
