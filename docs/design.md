@@ -360,7 +360,8 @@ once for the stamp in its header.
 
 The cell prefix follows Litestream's replica layout: levels are directories
 of four hex digits and snapshots live at level 9 (see
-[segment-format.md](segment-format.md) for what is checked and what is not).
+[segment-format.md](segment-format.md) for what is checked, including the
+Litestream 0.5.18 restore test and its limits).
 Litestream lists only the level directories, so the lease, the frozen marker,
 the `trashed` marker and the crash counter beside them are not part of a
 replica; the schema index, the feed and the trash manifests live outside the

@@ -25,6 +25,7 @@ mise run bench:inflight  # cost of the in-flight marker per write
 mise run bench:lease     # cost of Alambique.lease/3, in memory and with store latency
 mise run bench:stall     # per-second latency, run queues, NIF calls and store requests under steady load
 mise run test:seaweedfs  # store contract tests against a disposable SeaweedFS
+mise run test:litestream # Litestream 0.5.18 restores replicas Alambique wrote (needs SeaweedFS)
 mise run seaweedfs:down  # remove the SeaweedFS container
 ```
 

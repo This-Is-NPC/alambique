@@ -4,6 +4,7 @@ elixir = "1.20.4-otp-28"
 rust = "1.97.1"
 java = "openjdk-17.0.2"
 "aqua:taiki-e/cargo-llvm-cov" = "0.9.1"
+"aqua:benbjohnson/litestream" = "0.5.18"
 
 [env]
 # The nightly toolchain of the native hardening tasks (Miri, sanitizers and
@@ -82,6 +83,11 @@ run = "scripts/tla-mutations"
 description = "Run the store contract tests against SeaweedFS"
 depends = ["seaweedfs:up"]
 run = "mix test --only seaweedfs"
+
+[tasks."test:litestream"]
+description = "Restore replicas written by Alambique with the pinned Litestream and compare with Alambique's restore"
+depends = ["seaweedfs:up"]
+run = "mix test --only litestream test/litestream_interop_test.exs"
 
 [tasks."test:cluster"]
 description = "Run the failover properties on a cluster of peer nodes (slow)"

@@ -9,9 +9,9 @@ before touching `native/alambique_nif` or `Alambique.Replication`.
 Segments and snapshots are **LTX version 3**, the format of
 [superfly/ltx](https://github.com/superfly/ltx), the one Litestream v0.5
 writes. The files follow the specification of that repository, and the keys
-follow the layout of Litestream's S3 replica client. Litestream itself has not
-been run on our replicas: "How the format is checked" says what the tests
-cover.
+follow the layout of Litestream's S3 replica client. Litestream 0.5.18
+restores our replicas (see "Litestream compatibility"); the other direction
+does not work.
 
 Followed exactly: upstream `main` at commit
 `f299ac5b951cdb69ed7a99e957b4ed66cba32560` (2026-09-10), files `README.md`,
@@ -94,7 +94,8 @@ object was written, used by retention's grace period). A reader that finds no
 ### Key layout
 
 Followed from the sources of Litestream v0.5.17 (`s3/replica_client.go`,
-`replica.go`, `compaction_level.go`), which were read, not run. The S3 client
+`replica.go`, `compaction_level.go`). Restores by v0.5.18 confirm the layout of
+levels and snapshots on our replicas (below), not the metadata. The S3 client
 reads and writes
 `<path>/<level as %04x>/<min>-<max>.ltx` with 16 lowercase hex digits per
 TXID. There is no `ltx/` directory in S3 (the `ltx/<level>/` shape belongs to
@@ -212,10 +213,44 @@ Go, Litestream or an external service.
 Run it with `mise exec -- mix test test/ltx_format_test.exs`; it is part of
 `mise run test`.
 
-What this does not show: that Litestream (or any other implementation) reads
-our files, that the Go encoder and ours write the same bytes (they do not, see
-above), or the object metadata and key layout, which come from reading
-Litestream's sources.
+What this does not show: that the Go encoder and ours write the same bytes
+(they do not, see above), or the object metadata and key layout, which come
+from reading Litestream's sources. The next section covers Litestream itself.
+
+## Litestream compatibility
+
+`test/litestream_interop_test.exs` runs Litestream **v0.5.18** (pinned in
+`mise.toml`) against replicas that Alambique wrote to a local SeaweedFS:
+level-0 files, a checkpoint and a level-9 snapshot, built with
+`Replicator.sync/2` and `Replicator.snapshot/3`. Run it with
+`mise run test:litestream`; the default suite skips it.
+
+Observed, with the exact command shape
+`litestream restore -o OUT [-txid HEX16] 's3://BUCKET/PREFIX/cells/CELL?endpoint=URL&force-path-style=true'`
+and credentials in `LITESTREAM_ACCESS_KEY_ID` and
+`LITESTREAM_SECRET_ACCESS_KEY`:
+
+| Case | Result |
+| --- | --- |
+| Latest state (uses the snapshot) | Exit 0, no output. `PRAGMA integrity_check` is `ok`; every table and the schema equal the source database and Alambique's own restore. |
+| `-txid 0000000000000002` (before the snapshot, level-0 files only) and `-txid 0000000000000004` | Exit 0. Content equals Alambique's restore of the same TXID; integrity `ok`. |
+| Level-0 file 4 missing, file 5 left as a tail (design §6) | Latest state: exit 1, `Error: cannot calc restore plan: non-contiguous ltx files: have up to 0000000000000003 but next file starts at 0000000000000005`. Alambique's restore ends at TXID 3. `-txid 0000000000000003` restores, equal to Alambique's. |
+
+So Litestream can read what Alambique writes, including the key layout and the
+checksum chain it validates. Two limits remain:
+
+- Litestream cannot restore the latest state of a cell that has a tail, as
+  above. A cell that crashed with uploads in flight is in that state until a
+  later owner writes over the gap. Restore it with `mix alambique.restore`, or
+  with Litestream up to a TXID before the gap.
+- Alambique cannot apply files written by Litestream: they carry no database
+  checksums, which the NIF and the lazy restore need (see "Deviations from
+  upstream"). Alambique does not read a Litestream replica of a database it
+  did not write.
+
+Not tested: Litestream's other commands (`ltx`, `litestream replicate` into a
+prefix Alambique owns), timestamp restores (`-timestamp`, which reads the
+`litestream-timestamp` metadata), and other Litestream versions.
 
 ## Lazy restore
 
@@ -285,13 +320,12 @@ starting points from the newest snapshot at or below the target down to
    timestamp before the first file, gives an empty database at TXID 0.
 5. Sync the temporary file, remove the old `-wal` and `-shm`, rename.
 
-Litestream is stricter about a tail. Its `CalcRestorePlan` (v0.5.17, read in
-the sources, not run) fails a restore of the latest state with
-"non-contiguous ltx files" when a file starts after the end of the plan. A
-restore of a TXID up to the head is not affected. Nothing writes a tail yet;
-when pipelined commits do, a cell that crashed with several uploads in flight
-cannot be restored to its latest state by Litestream until a later owner
-writes over the gap.
+Litestream is stricter about a tail. Its `CalcRestorePlan` fails a restore of
+the latest state with "non-contiguous ltx files" when a file starts after the
+end of the plan (run against v0.5.18, see "Litestream compatibility"). A
+restore of a TXID up to the head is not affected. A cell that crashed with
+several uploads in flight cannot be restored to its latest state by Litestream
+until a later owner writes over the gap.
 
 A crash leaves `.restore-*` temporary files behind at worst; the destination
 is either untouched or complete. If a crash lands between removing the old
