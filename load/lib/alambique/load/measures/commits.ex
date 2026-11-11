@@ -10,6 +10,7 @@ defmodule Alambique.Load.Measures.Commits do
   def latency, do: {:p99, Env.float("COMMITS_P99_MS", 250)}
   def mem_fraction, do: 1.0
   def probe?, do: false
+  def holds_memory?, do: false
   def ramp_opts, do: [refine: Env.int("REFINE", 2)]
 
   def levels do
@@ -36,7 +37,10 @@ defmodule Alambique.Load.Measures.Commits do
     :ok
   end
 
-  def prepare(_ctx, level), do: Measure.offsets(level, Measure.step_s(), level)
+  def prepare(_ctx, level), do: {:ok, Measure.offsets(level, Measure.step_s(), level)}
+
+  # A repeat writes everything again; nothing to undo.
+  def rewind(_ctx, _level), do: :ok
 
   def run(ctx, _level, offsets) do
     kind = variant()

@@ -16,12 +16,13 @@ defmodule Alambique.Load.Summary do
     |> Map.merge(%{
       finished_at: DateTime.utc_now() |> DateTime.to_iso8601(),
       quiet_wait_s: steps |> Enum.map(& &1.quiet_wait_s) |> Enum.sum(),
+      cooldown_s: steps |> Enum.map(&(&1[:cooldown_s] || 0)) |> Enum.sum(),
       outcome: outcome,
       stopped_by: stopped_by(outcome, steps),
       rows: Enum.map(steps, &row/1),
       last_good:
         last_good && %{level: last_good.level, cost: last_good.cost, cgroup: last_good.cgroup},
-      memory_fit: memory_fit(meta.measure, steps)
+      memory_fit: memory_fit(meta.measure, steps, meta.limits)
     })
     |> Map.update!(:limits, &limits/1)
   end
@@ -56,27 +57,55 @@ defmodule Alambique.Load.Summary do
   defp describe({:swap, who, mb}), do: "the #{who} swapped (#{Float.round(mb * 1.0, 1)} MB)"
   defp describe({:host_busy, load}), do: "host net load #{Float.round(load * 1.0, 1)}"
 
-  defp describe(:store_full),
-    do: "the store is out of space"
+  defp describe(:store_full), do: "the store is out of space"
+
+  defp describe(:data_full),
+    do: "the service data tmpfs is full or the next level would fill it (harness limit)"
+
+  defp describe(:prepare_failed), do: "the preparation of the level failed"
+  defp describe(:no_operations), do: "the step had no operations"
+
+  defp describe({:no_cooldown, mb}),
+    do: "the service did not cool down (process memory #{Float.round(mb * 1.0)} MB)"
+
+  defp describe(:busy), do: "the library refused reads with :busy above the allowed share"
 
   defp describe(other), do: to_string(other)
 
-  # Process memory against the level, over the ramp and refinement steps that
-  # ran to the end (not the invalid ones, and not the confirmation repeat).
-  defp memory_fit(measure, steps) do
+  @min_fit_points 3
+
+  # Process memory against the level, over the good ramp and refinement steps
+  # (not the invalid or bad ones, and not the confirmation repeat). The line is
+  # reported only when it explains the points (R² at least `fit_min_r2`) and
+  # they span enough (largest level at least `fit_min_span` times the
+  # smallest); otherwise `per_unit_mb` and `fixed_mb` are nil and `suppressed`
+  # says why.
+  defp memory_fit(measure, steps, limits) do
     points =
-      for %{verdict_term: v, phase: phase, cgroup: cg} = s <- steps,
+      for %{verdict_term: :good, phase: phase, cgroup: cg} = s <- steps,
           cg != nil,
           phase != :confirm,
-          match?(:good, v) or match?({:bad, _}, v),
           do: point(measure, s)
 
-    case Stats.linear_fit(points) do
-      nil ->
-        nil
+    with %{slope: slope, intercept: intercept, r2: r2} <- Stats.linear_fit(points) do
+      {xs, _} = Enum.unzip(points)
+      fit = %{points: length(points), r2: r2, fixed_mb: nil, per_unit_mb: nil, suppressed: nil}
 
-      %{slope: slope, intercept: intercept} ->
-        %{fixed_mb: intercept, per_unit_mb: slope, points: length(points)}
+      case suppressed(length(points), r2, Enum.min(xs), Enum.max(xs), limits) do
+        nil -> %{fit | fixed_mb: intercept, per_unit_mb: slope}
+        reason -> %{fit | suppressed: reason}
+      end
+    end
+  end
+
+  defp suppressed(n, _r2, _min, _max, _limits) when n < @min_fit_points,
+    do: "fewer than #{@min_fit_points} good steps"
+
+  defp suppressed(_n, r2, min_x, max_x, limits) do
+    cond do
+      r2 < limits.fit_min_r2 -> "R² #{Float.round(r2, 2)} is below #{limits.fit_min_r2}"
+      max_x < limits.fit_min_span * min_x -> "the levels span less than #{limits.fit_min_span}x"
+      true -> nil
     end
   end
 
@@ -91,6 +120,11 @@ defmodule Alambique.Load.Summary do
       verdict: s.verdict,
       reason: s.reason,
       quiet_wait_s: s.quiet_wait_s,
+      cooldown_s: s[:cooldown_s],
+      suspect: s[:suspect] == true,
+      throttled_ms: s.cgroup && s.cgroup[:throttled_ms],
+      busy_ratio: s.delivery[:busy_ratio],
+      store_mb_end: get_in(s, [:store, :used_mb_end]),
       delivery_ratio: s.delivery.ratio,
       latency_ms: s.latency_ms,
       cpu_ms_per_op: s.cost && s.cost.cpu_ms_per_op,
@@ -127,7 +161,9 @@ defmodule Alambique.Load.Summary do
         "swap MB",
         "trips/op",
         "put KB/op",
-        "got KB/op"
+        "got KB/op",
+        "busy %",
+        "store MB"
       ] ++
         if(cells?, do: ["awake"], else: []) ++
         if(query?, do: ["dirty IO util", "stmts max"], else: [])
@@ -137,7 +173,9 @@ defmodule Alambique.Load.Summary do
         [
           r.level,
           "#{r.seq} #{r.phase}",
-          r.verdict <> if(r.reason != "", do: " (#{r.reason})", else: ""),
+          r.verdict <>
+            if(r.reason != "", do: " (#{r.reason})", else: "") <>
+            if(r.suspect, do: ", suspect", else: ""),
           pct(r.delivery_ratio),
           num(r.latency_ms[:p50]),
           num(r.latency_ms[:p95]),
@@ -147,7 +185,9 @@ defmodule Alambique.Load.Summary do
           num(r.host_swap_mb_max, 0),
           num(r.store_trips_per_op, 2),
           num(r.store_bytes_put_per_op && r.store_bytes_put_per_op / 1024, 1),
-          num(r.store_bytes_got_per_op && r.store_bytes_got_per_op / 1024, 1)
+          num(r.store_bytes_got_per_op && r.store_bytes_got_per_op / 1024, 1),
+          pct(r.busy_ratio),
+          num(r.store_mb_end)
         ] ++
           if(cells?, do: [r.awake || "-"], else: []) ++
           if(query?, do: [num(r.dirty_io_utilization, 2), r.user_statements_max || "-"], else: [])
@@ -161,7 +201,9 @@ defmodule Alambique.Load.Summary do
       "",
       "- Stopped by: #{summary.stopped_by}.",
       last_good_line(summary),
+      store_full_line(summary),
       fit_line(summary),
+      suspect_line(summary),
       wait_line(summary),
       "- Reproduce: `#{summary.command}`"
     ]
@@ -192,6 +234,26 @@ defmodule Alambique.Load.Summary do
       )
   end
 
+  defp store_full_line(%{rows: rows} = summary) do
+    if Enum.any?(rows, &(&1.reason == ":store_full")) do
+      if summary[:store_on] == "disk",
+        do: "- The disk of the store is nearly full: free space and run the case again.",
+        else: "- The store's tmpfs is full: run the case again with ALAMBIQUE_LOAD_STORE_ON=disk."
+    end
+  end
+
+  # Steps whose CPU was throttled for a large part of their time: not invalid,
+  # but the service was cut by the quota as much as it was loaded.
+  defp suspect_line(%{rows: rows, limits: limits}) do
+    case for(%{suspect: true, seq: seq} <- rows, do: seq) do
+      [] ->
+        nil
+
+      seqs ->
+        "- Suspect steps (CPU throttled for more than #{round(limits.suspect_throttle_fraction * 100)}% of the step): #{Enum.join(seqs, ", ")}."
+    end
+  end
+
   defp wait_line(%{quiet_wait_s: seconds}) when seconds > 0,
     do: "- Waited #{num(seconds)} s in all for the host to be quiet."
 
@@ -199,9 +261,13 @@ defmodule Alambique.Load.Summary do
 
   defp fit_line(%{memory_fit: nil}), do: nil
 
-  defp fit_line(%{memory_fit: fit, unit: unit}),
+  defp fit_line(%{memory_fit: %{suppressed: nil} = fit, unit: unit}),
     do:
-      "- Process memory: #{num(fit.fixed_mb, 0)} MB fixed and #{num(fit.per_unit_mb, 3)} MB per #{unit} (fit over #{fit.points} steps)."
+      "- Process memory: #{num(fit.fixed_mb, 0)} MB fixed and #{num(fit.per_unit_mb, 3)} MB per #{unit} (fit over #{fit.points} good steps, R² #{num(fit.r2, 2)})."
+
+  defp fit_line(%{memory_fit: fit}),
+    do:
+      "- Process memory: no slope reported (#{fit.suppressed}; #{fit.points} good steps, R² #{num(fit.r2, 2)})."
 
   defp table([head | rest]) do
     [head, Enum.map(head, fn _ -> "---" end) | rest]

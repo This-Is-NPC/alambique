@@ -85,6 +85,21 @@ defmodule Alambique.Load.OpenLoopTest do
       assert length(result.error_samples) == 3
     end
 
+    test "the library's busy refusals are counted apart from the errors" do
+      ops = fn
+        0 -> :ok
+        1 -> {:error, :busy}
+        2 -> {:error, {"q-7", :busy}}
+        3 -> {:error, {"q-7", :timeout}}
+      end
+
+      result = OpenLoop.run([0, 0, 0, 0], ops)
+      assert result.ok == 1 and result.busy == 2 and result.errors == 1
+      assert result.completed == 4
+      assert [%{error: error}] = result.error_samples
+      assert error =~ "timeout"
+    end
+
     test "operations still running after the drain are not completed" do
       result = OpenLoop.run([0, 0], fn _ -> Process.sleep(5_000) end, drain_ms: 100)
       assert result.completed == 0 and result.issued == 2

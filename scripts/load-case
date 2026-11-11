@@ -108,6 +108,9 @@ else
   store_mount=(--tmpfs "/data:rw,size=${store_mb}m")
 fi
 export ALAMBIQUE_LOAD_STORE_ON=$store_on ALAMBIQUE_LOAD_STORE_FSTYPE=$store_fs
+# What the driver needs to tell when the data tmpfs or the store is full.
+export ALAMBIQUE_LOAD_DATA_MB=$data_mb ALAMBIQUE_LOAD_STORE_MB=$store_mb
+[ "$store_on" != disk ] || export ALAMBIQUE_LOAD_STORE_PATH=$store_dir
 store=$(docker run -d --name "alambique-load-store-$suffix" \
   "${store_mount[@]}" \
   -p "127.0.0.1:${port}:8333" \

@@ -17,9 +17,10 @@ defmodule Alambique.Load.Stats do
 
   @doc """
   The line `y = intercept + slope * x` through `points`, or `nil` when there
-  are fewer than two distinct `x`.
+  are fewer than two distinct `x`. `r2` is the share of the variance of `y`
+  the line explains (1.0 when `y` does not vary).
   """
-  @spec linear_fit([{number, number}]) :: %{slope: float, intercept: float} | nil
+  @spec linear_fit([{number, number}]) :: %{slope: float, intercept: float, r2: float} | nil
   def linear_fit(points) do
     mx = mean(Enum.map(points, &elem(&1, 0)))
     my = mean(Enum.map(points, &elem(&1, 1)))
@@ -30,7 +31,13 @@ defmodule Alambique.Load.Stats do
     else
       sxy = Enum.sum(for {x, y} <- points, do: (x - mx) * (y - my))
       slope = sxy / sxx
-      %{slope: slope, intercept: my - slope * mx}
+      syy = Enum.sum(for {_, y} <- points, do: (y - my) * (y - my))
+
+      %{
+        slope: slope,
+        intercept: my - slope * mx,
+        r2: if(syy == 0, do: 1.0, else: sxy * sxy / (sxx * syy))
+      }
     end
   end
 end
