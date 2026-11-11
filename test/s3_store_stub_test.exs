@@ -74,7 +74,7 @@ defmodule Alambique.Store.S3StubTest do
       assert options.retry == false
       assert options.redirect == false
       assert options.decode_body == false
-      assert options.receive_timeout == 15_000
+      assert options.receive_timeout == 8_000
 
       assert {:ok, _, _} = S3.head(config(reply(200), %{receive_timeout: 77}), "k")
       assert sent().options.receive_timeout == 77

@@ -96,4 +96,68 @@ defmodule Alambique.Replication.RetryPropertiesTest do
       assert last - first < uncapped
     end
   end
+
+  # A store whose reads never return.
+  defmodule HangingStore do
+    @behaviour Alambique.Store
+    def put(_, _, _, _, _), do: Process.sleep(:infinity)
+    def get(_, _), do: Process.sleep(:infinity)
+    def head(_, _), do: Process.sleep(:infinity)
+    def get_range(_, _, _, _), do: Process.sleep(:infinity)
+    def list(_, _, _, _), do: Process.sleep(:infinity)
+    def delete(_, _), do: Process.sleep(:infinity)
+  end
+
+  # How far past its deadline a call may end (one slice of scheduling).
+  @slack_ms 150
+
+  test "a store call that never returns is interrupted at the deadline" do
+    ctx = Map.put(ctx(5, 10), :store, {HangingStore, nil})
+    started = System.monotonic_time(:millisecond)
+
+    assert {:error, _} = Alambique.Replication.Objects.fetch(ctx, "k", Retry.deadline_in(100))
+    assert System.monotonic_time(:millisecond) - started < 100 + @slack_ms
+  end
+
+  property "no attempt outlives the deadline by more than a small slack" do
+    check all(
+            deadline_ms <- integer(20..120),
+            hang <- member_of([:infinity, :long]),
+            max_runs: 25
+          ) do
+      started = System.monotonic_time(:millisecond)
+
+      result =
+        Retry.run(ctx(5, 20), Retry.deadline_in(deadline_ms), fn ->
+          Process.sleep(if hang == :infinity, do: :infinity, else: 5_000)
+          :done
+        end)
+
+      assert {:error, _} = result
+      assert System.monotonic_time(:millisecond) - started < deadline_ms + @slack_ms
+    end
+  end
+
+  test "an interrupted attempt leaves no process and no message behind" do
+    parent = self()
+
+    assert {:error, _} =
+             Retry.run(ctx(5, 10), Retry.deadline_in(30), fn ->
+               send(parent, {:attempt, self()})
+               Process.sleep(:infinity)
+             end)
+
+    assert_received {:attempt, pid}
+    refute Process.alive?(pid)
+    refute_received _
+  end
+
+  test "an attempt that raises raises in the caller, and exits and throws propagate" do
+    assert_raise RuntimeError, "boom", fn ->
+      Retry.run(ctx(5, 10), Retry.deadline_in(1_000), fn -> raise "boom" end)
+    end
+
+    assert catch_throw(Retry.run(ctx(5, 10), Retry.deadline_in(1_000), fn -> throw(:x) end)) == :x
+    assert catch_exit(Retry.run(ctx(5, 10), Retry.deadline_in(1_000), fn -> exit(:y) end)) == :y
+  end
 end
