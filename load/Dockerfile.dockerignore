@@ -1,0 +1,10 @@
+*
+!mix.exs
+!mix.lock
+!lib
+!load/lib
+!test/support/bench_text.ex
+!native/alambique_nif/Cargo.toml
+!native/alambique_nif/Cargo.lock
+!native/alambique_nif/.cargo
+!native/alambique_nif/src
