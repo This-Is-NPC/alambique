@@ -102,9 +102,11 @@ defmodule Alambique.FeedOrderTest do
     assert txids == Enum.sort(txids)
   end
 
+  # Every commit inserts a fresh id: a repeated one fails the primary key.
   # Every put of the cell is held; the script moves the clock (also back) and
   # lets uploads of segments and feed objects land one at a time.
-  defp step(ctx, inst, cell, {:commit, n}, tasks) do
+  defp step(ctx, inst, cell, :commit, tasks) do
+    n = System.unique_integer([:positive])
     before = length(held(ctx, :segment))
     task = Task.async(fn -> exec(inst, cell, n) end)
     eventually(fn -> length(held(ctx, :segment)) > before or Task.yield(task, 0) != nil end)
@@ -127,7 +129,7 @@ defmodule Alambique.FeedOrderTest do
 
   defp op do
     one_of([
-      tuple({constant(:commit), integer(1..1_000)}),
+      constant(:commit),
       tuple({constant(:clock), integer(-40..60)}),
       tuple({constant(:land), member_of([:segment, :feed])})
     ])
