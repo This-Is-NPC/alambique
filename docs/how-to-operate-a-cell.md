@@ -291,10 +291,14 @@ so that a query or restore that started before the move still finds its files.
 Then the instance marks the segments and snapshots for deletion and the reaper
 deletes them another `deletion_grace_ms` later (one day by default; step 7).
 The frozen marker, the crash counter, the retention marker and the schema index
-entries go at once, at cleanup time: they belong to the old residency. The task
-of the compactor that `relocate` queues, or `mix alambique.cleanup` /
-`Alambique.cleanup_moved/4` by hand, does this; use the latter too if the node
-restarted before the grace period ended or the cleanup failed:
+entries go at once, at cleanup time: they belong to the old residency. The
+compactor does this. `relocate` queues the cleanup, and `relocate` also leaves
+a marker for it in the old location, so a node that restarts (or another node)
+finds the pending cleanup by its periodic scan (`compaction: [moved_scan_ms:]`,
+default 60 000) and waits for the grace period counted from the move, not from
+the restart. Nothing is needed by hand. To finish a cleanup early, or when
+compaction is off, run `mix alambique.cleanup` or
+`Alambique.cleanup_moved/4`:
 
 ```sh
 mix alambique.cleanup org-1 eu --instance demo --connect a@127.0.0.1 --cookie demo
@@ -320,9 +324,10 @@ marked segments and snapshots may still be there, because the returning
 snapshot has a TXID above them and covers them; the reaper deletes them later.
 Until the cleanup is ready `relocate` answers:
 
-- `{:error, :destination_not_cleaned}`: no cleanup finished there, for
-  example because the node that would have run it restarted. Run the cleanup,
-  then `relocate` again.
+- `{:error, :destination_not_cleaned}`: no cleanup finished there, usually
+  because the grace period is still running. The call queues the cleanup in
+  the compactor; `relocate` again once the grace period has passed. With
+  compaction off, run the cleanup yourself first.
 - `{:error, {:destination_settling, ready_at_ms}}`: the cleanup finished but
   is too recent. Wait until `ready_at_ms` (Unix milliseconds) and run
   `relocate` again. Do not clean again: that restarts the wait.
