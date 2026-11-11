@@ -184,7 +184,7 @@ defmodule Alambique.PipelinePropertiesTest do
         w =
           Enum.reduce(1..count, w, fn _, w ->
             n = w.seq + 1
-            sql = {:execute, "INSERT INTO t (n) VALUES (?)", [n]}
+            sql = {:execute, "INSERT INTO t (n) VALUES (?)", [n], nil}
             req = :gen_server.send_request(pid, sql)
             %{w | seq: n, attempted: MapSet.put(w.attempted, n), reqs: [{n, req} | w.reqs]}
           end)

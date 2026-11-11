@@ -202,11 +202,15 @@ defmodule Alambique do
       full restore reads ahead of its walk, default 67 108 864).
     * `:hydrator` - `:poll_ms` (time between background hydration passes,
       default 100).
-    * `:sql` - limits on the statements of callers (`query/5`, `execute/5`
-      and the statements of `transaction/4`; design §7): `:statement_timeout_ms`
-      (a statement that runs longer is interrupted, default `:op_timeout_ms`,
-      10 000, so a caller with the default `:call_timeout_ms` sees the error
-      and not a timeout), `:max_result_rows` (default 100 000) and
+    * `:sql` - limits on the statements (design §7): `:statement_timeout_ms`
+      (the statements of callers, `query/5`, `execute/5` and the statements of
+      `transaction/4`; a statement that runs longer is interrupted, default
+      `:op_timeout_ms`, 10 000, so a caller with the default
+      `:call_timeout_ms` sees the error and not a timeout; a call can lower
+      it), `:script_timeout_ms` (migrations, `Alambique.Tx.script/2` and the
+      library's own statements, default 60 000; a migration that exceeds it
+      fails the wake with `{:error, {:migration, version, :statement_timeout}}`),
+      `:max_result_rows` (default 100 000) and
       `:max_result_bytes` (text and blobs by length, other values as 8 bytes;
       default 67 108 864, 64 MiB). A statement over a limit gives
       `{:error, :statement_timeout}` or `{:error, :result_too_large}`.
@@ -416,7 +420,12 @@ defmodule Alambique do
   `{:error, {:bad_params, message}}` for a wrong number or type of
   parameters, and `{:error, message}` with SQLite's message for the rest.
 
-  Options: `:timeout`, `:verify_lease` (default `false`) and `:consistency`.
+  Options: `:timeout`, `:statement_timeout_ms`, `:verify_lease` (default
+  `false`) and `:consistency`. `:statement_timeout_ms` is a positive integer
+  that lowers the deadline of this statement; it never raises it above the
+  `:sql` option of the same name (a value above it is the `:sql` one).
+  Anything else is `{:error, :bad_option}`. It applies to the owner's read, not
+  to `consistency: {:bounded, ms}`, whose deadline is `:timeout`.
 
   `consistency: :strong` (the default) is the read described below, answered
   by the owner. `consistency: {:bounded, ms}` (a positive integer) lets a node
@@ -446,16 +455,19 @@ defmodule Alambique do
   @spec query(instance, cell, String.t(), list, keyword) :: {:ok, result} | {:error, term}
   def query(instance, cell, sql, params \\ [], opts \\ [])
       when is_binary(sql) and is_list(params) do
-    case consistency(opts) do
-      :strong ->
+    case {consistency(opts), statement_timeout(opts)} do
+      {_, :error} ->
+        {:error, :bad_option}
+
+      {:strong, limit} ->
         request =
           if opts[:verify_lease] == true,
-            do: {:checked_query, sql, params},
-            else: {:query, sql, params}
+            do: {:checked_query, sql, params, limit},
+            else: {:query, sql, params, limit}
 
         Router.call(instance, cell, request, opts[:timeout])
 
-      {:bounded, ms} ->
+      {{:bounded, ms}, _} ->
         Alambique.Replica.Read.query(
           Config.fetch!(instance),
           cell,
@@ -465,8 +477,17 @@ defmodule Alambique do
           opts[:timeout]
         )
 
-      :error ->
+      {:error, _} ->
         {:error, :bad_option}
+    end
+  end
+
+  # The per-call `:statement_timeout_ms`: `nil` when absent.
+  defp statement_timeout(opts) do
+    case Keyword.fetch(opts, :statement_timeout_ms) do
+      :error -> nil
+      {:ok, ms} when is_integer(ms) and ms > 0 -> ms
+      {:ok, _} -> :error
     end
   end
 
@@ -489,13 +510,14 @@ defmodule Alambique do
   `{:error, {:bad_params, message}}`); the write then rolls back and the cell
   keeps serving.
 
-  Options: `:timeout`, `:idempotent` (default `false`, see "Calls") and
-  `:isolated` (default `false`, see `transaction/4`).
+  Options: `:timeout`, `:statement_timeout_ms` (as in `query/5`),
+  `:idempotent` (default `false`, see "Calls") and `:isolated` (default
+  `false`, see `transaction/4`).
   """
   @spec execute(instance, cell, String.t(), list, keyword) :: {:ok, result} | {:error, term}
   def execute(instance, cell, sql, params \\ [], opts \\ [])
       when is_binary(sql) and is_list(params),
-      do: write(instance, cell, {:execute, sql, params}, opts)
+      do: write(instance, cell, &{:execute, sql, params, &1}, opts)
 
   @doc """
   Runs `fun` inside one SQLite transaction on the cell and returns
@@ -510,7 +532,8 @@ defmodule Alambique do
   `{:error, :statement_timeout}` and SQLite rolls the transaction back, so the
   function should return the error (the call then answers with it).
 
-  Options: `:timeout`, `:idempotent` (default `false`, see "Calls") and
+  Options: `:timeout`, `:statement_timeout_ms` (as in `query/5`, for each
+  statement of `fun`), `:idempotent` (default `false`, see "Calls") and
   `:isolated` (default `false`). An isolated transaction owns its batch: the
   commits still waiting for their upload are uploaded first, and its own
   batch is uploaded before the cell runs another call. Inside it,
@@ -519,13 +542,16 @@ defmodule Alambique do
   """
   @spec transaction(instance, cell, (Tx.t() -> term), keyword) :: {:ok, term} | {:error, term}
   def transaction(instance, cell, fun, opts \\ []) when is_function(fun, 1),
-    do: write(instance, cell, {:transaction, fun}, opts)
+    do: write(instance, cell, &{:transaction, fun, &1}, opts)
 
   # Writes always go to the owner: `consistency:` belongs to `query/5`.
   defp write(instance, cell, request, opts) do
-    if Keyword.has_key?(opts, :consistency) do
+    limit = statement_timeout(opts)
+
+    if Keyword.has_key?(opts, :consistency) or limit == :error do
       {:error, :bad_option}
     else
+      request = request.(limit)
       request = if opts[:isolated] == true, do: {:isolated, request}, else: request
       Router.call(instance, cell, request, opts[:timeout], opts[:idempotent] == true)
     end

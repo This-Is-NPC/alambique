@@ -1104,25 +1104,57 @@ the connection, in the NIF, and not by looking at the SQL text:
   current state read-only. A cell cannot run `VACUUM`, which it could not
   inside its write transaction either.
 - *Deadline.* The NIF installs a progress handler (every 1 000 VM
-  instructions) on each connection. `sqlite_run` arms a deadline of
-  `sql: [statement_timeout_ms: ...]` for the statement, on the owner's reads,
-  on the statements of `execute/5` and `Alambique.Tx.query/3` and `execute/3`
-  in `transaction/4`, and on replicas and cross-cell queries (whose deadline
-  is the caller's; their error stays `:timeout`). A statement past its
-  deadline stops with `{:error, :statement_timeout}`: no process per
-  statement. SQLite rolls back a transaction whose write statement was
-  interrupted, so the write call returns the error and the cell keeps serving.
+  instructions) on each connection. `sqlite_run` arms a deadline for the
+  statement, and a stopped statement is `{:error, :statement_timeout}`: no
+  process per statement. Two options give it:
+  `sql: [statement_timeout_ms: ...]` for the statements of callers (the
+  owner's reads, `execute/5`, `Alambique.Tx.query/3` and `execute/3` in
+  `transaction/4`, replicas and cross-cell queries, whose deadline is the
+  caller's and whose error stays `:timeout`), and
+  `sql: [script_timeout_ms: ...]` (default 60 000) for the rest:
+  the statements of migrations, `Alambique.Tx.script/2` and the library's own
+  statements. The second is the deadline of the connection (`sqlite_open`
+  takes it): every `sqlite_run` and `sqlite_execute` call that sets none
+  gets it, so a statement the library adds later is bounded without asking.
+  It is a separate key because the two want different values: a caller
+  waits `call_timeout_ms` for the answer, while a migration may build an
+  index over a large table, and its wake has no caller at stake. Migrations
+  and scripts are interrupted like any statement; the wake fails with
+  `{:migration, version, :statement_timeout}` and `Tx.script/2` returns the
+  error. A call can lower the first deadline (`statement_timeout_ms:` on
+  `query/5`, `execute/5` and `transaction/4`, a positive integer, else
+  `{:error, :bad_option}`); it never raises it, the `:sql` value is the
+  ceiling, because the `:sql` limit is what protects the cell from host-supplied
+  SQL. The scrub's check shares the restore budget (`scrub: [timeout_ms:]`).
+  SQLite rolls back a transaction whose write statement was interrupted, so
+  the write call returns the error and the cell keeps serving.
   `Sqlite.close/1` interrupts a running statement before it waits for it.
-  A statement that spends its time in one VM instruction (a huge `zeroblob`
-  or a sort inside a single step) is not interrupted until that instruction
-  ends. Migrations and the library's own statements have no deadline.
+  Limits of SQLite, not defects:
+  - A statement that spends its time in one VM instruction (a huge
+    `zeroblob` in a write, or a sort inside a single step) is not
+    interrupted until that instruction ends; the handler runs between
+    instructions, so a shorter interval would not help and is not an option.
+    Reads are protected differently: SQLite's value length limit is lowered to
+    `max_result_bytes` (see the read-only item above), so such a value is refused before it
+    is built. In a write the limit stays SQLite's default (1 000 000 000
+    bytes), which a legitimate row may need, so the instruction is bounded by
+    that size only.
+  - The deadline is checked between VM instructions, so a statement ends a
+    little after it, not exactly at it.
+  - `:max_result_rows` and `:max_result_bytes` count what the statement
+    returns, so a scan that returns no rows is bounded by the deadline only.
+    A statement can scan a large table inside SQLite until its deadline.
+  - Only `sqlite_run` and `sqlite_execute` are armed; the prepared-statement
+    calls (`sqlite_step`, `sqlite_fetch_all`) are not used by the library.
+    The checkpoint (`Sqlite.checkpoint/1`) is not a statement: it is bounded
+    by the readers that keep it from finishing (`{:error, :busy}`).
 - *Result size.* `sqlite_run` counts rows and bytes while it builds the
   result and stops with `{:error, :result_too_large}` over
   `max_result_rows` (default 100 000) or `max_result_bytes` (default 64 MiB;
   text and blobs by length, 8 bytes for other values). The one NIF call
   serves the owner path, replicas and cross-cell queries, so all of them are
-  capped. The cap bounds the result a caller gets; a statement can still
-  scan a large table inside SQLite until its deadline.
+  capped. The cap bounds the result a caller gets, not the work of the
+  statement (see "Deadline").
 - *Parameters.* A wrong number or type of parameters is
   `{:error, {:bad_params, message}}` from `Db.run/4` and `Db.read/4`; the
   cell process does not crash. Lengths over 2 GiB are refused in the NIF.

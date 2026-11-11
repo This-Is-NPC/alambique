@@ -54,25 +54,6 @@ set the S3 `:receive_timeout` below `op_timeout_ms`.
 
 **Evidence.** `lib/alambique/replica.ex`, `lib/alambique/replication/retry.ex`.
 
-## Some statements have no deadline
-
-**What happens.** The `:sql` option `:statement_timeout_ms` bounds the
-statements of `query/5`, `execute/5`, `Alambique.Tx.query/3` and `execute/3`,
-and the reads of replicas and cross-cell queries. It does not bound migrations,
-`Alambique.Tx.script/2` and the library's own statements. The deadline is
-checked every 1 000 SQLite VM instructions, so a statement that spends a long
-time inside one instruction (a very large `zeroblob`, say) ends when that
-instruction does. A statement that scans a large table without returning rows
-is bounded by the deadline but not by `:max_result_rows`.
-
-**Workaround.** Keep migrations small, and lower `:statement_timeout_ms` for
-instances that run host-supplied SQL. There is no per-call override of the
-`:sql` limits yet.
-
-**Evidence.** `test/sql_safety_test.exs` and the tests of
-`native/alambique_nif/src/sqlite.rs` cover the bounded paths; design §7,
-"Statements of callers".
-
 ## Data directories are not checked
 
 **What happens.** Two requirements of the instance are not enforced:

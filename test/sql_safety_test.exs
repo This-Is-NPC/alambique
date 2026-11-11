@@ -163,6 +163,111 @@ defmodule Alambique.SqlSafetyTest do
       assert [[1], [2]] = durable_rows(ctx, cell, "SELECT n FROM t ORDER BY n")
     end
 
+    @tag timeout: 30_000
+    test "a migration past the script deadline is interrupted and the wake fails", ctx do
+      inst =
+        start_instance(ctx,
+          migrations: [{1, "CREATE TABLE t (n); CREATE TABLE big AS #{@forever}"}],
+          sql: [script_timeout_ms: 300]
+        )
+
+      cell = unique_cell()
+
+      assert {:error, {:migration, 1, :statement_timeout}} =
+               Alambique.query(inst, cell, "SELECT 1")
+
+      assert :none = Alambique.owner(inst, cell)
+    end
+
+    @tag timeout: 30_000
+    test "a Tx.script past the script deadline is interrupted and rolls back", ctx do
+      inst = start_instance(ctx, migrations: @schema, sql: [script_timeout_ms: 300])
+      cell = unique_cell()
+      {:ok, _} = put(inst, cell, 1)
+      before = pid(inst, cell)
+
+      assert {:error, :statement_timeout} =
+               Alambique.transaction(inst, cell, fn tx ->
+                 case Alambique.Tx.script(tx, "CREATE TABLE big AS #{@forever}") do
+                   {:error, reason} -> Alambique.Tx.rollback(tx, reason)
+                   other -> other
+                 end
+               end)
+
+      assert {:ok, %{rows: []}} =
+               Alambique.query(inst, cell, "SELECT name FROM sqlite_master WHERE name = 'big'")
+
+      assert {:ok, _} = put(inst, cell, 2)
+      assert pid(inst, cell) == before
+    end
+
+    @tag timeout: 30_000
+    test "a call lowers the statement deadline but never raises it past the :sql one", ctx do
+      inst = start_instance(ctx, migrations: @schema, sql: [statement_timeout_ms: 3_000])
+      cell = unique_cell()
+      {:ok, _} = put(inst, cell, 1)
+      slow = "INSERT INTO t (n, v) SELECT x + 100, 'y' FROM (#{@rows})"
+
+      assert {:error, :statement_timeout} =
+               timed(
+                 fn -> Alambique.query(inst, cell, @forever, [], statement_timeout_ms: 200) end,
+                 2_000
+               )
+
+      assert {:error, :statement_timeout} =
+               timed(
+                 fn -> Alambique.execute(inst, cell, slow, [], statement_timeout_ms: 200) end,
+                 2_000
+               )
+
+      assert {:error, :statement_timeout} =
+               timed(
+                 fn ->
+                   Alambique.transaction(
+                     inst,
+                     cell,
+                     fn tx ->
+                       case Alambique.Tx.query(tx, @forever) do
+                         {:error, reason} -> Alambique.Tx.rollback(tx, reason)
+                         other -> other
+                       end
+                     end,
+                     statement_timeout_ms: 200
+                   )
+                 end,
+                 2_000
+               )
+
+      # Above the ceiling the ceiling applies.
+      assert {:error, :statement_timeout} =
+               timed(
+                 fn ->
+                   Alambique.query(inst, cell, @forever, [],
+                     statement_timeout_ms: 600_000,
+                     timeout: 20_000
+                   )
+                 end,
+                 10_000
+               )
+
+      for bad <- [0, -1, 1.5, "1", nil] do
+        assert {:error, :bad_option} =
+                 Alambique.query(inst, cell, "SELECT 1", [], statement_timeout_ms: bad)
+
+        assert {:error, :bad_option} =
+                 Alambique.execute(inst, cell, "SELECT 1", [], statement_timeout_ms: bad)
+      end
+
+      assert {:ok, %{rows: [[1]]}} =
+               Alambique.query(inst, cell, "SELECT 1", [], statement_timeout_ms: 100)
+    end
+
+    defp timed(fun, limit_ms) do
+      {us, result} = :timer.tc(fun)
+      assert div(us, 1000) < limit_ms
+      result
+    end
+
     test "the options are validated and default from the operation timeout", ctx do
       base = fn extra ->
         Keyword.merge(
@@ -171,12 +276,18 @@ defmodule Alambique.SqlSafetyTest do
         )
       end
 
-      assert %{statement_timeout_ms: 10_000, max_result_rows: 100_000} =
+      assert %{statement_timeout_ms: 10_000, script_timeout_ms: 60_000, max_result_rows: 100_000} =
                Alambique.Config.build(base.([])).sql
 
       assert Alambique.Config.build(base.(op_timeout_ms: 2_000)).sql.statement_timeout_ms == 2_000
 
-      for bad <- [[statement_timeout_ms: 0], [max_result_rows: 0], [max_result_bytes: -1], [x: 1]] do
+      for bad <- [
+            [statement_timeout_ms: 0],
+            [script_timeout_ms: 0],
+            [max_result_rows: 0],
+            [max_result_bytes: -1],
+            [x: 1]
+          ] do
         assert_raise ArgumentError, fn -> Alambique.Config.build(base.(sql: bad)) end
       end
     end

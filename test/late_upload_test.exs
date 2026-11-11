@@ -51,7 +51,7 @@ defmodule Alambique.LateUploadTest do
 
   # Sends a write and returns once its put waits at the gate.
   defp send_write(w, sql, params) do
-    req = :gen_server.send_request(w.pid, {:execute, sql, params})
+    req = :gen_server.send_request(w.pid, {:execute, sql, params, nil})
     :sys.get_state(w.pid)
     txid = List.last(:sys.get_state(w.pid).pipe.queue).txid
     :ok = GatedStore.await(w.gate, key(w, txid))
@@ -82,7 +82,7 @@ defmodule Alambique.LateUploadTest do
     {:ok, %{epoch: epoch}} = lease(w)
     ref = Process.monitor(w.pid)
     ManualClock.advance(w.world, @ttl + 1_000)
-    call = :gen_server.send_request(w.pid, {:query, "SELECT 1", []})
+    call = :gen_server.send_request(w.pid, {:query, "SELECT 1", [], nil})
 
     assert {:reply, {:error, :lease_expired}} = answer(call)
     assert_receive {:DOWN, ^ref, :process, _, _}, 5_000

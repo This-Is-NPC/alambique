@@ -49,7 +49,7 @@ defmodule Alambique.PipelineStopTest do
 
   # Sends a write and returns once its put waits at the gate.
   defp send_write(w, n) do
-    req = :gen_server.send_request(w.pid, {:execute, @insert, [n]})
+    req = :gen_server.send_request(w.pid, {:execute, @insert, [n], nil})
     :sys.get_state(w.pid)
     txid = List.last(:sys.get_state(w.pid).pipe.queue).txid
     :ok = GatedStore.await(w.gate, key(w, txid))
@@ -82,7 +82,7 @@ defmodule Alambique.PipelineStopTest do
       test "is unknown when the lease is lost; a read gets the reason", w do
         {req, txid} = send_write(w, 1)
         if unquote(landed), do: land_unseen(w, txid)
-        read = :gen_server.send_request(w.pid, {:query, "SELECT n FROM t", []})
+        read = :gen_server.send_request(w.pid, {:query, "SELECT n FROM t", [], nil})
         :sys.get_state(w.pid)
 
         take_over(w, 100)
@@ -99,7 +99,7 @@ defmodule Alambique.PipelineStopTest do
         if unquote(landed), do: land_unseen(w, txid)
 
         ManualClock.advance(w.world, @ttl + 1_000)
-        call = :gen_server.send_request(w.pid, {:query, "SELECT 1", []})
+        call = :gen_server.send_request(w.pid, {:query, "SELECT 1", [], nil})
 
         assert {:reply, {:error, :lease_expired}} = answer(call)
         assert {:reply, {:error, :outcome_unknown}} = answer(req)
@@ -138,7 +138,7 @@ defmodule Alambique.PipelineStopTest do
       {first, txid} = send_write(w, 1)
       {second, _} = send_write(w, 2)
       # Depth 2 is full: the third write waits, committed locally, unsent.
-      third = :gen_server.send_request(w.pid, {:execute, @insert, [3]})
+      third = :gen_server.send_request(w.pid, {:execute, @insert, [3], nil})
       :sys.get_state(w.pid)
       assert [_] = :sys.get_state(w.pid).pending
 

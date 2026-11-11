@@ -590,7 +590,7 @@ defmodule Alambique.Router do
   defp repeatable?({:idempotent, _}), do: true
   # Migrating again runs only the migrations still pending.
   defp repeatable?({:migrate, _wake}), do: true
-  defp repeatable?({kind, _, _}), do: kind in [:query, :checked_query]
+  defp repeatable?({kind, _, _, _}), do: kind in [:query, :checked_query]
   defp repeatable?(request), do: request in [:touch, :hibernate]
 
   defp clock_ms(%{clock: {clock, clock_config}}), do: clock.now_ms(clock_config)

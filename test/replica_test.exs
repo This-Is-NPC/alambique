@@ -290,7 +290,9 @@ defmodule Alambique.ReplicaTest do
 
       reqs =
         for n <- 2..3 do
-          req = :gen_server.send_request(pid, {:execute, "INSERT INTO t (n) VALUES (?)", [n]})
+          req =
+            :gen_server.send_request(pid, {:execute, "INSERT INTO t (n) VALUES (?)", [n], nil})
+
           :sys.get_state(pid)
           :sys.get_state(pid)
           req

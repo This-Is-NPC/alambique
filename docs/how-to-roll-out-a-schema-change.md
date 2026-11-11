@@ -116,6 +116,15 @@ the value of a migration function is ignored:
 A script holds schema statements only. Put seed rows or backfills in
 `Tx.execute/3` calls of the same function, after the script.
 
+## A long migration
+
+Each statement of a migration and each `Tx.script/2` has a deadline,
+`sql: [script_timeout_ms:]` (default 60 000). A statement that runs longer,
+such as an index over a very large table, is interrupted, the migration rolls
+back and the wake fails with `{:error, {:migration, version, :statement_timeout}}`.
+Raise `script_timeout_ms` for such a rollout; callers' statements keep their
+own, shorter `statement_timeout_ms`.
+
 ## Migrations chosen per cell
 
 If groups of cells run different code, give each group its own list. Set
