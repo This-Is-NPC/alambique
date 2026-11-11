@@ -46,7 +46,9 @@ defmodule Alambique.Load.Driver do
     limits = %{
       delivery_min: Env.float("DELIVERY_MIN", 0.95),
       max_net_load: Env.float("MAX_NET_LOAD", 6),
-      max_swap_mb: Env.float("MAX_SWAP_MB", 0),
+      max_driver_swap_mb: Env.float("MAX_DRIVER_SWAP_MB", 16),
+      max_store_swap_mb: Env.float("MAX_STORE_SWAP_MB", 0),
+      max_host_swap_mb: Env.float("MAX_HOST_SWAP_MB", 512),
       max_error_ratio: Env.float("MAX_ERROR_RATIO", 0),
       latency: mod.latency(),
       mem_limit_mb: Env.int("MEM_LIMIT_MB", 512),
@@ -266,7 +268,8 @@ defmodule Alambique.Load.Driver do
 
   defp swap_verdict_stats(swap) do
     %{
-      driver_growth_mb: swap.driver_mb && swap.driver_mb.growth,
+      driver_max_mb: swap.driver_mb && swap.driver_mb.max,
+      host_max_mb: swap.host_mb && swap.host_mb.max,
       store_growth_mb: swap.store_mb && swap.store_mb.growth,
       service_mb: swap.service_mb && swap.service_mb.max
     }
