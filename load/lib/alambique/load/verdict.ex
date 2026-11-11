@@ -8,7 +8,9 @@ defmodule Alambique.Load.Verdict do
   #      operations completed                 -> invalid (not a failure: the
   #                                              harness or the service did not
   #                                              carry the load it was asked)
-  #   4. errors above the allowed share       -> bad
+  #   4. errors above the allowed share       -> bad (`:store_full` when
+  #                                              the errors say the store is
+  #                                              out of space, else `:errors`)
   #   5. the latency percentile of the
   #      measure above its limit              -> bad
   #   otherwise good.
@@ -39,7 +41,7 @@ defmodule Alambique.Load.Verdict do
         {:invalid, {:delivery, delivery_ratio(stats)}}
 
       stats.errors > limits.max_error_ratio * stats.completed ->
-        {:bad, :errors}
+        {:bad, if(stats[:store_full], do: :store_full, else: :errors)}
 
       latency_bad?(stats, limits.latency) ->
         {percentile, limit} = limits.latency
@@ -49,6 +51,12 @@ defmodule Alambique.Load.Verdict do
         :good
     end
   end
+
+  @full ~r/no space|nospace|enospc|disk full|volume (is )?full|quota/i
+
+  @doc "Whether the error samples of a step (`%{error: text, count: n}`) say the store is full."
+  @spec store_full?([map]) :: boolean
+  def store_full?(error_samples), do: Enum.any?(error_samples, &(&1.error =~ @full))
 
   defp latency_bad?(_stats, nil), do: false
 

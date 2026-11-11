@@ -66,6 +66,24 @@ defmodule Alambique.Load.VerdictTest do
     assert {:repeat, _} = judge(%{net_load_max: 9.0, completed: 0, errors: 5, mem_mb_max: 600.0})
   end
 
+  test "errors that say the store is full are named store_full" do
+    assert judge(%{errors: 3, store_full: true}) == {:bad, :store_full}
+    assert judge(%{errors: 3, store_full: false}) == {:bad, :errors}
+    assert judge(%{errors: 0, store_full: true}) == :good
+  end
+
+  test "store_full? reads the error samples" do
+    full = %{
+      error: "{:error, {:s3, 500, \"write /data/1.dat: no space left on device\"}}",
+      count: 2
+    }
+
+    other = %{error: "{:exit, :timeout}", count: 9}
+    assert Verdict.store_full?([other, full])
+    refute Verdict.store_full?([other])
+    refute Verdict.store_full?([])
+  end
+
   test "a measure without a latency criterion ignores latency" do
     assert judge(%{latency_ms: %{p99: 99_999.0}}, %{latency: nil}) == :good
   end

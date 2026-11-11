@@ -22,13 +22,21 @@ tag=$scenario-$measure-$variant
 out=${ALAMBIQUE_LOAD_RESULTS:-results/load}/$run_id/$tag
 data_mb=${ALAMBIQUE_LOAD_DATA_MB:-1024}
 store_mb=${ALAMBIQUE_LOAD_STORE_MB:-4096}
+store_on=${ALAMBIQUE_LOAD_STORE_ON:-tmpfs}
+store_image=chrislusf/seaweedfs:4.48
 image=${ALAMBIQUE_LOAD_IMAGE:-alambique-load:local}
 cookie=$(head -c 24 /dev/urandom | base64 | tr -d '/+=')
 suffix=$run_id-$tag-$$
 min_gib=${ALAMBIQUE_LOAD_MIN_AVAILABLE_GIB:-6}
 quiet_load=${ALAMBIQUE_LOAD_START_LOAD:-8}
 
+case "$store_on" in
+  tmpfs | disk) ;;
+  *) echo "ALAMBIQUE_LOAD_STORE_ON must be tmpfs or disk, not $store_on" >&2; exit 1 ;;
+esac
+
 mkdir -p "$out"
+store_dir=""    # the directory this script created for the store (disk only)
 containers=()   # ids of the containers this script started, the only ones it removes
 driver=""
 envfile=$(mktemp)
@@ -42,6 +50,14 @@ cleanup() {
   trap - EXIT INT TERM
   [ -z "$driver" ] || kill "$driver" 2>/dev/null || true
   for id in "${containers[@]}"; do docker rm -f "$id" >/dev/null 2>&1 || true; done
+  if [ -n "$store_dir" ]; then
+    # SeaweedFS runs as root, so its files may not be ours to remove. A
+    # throwaway container of the same image empties exactly that directory.
+    docker run --rm --entrypoint find -v "$store_dir:/d" "$store_image" \
+      /d -mindepth 1 -delete >/dev/null 2>&1 || true
+    rmdir "$store_dir" 2>/dev/null ||
+      echo "could not remove the store directory $store_dir; remove it by hand" >&2
+  fi
   rm -f "$envfile" "$out/driver.pid"
   exit "$status"
 }
@@ -76,13 +92,27 @@ case "$variant" in
   cache[0-9]*) export ALAMBIQUE_LOAD_CACHE_KIB=${variant#cache} ;;
 esac
 
-# The store: SeaweedFS on a tmpfs, in a container of its own, on a free port.
+# The store: SeaweedFS in a container of its own, on a free port, with its
+# data on a tmpfs or, with ALAMBIQUE_LOAD_STORE_ON=disk, in a fresh directory.
 port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+if [ "$store_on" = disk ]; then
+  store_dir=${ALAMBIQUE_LOAD_STORE_DIR:-$out/store}
+  mkdir -p "$(dirname "$store_dir")"
+  store_dir=$(cd "$(dirname "$store_dir")" && pwd)/$(basename "$store_dir")
+  mkdir "$store_dir" # fails if it exists: only a directory made here is ever removed
+  echo "$store_dir" >"$out/store-dir.txt"
+  store_fs=$(findmnt -no FSTYPE -T "$store_dir" 2>/dev/null || stat -fc %T "$store_dir")
+  store_mount=(-v "$store_dir:/data")
+else
+  store_fs=tmpfs
+  store_mount=(--tmpfs "/data:rw,size=${store_mb}m")
+fi
+export ALAMBIQUE_LOAD_STORE_ON=$store_on ALAMBIQUE_LOAD_STORE_FSTYPE=$store_fs
 store=$(docker run -d --name "alambique-load-store-$suffix" \
-  --tmpfs "/data:rw,size=${store_mb}m" \
+  "${store_mount[@]}" \
   -p "127.0.0.1:${port}:8333" \
   -e AWS_ACCESS_KEY_ID=alambique -e AWS_SECRET_ACCESS_KEY=alambique-secret \
-  chrislusf/seaweedfs:4.48 \
+  "$store_image" \
   mini -dir=/data -ip=127.0.0.1 -ip.bind=0.0.0.0 -s3.port=8333 -admin.ui=false)
 containers+=("$store")
 echo "$store" >>"$started"

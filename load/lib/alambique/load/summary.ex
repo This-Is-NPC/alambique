@@ -54,6 +54,10 @@ defmodule Alambique.Load.Summary do
     do: "delivered #{Float.round(ratio * 100, 1)}% of the planned operations"
 
   defp describe({:host_busy, load}), do: "host net load #{Float.round(load * 1.0, 1)}"
+
+  defp describe(:store_full),
+    do: "the store is out of space"
+
   defp describe(other), do: to_string(other)
 
   # Process memory against the level, over the ramp and refinement steps that
@@ -146,7 +150,8 @@ defmodule Alambique.Load.Summary do
       end
 
     lines = [
-      "#### Scenario #{summary.scenario}: #{summary.measure} (#{summary.variant}), #{summary.cpus} CPU, #{summary.mem_limit_mb} MB",
+      "#### Scenario #{summary.scenario}: #{summary.measure} (#{summary.variant}), #{summary.cpus} CPU, #{summary.mem_limit_mb} MB" <>
+        store_note(summary),
       "",
       table([head | rows]),
       "",
@@ -159,6 +164,11 @@ defmodule Alambique.Load.Summary do
 
     lines |> Enum.reject(&is_nil/1) |> Enum.join("\n") |> Kernel.<>("\n")
   end
+
+  defp store_note(%{store_on: "disk"} = summary),
+    do: ", store on disk (#{summary[:store_fstype] || "unknown"})"
+
+  defp store_note(_), do: ""
 
   defp last_good_line(%{last_good: nil}), do: "- No level was good."
 
