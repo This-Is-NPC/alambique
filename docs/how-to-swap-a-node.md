@@ -19,8 +19,8 @@ released is taken at once.
 
 - The same version of the application, and the same `:store`, `:prefix`,
   `:placement` and `:migrations`, on A and B.
-- A distinct `:data_dir` for each node (nothing checks it, see
-  [what-does-not-work.md](what-does-not-work.md)).
+- A distinct `:data_dir` for each node. A start on a directory that another
+  live instance holds fails with `{:error, {:data_dir_in_use, path}}`.
 - A router or load balancer in front that can send a request to B first and
   retry a refused one after a delay, such as a `503` with `Retry-After`.
 - A stop grace period longer than the drain, if you stop A with a signal:

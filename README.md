@@ -66,7 +66,10 @@ More calls, placement and the other features are in
 - For nodes that run many cells, the VM flags `+Mdai max +MMmcs 0`
   ([docs/design.md](docs/design.md), section 12).
 - A local, case-sensitive file system for `:data_dir`, used by one instance
-  only. The library checks neither. A `node_id` need not be unique for safety:
+  only. The start refuses a directory that another live instance holds (a
+  lock file, released when its OS process ends); it does not check case. The
+  lock needs a local file system: on NFS `flock` may not exclude other hosts.
+  A `node_id` need not be unique for safety:
   leases also carry a random incarnation per start (design section 5).
 - Docker, only to run the SeaweedFS tests.
 

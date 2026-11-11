@@ -18,6 +18,23 @@ application, started with `{Alambique, opts}`. All nodes of a cluster that
 serve the same cells run an instance with the same `:name` and the same
 placement (§18), which says where each cell's store and prefix are.
 
+**Data directory.** `:data_dir` holds the local files of the cells and belongs
+to one live instance: a second one would share the files of cells with equal
+ids, and its start removes `read-replicas` and `work` (§20, §21). The start
+takes an exclusive `flock` on `<data_dir>/lock` (`dir_lock` in the NIF, through
+`File::try_lock`) before it touches any other file, and the first child of the
+instance (`Alambique.DataDir`) holds it. `flock` belongs to the open file
+description, so a second open conflicts inside one VM as well as across OS
+processes, and the kernel releases it when the process dies: a crashed VM
+leaves no stale lock, and a stop (or a failed start) releases it at once. A
+refused start returns `{:error, {:data_dir_in_use, path}}` and changed nothing
+but the creation of the directory and its lock file. The lock excludes only
+processes that share the kernel's view of the file: on NFS `flock` may be
+local to the client, so the directory must be local, as it already must be
+for SQLite. `test/data_dir_lock_test.exs` covers two instances in one VM, a
+lock held by another OS process, and the release after a stop;
+`test/data_dir_lock_properties_test.exs` checks a model of starts and stops.
+
 ## 2. Packages and layout
 
 | Path | Package | Purpose |
@@ -368,9 +385,8 @@ its awake cells unreleased, and the restarted instance is a new holder: it
 serves those cells after `lease_ttl_ms` plus `skew_margin_ms` (32 s by default)
 instead of at once. A graceful stop and `Alambique.drain/2` release the leases
 and cost nothing. Persisting the incarnation in `:data_dir` would let a restart
-on the same disk reclaim at once, but nothing locks `:data_dir`, so two
-instances that share one directory would share an incarnation and the fence
-would rest on documentation again; a copied disk would do the same. The
+on the same disk reclaim at once, but a copied disk would share an incarnation
+between two instances, and the fence would rest on documentation again. The
 incarnation stays in memory. A cell process that dies inside a running instance
 is still reclaimed at once, because the incarnation is the instance's.
 

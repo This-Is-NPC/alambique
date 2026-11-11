@@ -8,11 +8,23 @@ defmodule Alambique.Instance do
 
   alias Alambique.{Config, Membership}
 
-  def start_link(config), do: Supervisor.start_link(__MODULE__, config, name: config.name)
+  # The data directory is locked before the tree starts, so a refused start
+  # touches no file (design §1).
+  def start_link(config) do
+    with {:ok, lock} <- Alambique.DataDir.acquire(config.data_dir) do
+      case Supervisor.start_link(__MODULE__, {config, lock}, name: config.name) do
+        {:ok, pid} ->
+          {:ok, pid}
+
+        error ->
+          Alambique.DataDir.release(lock)
+          error
+      end
+    end
+  end
 
   @impl true
-  def init(config) do
-    Alambique.Cell.Local.private_dir!(config.data_dir)
+  def init({config, lock}) do
     # A replica file never outlives its process (design §21).
     File.rm_rf!(Alambique.Replica.dir(config))
     Alambique.Cell.Local.clean_work_dirs(config)
@@ -20,6 +32,7 @@ defmodule Alambique.Instance do
     Membership.init_state(config)
 
     children = [
+      %{id: DataDir, start: {Alambique.DataDir, :start_link, [lock]}},
       %{id: :pg, start: {:pg, :start_link, [config.scope]}},
       %{id: Live, start: {Alambique.Live, :start_link, [config]}},
       {Registry, keys: :unique, name: config.registry, listeners: [config.live]}

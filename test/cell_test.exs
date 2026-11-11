@@ -88,7 +88,14 @@ defmodule Alambique.CellTest do
       assert Enum.any?(open_files(), &String.ends_with?(&1, "cell.db"))
 
       eventually(fn -> Alambique.cells(inst).count == 0 end)
-      eventually(fn -> not Enum.any?(open_files(), &String.contains?(&1, ctx.dir)) end)
+      # The instance holds its data directory lock for as long as it lives.
+      eventually(fn ->
+        not Enum.any?(
+          open_files(),
+          &(String.contains?(&1, ctx.dir) and not String.ends_with?(&1, "/lock"))
+        )
+      end)
+
       assert length(Process.list()) <= before
       assert DynamicSupervisor.count_children(Module.concat(inst, CellSupervisor)).active == 0
 

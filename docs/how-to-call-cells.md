@@ -10,7 +10,8 @@ documentation of `Alambique`; the words are in [concepts.md](concepts.md).
 
 - An S3-compatible store with conditional writes and its credentials
   ([storage-compatibility.md](storage-compatibility.md)).
-- A local directory for `:data_dir`, used by one instance only.
+- A local directory for `:data_dir`, used by one instance only. A second
+  instance on it fails to start with `{:error, {:data_dir_in_use, path}}`.
 
 ## 1. Start one instance per node
 
