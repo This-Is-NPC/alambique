@@ -132,4 +132,18 @@ defmodule Alambique.Load.SummaryTest do
     assert hd(summary.rows).quiet_wait_s == 30.0
     assert Summary.markdown(summary) =~ "Waited 1861 s in all"
   end
+
+  test "the heading says when the store was on disk, and a full store is named" do
+    steps = [step(1, :ramp, 50, {:bad, :store_full}, 100.0)]
+    outcome = %{stopped: :bad, confirmation: nil}
+
+    tmpfs = Summary.markdown(Summary.build(Map.put(@meta, :store_on, "tmpfs"), steps, outcome))
+    refute tmpfs =~ "store on disk"
+
+    disk_meta = Map.merge(@meta, %{store_on: "disk", store_fstype: "ext4"})
+    summary = Summary.build(disk_meta, steps, outcome)
+
+    assert Summary.markdown(summary) =~ "1.0 CPU, 512 MB, store on disk (ext4)\n"
+    assert summary.stopped_by =~ "bad: the store is out of space"
+  end
 end
