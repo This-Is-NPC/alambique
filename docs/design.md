@@ -2454,7 +2454,7 @@ closes the file and releases the lease: it hands the sender every
 acknowledged batch not yet handed over, whatever `max_backlog_batches`, and
 sends `{:flush, ref}`. The sender then puts its whole queue in objects of up
 to `n` batches, with no linger, through the same path as any put (the late
-and bump rules and the 412 dedupe hold), and answers `{:feed_flushed, ref}`.
+and floor rules and the 412 dedupe hold), and answers `{:feed_flushed, ref}`.
 The cell waits for it at most `feed: [stop_publish_ms:]` (default 5 000; 0
 turns the flush off) and only while its lease is valid. On a timeout, a lost
 lease or a sender that ends, the cell kills the sender and stops as before;
@@ -2577,14 +2577,35 @@ key sorts, within a shard, by time, then TXID, then cell.
   time <= feed window` (`feed: [window_ms:]`, default 10 000). A later
   publication, which happens after a long outage or when a new owner finds rows
   from a dead one, would land behind consumers that have moved on. It is
-  therefore published under the time `max(now, its own time)`, and so is every
-  later batch of the same publication, which keeps the commit order. Before it
-  puts a late batch the publisher looks for the object at its original key
-  (`head`), because the previous owner may have published it in time. The
-  floor moves up to the time used. A late batch can still be duplicated, for
+  therefore published under the time `max(now, its own time)`. Before it
+  puts a batch under a time other than its own the publisher looks for the
+  object at its original key (`head`), because the previous owner may have
+  published it in time. A late batch can still be duplicated, for
   example when an earlier attempt landed under a late key and its
   acknowledgement was lost; that is the at-least-once case, and the duplicate has
   the same content and the same idempotency key.
+- **Key floor.** The time of an object key is `max(its own time, floor)`, or
+  `max(now, its own time, floor)` when late, and `floor` is the latest time
+  any key of the cell took. The sender keeps it for as long as it lives, also
+  when its queue is empty, and raises it to the time of every object it
+  puts. A new sender starts at the cell's `floor` (above), which holds the
+  times of the objects published and of the batches stamped. So the times of
+  the keys never decrease along the TXIDs: a batch that is acknowledged after
+  a late one was published, though stamped before it, takes a key at or after
+  the late one's, and the TXID orders equal times. Without the floor, the
+  late rule applied to each queue run alone: once the queue drained, a batch
+  stamped earlier than the late key but still on time got a key before it
+  (seen with `window_ms: 1`). Across a restart of the sender or an owner
+  change, an object that landed but was not recorded is published again from
+  the file, under the same or a later key. Keys written by v0.1.0 are read as
+  before: the key format has not changed.
+
+  *Limit.* If a late put lands, the sender ends before the cell records it,
+  and the clock then reads below that late key (it went back, or the new
+  owner's is behind), the batches still in the file can take keys below the
+  landed object. A consumer whose position is already at that object skips
+  them, and the first occurrence of an idempotency key is then not in commit
+  order. No test or property covers this case.
 - **Reading.** A consumer's feed position is a JSON map from each list (a
   shard of a location) to the key of the last object it read there, an opaque
   string (`nil` is the beginning). `Alambique.Feed.read/3` lists every shard of
@@ -2635,6 +2656,8 @@ acknowledgement and publication, the deduplicated feed of every cell equals
 the rows the cell holds, in the same order, with a random `object_batches`.
 `test/feed_batching_properties_test.exs` checks it on one node with groups of
 varied sizes, crashes of the sender and resumes from saved positions.
+`test/feed_order_test.exs` checks the order of the keys alone, with held
+uploads and a manual clock that also goes back.
 
 
 ## 14. Cross-cell queries
