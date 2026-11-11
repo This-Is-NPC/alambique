@@ -13,7 +13,8 @@ defmodule Alambique.MixProject do
       description:
         "SQLite databases that wake on demand and replicate to S3-compatible storage, " <>
           "one lease-fenced owner per cell.",
-      package: package()
+      package: package(),
+      releases: releases()
     ]
   end
 
@@ -29,12 +30,20 @@ defmodule Alambique.MixProject do
     ]
   end
 
+  # The service of the load test (docs/how-to-load-test.md), built by
+  # `mise run load:image` with MIX_ENV=load. The ERTS comes from the image.
+  defp releases do
+    [alambique_load: [applications: [alambique: :permanent], include_erts: false]]
+  end
+
   # `mix test --cover` fails below the threshold. The environment variable
   # lets scripts/test-coverage keep one documented value for both languages.
   # The ignored modules are test support and the testkit, which the test build
   # compiles into the application, and the NIF stubs of Replication.Native
   # (their bodies never run; scripts/test-coverage measures the Rust side).
-  # Nothing else is excluded.
+  # The load test harness (load/lib, Alambique.Load.*) is tooling: it drives
+  # containers and a service, and what decides outcomes is unit-tested in
+  # test/load. Nothing else is excluded.
   defp test_coverage do
     threshold = String.to_integer(System.get_env("ALAMBIQUE_COVERAGE_MIN", "90"))
 
@@ -46,14 +55,18 @@ defmodule Alambique.MixProject do
         ~r/^Alambique\.Replication\.Native$/,
         ~r/^Alambique\.(OptionFuns|RecordingStore|ReplicationHelpers|StoreContract)$/,
         ~r/^Alambique\.(BenchText|TestDirs)(\.|$)/,
+        ~r/^Alambique\.Load(\.|$)/,
         ~r/^AlambiqueTestkit\./
       ]
     ]
   end
 
   def application do
-    [extra_applications: [:logger | test_applications(Mix.env())]]
+    [extra_applications: [:logger | test_applications(Mix.env())]] ++ service(Mix.env())
   end
+
+  defp service(:load), do: [mod: {Alambique.Load.Service.App, []}]
+  defp service(_), do: []
 
   # The testkit uses :cover, which ships in :tools.
   defp test_applications(:test), do: [:tools]
@@ -62,7 +75,10 @@ defmodule Alambique.MixProject do
   # The testkit sources are compiled into the test build instead of being a
   # path dependency, because alambique_testkit itself depends on alambique
   # and Mix rejects that cycle.
-  defp elixirc_paths(:test), do: ["lib", "test/support", "testkit/lib"]
+  # The load harness (load/lib) compiles in the test build, which runs its
+  # tests and its driver, and in the load build, which is its service.
+  defp elixirc_paths(:test), do: ["lib", "load/lib", "test/support", "testkit/lib"]
+  defp elixirc_paths(:load), do: ["lib", "load/lib", "test/support/bench_text.ex"]
   defp elixirc_paths(_), do: ["lib"]
 
   defp deps do
