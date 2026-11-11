@@ -643,6 +643,74 @@ the new owner writes an empty fence segment at TXID `n + 1` with
 retries the fence. Once the fence lands, every write by an older epoch collides on a TXID the new owner
 holds.
 
+**Late puts.** When a cell stops it kills its upload processes and releases
+its lease, but a request that was already sent is not recalled: the store may
+apply it after the release, after a new owner woke and after that owner
+committed. Nothing waits for it; no code needs to, because the keys and the
+conditions make a late put harmless. The upload process puts one kind of
+object, a level-0 segment at `0000/<txid>-<txid>.ltx`; the cell's other
+processes that put are the feed sender, which is covered below, and nothing
+else (snapshots and merged files come from the compaction, which reads the
+chain with the rules above and does not depend on the lease). Let `h` be the
+head the new owner restored, so its fence is TXID `h + 1`, and `t` the TXID of
+the late segment:
+
+- `h < t` and the new owner already holds `t` (the fence or a commit): the key
+  exists, so the put fails with `:precondition_failed`. Nothing is replaced,
+  whatever the epochs.
+- The put landed before the new owner restored (`t <= h`): the segment is part
+  of the chain the new owner continues, whole, because a segment is one object
+  and one transaction. Its writers were told `:outcome_unknown`, and it is
+  there. A restore never applies half a batch.
+- `t` is past the new owner's head and lands first: an object of an older
+  epoch in a TXID the new owner has not used. A reader ignores it: it follows
+  a segment of a higher epoch (the fence), which R2 excludes from the chain,
+  and it is a tail by its key (above). The new owner's own put at `t` meets
+  it, sees an epoch below its floor and replaces it with `{:if_match, etag}`
+  (the put rule); after that, nothing of the old epoch remains at `t`.
+- A put that fails its condition is a no-op in the store: the old owner never
+  overwrites, and the new owner's objects and later writes are untouched.
+
+So the rule that makes a late put harmless is the pair "one key per TXID,
+created only with `:if_none_match`" and "a reader and a writer treat an epoch
+below the preceding segment's as outside the chain". The epoch is in the
+object metadata, not in the key; the TXID is the key. No deadline or wait is
+needed before the release.
+
+One case rests on time instead of on a key. `:if_none_match` succeeds when
+the key does not exist, so a put that outlives the deletion of its key would
+recreate it. Only retention deletes level-0 files (compaction keeps them,
+§9): a file whose last TXID is at or below the anchor, once the anchor is
+`pitr_window_ms` old (default seven days) and `grace_ms` old (default ten
+minutes), and `deletion_grace_ms` after it was marked (default one day; 0
+deletes at once, §9.1). So with the defaults a put must stay in flight for
+more than a day to find its key gone, against `op_timeout_ms` (10 s) for the
+call and the `receive_timeout` of the S3 store (15 s) for a request. Nothing
+enforces that bound yet: a store call has no hard deadline, and the cell does
+not wait for or cancel a request it sent. If it happens, the resurrected
+object does not change what a restore returns. It has an old epoch and a TXID
+at or below the anchor; restore starts at a snapshot at or above the anchor
+and walks only files after it, and the compaction plans only blocks after the
+newest snapshot, so neither reads it, and it is not a tail (tails lie past
+the head). Retention counts it as covered by the anchor it already recorded
+and does not mark it again, so with a deletion grace it stays in the store as
+an inert object (one segment); with `deletion_grace_ms: 0` the next run
+deletes it. Points before the anchor are already gone (§9).
+
+A late feed object (§13) is keyed by the time of
+its own batch and read after `settle_ms`; the new owner publishes the rows
+the old one left, so a late object duplicates records and loses none.
+`test/late_upload_test.exs` holds the old owner's requests inside the store
+(`Alambique.DetachedStore` keeps a put alive after its caller is killed,
+`GatedStore` holds it) until the owner stopped and released and a second
+instance committed, then lets them go. It checks the cases above for
+segments (refused at the fence and at a commit, landing past the head and
+replaced by the next commit, landing before the takeover as a whole batch of
+two rows) and for a feed object. After each it compares the rows restored
+from the store with the new owner's state and with its later writes. With
+`:if_none_match` replaced by an unconditional put in `Replicator`, three of
+the four tests fail.
+
 **Data TXID.** A fence takes a TXID but commits no data, so the head TXID
 cannot tell a woken cell from a written one. The data TXID of a cell is the
 TXID of the newest commit in its chain that changed data. Every segment,
