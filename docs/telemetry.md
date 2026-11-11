@@ -270,7 +270,7 @@ Emitted by `Alambique.Query` (design §14). `cell` is a string, `txid` an intege
 | Event | Measurements | Metadata |
 | --- | --- | --- |
 | `[:alambique, :query, :list]` | `duration`, `keys` (keys in the page), `cells` | `result` (`:ok` or `:error`), and `reason` for `:error` |
-| `[:alambique, :query, :replica]` | `duration` | `cell`, `result` (`:ok` or `:error`), and `source` (`:hit` for a cached replica used as is, `:unchanged` for one the store confirmed, `:refresh` for new segments applied, `:restore` for a full restore), `txid`, `segments` (files applied) for `:ok`, or `reason` for `:error` |
+| `[:alambique, :query, :replica]` | `duration` | `cell`, `result` (`:ok` or `:error`), and `source` (`:hit` for a cached replica used as is, `:unchanged` for one the store confirmed, `:refresh` for new segments applied, `:restore` for a full restore), `txid`, `segments` (files applied) for `:ok`, `copy` (`:reflink` or `:copy`: how a `:refresh` made the file it applied to), or `reason` for `:error` |
 | `[:alambique, :query, :cell]` | `duration`, `rows` | `cell`, `result` (`:ok` or `:error`), and `txid` for `:ok`, or `reason` for `:error` |
 | `[:alambique, :query, :trim]` | `duration`, `deleted` (files), `bytes` (left in the cache, replicas being built included) | none |
 

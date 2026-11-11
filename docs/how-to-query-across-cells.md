@@ -113,7 +113,8 @@ Per instance, in `Alambique` options:
 
 ```elixir
 query: [cache_bytes: 2_147_483_648, concurrency: 16, timeout_ms: 30_000,
-        page_size: 1_000, stale_tmp_seconds: 600, restore_attempts: 3]
+        page_size: 1_000, stale_tmp_seconds: 600, restore_attempts: 3,
+        reflink: true]
 ```
 
 Per call: `location:` (an `Alambique.Location`, its id, or `{store, prefix}`, or
@@ -132,7 +133,11 @@ that runs past it is interrupted and the cell reports `:timeout`.
   and a replica was removed twice before it could be opened. Raise `cache_bytes`
   or lower `concurrency`.
 - **Slow cold runs**: the first query of a cell restores it from the store.
-  Later queries apply only new segments. Telemetry `[:alambique, :query, :replica]`
+  Later queries apply only new segments to a clone of the cached file. On a
+  filesystem with reflinks (btrfs, xfs) that costs the change; on one without
+  (ext4, tmpfs) the file is copied and flushed each time, so keep
+  `<data_dir>/replicas` on a reflink filesystem, or use `max_age_ms`.
+  `query: [reflink: false]` turns clones off. Telemetry `[:alambique, :query, :replica]`
   shows the `source` of each ([telemetry.md](telemetry.md)).
 - **Data looks old**: check `max_age_ms`, and that the row's `txid` is the
   newest in the store (`mix alambique.inspect`).

@@ -230,9 +230,11 @@ defmodule Alambique do
       a query),
       `:timeout_ms` (per cell, default 30 000), `:page_size` (ids per listing
       request, default 1 000), `:stale_tmp_seconds` (age at which a
-      temporary replica file is removed, default 600) and `:restore_attempts`
+      temporary replica file is removed, default 600), `:restore_attempts`
       (restores of a replica when compaction or retention change the files
-      being read, default 3).
+      being read, default 3) and `:reflink` (refresh a cached replica from a
+      copy-on-write clone where the filesystem has them, default true; `false`
+      always copies the file).
     * `:quarantine` - freezing a cell that crashes the VM (design §10; default:
       on). `false` turns it off; a keyword list sets `:threshold` (crashes that
       freeze a cell, default 3), `:window_ms` (only crashes this recent count,

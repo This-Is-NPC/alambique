@@ -1,12 +1,19 @@
 defmodule Alambique.Query.Cache do
   @moduledoc false
   # On-disk cache of read-only replicas (design §14). One directory per cell,
-  # `<cell>.r/`, with one file per TXID: `<txid hex>-<epoch>.db`. Files are
+  # `<cell>.r/`, with one file per TXID:
+  # `<txid hex>-<epoch>-<checksum hex>.db`, the database checksum (LTX) of the
+  # file, so a refresh need not read it to continue the chain. Files are
   # built under a `.tmp-*` name and renamed into place, so a name that looks
   # like a replica is always a complete one. The modification time is the time
   # of the last use, which orders the eviction.
 
-  @type entry :: %{txid: non_neg_integer, epoch: non_neg_integer, path: Path.t()}
+  @type entry :: %{
+          txid: non_neg_integer,
+          epoch: non_neg_integer,
+          checksum: non_neg_integer,
+          path: Path.t()
+        }
 
   @spec dir(map) :: Path.t()
   def dir(config), do: Path.join(config.data_dir, "replicas")
@@ -36,9 +43,11 @@ defmodule Alambique.Query.Cache do
     end
   end
 
-  @spec path(Path.t(), String.t(), non_neg_integer, non_neg_integer) :: Path.t()
-  def path(dir, cell, txid, epoch),
-    do: Path.join(cell_dir(dir, cell), "#{Alambique.Replication.Keys.hex(txid)}-#{epoch}.db")
+  @spec path(Path.t(), String.t(), non_neg_integer, non_neg_integer, non_neg_integer) :: Path.t()
+  def path(dir, cell, txid, epoch, checksum) do
+    hex = &Alambique.Replication.Keys.hex/1
+    Path.join(cell_dir(dir, cell), "#{hex.(txid)}-#{epoch}-#{hex.(checksum)}.db")
+  end
 
   @doc "Complete replicas of `cell`, newest TXID first."
   @spec entries(Path.t(), String.t()) :: [entry]
@@ -58,9 +67,10 @@ defmodule Alambique.Query.Cache do
 
   defp parse(cell_dir, name) do
     with <<hex::binary-size(16), ?-, rest::binary>> <- name,
-         {epoch, ".db"} <- Integer.parse(rest),
+         {epoch, <<?-, sum::binary-size(16), ".db">>} <- Integer.parse(rest),
+         {checksum, ""} <- Integer.parse(sum, 16),
          {txid, ""} <- Integer.parse(hex, 16) do
-      %{txid: txid, epoch: epoch, path: Path.join(cell_dir, name)}
+      %{txid: txid, epoch: epoch, checksum: checksum, path: Path.join(cell_dir, name)}
     else
       _ -> nil
     end
@@ -90,6 +100,21 @@ defmodule Alambique.Query.Cache do
       File.rm(path <> "-wal")
       File.rm(path <> "-shm")
     end)
+  end
+
+  @doc """
+  Makes the empty file `dst` a copy of `src`: a copy-on-write clone when
+  `reflink?` and the filesystem has them, else a plain copy. Returns which.
+  """
+  @spec clone(Path.t(), Path.t(), boolean) :: {:ok, :reflink | :copy} | {:error, term}
+  def clone(src, dst, reflink?) do
+    case reflink? and Alambique.Replication.Native.reflink(src, dst) do
+      {:ok, true} ->
+        {:ok, :reflink}
+
+      _ ->
+        with {:ok, _} <- File.copy(src, dst), do: {:ok, :copy}
+    end
   end
 
   @doc "Flushes a file to disk, so a renamed replica is never a torn one."

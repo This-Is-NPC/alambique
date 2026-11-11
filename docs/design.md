@@ -2865,8 +2865,9 @@ caller passes `:max_age_ms`, which allows a cached `:latest` replica that many
 seconds old (resolution one second). `at: {:txid, n}` and `at: {:timestamp, ms}`
 read a past state.
 
-**Cache.** `<data_dir>/replicas/<cell>.r/<txid hex>-<epoch>.db`, one file per
-replica. A file is built under a `.tmp-*` name in the same directory, flushed,
+**Cache.** `<data_dir>/replicas/<cell>.r/<txid hex>-<epoch>-<checksum hex>.db`, one file
+per replica; the checksum is the database checksum of the LTX chain (§6) at
+that TXID. A file is built under a `.tmp-*` name in the same directory, flushed,
 and renamed, so a name that parses is always a complete file; a crash leaves
 only temporary files, which `trim` deletes after ten minutes. The temporary
 file is created empty before anything is downloaded: `trim` also removes cell
@@ -2881,8 +2882,20 @@ statement (`immutable=1`, so no locks and no `-wal`/`-shm`), and closes it.
   reads when nothing is new. New segments `t+1, t+2, ...` must be contiguous,
   each with an epoch not below the chain's (R2), and are applied with the
   checksum check of restore to a copy of the cached file; the copy is renamed
-  to its new TXID and the older replicas of the cell are deleted. A refresh
-  costs one file copy plus one `get` per new segment. The run ends at a gap or
+  to its new TXID and the older replicas of the cell are deleted. The copy is
+  needed because other queries may have the old file open. It is a
+  copy-on-write clone (`ioctl(FICLONE)`, Linux btrfs, xfs and the like) when the
+  filesystem has them, so it shares the unchanged blocks and costs the
+  metadata, not the database; otherwise a plain copy.
+  `query: [reflink: false]` always copies. The starting checksum is the one in
+  the cache name, and each segment's trailer gives the next, so no pass reads
+  the file; the only data written are the pages of the segments, and the flush
+  before the rename writes back only those on a clone. A refresh costs one
+  clone, one `get` per new segment and the pages they change; on a filesystem
+  without clones it still copies and flushes the file. Not done: reflinks on
+  other platforms (`clonefile` on macOS), and skipping the copy when no query
+  holds the old file, which would need a count of open readers shared by every
+  process of the cache. The run ends at a gap or
   at a file of a lower epoch when the files left are a tail (§6, R3), so a
   refresh during an upload in flight keeps the replica at the prefix. Anything
   else unexpected falls back to a full restore, which has the final say and returns its errors
@@ -2971,6 +2984,20 @@ default 1 GiB cache):
 
 Warm time is the local work: opening a file and running the statement. Against
 S3 the cold run is dominated by its 5 000 reads, the warm run by 2 000 listings.
+
+`mise run bench:query-refresh -- <MiB>` refreshes one large replica with one
+small segment (AMD Ryzen AI 5 340, in-memory store, `ALAMBIQUE_BENCH_DIR` on
+btrfs; file sizes are what the cell grew to; single runs, the flush of a plain
+copy varies a lot with the filesystem's write-back):
+
+| Replica | Before (copy, read, flush) | After (clone) |
+| --- | --- | --- |
+| 134 MiB | 307 ms (copy 33, read 256, flush 6) | 17 ms (122 MiB file) |
+| 254-281 MiB | 17 097 ms (copy 2 133, read 512, flush 18 085) | 38 ms and 46 ms |
+| 256 MiB, tmpfs (plain copy) | 846 ms | 94 ms (read pass gone, copy kept) |
+
+The "before" column is the code that read the whole file for its checksum and
+copied and flushed it; the passes were timed on the final file.
 
 ## 15. Durability and commit latency
 

@@ -5,22 +5,6 @@ Known defects that are still open. Limits that follow from the design are in
 entry says what happens,
 what to do about it, and where the evidence is.
 
-## A query replica refresh costs the size of the database
-
-**What happens.** `Alambique.Query` refreshes a cached replica by copying the
-file, reading it once to compute its checksum, applying the new segments and
-flushing the copy. The cost is proportional to the database, not to the
-change: a 1 GB replica refreshed by one 4 KiB segment copies, reads and flushes
-1 GB. The copy is needed because other queries may have the old file open.
-Recording the checksum with the cache entry and using reflinks where the
-filesystem has them would remove two of the passes, but change the cache
-naming and need a platform check.
-
-**Workaround.** Use `max_age_ms:` so that a run reuses a replica instead of
-refreshing it, and keep the cache on a filesystem with fast copies.
-
-**Evidence.** `Alambique.Query.Replica` (`apply_chain`); design §14.
-
 ## Data directories are not checked
 
 **What happens.** Two requirements of the instance are not enforced:

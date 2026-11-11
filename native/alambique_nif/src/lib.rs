@@ -13,6 +13,7 @@ mod lazy;
 mod lazy_nif;
 mod ltx;
 mod merge;
+mod reflink;
 mod sqlite;
 mod stats;
 mod sums;
@@ -278,6 +279,16 @@ fn file_state<'a>(env: Env<'a>, path: String, page_size: u32) -> Term<'a> {
             sums.len() as u32,
         )
             .encode(env),
+        Err(e) => error_term(env, e),
+    }
+}
+
+/// Clones `src` into the existing empty file `dst`: `{:ok, true}`, or
+/// `{:ok, false}` when the filesystem has no reflinks.
+#[rustler::nif(schedule = "DirtyIo")]
+fn reflink<'a>(env: Env<'a>, src: String, dst: String) -> Term<'a> {
+    match reflink::clone_file(Path::new(&src), Path::new(&dst)) {
+        Ok(cloned) => (atoms::ok(), cloned).encode(env),
         Err(e) => error_term(env, e),
     }
 }
