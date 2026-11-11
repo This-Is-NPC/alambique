@@ -362,7 +362,9 @@ defmodule Alambique.CompactorTest do
 
       assert compaction_requests(counts, :get) == []
       assert compaction_requests(counts, :head) == []
-      assert CountingStore.count(counts, :list) == 1
+      # One listing for the pass; the scan for pending cleanups (design §18) lists apart.
+      assert Enum.reject(CountingStore.listed(counts), &String.ends_with?(&1, "/moved/"))
+             |> length() == 1
 
       # What the pass wrote equals what a merge of the stored inputs makes.
       merges = [

@@ -10,6 +10,11 @@ defmodule Alambique.Compaction.Compactor do
   # deletes them and runs one pass for each, `concurrency` at a time. A cell
   # nobody writes has no row and costs nothing. Notifications for new cells
   # are dropped while the table is full; the next commit makes a new one.
+  #
+  # The cleanups of moved cells (design §18) are jobs in a second table. The
+  # store holds the truth: every `moved_scan_ms` the compactor lists the
+  # pending-cleanup markers of each location, one page of `moved_scan_page`
+  # per tick, and queues what it finds, so a restart forgets nothing.
 
   use GenServer
 
@@ -41,8 +46,8 @@ defmodule Alambique.Compaction.Compactor do
   @doc """
   Asks for the cleanup of what `cell` left at the location `location_id` after a
   move (design §18), in `delay_ms`. A cleanup that finds the grace period still
-  running schedules itself again. Jobs live in memory: after a restart, call
-  `Alambique.cleanup_moved/4`.
+  running schedules itself again. The jobs live in memory; the periodic scan
+  of the markers in the store brings them back after a restart.
   """
   @spec cleanup(Alambique.Config.t(), String.t(), String.t(), non_neg_integer) :: :ok
   def cleanup(%{compaction: nil}, _cell, _location_id, _delay_ms), do: :ok
@@ -72,7 +77,8 @@ defmodule Alambique.Compaction.Compactor do
     :ets.new(config.cleanups, [:named_table, :public, :set])
     Hold.create(config)
 
-    {:ok, schedule(config, %{config: config, timer: nil})}
+    state = %{config: config, timer: nil, scan_at: now_ms(), scan: nil}
+    {:ok, schedule(config, state)}
   end
 
   @impl true
@@ -103,6 +109,7 @@ defmodule Alambique.Compaction.Compactor do
     |> Enum.each(&settle(config, &1))
 
     cleanups(config, batch)
+    state = scan(state)
 
     if rows != [] do
       Telemetry.emit(
@@ -116,6 +123,38 @@ defmodule Alambique.Compaction.Compactor do
 
     # A full batch means more rows may be waiting.
     schedule(config, state, if(length(rows) == batch, do: 0))
+  end
+
+  # One page of markers per tick; a scan starts when `scan_at` passed.
+  defp scan(%{scan: nil, scan_at: at, config: config} = state) do
+    now = now_ms()
+
+    with true <- now >= at,
+         {:ok, locations} <- Placement.locations(config) do
+      scan(%{state | scan: {locations, nil}, scan_at: now + config.compaction.moved_scan_ms})
+    else
+      false ->
+        state
+
+      {:error, reason} ->
+        Logger.warning("Alambique cleanup scan could not list locations: #{inspect(reason)}")
+        %{state | scan_at: now + config.compaction.moved_scan_ms}
+    end
+  end
+
+  defp scan(%{scan: {[], _}} = state), do: %{state | scan: nil}
+
+  defp scan(%{scan: {[location | rest] = locations, cursor}, config: config} = state) do
+    case Cleanup.pending(config, location, cursor, config.compaction.moved_scan_page) do
+      {:ok, cells, next} ->
+        for cell <- cells, do: :ets.insert_new(config.cleanups, {{cell, location.id}, now_ms()})
+        %{state | scan: if(next, do: {locations, next}, else: {rest, nil})}
+
+      {:error, reason} ->
+        Logger.warning("Alambique cleanup scan could not list #{location.id}: #{inspect(reason)}")
+
+        %{state | scan: {rest, nil}}
+    end
   end
 
   defp cleanups(config, limit) do
@@ -160,9 +199,10 @@ defmodule Alambique.Compaction.Compactor do
 
   defp after_cleanup(_config, _cell, _location_id, {:ok, _}), do: :ok
 
-  # The cell is back, or the location is no longer a source: nothing to do.
+  # The cell is back, the location is no longer a source, or another cleanup
+  # runs: nothing to do. A marker still in the store is found by the next scan.
   defp after_cleanup(_config, _cell, _location_id, {:error, reason})
-       when reason in [:live_location, :not_moved],
+       when reason in [:live_location, :not_moved, :contended],
        do: :ok
 
   defp after_cleanup(config, cell, location_id, {:error, reason}) do

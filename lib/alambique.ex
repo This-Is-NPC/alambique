@@ -123,7 +123,10 @@ defmodule Alambique do
       `:concurrency` (cells compacted at once, default 2), `:queue_limit`
       (cells waiting, default 10 000), `:max_age_ms` (a written cell is looked
       at after this long even if little was written, default 300 000),
-      `:retry_ms` (after a failed pass, default 30 000), `:batch_factor`
+      `:retry_ms` (after a failed pass, default 30 000), `:moved_scan_ms`
+      (time between the scans of the store for cleanups of moved cells that
+      wait, default 60 000), `:moved_scan_page` (markers listed per request,
+      one request per tick, default 100), `:batch_factor`
       (ready cells taken per tick as a multiple of `:concurrency`, default 4),
       `:hold_bytes` (memory per instance for the files cells just replicated,
       so a pass of the owning node does not read them back from the store,
@@ -906,8 +909,9 @@ defmodule Alambique do
   once that cleanup is over, even while the data it marked is still there for
   `:deletion_grace_ms`: the new snapshot has a TXID above every object left
   there, so it covers them, and the reaper deletes the old ones later. Until
-  a cleanup finished the answer is `{:error, :destination_not_cleaned}` (run
-  `cleanup_moved/4`); until it settled,
+  a cleanup finished the answer is `{:error, :destination_not_cleaned}` (the
+  call queues the cleanup in the compactor; try again after the grace); until
+  it settled,
   `{:error, {:destination_settling, ready_at_ms}}` (wait until `ready_at_ms`
   on the instance's clock, without cleaning again, which would restart the
   wait). `{:error, :destination_not_empty}` means data at a destination with
@@ -927,8 +931,9 @@ defmodule Alambique do
   (`frozen`, `trashed`, `crashes`) and the schema index entry go at once. The
   lease stays, marked as moved, because nodes with an old view of the placement
   rely on it to refuse the cell. `relocate/4` and the compactor (when enabled)
-  call this after the grace period; call it to finish a cleanup that was
-  interrupted, or to run it early with a smaller `:grace_ms`. Pending marked
+  call this after the grace period, and the compactor finds cleanups left
+  pending by a restart in the store; call it to run a cleanup early with a
+  smaller `:grace_ms`, or with compaction off. Pending marked
   data does not block a move back: the returning snapshot covers it and the
   reaper deletes it later.
 
