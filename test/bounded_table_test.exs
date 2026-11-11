@@ -22,39 +22,30 @@ defmodule Alambique.BoundedTableTest do
     assert :ets.info(t, :size) <= 100
   end
 
-  # Counts the `:ets.insert/2` calls that `fun` makes in this process.
-  defp inserts(fun) do
+  # The table belongs to another process and is protected: this process can
+  # read it but any write raises, so the check needs no timing.
+  defp read_only_table(object) do
     parent = self()
 
-    tracer =
-      spawn_link(fn ->
-        receive do
-          :stop -> send(parent, {:inserts, count_inserts(0)})
-        end
-      end)
+    owner =
+      start_supervised!(
+        {Task,
+         fn ->
+           t = :ets.new(:bounded, [:protected, :set])
+           :ets.insert(t, object)
+           send(parent, {:table, t})
+           Process.sleep(:infinity)
+         end}
+      )
 
-    :erlang.trace_pattern({:ets, :insert, 2}, true, [:global])
-    :erlang.trace(self(), true, [:call, {:tracer, tracer}])
-    fun.()
-    :erlang.trace(self(), false, [:call])
-    send(tracer, :stop)
-    assert_receive {:inserts, n}
-    n
-  end
-
-  defp count_inserts(n) do
-    receive do
-      {:trace, _, :call, {:ets, :insert, _}} -> count_inserts(n + 1)
-    after
-      50 -> n
-    end
+    assert_receive {:table, t}
+    {t, owner}
   end
 
   test "an entry that is already stored is not written again" do
-    t = table()
-    BoundedTable.put(t, 100, {"cell", :a@node})
+    {t, _owner} = read_only_table({"cell", :a@node})
 
-    assert inserts(fn -> BoundedTable.put(t, 100, {"cell", :a@node}) end) == 0
-    assert inserts(fn -> BoundedTable.put(t, 100, {"cell", :b@node}) end) == 1
+    assert BoundedTable.put(t, 100, {"cell", :a@node})
+    assert_raise ArgumentError, fn -> BoundedTable.put(t, 100, {"cell", :b@node}) end
   end
 end
