@@ -2,7 +2,8 @@ defmodule Alambique.QueryPropertiesTest do
   @moduledoc """
   A cross-cell query returns, for every cell, what a fresh full restore of the
   cell gives at the TXID the row reports (design §14), whatever the workload,
-  hibernations and earlier queries (and so cache states) came before.
+  hibernations, compactions (snapshots) and earlier queries (and so cache
+  states) came before.
   """
   use ExUnit.Case, async: false
   use ExUnitProperties
@@ -35,6 +36,7 @@ defmodule Alambique.QueryPropertiesTest do
     frequency([
       {6, gen(all(cell <- cell_gen(), write <- write_gen(), do: {:write, cell, write}))},
       {2, map(cell_gen(), &{:hibernate, &1})},
+      {2, map(cell_gen(), &{:compact, &1})},
       {5, constant(:query)},
       {1, constant(:query_old)}
     ])
@@ -83,6 +85,17 @@ defmodule Alambique.QueryPropertiesTest do
 
           {:hibernate, cell}, seen ->
             :ok = Alambique.hibernate(owner, cell)
+            seen
+
+          # A snapshot newer than a cached replica sends the refresh to a restore.
+          {:compact, cell}, seen ->
+            :ok = Alambique.hibernate(owner, cell)
+
+            Alambique.Compaction.run(repl_ctx(owner, cell), cell,
+              fanout: 2,
+              snapshot_interval_txids: 1
+            )
+
             seen
 
           :query, seen ->
