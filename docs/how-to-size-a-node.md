@@ -85,9 +85,18 @@ the instances of one VM the same value; with different values the lower one
 is refused first.
 
 Set it lower when slow reads on many cells hurt the commits, or raise the
-pool with `+SDio` and the limit with it. `query: [concurrency:]` defaults to
-the same bound, so a single query never takes more than the limit. A client
-that gets `:busy` should retry later.
+pool with `+SDio` and the limit with it. A client that gets `:busy` should
+retry later.
+
+`query: [concurrency:]` is 16 and does not follow the schedulers: a cell of a
+query spends most of its time waiting for the store, so the count of cells read
+at once, not the CPUs, sets how long a query over many cells takes. SQLite
+statements still take the slots above, but a query lets only
+`min(concurrency, max_concurrent_statements)` of its cells run a statement at
+once, so it never gets `:busy` from its own cells. When other callers hold the
+slots, the cells of a query get `:busy` at once like any read. Lower
+`query: [concurrency:]` if a query over many cells should leave the pool to
+other work.
 
 ## Check it
 
