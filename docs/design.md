@@ -3641,18 +3641,47 @@ conditional write (`claim_cleanup`), deletes with a deadline of six times
 A second cleanup that starts meanwhile makes the first one's stamp fail with
 `{:error, :contended}`. Nothing is lost by repeating any part of it.
 
-During the grace period `relocate` queues the cleanup in the compactor (when
-compaction is on), which runs it when due and again after a failure
-(`retry_ms`). The queue is in memory: after a restart of the node, call
-`Alambique.cleanup_moved/4` or `mix alambique.cleanup`. A relocation that
-crashed before step 5 is not repeated by `relocate` (the placement already
-names the destination); `cleanup_moved` finishes it.
+**Pending cleanups survive a restart.** The queue of the compactor is in
+memory, so the store holds the truth. Before step 3 the relocator writes an
+empty marker `<prefix>/moved/<cell>` at the source; the cleanup deletes it as
+its last step, after `cleaned_at_ms` is stamped. A marker therefore means "this
+cleanup is not finished", whichever node or step stopped. Every
+`compaction: [moved_scan_ms:]` (default 60 000) the compactor of each node
+lists the markers of every location, one page of `moved_scan_page` (default
+100) per tick, and queues the cells it finds. The grace is not kept in memory:
+the cleanup reads `moved_at_ms` from the moved lease, so a restart neither
+deletes early (the cleanup answers `:waiting` and is queued again for
+`ready_at_ms`) nor forgets. The marker is in a prefix of its own because
+finding moved cells by listing leases would read the objects of every cell.
+A marker left by a move that failed before the mark stays: the cleanup of
+such a cell answers `:live_location` or `:not_moved` and deletes nothing, at
+the price of one lease read per scan, and the marker is rewritten and used if
+the cell later moves away from that location.
+
+Several nodes may find the same marker. Only one deletes at a time: the claim
+on the lease object (`claim_cleanup`) is conditional, a second claimant that
+overtakes the first makes its stamp fail with `{:error, :contended}` (the
+compactor drops that job; the marker brings it back at the next scan if the
+cleanup did not end), and every step (marking, deleting, dropping the index) is
+idempotent, so a repeated or overlapping run loses nothing. The invariant that
+nothing is deleted at the live location or before the grace holds for every
+caller because `Cleanup.run` checks both against the store, never against the
+queue. `test/moved_cleanup_properties_test.exs` checks it with random moves,
+restarts and clock steps.
+
+A relocation that crashed before step 5 is not repeated by `relocate` (the
+placement already names the destination); the marker lets the compactor finish
+it, or `cleanup_moved` by hand. With compaction off nothing scans: run
+`cleanup_moved`.
 
 **Moving back.** A cell can move to a location it left while the data its
 cleanup marked is still pending for the reaper. The destination check of step
 2 accepts a lease with `moved_to` when:
 
-1. `cleaned_at_ms` is set (otherwise `{:error, :destination_not_cleaned}`)
+1. `cleaned_at_ms` is set (otherwise `{:error, :destination_not_cleaned}`, and
+   the move queues the cleanup in the compactor instead of cleaning inline:
+   the move has a deadline and the cleanup waits for the grace, so the caller
+   retries)
    and older than eight times `op_timeout_ms` plus the skew margin (otherwise
    `{:error, {:destination_settling, ready_at_ms}}`, so a caller waits instead
    of cleaning again, which would restart the gap). The stamp is written after
@@ -3699,7 +3728,7 @@ finish first and the answer is `{:error, {:move_pending, id}}`.
 
 **Not done.** The relocator renews the source lease only between steps, so a
 snapshot that takes longer than the lease ttl ends in a failed mark and a
-retry (nothing is lost). Cleanup jobs are not persisted. A reader that holds
+retry (nothing is lost). A reader that holds
 a restore of the source for longer than `moved_grace_ms` can fail with a
 missing file and retries.
 
