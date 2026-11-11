@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.0](https://github.com/This-Is-NPC/alambique/compare/v0.1.0...v0.2.0) (2026-11-11)
+
+
+### Features
+
+* **drain:** add a deadline for the whole drain ([55dda59](https://github.com/This-Is-NPC/alambique/commit/55dda595f785df18d43257fdafc327d9da3224df))
+* **drain:** add telemetry and drain_status/1 ([65335a2](https://github.com/This-Is-NPC/alambique/commit/65335a253aca2eb82a5480054a96b4a95de963fd))
+
+
+### Bug Fixes
+
+* **cell:** report a failed lease release ([9bbd40f](https://github.com/This-Is-NPC/alambique/commit/9bbd40fd7f9732b3c70de3751f0afbc712ded5d7))
+* **lease:** fence same node_id with an incarnation ([9d4eae7](https://github.com/This-Is-NPC/alambique/commit/9d4eae7dd3bd5406cbf31081660cbc81e31dd175))
+
 ## 0.1.0 (2026-11-05)
 
 First release.
