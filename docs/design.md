@@ -2911,7 +2911,9 @@ statement (`immutable=1`, so no locks and no `-wal`/`-shm`), and closes it.
 
 - **Refresh.** With a replica at TXID `t` the refresh lists the snapshot level (`0009/`) and the
   level-0 segments after `t` (`0000/` with `start_after`), two listings and no
-  reads when nothing is new. New segments `t+1, t+2, ...` must be contiguous,
+  reads when nothing is new. The two listings run at the same time, so a cell
+  costs one round trip to the store, not two, before it reads anything. New
+  segments `t+1, t+2, ...` must be contiguous,
   each with an epoch not below the chain's (R2), and are applied with the
   checksum check of restore to a copy of the cached file; the copy is renamed
   to its new TXID and the older replicas of the cell are deleted. The copy is

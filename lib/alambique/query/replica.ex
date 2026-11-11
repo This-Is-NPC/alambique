@@ -125,10 +125,7 @@ defmodule Alambique.Query.Replica do
   defp advance(ctx, dir, {cell, key}, target, cached, deadline, reflink?) do
     after_key = Keys.segment(ctx.prefix, cell, 0, cached.txid, cached.txid)
 
-    with {:ok, snapshot_keys} <-
-           Objects.list(ctx, Keys.level_prefix(ctx.prefix, cell, Keys.snapshot_level()), deadline),
-         {:ok, keys} <-
-           Objects.list(ctx, Keys.level_prefix(ctx.prefix, cell, 0), deadline, after_key) do
+    with {:ok, snapshot_keys, keys} <- list_levels(ctx, cell, after_key, deadline) do
       {segments, snapshots} = Keys.parse(ctx.prefix, cell, snapshot_keys ++ keys)
       newest_snapshot = newest(snapshots)
       limit = limit(target)
@@ -146,6 +143,24 @@ defmodule Alambique.Query.Replica do
         _ ->
           :fallback
       end
+    end
+  end
+
+  # The snapshot level and level 0 are listed at the same time: the trips are
+  # waits for the store, and the listing task ends at the deadline like the
+  # one in this process.
+  defp list_levels(ctx, cell, after_key, deadline) do
+    snapshots =
+      Task.async(fn ->
+        Objects.list(ctx, Keys.level_prefix(ctx.prefix, cell, Keys.snapshot_level()), deadline)
+      end)
+
+    level0 = Objects.list(ctx, Keys.level_prefix(ctx.prefix, cell, 0), deadline, after_key)
+
+    case {Task.await(snapshots, :infinity), level0} do
+      {{:ok, snapshot_keys}, {:ok, keys}} -> {:ok, snapshot_keys, keys}
+      {{:error, _} = error, _} -> error
+      {_, {:error, _} = error} -> error
     end
   end
 
