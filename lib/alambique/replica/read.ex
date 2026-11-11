@@ -32,7 +32,7 @@ defmodule Alambique.Replica.Read do
         reply
 
       {:owner, reason} ->
-        reply = Router.call(config.name, cell, {:query, sql, params}, timeout)
+        reply = Router.call(config.name, cell, {:query, sql, params, nil}, timeout)
 
         Telemetry.span_stop([:replica, :read], started, %{}, %{
           cell: cell,

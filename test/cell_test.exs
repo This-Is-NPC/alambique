@@ -139,7 +139,7 @@ defmodule Alambique.CellTest do
 
     test "a cell id received from a peer is checked too", ctx do
       inst = start_instance(ctx)
-      request = {:query, "SELECT 1", []}
+      request = {:query, "SELECT 1", [], nil}
 
       for id <- ["", "..", "a/b", String.duplicate("a", 129)] do
         assert {nil, {:error, :invalid_cell_id}} =

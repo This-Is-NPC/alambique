@@ -264,8 +264,8 @@ defmodule Alambique.Cell do
   # A read that may see unacknowledged writes is answered after the newest
   # batch is durable, which implies every earlier one is, so no caller
   # observes a write that could still be lost.
-  defp serve_call({:query, sql, params}, from, state) do
-    reply = Db.read(state.conn, sql, params, Db.limits(state.config))
+  defp serve_call({:query, sql, params, ms}, from, state) do
+    reply = Db.read(state.conn, sql, params, Db.limits(state.config, ms))
 
     if idle?(state),
       do: {:reply, reply, state},
@@ -275,8 +275,8 @@ defmodule Alambique.Cell do
   # A checked read (design §5) is answered only if the lease is still ours
   # after the read ran. When it is not, the caller gets no answer and the
   # router sends the call to the new owner.
-  defp serve_call({:checked_query, sql, params}, from, state) do
-    reply = Db.read(state.conn, sql, params, Db.limits(state.config))
+  defp serve_call({:checked_query, sql, params, ms}, from, state) do
+    reply = Db.read(state.conn, sql, params, Db.limits(state.config, ms))
 
     if idle?(state) do
       case check_lease(state) do
@@ -289,10 +289,10 @@ defmodule Alambique.Cell do
     end
   end
 
-  defp serve_call({:transaction, fun}, from, state), do: write(state, from, fun)
+  defp serve_call({:transaction, fun, ms}, from, state), do: write(state, from, fun, ms)
 
-  defp serve_call({:execute, sql, params}, from, state),
-    do: write(state, from, execute_fun(sql, params))
+  defp serve_call({:execute, sql, params, ms}, from, state),
+    do: write(state, from, execute_fun(sql, params), ms)
 
   # An isolated write owns its batch (design §13): the pending commits are
   # encoded first, and its own batch is encoded before the next call runs.
@@ -342,18 +342,18 @@ defmodule Alambique.Cell do
     end
   end
 
-  defp isolated({:transaction, fun}, from, state), do: write(state, from, fun, true)
+  defp isolated({:transaction, fun, ms}, from, state), do: write(state, from, fun, ms, true)
 
-  defp isolated({:execute, sql, params}, from, state),
-    do: write(state, from, execute_fun(sql, params), true)
+  defp isolated({:execute, sql, params, ms}, from, state),
+    do: write(state, from, execute_fun(sql, params), ms, true)
 
-  defp write(state, from, fun, isolated? \\ false) do
+  defp write(state, from, fun, ms, isolated? \\ false) do
     txid = Replicator.next_txid(state.repl)
 
     case Db.transaction(state.conn, txid, Publisher.wrap(state, fun),
            select: state.config.feed,
            isolated: isolated?,
-           limits: Db.limits(state.config)
+           limits: Db.limits(state.config, ms)
          ) do
       {:ok, value} ->
         state = Publisher.committed(state)

@@ -49,7 +49,7 @@ defmodule Alambique.PipelineTest do
   # Sends a write and returns once the cell processed its flush: the batch is
   # encoded when the pipeline had a free slot.
   defp send_write(owner, n, request \\ nil) do
-    req = :gen_server.send_request(owner.pid, request || {:execute, @insert, [n]})
+    req = :gen_server.send_request(owner.pid, request || {:execute, @insert, [n], nil})
     state(owner)
     state(owner)
     req
@@ -135,7 +135,7 @@ defmodule Alambique.PipelineTest do
       head = state(owner).repl.txid
       write1 = send_write(owner, 1)
       write2 = send_write(owner, 2)
-      read = send_write(owner, 0, {:query, "SELECT count(*) FROM t", []})
+      read = send_write(owner, 0, {:query, "SELECT count(*) FROM t", [], nil})
 
       land(env, owner, head + 2)
       assert answer(read) == :timeout
@@ -163,9 +163,9 @@ defmodule Alambique.PipelineTest do
       head = state(owner).repl.txid
 
       reqs = [
-        :gen_server.send_request(owner.pid, {:execute, @insert, [1]}),
-        :gen_server.send_request(owner.pid, {:execute, @insert, [2]}),
-        :gen_server.send_request(owner.pid, {:isolated, {:execute, @insert, [3]}})
+        :gen_server.send_request(owner.pid, {:execute, @insert, [1], nil}),
+        :gen_server.send_request(owner.pid, {:execute, @insert, [2], nil}),
+        :gen_server.send_request(owner.pid, {:isolated, {:execute, @insert, [3], nil}})
       ]
 
       eventually(fn -> txids(owner) == [head + 1, head + 2] end)
