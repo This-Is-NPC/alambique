@@ -64,12 +64,81 @@ repeat: the cells stay awake, and the answer is the memory fit.
 A step ends in one of:
 
 - **good**, **bad** (a criterion broke), or
-- **invalid**: fewer than 95% of the planned operations completed. It is not a
-  failure; it says the load was not delivered. The ramp stops.
-- **repeat**: the host was busy (below). The step runs again, up to 5 attempts
-  (`ALAMBIQUE_LOAD_ATTEMPTS`), then is invalid. The attempts stay on disk.
+- **invalid**: the step does not say whether the service carries the level, so
+  it is not a failure. The ramp stops. The reasons: fewer than 95% of the
+  planned operations completed (`delivery`); no operation was planned
+  (`no_operations`: a step with no operations is never good); the harness ran
+  out of room (`data_full`, `store_full`); a preparation failed
+  (`prepare_failed`); the service did not cool down (`no_cooldown`); the
+  host was not quiet (`host_busy`); the service container is gone
+  (`service_down`).
+- **repeat**: the host was busy, or the service did not cool down (below). The
+  step runs again, up to 5 attempts (`ALAMBIQUE_LOAD_ATTEMPTS`), then is
+  invalid. The attempts that ran stay on disk. A repeat redoes the whole work
+  of the step and measures it. For `cells`, the cells the disturbed attempt
+  woke are put to sleep first, so the repeat wakes them again and the step
+  does not pass with no operations.
 
-Order of decision: host busy, swap, memory, delivery, errors, latency.
+Order of decision: why the step ended (the harness's own stops are invalid; a
+stop on memory is bad even at the first second, and only a container that is
+gone is `service_down`), then host busy, swap, memory, no operations, store
+full, delivery, errors, `busy`, latency.
+
+A step is also marked **suspect** (not invalid, the verdict stands) when the
+service's CPU was throttled for more than 10% of the step
+(`ALAMBIQUE_LOAD_SUSPECT_THROTTLE_FRACTION`): the quota cut it as much as the
+load did. Each step's JSON has the `throttled_usec` delta in `cgroup` and
+`suspect`; `summary.md` lists the suspect steps.
+
+**Busy refusals.** When `sql: [max_concurrent_statements:]` slots are taken,
+the library answers a read with `{:error, :busy}` by design. The driver counts
+those apart from other errors (`delivery.busy` and `delivery.busy_ratio` in the
+step JSON, a `busy %` column in the summary, for every measure). A step is bad
+with reason `busy` only when they are more than 1%
+(`ALAMBIQUE_LOAD_MAX_BUSY_RATIO`) of the completed operations; other errors
+keep their rule (`ALAMBIQUE_LOAD_MAX_ERROR_RATIO`).
+
+**Cooldown.** Before every step, and before every repeat, the driver waits
+until the service has recovered from the previous step: no operation of the
+driver still running on the service, and (except for `cells`, whose awake cells
+keep memory by design) process memory below 80% of the scenario limit
+(`ALAMBIQUE_LOAD_COOLDOWN_MEM_FRACTION`). It waits up to 300 s
+(`ALAMBIQUE_LOAD_COOLDOWN_MAX_S`); if the service has not cooled down the
+attempt is repeated like a busy host, and after the attempts the step is
+invalid with `no_cooldown`. Without it a step that follows an overloaded one
+starts on the backlog and memory of the other. `cooldown_s` in each step's JSON
+is the time waited (the attempts included). A step that stops on memory is bad
+with reason `memory`; it is `service_down` only when the container is gone.
+
+**Room of the harness.** Two spaces can fill without the service being at
+fault; both end the ramp with an invalid step.
+
+- The service's data tmpfs (`ALAMBIQUE_LOAD_DATA_MB`). The `wakes` ramp keeps
+  every cell it woke, asleep, so its data grows with the level. Before it
+  prepares a level it estimates the data: the cells it still has to create
+  times the bytes one asleep cell took on the tmpfs (measured after the
+  previous level; 160 000 bytes before any, `ALAMBIQUE_LOAD_CELL_BYTES`). If
+  the data in use plus the estimate is over 90% of the tmpfs
+  (`ALAMBIQUE_LOAD_DATA_ESTIMATE_FRACTION`), the level is invalid `data_full`
+  and is not run: this is a limit of the harness, not of the service. A
+  preparation that fails is invalid `data_full` when the service's shared memory
+  is at 95% of the tmpfs or more (`ALAMBIQUE_LOAD_DATA_FULL_FRACTION`), else
+  `prepare_failed`; the first error is in the step's `extra.prepare_error`.
+  The summary is always written. Use a shorter `ALAMBIQUE_LOAD_WAKES_STEP_S`
+  (fewer fresh cells per level) or a larger `ALAMBIQUE_LOAD_DATA_MB`.
+- The store. The service never deletes during a case (the deletion grace is 24
+  hours, the library default, and it is not changed because that would change
+  the cost measured), so the store only grows. Every second the driver reads the
+  store container's shared memory (its tmpfs) or, with
+  `ALAMBIQUE_LOAD_STORE_ON=disk`, the free space of the store directory's file
+  system (`df`). At 95% of `ALAMBIQUE_LOAD_STORE_MB`
+  (`ALAMBIQUE_LOAD_STORE_FULL_FRACTION`), or with less than 1 GiB free on disk
+  (`ALAMBIQUE_LOAD_STORE_MIN_FREE_MB`), the step stops and is invalid
+  `store_full` (not bad), the ramp stops, and the driver says to run the case
+  again with `ALAMBIQUE_LOAD_STORE_ON=disk`. Errors that say "no space" are
+  treated the same. The step JSON has `store` (`used_mb_end`, `used_mb_max`,
+  and `free_mb_min` on disk; on disk, used is the fall of free space since the
+  case started) and the summary a `store MB` column.
 
 **Swap guard.** The service container runs with `--memory-swap` equal to
 `--memory`, so it cannot swap. The store container has no memory limit, and the
@@ -170,6 +239,11 @@ All are environment variables; set them before `mise run load`.
 | `ALAMBIQUE_LOAD_OP_TIMEOUT_MS` | 15000 | per operation |
 | `ALAMBIQUE_LOAD_DELIVERY_MIN` | 0.95 | delivery gate |
 | `ALAMBIQUE_LOAD_MAX_ERROR_RATIO` | 0 | errors allowed, as a share of completed |
+| `ALAMBIQUE_LOAD_MAX_BUSY_RATIO` | 0.01 | `{:error, :busy}` refusals allowed, as a share of completed; above it the step is bad `busy` |
+| `ALAMBIQUE_LOAD_COOLDOWN_MEM_FRACTION` | 0.8 | share of the scenario's memory limit the service must be below before a step (not for `cells`) |
+| `ALAMBIQUE_LOAD_COOLDOWN_MAX_S` | 300 | longest wait for the service to cool down; then the attempt is repeated, finally `no_cooldown` |
+| `ALAMBIQUE_LOAD_SUSPECT_THROTTLE_FRACTION` | 0.1 | share of the step the CPU may be throttled before the step is marked `suspect` |
+| `ALAMBIQUE_LOAD_FIT_MIN_R2`, `_FIT_MIN_SPAN` | 0.8, 2 | the memory slope is shown only with R² at least this and the largest level at least this times the smallest (and three good steps) |
 | `ALAMBIQUE_LOAD_MAX_NET_LOAD` | 6 | host net load limit |
 | `ALAMBIQUE_LOAD_SETTLE_S` | 30 | seconds of quiet readings before each step (one reading per 5 s) |
 | `ALAMBIQUE_LOAD_WAIT_QUIET_STEP_S` | 1800 | longest wait for a quiet host before a step; then the step is invalid (`host_busy`) |
@@ -182,6 +256,9 @@ All are environment variables; set them before `mise run load`.
 | `ALAMBIQUE_LOAD_WAIT_QUIET_S` | 600 | how long a case waits to start (a step waits by `_WAIT_QUIET_STEP_S`) |
 | `ALAMBIQUE_LOAD_STORE_LATENCY_MS` | 25 | added to every store request |
 | `ALAMBIQUE_LOAD_DATA_MB` / `_STORE_MB` | 1024 / 4096 | tmpfs of the service data and of the store (`_STORE_MB` is ignored with `_STORE_ON=disk`) |
+| `ALAMBIQUE_LOAD_STORE_FULL_FRACTION`, `_STORE_MIN_FREE_MB` | 0.95, 1024 | the store is full at this share of `_STORE_MB` (tmpfs), or with less than this free (disk) |
+| `ALAMBIQUE_LOAD_DATA_ESTIMATE_FRACTION`, `_DATA_FULL_FRACTION` | 0.9, 0.95 | `wakes`: a level whose estimated data goes over the first share of `_DATA_MB` is not run (`data_full`); a failed preparation with the service's shared memory over the second is `data_full` |
+| `ALAMBIQUE_LOAD_CELL_BYTES` | 160000 | `wakes`: bytes one asleep cell is estimated to take on the data tmpfs before one has been measured |
 | `ALAMBIQUE_LOAD_STORE_ON` | `tmpfs` | `tmpfs` or `disk`: where the store keeps its data (below) |
 | `ALAMBIQUE_LOAD_STORE_DIR` | `<case results dir>/store` | with `disk`, the directory the case creates for the store; it must not exist |
 | `ALAMBIQUE_LOAD_CACHE_KIB` | library default (512) | `awake.cache_kib` (set by `cache<N>`) |
@@ -193,6 +270,7 @@ All are environment variables; set them before `mise run load`.
 | `ALAMBIQUE_LOAD_COMMIT_CELLS`, `_COMMIT_ROWS` | 64, 8 | cells written, rows per cell |
 | `ALAMBIQUE_LOAD_CELLS_FILL_RATE`, `_HOLD_S`, `_CELLS_MEM_FRACTION` | 100, 60, 0.9 | cells per second woken, hold for memory to settle, criterion |
 | `ALAMBIQUE_LOAD_WAKE_MODE`, `_TAIL_S` | `cold`, 60 | `cold` removes the local file first (restore from the store), `local` keeps it; wait for the cells to sleep again |
+| `ALAMBIQUE_LOAD_WAKES_STEP_S` | the global step | seconds per step of `wakes` only; a shorter step wakes fewer fresh cells per level |
 | `ALAMBIQUE_LOAD_QUERY_POPULATION`, `_QUERY_CELLS` | 200, 20 | cells in the population, cells per query |
 | `ALAMBIQUE_LOAD_CELL_ROWS`, `_ROW_BYTES` | 20, 1500 | data of the cells of `wakes` and `query` |
 | `ALAMBIQUE_LOAD_COMMITS_P99_MS`, `_WAKES_P95_MS`, `_QUERY_P99_MS` | 250, 500, 1000 | latency criteria |
@@ -244,6 +322,19 @@ re-run the case with `ALAMBIQUE_LOAD_STORE_ON=disk`.
 
 ## What the numbers include
 
+- A wake is the first read of a cell that is asleep (hibernated, its process
+  stopped, its data written to the store). Each step wakes cells no earlier
+  step woke: the population is `rate x step seconds` cells at the largest level
+  so far, created and put to sleep before the step, outside its measurement
+  (the data tmpfs holds all of them, see "Room of the harness"). In the default
+  `cold` mode the local file of every cell of the step is removed first
+  (`Ops.drop_local`), so the wake restores the cell from the store. Observed in
+  the first step of `A wakes` in run o022b (937 wakes, cells of 20 rows of 1500
+  bytes): 14.0 store trips per wake (1 list, 4 gets, 3 range reads, 2 heads and
+  4 puts, the puts being the cell going back to sleep) and 149 KB read. With
+  `ALAMBIQUE_LOAD_WAKE_MODE=local`
+  the local files stay, and a wake reopens them and only checks the store. A
+  wake is not a move of the cell to another node.
 - The cost of a wake includes putting the cell back to sleep: the window ends
   when the woken cells sleep again.
 - Store trips and bytes are everything the service sent in the window,
@@ -254,7 +345,10 @@ re-run the case with `ALAMBIQUE_LOAD_STORE_ON=disk`.
 - A cross-cell query is warm: one pass over the population fills the replica
   cache first.
 - Memory per unit is a least-squares line of process memory against the level
-  over the steps that ran (for `cells`, against the cells awake).
+  over the good steps (for `cells`, against the cells awake). The summary
+  prints its R². It does not print the slope when R² is below 0.8, when the
+  largest level is less than twice the smallest, or with fewer than three good
+  steps; it says why instead.
 
 ## Estimate of a full run
 
@@ -290,15 +384,24 @@ Not run yet.
   swap, or its swap in use is high. Free memory on the host, or lower `ALAMBIQUE_LOAD_STORE_MB` / `ALAMBIQUE_LOAD_DATA_MB`. With
   `{:swap, :service, ...}` the service container is not limited as
   intended; check its `memory.swap.max`.
-- A tmpfs full error in the service log: raise `ALAMBIQUE_LOAD_DATA_MB`.
-- A step bad with reason `:store_full`, and "the store is out of space" in
-  the summary: the store's tmpfs filled. The driver tells it from other errors
-  by words such as "no space", "volume full" or "quota" in the operation
-  errors (`error_samples` of the step JSON). A full store can also show only as
-  timeouts or a lower delivery; then check `docker logs` of the store container
-  (the id is in `started-containers.txt`) for "no space" or "volume full". Run
-  the case again with `ALAMBIQUE_LOAD_STORE_ON=disk`, or raise
-  `ALAMBIQUE_LOAD_STORE_MB`.
+- A step invalid with `data_full`: the service's data tmpfs is, or would be,
+  full. See "Room of the harness": use a shorter `ALAMBIQUE_LOAD_WAKES_STEP_S`
+  or a larger `ALAMBIQUE_LOAD_DATA_MB`. With `prepare_failed`, read
+  `extra.prepare_error` in the step JSON.
+- A step invalid with `store_full`, and "the store is out of space" in the
+  summary: the store's tmpfs reached 95% (or the disk has less than 1 GiB
+  free), or the operation errors said "no space", "volume full" or "quota"
+  (`error_samples` of the step JSON). Run the case again with
+  `ALAMBIQUE_LOAD_STORE_ON=disk`, or raise `ALAMBIQUE_LOAD_STORE_MB`. A full
+  store can also show only as timeouts; then check `docker logs` of the store
+  container (the id is in `started-containers.txt`).
+- A step invalid with `no_cooldown`: the service stayed above 80% of its memory
+  limit, or kept operations running, for 300 s after the previous step, in every
+  attempt. The previous step overloaded it; the level is past what it carries.
+- A step bad with `busy`: the library refused more than 1% of the reads with
+  `{:error, :busy}` because its statement slots were taken
+  (`sql: [max_concurrent_statements:]`). That is the limit of the service at
+  that level, not an error of the harness.
 
 Next: [how-to-size-a-node.md](how-to-size-a-node.md) turns memory per cell into
 node sizes; [contributing.md](contributing.md) lists the other benchmarks.
