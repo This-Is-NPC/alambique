@@ -3443,7 +3443,9 @@ consistent through crashes by ordering the writes:
 At every instant the durable version of a cell has an entry; the index may
 briefly show two versions of one cell, never none. A crash between 1 and 2
 leaves an entry ahead of the cell (harmless: the old entry is still there); a
-crash or failure between 2 and 3 leaves one behind, and the sweeper removes it.
+crash or failure between 2 and 3 leaves one behind, and the sweeper removes it
+the next time it reaches the cell. That can take until the lease of a crashed
+cell expires (§5), so the double listing is allowed until then.
 A wake that reuses the local file without migrating writes nothing; any other
 wake puts the current version again, which repairs a lost entry. Cells created
 before the index existed have no entry until they wake once. Every instance
