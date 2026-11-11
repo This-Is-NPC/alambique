@@ -45,21 +45,61 @@ defmodule Alambique.Relocate.Cleanup do
   @doc """
   Records, at the location a cell is about to leave, that its cleanup is
   pending. It is written before the move is marked, so a crash anywhere after
-  leaves the record; the compactor of any node finds it (`pending/3`).
+  leaves the record; the compactor of any node finds it (`pending/4`). The
+  body is the deadline of the move (now plus its `timeout_ms`, on the
+  instance's clock; `drop_stray/3`).
   """
-  @spec record(Config.t(), Location.t(), String.t()) :: :ok | {:error, term}
-  def record(config, source, cell) do
+  @spec record(Config.t(), Location.t(), String.t(), pos_integer) :: :ok | {:error, term}
+  def record(config, source, cell, timeout_ms) do
     ctx = Config.repl_ctx(config, source)
     {store, store_config} = ctx.store
     key = Keys.moved(ctx.prefix, cell)
 
     Retry.run(ctx, Retry.deadline_in(config.op_timeout_ms), fn ->
-      case store.put(store_config, key, "", :none, %{}) do
+      case store.put(
+             store_config,
+             key,
+             Integer.to_string(now_ms(config) + timeout_ms),
+             :none,
+             %{}
+           ) do
         {:ok, _etag} -> :ok
         {:error, reason} -> {:retry, reason}
       end
     end)
   end
+
+  @doc """
+  Removes the marker of `cell` at `from` when no move can still own it: the
+  cleanup found the cell live there or not moved, and the deadline the marker
+  names, plus the skew margin, has passed. Before it the marker may belong to a
+  move between the marker and the mark.
+  """
+  @spec drop_stray(Config.t(), String.t(), String.t()) :: :ok | :young | {:error, term}
+  def drop_stray(config, cell, location_id) do
+    with {:ok, source} <- Placement.location(config, location_id) do
+      ctx = Config.repl_ctx(config, source)
+      key = Keys.moved(ctx.prefix, cell)
+      deadline = Retry.deadline_in(config.op_timeout_ms)
+
+      case Objects.fetch_optional(ctx, key, deadline) do
+        {:ok, body, _meta} ->
+          due = with {ms, ""} <- Integer.parse(body), do: ms + config.skew_margin_ms
+
+          if not is_integer(due) or now_ms(config) >= due,
+            do: Objects.delete(ctx, key, deadline),
+            else: :young
+
+        :none ->
+          :ok
+
+        {:error, _} = error ->
+          error
+      end
+    end
+  end
+
+  defp now_ms(%{clock: {clock, clock_config}}), do: clock.now_ms(clock_config)
 
   @doc """
   One page of the cells with a pending cleanup at `location`, after the cell

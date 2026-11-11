@@ -38,7 +38,8 @@ defmodule Alambique.Relocate do
           {:ok, Location.t()} | {:error, term}
   def run(config, cell, to, opts) do
     started = System.monotonic_time()
-    deadline = Retry.deadline_in(Keyword.get(opts, :timeout, config.relocate.timeout_ms))
+    timeout = Keyword.get(opts, :timeout, config.relocate.timeout_ms)
+    deadline = Retry.deadline_in(timeout)
 
     with :ok <- Placement.validate_id(config, cell),
          {:ok, dest} <- destination(config, to),
@@ -46,7 +47,7 @@ defmodule Alambique.Relocate do
       {result, cleanup} =
         if source.id == dest.id,
           do: {already_there(config, cell, source), :none},
-          else: move(config, cell, source, dest, deadline)
+          else: move(config, cell, source, dest, deadline, timeout)
 
       Telemetry.span_stop([:cell, :relocate], started, %{}, %{
         cell: cell,
@@ -78,7 +79,7 @@ defmodule Alambique.Relocate do
 
   defp destination(_config, _), do: {:error, :bad_location}
 
-  defp move(config, cell, source, dest, deadline) do
+  defp move(config, cell, source, dest, deadline, timeout) do
     point = %{cell: cell, from: source.id, to: dest.id}
     src_lease_ctx = Config.lease_ctx(config, source)
 
@@ -87,7 +88,7 @@ defmodule Alambique.Relocate do
         Fault.point(:relocate_after_acquire, point)
 
         with {:ok, lease, version} <- copy(config, cell, source, dest, lease, deadline),
-             :ok <- Cleanup.record(config, source, cell),
+             :ok <- Cleanup.record(config, source, cell, timeout),
              _ = Fault.point(:relocate_before_mark, point),
              :ok <- Lease.mark_moved(src_lease_ctx, lease, dest.id) do
           Fault.point(:relocate_after_mark, point)

@@ -256,6 +256,40 @@ defmodule Alambique.PlacementTest do
       end
     end
 
+    test "the marker of a move that failed before the mark goes after its own deadline",
+         ctx do
+      world = ManualClock.new(1_700_000_000_000)
+
+      inst =
+        instance(ctx,
+          clock: {ManualClock, ManualClock.config(world, 0)},
+          relocate: [timeout_ms: 2_000],
+          compaction: [interval_ms: 50, moved_scan_ms: 50]
+        )
+
+      cell = "home-a"
+      assert {:ok, _} = put(inst, cell, 1)
+      :ok = Alambique.hibernate(inst, cell)
+
+      # The call asks for more time than the instance default.
+      CrashPoints.arm(:relocate_before_mark, :raise)
+
+      assert_raise CrashPoints.Crash, fn ->
+        Alambique.relocate(inst, cell, "b", timeout: 10_000)
+      end
+
+      CrashPoints.reset()
+
+      # Scans keep finding it, and keep it, while the move could still own it.
+      Process.sleep(400)
+      ManualClock.advance(world, 2_000 + 500 + 1)
+      Process.sleep(400)
+      assert "pa/moved/home-a" in keys(ctx.stores.a)
+
+      ManualClock.advance(world, 8_000)
+      eventually(fn -> "pa/moved/home-a" not in keys(ctx.stores.a) end)
+    end
+
     test "the frozen marker moves with the cell", ctx do
       inst = instance(ctx)
       cell = "home-a"

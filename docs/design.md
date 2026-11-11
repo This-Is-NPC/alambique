@@ -3653,10 +3653,15 @@ the cleanup reads `moved_at_ms` from the moved lease, so a restart neither
 deletes early (the cleanup answers `:waiting` and is queued again for
 `ready_at_ms`) nor forgets. The marker is in a prefix of its own because
 finding moved cells by listing leases would read the objects of every cell.
-A marker left by a move that failed before the mark stays: the cleanup of
-such a cell answers `:live_location` or `:not_moved` and deletes nothing, at
-the price of one lease read per scan, and the marker is rewritten and used if
-the cell later moves away from that location.
+The body of the marker is the deadline of the move that wrote it: its time on
+the instance's clock (not the store's, whose clock may differ) plus the
+`timeout` that move uses, whether the instance's `relocate: [timeout_ms:]` or a
+longer one passed to `relocate/4`. A move that failed before the mark leaves a
+marker for a cell that is live or not moved at that location: the cleanup of
+such a cell answers `:live_location` or `:not_moved` and deletes nothing, and
+the compactor then deletes the marker once its deadline plus `skew_margin_ms`
+has passed, because before that the marker may belong to a move between the
+marker and the mark.
 
 Several nodes may find the same marker. Only one deletes at a time: the claim
 on the lease object (`claim_cleanup`) is conditional, a second claimant that
