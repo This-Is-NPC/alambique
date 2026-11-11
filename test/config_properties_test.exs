@@ -41,6 +41,7 @@ defmodule Alambique.ConfigPropertiesTest do
     {:restore, :prefetch_bytes},
     {:hydrator, :poll_ms},
     {:sql, :statement_timeout_ms},
+    {:sql, :script_timeout_ms},
     {:sql, :max_result_rows},
     {:sql, :max_result_bytes},
     {:drain, :concurrency},

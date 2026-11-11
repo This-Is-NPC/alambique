@@ -202,7 +202,8 @@ defmodule Alambique.Relocate do
              result,
              lease.epoch,
              deadline,
-             config.relocate.fence_attempts
+             config.relocate.fence_attempts,
+             Db.script_timeout_ms(config)
            ),
          _ = Fault.point(:relocate_after_snapshot, %{cell: cell, to: dest.id}),
          # The destination lists the cell before it can be reached (design §17).
@@ -274,9 +275,9 @@ defmodule Alambique.Relocate do
     Replication.restore(src, cell, path, :latest, timeout_ms: timeout)
   end
 
-  defp fence_and_snapshot(cell, src, dst, path, result, epoch, deadline, attempts) do
+  defp fence_and_snapshot(cell, src, dst, path, result, epoch, deadline, attempts, timeout_ms) do
     with {:ok, repl} <- continue(result, epoch),
-         {:ok, conn} <- Db.open(path) do
+         {:ok, conn} <- Db.open(path, timeout_ms: timeout_ms) do
       try do
         case Replicator.fence(repl, src, deadline: deadline) do
           {:ok, repl} ->
@@ -295,7 +296,17 @@ defmodule Alambique.Relocate do
       |> case do
         :retry ->
           with {:ok, result} <- restore(src, cell, path, deadline) do
-            fence_and_snapshot(cell, src, dst, path, result, epoch, deadline, attempts - 1)
+            fence_and_snapshot(
+              cell,
+              src,
+              dst,
+              path,
+              result,
+              epoch,
+              deadline,
+              attempts - 1,
+              timeout_ms
+            )
           end
 
         other ->

@@ -17,7 +17,9 @@ defmodule Alambique.Cell.Db do
   The connection is read-only (`query_only`) except inside `writable/2`, so
   only the cell's write path can change the file. Recursive triggers are on so that a `REPLACE` that removes a row fires the
   delete trigger of the change feed (design §13). `opts` are those of
-  `Alambique.Sqlite.open/2` (`attach: true` for the rewind's reconcile), and
+  `Alambique.Sqlite.open/2` (`attach: true` for the rewind's reconcile;
+  `timeout_ms:`, the deadline of the statements that set none, which the
+  callers take from `script_timeout_ms/1`), and
   `cache_kib:`, the page cache of the connection in KiB (SQLite's default
   when absent): the cache is the largest part of an awake cell's memory
   (design §12).
@@ -48,11 +50,11 @@ defmodule Alambique.Cell.Db do
   `-shm` file even though the header says WAL. The connection is also
   `query_only`.
   """
-  @spec open_read_only(Path.t()) :: {:ok, Sqlite.conn()} | {:error, term}
-  def open_read_only(path) do
+  @spec open_read_only(Path.t(), keyword) :: {:ok, Sqlite.conn()} | {:error, term}
+  def open_read_only(path, opts \\ []) do
     uri = "file:" <> URI.encode(path, &(URI.char_unreserved?(&1) or &1 == ?/)) <> "?immutable=1"
 
-    with {:ok, conn} <- Sqlite.open(uri, readonly: true),
+    with {:ok, conn} <- Sqlite.open(uri, [readonly: true] ++ opts),
          :ok <- Sqlite.execute(conn, "PRAGMA query_only = ON") do
       {:ok, conn}
     end
@@ -63,16 +65,29 @@ defmodule Alambique.Cell.Db do
 
   @doc """
   Statement limits from the `:sql` option of the instance: the options of
-  `Alambique.Sqlite.run/4` for a statement run for a caller.
+  `Alambique.Sqlite.run/4` for a statement run for a caller. `ms` is the
+  caller's own deadline; it never exceeds `statement_timeout_ms`.
   """
-  @spec limits(map) :: keyword
-  def limits(%{sql: sql}) do
+  @spec limits(map, pos_integer | nil) :: keyword
+  def limits(%{sql: sql}, ms \\ nil) do
     [
-      timeout_ms: sql.statement_timeout_ms,
+      timeout_ms: min(ms || sql.statement_timeout_ms, sql.statement_timeout_ms),
       max_rows: sql.max_result_rows,
       max_bytes: sql.max_result_bytes
     ]
   end
+
+  @doc """
+  The deadline of the statements of migrations, `Alambique.Tx.script/2` and
+  the library itself (the `:sql` option `:script_timeout_ms`): the options of
+  `Alambique.Sqlite.run/4` for a migration statement.
+  """
+  @spec migration_limits(map) :: keyword
+  def migration_limits(%{sql: sql}), do: [timeout_ms: sql.script_timeout_ms]
+
+  @doc "The deadline for `Alambique.Sqlite.open/2` (`:timeout_ms`)."
+  @spec script_timeout_ms(map) :: pos_integer
+  def script_timeout_ms(%{sql: sql}), do: sql.script_timeout_ms
 
   @doc """
   Runs a statement for a caller that may only read. Anything that would write

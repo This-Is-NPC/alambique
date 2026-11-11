@@ -26,8 +26,10 @@ defmodule Alambique.Sqlite do
   @doc """
   Opens `path`, a file name or a `file:` URI. Options: `:readonly` (default
   `false`: read-write, created when missing), `:vfs`, `:alambique` for the
-  Alambique VFS (default: SQLite's), and `:attach` (default `false`) to allow
-  `ATTACH`, `DETACH` and `VACUUM`.
+  Alambique VFS (default: SQLite's), `:attach` (default `false`) to allow
+  `ATTACH`, `DETACH` and `VACUUM`, and `:timeout_ms` (default 0, none), the
+  deadline of every `run/4` and `execute/2` call that sets none. A statement
+  over it gives `{:error, :statement_timeout}`.
   """
   @spec open(Path.t(), keyword) :: {:ok, conn} | {:error, term}
   def open(path, opts \\ []) do
@@ -37,7 +39,8 @@ defmodule Alambique.Sqlite do
       path,
       Keyword.get(opts, :readonly, false),
       vfs,
-      Keyword.get(opts, :attach, false)
+      Keyword.get(opts, :attach, false),
+      Keyword.get(opts, :timeout_ms, 0)
     )
   end
 
@@ -45,7 +48,10 @@ defmodule Alambique.Sqlite do
   @spec close(conn) :: :ok
   def close(conn), do: Native.sqlite_close(conn)
 
-  @doc "Runs one or more statements without reading rows."
+  @doc """
+  Runs one or more statements without reading rows, with the deadline of the
+  connection (`open/2`).
+  """
   @spec execute(conn, iodata) :: :ok | {:error, term}
   def execute(conn, sql), do: Native.sqlite_execute(conn, IO.iodata_to_binary(sql))
 
@@ -81,7 +87,8 @@ defmodule Alambique.Sqlite do
       pragmas that set something; the error is `{:error, :not_authorized}`.
       Values over `:max_bytes` cannot be built.
     * `:timeout_ms` - stop the statement after this long with
-      `{:error, :statement_timeout}`. A statement of a transaction that is
+      `{:error, :statement_timeout}`; the default is the deadline of the
+      connection. A statement of a transaction that is
       stopped rolls the transaction back.
     * `:max_rows` and `:max_bytes` - `{:error, :result_too_large}` when the
       result has more rows, or more bytes of text, blobs and (8 each) other

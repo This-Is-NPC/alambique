@@ -210,14 +210,15 @@ defmodule Alambique.ScrubTest do
       on_exit(fn -> File.rm(path) end)
       {:ok, result} = Alambique.Replication.restore(repl, cell, path, :latest)
 
-      assert {:ok, txid} = Alambique.Scrub.verify(path, result, :integrity_check)
+      assert {:ok, txid} = Alambique.Scrub.verify(path, result, :integrity_check, 60_000)
       assert txid == result.txid
 
       assert {:error, {:checksum_mismatch, _, _}} =
                Alambique.Scrub.verify(
                  path,
                  %{result | checksum: result.checksum + 1},
-                 :quick_check
+                 :quick_check,
+                 60_000
                )
     end
   end

@@ -373,7 +373,10 @@ defmodule Alambique.Cell.Wake do
   end
 
   defp open(state) do
-    case Db.open(state.path, cache_kib: state.config.awake.cache_kib) do
+    case Db.open(state.path,
+           cache_kib: state.config.awake.cache_kib,
+           timeout_ms: Db.script_timeout_ms(state.config)
+         ) do
       {:ok, conn} ->
         {:ok, conn}
 
@@ -484,7 +487,8 @@ defmodule Alambique.Cell.Wake do
         txid = Replicator.next_txid(state.repl)
 
         case Db.transaction(state.conn, txid, &apply_one(&1, version, migration),
-               select: state.config.feed
+               select: state.config.feed,
+               limits: Db.migration_limits(state.config)
              ) do
           {:ok, _} ->
             Telemetry.span_stop([:cell, :migrate], started, %{}, %{

@@ -377,7 +377,8 @@ defmodule Alambique.Query do
   end
 
   defp read(config, replica, sql, params, deadline) do
-    case File.exists?(replica.path) && Db.open_read_only(replica.path) do
+    case File.exists?(replica.path) &&
+           Db.open_read_only(replica.path, timeout_ms: Db.script_timeout_ms(config)) do
       false ->
         {:error, :gone}
 

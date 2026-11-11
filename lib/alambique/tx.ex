@@ -78,9 +78,17 @@ defmodule Alambique.Tx do
         :ok = Db.script(conn, "RELEASE alambique_script")
 
       {:error, _} = error ->
-        :ok = Db.script(conn, "ROLLBACK TO alambique_script")
-        :ok = Db.script(conn, "RELEASE alambique_script")
+        undo(conn)
         error
+    end
+  end
+
+  # An interrupted statement (`:statement_timeout`) makes SQLite roll back the
+  # whole transaction, savepoint included; there is nothing left to undo.
+  defp undo(conn) do
+    if Alambique.Sqlite.transaction_status(conn) == {:ok, :transaction} do
+      :ok = Db.script(conn, "ROLLBACK TO alambique_script")
+      :ok = Db.script(conn, "RELEASE alambique_script")
     end
   end
 
