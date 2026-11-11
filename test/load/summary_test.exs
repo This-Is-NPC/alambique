@@ -10,6 +10,7 @@ defmodule Alambique.Load.SummaryTest do
       level: level,
       verdict: if(verdict == :good, do: "good", else: "bad"),
       reason: "",
+      quiet_wait_s: 0.0,
       verdict_term: verdict,
       delivery: %{ratio: 1.0},
       latency_ms: %{p50: 30.0, p95: 60.0, p99: 90.0},
@@ -116,5 +117,19 @@ defmodule Alambique.Load.SummaryTest do
       assert Stats.linear_fit([{2, 1}, {2, 5}]) == nil
       assert %{slope: 2.0, intercept: 1.0} = Stats.linear_fit([{0, 1}, {1, 3}, {2, 5}])
     end
+  end
+
+  test "the time waited for a quiet host is summed over the steps and said" do
+    steps = [
+      %{step(1, :ramp, 50, :good, 100.0) | quiet_wait_s: 30.0},
+      %{step(2, :ramp, 100, {:invalid, {:host_busy, 9.2}}, 100.0) | quiet_wait_s: 1830.5}
+    ]
+
+    summary = Summary.build(@meta, steps, %{stopped: :invalid, confirmation: nil})
+
+    assert summary.quiet_wait_s == 1860.5
+    assert summary.stopped_by == "invalid (not a failure): host net load 9.2"
+    assert hd(summary.rows).quiet_wait_s == 30.0
+    assert Summary.markdown(summary) =~ "Waited 1861 s in all"
   end
 end

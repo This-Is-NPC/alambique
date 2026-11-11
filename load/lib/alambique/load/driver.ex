@@ -9,6 +9,7 @@ defmodule Alambique.Load.Driver do
     Env,
     Host,
     Measure,
+    Quiet,
     Ramp,
     Results,
     Sampler,
@@ -19,9 +20,6 @@ defmodule Alambique.Load.Driver do
   }
 
   alias Alambique.Load.Measures
-
-  # Times a step the host disturbed is run before it counts as invalid.
-  @attempts 3
 
   @measures %{
     "commits" => Measures.Commits,
@@ -52,7 +50,10 @@ defmodule Alambique.Load.Driver do
       latency: mod.latency(),
       mem_limit_mb: Env.int("MEM_LIMIT_MB", 512),
       mem_fraction: mod.mem_fraction(),
-      min_available_gib: Env.float("MIN_AVAILABLE_GIB", 6)
+      min_available_gib: Env.float("MIN_AVAILABLE_GIB", 6),
+      settle_s: Env.int("SETTLE_S", 30),
+      wait_quiet_step_s: Env.int("WAIT_QUIET_STEP_S", 1800),
+      attempts: Env.int("ATTEMPTS", 5)
     }
 
     ctx = %{node: node, measure: measure, limits: limits, abort: abort_fun(limits)}
@@ -95,32 +96,101 @@ defmodule Alambique.Load.Driver do
     end
   end
 
-  # A step the host disturbed runs again, up to @attempts times in all; the
-  # disturbed attempts stay on disk, marked "repeat".
-  defp step_with_repeats(ctx, mod, level, phase, seq, out, meta, attempt \\ 1) do
-    {step, verdict} = run_step(ctx, mod, level, phase, seq, attempt)
+  # Every attempt starts when the host is quiet. A step the host disturbed runs
+  # again, up to `limits.attempts` times in all; the disturbed attempts stay on
+  # disk, marked "repeat". `waited` is the time spent waiting for the host so
+  # far in this step, this attempt included in the step it is written to.
+  defp step_with_repeats(ctx, mod, level, phase, seq, out, meta, attempt \\ 1, waited \\ 0.0) do
     name = Results.step_name(seq, phase, level)
+    key = {level, phase, seq, attempt}
 
+    case Quiet.wait(quiet_opts(ctx.limits), quiet_io()) do
+      {:quiet, wait_s} ->
+        waited = waited + wait_s
+        {step, verdict} = run_step(ctx, mod, level, phase, seq, attempt)
+        step = Map.put(step, :quiet_wait_s, waited)
+        finish(ctx, mod, {step, verdict}, key, waited, out, meta, name)
+
+      {:busy, wait_s, load} ->
+        unrun_step(ctx, key, waited + wait_s, {:invalid, {:host_busy, load}})
+        |> write_step(out, name, meta, mod)
+
+      {:low_memory, wait_s} ->
+        unrun_step(ctx, key, waited + wait_s, {:invalid, :host_low_memory})
+        |> write_step(out, name, meta, mod)
+    end
+  end
+
+  defp finish(ctx, mod, {step, verdict}, {level, phase, seq, attempt}, waited, out, meta, name) do
     case verdict do
-      {:repeat, reason} when attempt < @attempts ->
+      {:repeat, reason} when attempt < ctx.limits.attempts ->
         Results.write!(
           Path.join(out, String.replace(name, ".json", "-attempt#{attempt}.json")),
           step
         )
 
         IO.puts("#{meta.measure} #{level}: repeated, #{inspect(reason)}")
-        step_with_repeats(ctx, mod, level, phase, seq, out, meta, attempt + 1)
+        step_with_repeats(ctx, mod, level, phase, seq, out, meta, attempt + 1, waited)
 
       {:repeat, reason} ->
         step = %{step | verdict: "invalid", reason: inspect(reason)}
-        Results.write!(Path.join(out, name), step)
-        {step, {:invalid, reason}}
+        write_step({step, {:invalid, reason}}, out, name, meta, mod)
 
       _ ->
-        Results.write!(Path.join(out, name), step)
-        IO.puts("#{meta.measure} #{level} #{mod.unit()}: #{step.verdict} #{step.reason}")
-        {step, verdict}
+        write_step({step, verdict}, out, name, meta, mod)
     end
+  end
+
+  defp write_step({step, verdict}, out, name, meta, mod) do
+    Results.write!(Path.join(out, name), step)
+    IO.puts("#{meta.measure} #{step.level} #{mod.unit()}: #{step.verdict} #{step.reason}")
+    {step, verdict}
+  end
+
+  defp quiet_opts(limits) do
+    %{
+      max_net_load: limits.max_net_load,
+      min_available_gib: limits.min_available_gib,
+      settle_s: limits.settle_s,
+      max_wait_s: limits.wait_quiet_step_s
+    }
+  end
+
+  defp quiet_io do
+    %{
+      read: &Sampler.host/0,
+      now: fn -> System.system_time(:millisecond) end,
+      sleep: &Process.sleep/1,
+      log: &IO.puts/1
+    }
+  end
+
+  # The step of an attempt that never ran because the host was not quiet.
+  defp unrun_step(ctx, {level, phase, seq, attempt}, waited, verdict) do
+    step = %{
+      schema: 1,
+      scenario: Env.get("SCENARIO"),
+      measure: ctx.measure,
+      variant: Env.get("VARIANT", "default"),
+      seq: seq,
+      phase: phase,
+      level: level,
+      attempt: attempt,
+      started_at: iso_now(),
+      duration_s: 0.0,
+      quiet_wait_s: waited,
+      delivery: %{planned: 0, issued: 0, dropped: 0, completed: 0, ok: 0, errors: 0, ratio: nil},
+      latency_ms: %{},
+      host: nil,
+      cgroup: nil,
+      service: nil,
+      cost: nil,
+      extra: %{},
+      verdict: verdict_name(verdict),
+      reason: reason(verdict)
+    }
+
+    {step, verdict}
   end
 
   defp run_step(ctx, mod, level, phase, seq, attempt) do

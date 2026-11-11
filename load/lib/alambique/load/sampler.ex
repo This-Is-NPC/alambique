@@ -9,7 +9,7 @@ defmodule Alambique.Load.Sampler do
   alias Alambique.Load.{Cgroup, Host}
 
   @interval 1_000
-  @host_every 5
+  @host_every Host.tick_s()
 
   def start_link(cgroup_dirs), do: GenServer.start_link(__MODULE__, cgroup_dirs, name: __MODULE__)
 
