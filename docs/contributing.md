@@ -24,10 +24,17 @@ mise run bench:router    # routing path and awake.max_pending check of a local c
 mise run bench:inflight  # cost of the in-flight marker per write
 mise run bench:lease     # cost of Alambique.lease/3, in memory and with store latency
 mise run bench:stall     # per-second latency, run queues, NIF calls and store requests under steady load
+mise run load:image      # build the image of the load test service
+mise run load -- A commits  # load-test one node in a limited container (docs/how-to-load-test.md)
 mise run test:seaweedfs  # store contract tests against a disposable SeaweedFS
 mise run test:litestream # Litestream 0.5.18 restores replicas Alambique wrote (needs SeaweedFS)
 mise run seaweedfs:down  # remove the SeaweedFS container
 ```
+
+The load test is described in [how-to-load-test.md](how-to-load-test.md). Its
+harness lives in `load/`; the code that decides outcomes is unit-tested in
+`test/load/` and excluded from the coverage figures, because the rest of it
+drives containers.
 
 The Miri, sanitizer and fuzz tasks install the pinned nightly toolchain and
 `cargo-fuzz` on first use; the sanitizer tasks also need `clang`, or `CC` set
