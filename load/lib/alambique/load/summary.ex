@@ -53,6 +53,7 @@ defmodule Alambique.Load.Summary do
   defp describe({:delivery, ratio}),
     do: "delivered #{Float.round(ratio * 100, 1)}% of the planned operations"
 
+  defp describe({:swap, who, mb}), do: "the #{who} swapped (#{Float.round(mb * 1.0, 1)} MB)"
   defp describe({:host_busy, load}), do: "host net load #{Float.round(load * 1.0, 1)}"
 
   defp describe(:store_full),
@@ -95,6 +96,7 @@ defmodule Alambique.Load.Summary do
       cpu_ms_per_op: s.cost && s.cost.cpu_ms_per_op,
       cpu_cores_mean: s.cgroup && s.cgroup.cpu_cores_mean,
       mem_process_mb_mean: s.cgroup && s.cgroup.mem_process_mb.mean,
+      host_swap_mb_max: get_in(s, [:swap, :host_mb, :max]),
       mem_process_mb_max: s.cgroup && s.cgroup.mem_process_mb.max,
       store_trips_per_op: s.cost && s.cost.store_trips_per_op,
       store_bytes_put_per_op: s.cost && s.cost.store_bytes_put_per_op,
@@ -122,6 +124,7 @@ defmodule Alambique.Load.Summary do
         "p99 ms",
         "CPU ms/op",
         "mem MB",
+        "swap MB",
         "trips/op",
         "put KB/op",
         "got KB/op"
@@ -141,6 +144,7 @@ defmodule Alambique.Load.Summary do
           num(r.latency_ms[:p99]),
           num(r.cpu_ms_per_op, 2),
           num(r.mem_process_mb_mean, 0),
+          num(r.host_swap_mb_max, 0),
           num(r.store_trips_per_op, 2),
           num(r.store_bytes_put_per_op && r.store_bytes_put_per_op / 1024, 1),
           num(r.store_bytes_got_per_op && r.store_bytes_got_per_op / 1024, 1)

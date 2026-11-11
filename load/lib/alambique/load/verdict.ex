@@ -3,22 +3,27 @@ defmodule Alambique.Load.Verdict do
   # Decides what one step means, in this order:
   #
   #   1. host net load above the limit        -> repeat the step
-  #   2. process memory at its criterion      -> bad
-  #   3. fewer than 95% of the planned
+  #   2. swap: the driver's or the store's
+  #      swap grew in the step by more than
+  #      the threshold                        -> repeat the step
+  #      the service has any swap             -> invalid (`:swap`)
+  #   3. process memory at its criterion      -> bad
+  #   4. fewer than 95% of the planned
   #      operations completed                 -> invalid (not a failure: the
   #                                              harness or the service did not
   #                                              carry the load it was asked)
-  #   4. errors above the allowed share       -> bad (`:store_full` when
+  #   5. errors above the allowed share       -> bad (`:store_full` when
   #                                              the errors say the store is
   #                                              out of space, else `:errors`)
-  #   5. the latency percentile of the
+  #   6. the latency percentile of the
   #      measure above its limit              -> bad
   #   otherwise good.
   #
   # `stats` holds `planned`, `completed`, `errors`, `latency_ms` (percentile
-  # name to value), `net_load_max`, `mem_mb_max` and `aborted` (`:memory` when
+  # name to value), `net_load_max`, `swap` (`%{driver_growth_mb, store_growth_mb, service_mb}`,
+  # nil values when unreadable), `mem_mb_max` and `aborted` (`:memory` when
   # the step stopped early because memory reached its criterion). `limits`
-  # holds `delivery_min`, `max_net_load`, `max_error_ratio`, `latency`
+  # holds `delivery_min`, `max_net_load`, `max_swap_mb`, `max_error_ratio`, `latency`
   # (`{percentile, limit_ms}` or nil), `mem_limit_mb` and `mem_fraction` (the
   # share of the limit that is the criterion).
 
@@ -33,6 +38,9 @@ defmodule Alambique.Load.Verdict do
     cond do
       stats.net_load_max > limits.max_net_load ->
         {:repeat, {:host_busy, stats.net_load_max}}
+
+      swap = swap_problem(stats[:swap], limits.max_swap_mb) ->
+        swap
 
       stats[:aborted] == :memory or stats.mem_mb_max >= limits.mem_limit_mb * limits.mem_fraction ->
         {:bad, :memory}
@@ -49,6 +57,17 @@ defmodule Alambique.Load.Verdict do
 
       true ->
         :good
+    end
+  end
+
+  defp swap_problem(nil, _), do: nil
+
+  defp swap_problem(swap, max_mb) do
+    cond do
+      (swap.service_mb || 0) > 0 -> {:invalid, {:swap, :service, swap.service_mb}}
+      (swap.driver_growth_mb || 0) > max_mb -> {:repeat, {:swap, :driver, swap.driver_growth_mb}}
+      (swap.store_growth_mb || 0) > max_mb -> {:repeat, {:swap, :store, swap.store_growth_mb}}
+      true -> nil
     end
   end
 

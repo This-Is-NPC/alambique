@@ -6,6 +6,7 @@ defmodule Alambique.Load.VerdictTest do
   @limits %{
     delivery_min: 0.95,
     max_net_load: 6.0,
+    max_swap_mb: 0.0,
     max_error_ratio: 0.0,
     latency: {:p99, 250},
     mem_limit_mb: 512,
@@ -82,6 +83,38 @@ defmodule Alambique.Load.VerdictTest do
     assert Verdict.store_full?([other, full])
     refute Verdict.store_full?([other])
     refute Verdict.store_full?([])
+  end
+
+  describe "swap" do
+    defp swap(changes),
+      do: %{
+        swap: Map.merge(%{driver_growth_mb: 0.0, store_growth_mb: 0.0, service_mb: 0.0}, changes)
+      }
+
+    test "growth of the driver's or the store's swap repeats the step" do
+      assert judge(swap(%{driver_growth_mb: 0.5})) == {:repeat, {:swap, :driver, 0.5}}
+      assert judge(swap(%{store_growth_mb: 3.0})) == {:repeat, {:swap, :store, 3.0}}
+      assert judge(swap(%{driver_growth_mb: nil, store_growth_mb: nil, service_mb: nil})) == :good
+    end
+
+    test "the threshold is strict" do
+      assert judge(swap(%{driver_growth_mb: 2.0}), %{max_swap_mb: 2.0}) == :good
+
+      assert judge(swap(%{driver_growth_mb: 2.1}), %{max_swap_mb: 2.0}) ==
+               {:repeat, {:swap, :driver, 2.1}}
+    end
+
+    test "any swap of the service is invalid, and is judged after the host" do
+      assert judge(swap(%{service_mb: 0.1})) == {:invalid, {:swap, :service, 0.1}}
+
+      assert {:repeat, {:host_busy, _}} =
+               judge(Map.merge(swap(%{driver_growth_mb: 5.0}), %{net_load_max: 9.0}))
+    end
+
+    test "swap is judged before memory, delivery, errors and latency" do
+      bad = %{mem_mb_max: 900.0, completed: 0, errors: 9, latency_ms: %{p99: 9_999.0}}
+      assert {:repeat, {:swap, :store, _}} = judge(Map.merge(swap(%{store_growth_mb: 1.0}), bad))
+    end
   end
 
   test "a measure without a latency criterion ignores latency" do

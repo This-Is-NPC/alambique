@@ -50,4 +50,35 @@ defmodule Alambique.Load.HostTest do
       assert net >= 0.0 and net <= load
     end
   end
+
+  test "reads swap in use from /proc/meminfo and VmSwap from a status file" do
+    text = "MemTotal: 1 kB\nSwapTotal:      12288000 kB\nSwapFree:       12263424 kB\n"
+    assert Host.parse_swap_used_mb(text) == 24_576 / 1024
+    assert Host.parse_swap_used_mb("SwapTotal: 0 kB\nSwapFree: 0 kB\n") == 0.0
+    assert Host.parse_vmswap_mb("Name:\tbeam\nVmRSS:\t10 kB\nVmSwap:\t    2048 kB\n") == 2.0
+    assert Host.parse_vmswap_mb("Name:\tkthread\n") == nil
+  end
+
+  test "swap stats: start, max, end and the growth over the start" do
+    samples = [
+      %{host_mb: 100.0, driver_mb: 0.0, store_mb: nil, service_mb: 0.0},
+      %{host_mb: 90.0, driver_mb: 3.0, store_mb: nil, service_mb: 0.0},
+      %{host_mb: 95.0, driver_mb: 1.0, store_mb: nil, service_mb: 0.0}
+    ]
+
+    stats = Host.swap_stats(samples)
+    assert stats.host_mb == %{start: 100.0, max: 100.0, end: 95.0, growth: 0.0}
+    assert stats.driver_mb == %{start: 0.0, max: 3.0, end: 1.0, growth: 3.0}
+    assert stats.store_mb == nil
+    assert Host.swap_stats([]).host_mb == nil
+  end
+
+  test "reads the swap of a cgroup, nil when the file is missing" do
+    dir = Path.join(System.tmp_dir!(), "swapcg-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf!(dir) end)
+    assert Alambique.Load.Cgroup.swap_mb(dir) == nil
+    File.write!(Path.join(dir, "memory.swap.current"), "3145728\n")
+    assert Alambique.Load.Cgroup.swap_mb(dir) == 3.0
+  end
 end
