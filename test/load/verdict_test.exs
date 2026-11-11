@@ -6,7 +6,9 @@ defmodule Alambique.Load.VerdictTest do
   @limits %{
     delivery_min: 0.95,
     max_net_load: 6.0,
-    max_swap_mb: 0.0,
+    max_driver_swap_mb: 16.0,
+    max_store_swap_mb: 0.0,
+    max_host_swap_mb: 512.0,
     max_error_ratio: 0.0,
     latency: {:p99, 250},
     mem_limit_mb: 512,
@@ -88,27 +90,42 @@ defmodule Alambique.Load.VerdictTest do
   describe "swap" do
     defp swap(changes),
       do: %{
-        swap: Map.merge(%{driver_growth_mb: 0.0, store_growth_mb: 0.0, service_mb: 0.0}, changes)
+        swap:
+          Map.merge(
+            %{driver_max_mb: 0.0, host_max_mb: 0.0, store_growth_mb: 0.0, service_mb: 0.0},
+            changes
+          )
       }
 
-    test "growth of the driver's or the store's swap repeats the step" do
-      assert judge(swap(%{driver_growth_mb: 0.5})) == {:repeat, {:swap, :driver, 0.5}}
-      assert judge(swap(%{store_growth_mb: 3.0})) == {:repeat, {:swap, :store, 3.0}}
-      assert judge(swap(%{driver_growth_mb: nil, store_growth_mb: nil, service_mb: nil})) == :good
+    test "the driver's swap is judged by its absolute maximum; the limit itself is valid" do
+      assert judge(swap(%{driver_max_mb: 16.0})) == :good
+      assert judge(swap(%{driver_max_mb: 16.1})) == {:repeat, {:swap, :driver, 16.1}}
+
+      assert judge(swap(%{driver_max_mb: 3.0}), %{max_driver_swap_mb: 2.0}) ==
+               {:repeat, {:swap, :driver, 3.0}}
     end
 
-    test "the threshold is strict" do
-      assert judge(swap(%{driver_growth_mb: 2.0}), %{max_swap_mb: 2.0}) == :good
-
-      assert judge(swap(%{driver_growth_mb: 2.1}), %{max_swap_mb: 2.0}) ==
-               {:repeat, {:swap, :driver, 2.1}}
+    test "the store's swap is judged by its growth; the limit itself is valid" do
+      assert judge(swap(%{store_growth_mb: 0.0})) == :good
+      assert judge(swap(%{store_growth_mb: 0.1})) == {:repeat, {:swap, :store, 0.1}}
+      assert judge(swap(%{store_growth_mb: 2.0}), %{max_store_swap_mb: 2.0}) == :good
     end
 
-    test "any swap of the service is invalid, and is judged after the host" do
+    test "the host's swap is judged by its absolute maximum; the limit itself is valid" do
+      assert judge(swap(%{host_max_mb: 512.0})) == :good
+      assert judge(swap(%{host_max_mb: 512.5})) == {:repeat, {:swap, :host, 512.5}}
+    end
+
+    test "unreadable swap is not a problem" do
+      none = %{driver_max_mb: nil, host_max_mb: nil, store_growth_mb: nil, service_mb: nil}
+      assert judge(swap(none)) == :good
+    end
+
+    test "any swap of the service is invalid, and is judged after the host load" do
       assert judge(swap(%{service_mb: 0.1})) == {:invalid, {:swap, :service, 0.1}}
 
       assert {:repeat, {:host_busy, _}} =
-               judge(Map.merge(swap(%{driver_growth_mb: 5.0}), %{net_load_max: 9.0}))
+               judge(Map.merge(swap(%{driver_max_mb: 50.0}), %{net_load_max: 9.0}))
     end
 
     test "swap is judged before memory, delivery, errors and latency" do

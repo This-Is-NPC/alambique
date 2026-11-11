@@ -3,9 +3,10 @@ defmodule Alambique.Load.Verdict do
   # Decides what one step means, in this order:
   #
   #   1. host net load above the limit        -> repeat the step
-  #   2. swap: the driver's or the store's
-  #      swap grew in the step by more than
-  #      the threshold                        -> repeat the step
+  #   2. swap: the driver's swap, or the
+  #      host's, above its limit, or the
+  #      store's swap grown by more than its
+  #      limit during the step                -> repeat the step
   #      the service has any swap             -> invalid (`:swap`)
   #   3. process memory at its criterion      -> bad
   #   4. fewer than 95% of the planned
@@ -20,10 +21,10 @@ defmodule Alambique.Load.Verdict do
   #   otherwise good.
   #
   # `stats` holds `planned`, `completed`, `errors`, `latency_ms` (percentile
-  # name to value), `net_load_max`, `swap` (`%{driver_growth_mb, store_growth_mb, service_mb}`,
+  # name to value), `net_load_max`, `swap` (`%{driver_max_mb, host_max_mb, store_growth_mb, service_mb}`,
   # nil values when unreadable), `mem_mb_max` and `aborted` (`:memory` when
   # the step stopped early because memory reached its criterion). `limits`
-  # holds `delivery_min`, `max_net_load`, `max_swap_mb`, `max_error_ratio`, `latency`
+  # holds `delivery_min`, `max_net_load`, `max_driver_swap_mb`, `max_host_swap_mb`, `max_store_swap_mb`, `max_error_ratio`, `latency`
   # (`{percentile, limit_ms}` or nil), `mem_limit_mb` and `mem_fraction` (the
   # share of the limit that is the criterion).
 
@@ -39,7 +40,7 @@ defmodule Alambique.Load.Verdict do
       stats.net_load_max > limits.max_net_load ->
         {:repeat, {:host_busy, stats.net_load_max}}
 
-      swap = swap_problem(stats[:swap], limits.max_swap_mb) ->
+      swap = swap_problem(stats[:swap], limits) ->
         swap
 
       stats[:aborted] == :memory or stats.mem_mb_max >= limits.mem_limit_mb * limits.mem_fraction ->
@@ -62,12 +63,22 @@ defmodule Alambique.Load.Verdict do
 
   defp swap_problem(nil, _), do: nil
 
-  defp swap_problem(swap, max_mb) do
+  defp swap_problem(swap, limits) do
     cond do
-      (swap.service_mb || 0) > 0 -> {:invalid, {:swap, :service, swap.service_mb}}
-      (swap.driver_growth_mb || 0) > max_mb -> {:repeat, {:swap, :driver, swap.driver_growth_mb}}
-      (swap.store_growth_mb || 0) > max_mb -> {:repeat, {:swap, :store, swap.store_growth_mb}}
-      true -> nil
+      (swap.service_mb || 0) > 0 ->
+        {:invalid, {:swap, :service, swap.service_mb}}
+
+      (swap.driver_max_mb || 0) > limits.max_driver_swap_mb ->
+        {:repeat, {:swap, :driver, swap.driver_max_mb}}
+
+      (swap.store_growth_mb || 0) > limits.max_store_swap_mb ->
+        {:repeat, {:swap, :store, swap.store_growth_mb}}
+
+      (swap.host_max_mb || 0) > limits.max_host_swap_mb ->
+        {:repeat, {:swap, :host, swap.host_max_mb}}
+
+      true ->
+        nil
     end
   end
 
