@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.3.0](https://github.com/This-Is-NPC/alambique/compare/v0.2.0...v0.3.0) (2026-11-11)
+
+
+### Features
+
+* **sql:** let a call lower its statement deadline ([90ea5f7](https://github.com/This-Is-NPC/alambique/commit/90ea5f7304237b3e3628d8b3b6b4c534beb86517))
+
+
+### Bug Fixes
+
+* **admission:** hibernate the lru cell at max_cells ([af2dc19](https://github.com/This-Is-NPC/alambique/commit/af2dc19486bea2c031d5f0575695f8c83f2b8881))
+* **admission:** take max_pending places atomically ([336968c](https://github.com/This-Is-NPC/alambique/commit/336968cd9d635b55d054449fb991e1fff24f2ad6))
+* **cell:** drop calls whose caller gave up ([033ec41](https://github.com/This-Is-NPC/alambique/commit/033ec41918f3c7209c5d2edef1493ac9a2984127))
+* **feed:** keep object keys in commit order ([69f30d2](https://github.com/This-Is-NPC/alambique/commit/69f30d20f37a86599d653c20177cc6de2364280c))
+* **instance:** refuse a case-insensitive data_dir ([7d71c16](https://github.com/This-Is-NPC/alambique/commit/7d71c16f0d0603c0969092beeabf37b43fe8163f))
+* **instance:** refuse a data_dir held by another ([a37f81f](https://github.com/This-Is-NPC/alambique/commit/a37f81fa896fdc4c67995e1bd9bb9768798166ce))
+* **query:** refresh a replica without reading it ([045fb0e](https://github.com/This-Is-NPC/alambique/commit/045fb0e901d7131a6f50eaee06e4de2139d02c6b))
+* **query:** remove cache files of the old name ([314cda1](https://github.com/This-Is-NPC/alambique/commit/314cda193cf2bef2f738583cd7d2a80a9b67b49d))
+* **relocate:** drop stray cleanup markers ([b3e66d4](https://github.com/This-Is-NPC/alambique/commit/b3e66d4bc6889979bd35fe68d4c7118350e357a1))
+* **relocate:** rediscover cleanups after a restart ([f987077](https://github.com/This-Is-NPC/alambique/commit/f9870774c79c418ecb48e0255370a84215a1dcf5))
+* **replication:** kill store calls at the deadline ([126d0dd](https://github.com/This-Is-NPC/alambique/commit/126d0dd096a41eb9a928f01f84e20e138c333b33))
+* **sql:** bound migrations, scripts and own statements ([491c015](https://github.com/This-Is-NPC/alambique/commit/491c015f43062a766ac9f18353160f8e123eee1e))
+* **sql:** limit concurrent user statements per node ([c75b4c0](https://github.com/This-Is-NPC/alambique/commit/c75b4c052f058452f9808d61b5437f8288844a8f))
+* **store:** bound the lease and feed requests ([ce7affb](https://github.com/This-Is-NPC/alambique/commit/ce7affb5aa5abd550a3fcd6d08a8412b67314ec6))
+
+
+### Performance Improvements
+
+* **replica:** poll idle replicas less often ([67178d2](https://github.com/This-Is-NPC/alambique/commit/67178d2bd0cb07b40f52ef19d77e76b84420bdec))
+
 ## [0.2.0](https://github.com/This-Is-NPC/alambique/compare/v0.1.0...v0.2.0) (2026-11-11)
 
 
