@@ -66,8 +66,8 @@ A step ends in one of:
 - **good**, **bad** (a criterion broke), or
 - **invalid**: fewer than 95% of the planned operations completed. It is not a
   failure; it says the load was not delivered. The ramp stops.
-- **repeat**: the host was busy (below). The step runs again, up to 3 attempts,
-  then is invalid. The attempts stay on disk.
+- **repeat**: the host was busy (below). The step runs again, up to 5 attempts
+  (`ALAMBIQUE_LOAD_ATTEMPTS`), then is invalid. The attempts stay on disk.
 
 Order of decision: host busy, memory, delivery, errors, latency.
 
@@ -80,6 +80,18 @@ containers and the driver). The kernel averages that count every 5 s with a
 (`ALAMBIQUE_LOAD_MIN_AVAILABLE_GIB`) stops the run cleanly: the containers are
 removed and the results so far stay. A case also waits up to 10 minutes before
 it starts for load average at most 8 and that much free memory.
+
+**Waiting for a quiet host.** Before every step, and before every repeat, the
+driver waits until the net load is at most the limit in every sample of a
+settle window (30 s, so 6 samples, `ALAMBIQUE_LOAD_SETTLE_S`). One quiet sample
+is not enough: the 1-minute average lags. The service stays up and idle
+meanwhile, so the net load is close to the plain 1-minute load average. The
+driver prints one line when it starts waiting and one when it goes on. If the
+host is not quiet after 30 minutes (`ALAMBIQUE_LOAD_WAIT_QUIET_STEP_S`), the
+step is invalid with `host_busy` and the ramp stops; that is not a failure of
+the service. Low memory while waiting stops the run as above. Each step's JSON
+has `quiet_wait_s`, the seconds waited for it (the settle window included, the
+earlier attempts included), and the summary adds the total of the case.
 
 ## Run it
 
@@ -136,9 +148,12 @@ All are environment variables; set them before `mise run load`.
 | `ALAMBIQUE_LOAD_DELIVERY_MIN` | 0.95 | delivery gate |
 | `ALAMBIQUE_LOAD_MAX_ERROR_RATIO` | 0 | errors allowed, as a share of completed |
 | `ALAMBIQUE_LOAD_MAX_NET_LOAD` | 6 | host net load limit |
+| `ALAMBIQUE_LOAD_SETTLE_S` | 30 | seconds of quiet readings before each step (one reading per 5 s) |
+| `ALAMBIQUE_LOAD_WAIT_QUIET_STEP_S` | 1800 | longest wait for a quiet host before a step; then the step is invalid (`host_busy`) |
+| `ALAMBIQUE_LOAD_ATTEMPTS` | 5 | times a step the host disturbed runs before it is invalid |
 | `ALAMBIQUE_LOAD_MIN_AVAILABLE_GIB` | 6 | clean stop below this |
 | `ALAMBIQUE_LOAD_START_LOAD` | 8 | load average at most, to start a case |
-| `ALAMBIQUE_LOAD_WAIT_QUIET_S` | 600 | how long a case waits to start |
+| `ALAMBIQUE_LOAD_WAIT_QUIET_S` | 600 | how long a case waits to start (a step waits by `_WAIT_QUIET_STEP_S`) |
 | `ALAMBIQUE_LOAD_STORE_LATENCY_MS` | 25 | added to every store request |
 | `ALAMBIQUE_LOAD_DATA_MB` / `_STORE_MB` | 1024 / 4096 | tmpfs of the service data and of the store |
 | `ALAMBIQUE_LOAD_CACHE_KIB` | library default (512) | `awake.cache_kib` (set by `cache<N>`) |
@@ -179,8 +194,10 @@ minutes. Counting the variants, one scenario is `commits` 2 ramps, `cells` 2
 ramps (about 7 steps of up to 90 s fill and 60 s hold, 15 minutes each),
 `wakes` and `query` 1 each. That is about 3 hours per scenario, 3 to 4 with the
 preparation (creating the cells of `wakes` and `query`), and 6 to 8 hours for
-both. Ramps that stop early are shorter. This is an estimate: no full ramp has
-been run.
+both. Ramps that stop early are shorter. Every step also waits at least the
+settle window (30 s, 5 to 6 minutes per ramp). A busy host makes the run longer:
+each wait lasts until the host is quiet, up to 30 minutes per step, and each
+repeat waits again. This is an estimate: no full ramp has been run.
 
 ## Results
 
@@ -192,8 +209,10 @@ Not run yet.
 
 - `host not quiet`: the case waited 10 minutes for the load average. Wait, or
   raise `ALAMBIQUE_LOAD_START_LOAD` knowingly.
-- Every step repeated and then invalid with `host_busy`: other work on the host
-  keeps the net load above 6.
+- A step invalid with `host_busy`: the host stayed above the net load limit for
+  the whole wait (`ALAMBIQUE_LOAD_WAIT_QUIET_STEP_S`) or every attempt was
+  disturbed. Run again when the other work is done, or raise
+  `ALAMBIQUE_LOAD_WAIT_QUIET_STEP_S` or `ALAMBIQUE_LOAD_ATTEMPTS`.
 - Exit status 2 (invalid), 3 (host low on memory), 4 (service down). For 4,
   read the container's log; a case prints it when the service died.
 - A tmpfs full error in the service log: raise `ALAMBIQUE_LOAD_DATA_MB`.
