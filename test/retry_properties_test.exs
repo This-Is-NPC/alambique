@@ -9,6 +9,9 @@ defmodule Alambique.Replication.RetryPropertiesTest do
 
   alias Alambique.Replication.Retry
 
+  # How far past its deadline a call may end (one slice of scheduling).
+  @slack_ms 150
+
   # Calls `fun` as the n-th time and records when.
   defp recorder(script) do
     {:ok, agent} = Agent.start_link(fn -> [] end)
@@ -53,6 +56,20 @@ defmodule Alambique.Replication.RetryPropertiesTest do
       assert Retry.run(ctx(1, 2), Retry.deadline_in(-late), fun) == {:error, reason}
       assert length(calls.()) == 1
     end
+  end
+
+  test "an attempt past the deadline gets the first backoff and is then killed" do
+    started = System.monotonic_time(:millisecond)
+
+    assert {:error, :timeout} =
+             Retry.run(ctx(40, 80), Retry.deadline_in(-5), fn -> Process.sleep(:infinity) end)
+
+    assert (System.monotonic_time(:millisecond) - started) in 40..(40 + @slack_ms)
+  end
+
+  test "once kills the attempt after the timeout and returns its result before" do
+    assert Retry.once(500, fn -> :ok end) == :ok
+    assert Retry.once(30, fn -> Process.sleep(:infinity) end) == {:error, :timeout}
   end
 
   property "a retry that would end past the deadline is not started" do
@@ -108,14 +125,13 @@ defmodule Alambique.Replication.RetryPropertiesTest do
     def delete(_, _), do: Process.sleep(:infinity)
   end
 
-  # How far past its deadline a call may end (one slice of scheduling).
-  @slack_ms 150
-
   test "a store call that never returns is interrupted at the deadline" do
     ctx = Map.put(ctx(5, 10), :store, {HangingStore, nil})
     started = System.monotonic_time(:millisecond)
 
-    assert {:error, _} = Alambique.Replication.Objects.fetch(ctx, "k", Retry.deadline_in(100))
+    assert {:error, :timeout} =
+             Alambique.Replication.Objects.fetch(ctx, "k", Retry.deadline_in(100))
+
     assert System.monotonic_time(:millisecond) - started < 100 + @slack_ms
   end
 

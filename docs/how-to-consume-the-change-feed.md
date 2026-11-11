@@ -38,7 +38,9 @@ From a process that does not run the instance, build it from the store
 or from a list of `Alambique.Location` (`locations: [...]`), pass the same
 `shards:` as the instance (default 16), and keep `settle_ms` at least that high.
 The locations are those of the moment: build the context again when the
-placement gains one.
+placement gains one. Each store request of the consumer is killed after
+`timeout_ms` (the instance's `op_timeout_ms`, 10 000 when you build the context
+from a store) and answers `{:error, :timeout}`.
 
 ## 2. Read from a position
 
