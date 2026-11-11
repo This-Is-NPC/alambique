@@ -991,7 +991,14 @@ Why each overlap is safe:
   arrive together. The cell gives the place back when it has answered or
   parked the call, so a call counts while it waits in the mailbox or runs,
   even after its caller gave up, and a read that waits for a held upload holds
-  its result only while it counts. A hibernation is never refused.
+  its result only while it counts. A hibernation is never refused. The router
+  stamps each call with the time its caller stops waiting (the call timeout);
+  a cell that takes from its mailbox a call stamped in the past drops it
+  without running it and gives the place back. The stamp is made and compared
+  on the node of the cell (`deliver` runs there; a call from another node
+  arrives by `:erpc` and is stamped on arrival), so the clocks of different
+  nodes are never compared. A call that already runs
+  cannot be stopped: a write is durable or not, as in §6.
 
 **Serving.** A call checks `Lease.valid?` first and stops the cell with
 `:lease_expired` if it is false. A timer at `ttl / 3` first looks for the freeze marker (one `HEAD`; a frozen

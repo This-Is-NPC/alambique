@@ -217,6 +217,18 @@ defmodule Alambique.Cell do
   # Calls
 
   @impl true
+  # The router stamps a call with the time its caller stops waiting. A call
+  # taken from the mailbox after that is dropped unrun: nobody can read its
+  # answer (`GenServer.call` does not cancel it).
+  def handle_call({:deadline, at, request}, from, state) do
+    if System.monotonic_time(:millisecond) < at do
+      handle_call(request, from, state)
+    else
+      :atomics.sub(state.load, 2, 1)
+      {:noreply, state}
+    end
+  end
+
   def handle_call(request, from, %State{mode: :serving} = state) do
     answer = state.inflight |> Inflight.busy(fn -> call(request, from, state) end) |> tracked()
     # Taken back once the call is parked or answered, so it counts all along.
