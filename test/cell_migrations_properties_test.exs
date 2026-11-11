@@ -16,8 +16,10 @@ defmodule Alambique.CellMigrationsPropertiesTest do
     * the schema index lists every cell at version 1 or later at its durable
       version (perhaps also at an older one, never nowhere).
 
-  At the end one sweep brings every listed cell to the version of its
-  namespace and lists it only there.
+  At the end the sweeper brings every listed cell to the version of its
+  namespace and lists it only there. After a restart that takes until the
+  leases that crashed cells left expire, and an entry left behind a migrated
+  cell stays until then.
   """
   use ExUnit.Case, async: false
   use ExUnitProperties
@@ -85,6 +87,27 @@ defmodule Alambique.CellMigrationsPropertiesTest do
     assert {:ok, _} = Alambique.sweep(name)
 
     assert index_of(ctx, cell) == [1]
+    stop_supervised(name)
+  end
+
+  test "the sweeper drops the entry that a crash left behind a migrated cell", ctx do
+    Lists.set(%{"a" => 3, "b" => 0, "c" => 0})
+    name = :"cell_migrations_example_#{System.unique_integer([:positive])}"
+    start(ctx, name)
+    cell = "a.1-#{System.unique_integer([:positive])}"
+
+    assert {:ok, _} = Alambique.touch(name, cell)
+    :ok = Alambique.hibernate(name, cell)
+    assert index_of(ctx, cell) == [3]
+
+    # The entry of the previous version, which the crashed wake did not delete.
+    {:ok, _} =
+      MemoryStore.put(ctx.store_config, "cells-test/schema/0000000002/#{cell}", "", :none, %{})
+
+    assert index_of(ctx, cell) == [2, 3]
+    assert {:ok, _} = Alambique.sweep(name)
+
+    assert index_of(ctx, cell) == [3]
     stop_supervised(name)
   end
 
@@ -160,7 +183,9 @@ defmodule Alambique.CellMigrationsPropertiesTest do
   end
 
   # A restart is a new instance: the leases that a crashed cell left are not
-  # its own and expire first (design §5). Sweep until every cell is migrated.
+  # its own and expire first (design §5). Sweep until every cell is migrated and
+  # listed only at its version: a stale entry that a crash left stays until the
+  # sweeper reaches the cell, which waits for the lease.
   defp settle(ctx, name, cells) do
     deadline = System.monotonic_time(:millisecond) + 10_000
 
@@ -170,7 +195,8 @@ defmodule Alambique.CellMigrationsPropertiesTest do
       for cell <- cells, do: safely(fn -> Alambique.hibernate(name, cell) end)
 
       Enum.all?(cells, fn cell ->
-        durable_version(ctx, cell) in [0, Lists.version(cell)]
+        n = Lists.version(cell)
+        durable_version(ctx, cell) in [0, n] and index_of(ctx, cell) in [[], [n]]
       end)
     end)
     |> Enum.find(&(&1 or System.monotonic_time(:millisecond) > deadline))
