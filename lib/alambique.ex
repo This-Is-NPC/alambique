@@ -249,7 +249,10 @@ defmodule Alambique do
       read goes to the owner), `:max_bytes` (the files of all replicas, default
       1 073 741 824; a replica that would not fit is not built), `:cache_kib`
       (SQLite page cache of a replica, default 4 096), `:poll_ms` (time between
-      refreshes, default 250), `:idle_ms` (a replica nobody read for this long
+      refreshes of a replica that is being read, default 250), `:poll_max_ms`
+      (longest time between refreshes of a replica nobody reads: the interval
+      grows to a quarter of the idle time up to this value, default 5 000),
+      `:idle_ms` (a replica nobody read for this long
       stops and removes its file, default 600 000), `:marker_ttl_ms` (how long
       the node trusts the switch of `replicas/3`, default 5 000), `:on_stale`
       (`:refresh` waits for a refresh, `:owner` sends the read to the owner,

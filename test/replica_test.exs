@@ -71,6 +71,37 @@ defmodule Alambique.ReplicaTest do
     assert m.lag_ms >= 0
   end
 
+  test "an idle replica polls less and less, and a read still sees the owner's writes", t do
+    counting = Alambique.CountingStore.wrap(t.store)
+    {_, counts} = counting
+    reader = start_instance(%{t | store: counting}, replicas: [poll_ms: 20, marker_ttl_ms: 200])
+    :ok = Alambique.replicas(reader, t.cell, true)
+
+    read = fn ms ->
+      Alambique.query(reader, t.cell, "SELECT n FROM t ORDER BY n", [],
+        consistency: {:bounded, ms},
+        timeout: 5_000
+      )
+    end
+
+    Enum.find_value(1..400, fn _ ->
+      if match?({:ok, _}, read.(1_000)), do: true, else: Process.sleep(25)
+    end) ||
+      flunk("the replica never answered")
+
+    # Nobody reads for 400 ms, then the store calls of 1.2 s are counted. At a
+    # fixed `poll_ms` that is 3 calls every 20 ms, 180 in all.
+    Process.sleep(400)
+    Alambique.CountingStore.reset(counts)
+    Process.sleep(1_200)
+
+    calls = for op <- [:list, :get, :head], do: Alambique.CountingStore.count(counts, op)
+    assert Enum.sum(calls) < 90, "store calls of an idle replica: #{inspect(calls)}"
+
+    {:ok, _} = Alambique.execute(t.owner, t.cell, "INSERT INTO t (n) VALUES (2)")
+    assert {:ok, %{rows: [[1], [2]]}} = read.(1)
+  end
+
   test "the replica follows the owner within the bound", t do
     :ok = Alambique.replicas(t.reader, t.cell, true)
     ready(t)

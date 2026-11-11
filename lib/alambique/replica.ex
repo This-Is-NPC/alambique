@@ -443,8 +443,18 @@ defmodule Alambique.Replica do
 
   defp schedule(state) do
     if state.timer, do: Process.cancel_timer(state.timer)
-    %{state | timer: Process.send_after(self(), :poll, state.settings.poll_ms)}
+    delay = poll_interval(state.settings, now() - state.last_read)
+    %{state | timer: Process.send_after(self(), :poll, delay)}
   end
+
+  @doc false
+  # Time to the next poll of a replica nobody read for `idle` ms: `poll_ms`
+  # while it is read, then a quarter of the idle time, up to `poll_max_ms`. A
+  # read of an idle replica is stale and waits for a refresh (or goes to the
+  # owner), so the bound of a read does not depend on this interval.
+  @spec poll_interval(map, integer) :: pos_integer
+  def poll_interval(%{poll_ms: poll, poll_max_ms: max}, idle),
+    do: idle |> div(4) |> min(max) |> max(poll)
 
   # Applies the segments between reads: the connection is closed, the file
   # changes in place, and a new connection (no cached page) is opened.
