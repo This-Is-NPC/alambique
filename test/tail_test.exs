@@ -6,7 +6,6 @@ defmodule Alambique.TailTest do
   """
   use ExUnit.Case, async: false
 
-  import Alambique.CellHelpers, only: [setup_store: 0, start_instance: 1]
   import Alambique.CompactionHelpers
   import Alambique.ReplicationHelpers, only: [safe_op: 2]
 
