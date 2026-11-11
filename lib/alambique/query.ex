@@ -35,7 +35,7 @@ defmodule Alambique.Query do
 
     * `:at` - `:latest` (default), `{:txid, n}` or `{:timestamp, ms}`: the
       state to read. A timestamp always restores the cell from scratch.
-    * `:concurrency` - cells read at once (instance option `:query`).
+    * `:concurrency` - cells read at once (instance option `:query`, default 16).
     * `:timeout_ms` - time one cell may take, including building its replica
       (instance option `:query`). A running statement is interrupted at the
       deadline.
@@ -62,7 +62,7 @@ defmodule Alambique.Query do
 
   alias Alambique.{Config, Inflight, Location, Placement, Telemetry}
   alias Alambique.Cell.Db
-  alias Alambique.Query.{Cache, Replica}
+  alias Alambique.Query.{Cache, Gate, Replica}
   alias Alambique.Replication.Retry
 
   defmodule Row do
@@ -189,9 +189,32 @@ defmodule Alambique.Query do
       when is_binary(sql) and is_list(params) do
     config = config(instance)
     concurrency = Keyword.get(opts, :concurrency, config.query.concurrency)
+    explicit = explicit_target(config, cells, opts)
+
+    # The cells wait for the store `concurrency` at a time, but never run more
+    # statements at once than the slots allow, so the query does not meet its
+    # own `:busy`.
+    places = min(concurrency, config.sql.max_concurrent_statements)
+
+    Stream.resource(
+      fn -> {:open, Gate.start(places)} end,
+      fn
+        {:open, gate} ->
+          {[cell_results(config, {cells, explicit}, sql, params, opts, gate)], {:done, gate}}
+
+        {:done, _gate} = state ->
+          {:halt, state}
+      end,
+      fn {_, gate} -> Gate.stop(gate) end
+    )
+    |> Stream.flat_map(& &1)
+  end
+
+  defp cell_results(config, {cells, explicit}, sql, params, opts, gate) do
+    concurrency = Keyword.get(opts, :concurrency, config.query.concurrency)
     timeout = Keyword.get(opts, :timeout_ms, config.query.timeout_ms)
     target = Keyword.get(opts, :at, :latest)
-    explicit = explicit_target(config, cells, opts)
+    opts = Keyword.put(opts, :gate, gate)
 
     work = fn {cell, location} ->
       {cell, query_cell(config, location, cell, sql, params, target, timeout, opts)}
@@ -346,7 +369,7 @@ defmodule Alambique.Query do
   defp read_cell(config, location, cell, sql, params, target, deadline, opts, tries) do
     with {:ok, location} <- place(config, location, cell),
          {:ok, replica} <- Replica.ensure(config, location, cell, target, deadline, opts) do
-      case read(config, replica, sql, params, deadline) do
+      case read(config, replica, sql, params, deadline, opts[:gate]) do
         # An eviction removed the file between choosing and opening it.
         {:error, :gone} when tries > 1 ->
           read_cell(config, location, cell, sql, params, target, deadline, opts, tries - 1)
@@ -376,7 +399,7 @@ defmodule Alambique.Query do
     end
   end
 
-  defp read(config, replica, sql, params, deadline) do
+  defp read(config, replica, sql, params, deadline, gate) do
     case File.exists?(replica.path) &&
            Db.open_read_only(replica.path, timeout_ms: Db.script_timeout_ms(config)) do
       false ->
@@ -384,13 +407,15 @@ defmodule Alambique.Query do
 
       {:ok, conn} ->
         try do
-          case Db.read_within(
-                 conn,
-                 sql,
-                 params,
-                 max(deadline - System.monotonic_time(:millisecond), 1),
-                 Db.limits(config)
-               ) do
+          case Gate.run(gate, max(deadline - System.monotonic_time(:millisecond), 1), fn ->
+                 Db.read_within(
+                   conn,
+                   sql,
+                   params,
+                   max(deadline - System.monotonic_time(:millisecond), 1),
+                   Db.limits(config)
+                 )
+               end) do
             {:ok, %{columns: columns, rows: rows}} -> {:ok, columns, rows}
             {:error, _} = error -> error
           end

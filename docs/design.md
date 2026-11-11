@@ -1222,7 +1222,7 @@ the connection, in the NIF, and not by looking at the SQL text:
   gives it back when it returns: a node-wide counter in the NIF, raised by a
   compare-and-swap that never passes the limit. A user statement with no free
   slot gets `{:error, :busy}` at once, so the cell process never waits for
-  one. Owner reads (checked or not), replica reads and `Alambique.Query` use
+  one. Owner reads (checked or not), replica reads and `Alambique.Query` (whose cells queue behind a per-query gate, §14, so the query itself never takes more slots than the limit) use
   `sql: [max_concurrent_statements:]` as the limit (default: the dirty IO
   schedulers minus two, at least 1). The count is VM-wide (the dirty IO pool
   is per VM, so the counter is shared by every Alambique instance in the
@@ -2947,6 +2947,21 @@ statement (`immutable=1`, so no locks and no `-wal`/`-shm`), and closes it.
   (default 3); when they are used up the cell reports the last error, which
   is safe to retry. "Nothing new" relies on retention never deleting level-0
   files after the newest snapshot (§9), so they are all listed.
+- **Concurrency.** `query: [concurrency:]` (default 16) is the number of cells
+  built and read at once. It is a fixed number and does not follow the CPUs
+  or the dirty IO pool: a cell spends most of its time waiting for the store
+  (the two listings, the `GET`s of a refresh), so the time of a query over
+  many cells is about `ceil(cells / concurrency)` round trips, whatever the
+  quota of the node. With the default tied to the schedulers, 20 up-to-date
+  cells on a 1-CPU node cost 40 trips in sequence at 25 ms each, 1.1 s. SQLite
+  work is still bounded by the statement slots (§7): the cells of one query
+  build and refresh `concurrency` at a time, but a gate of
+  `min(concurrency, sql: [max_concurrent_statements:])` places lets only that
+  many of them run their statement at once, so a query never gets `:busy` from
+  its own cells. The gate orders the cells of one query and nothing else: a
+  cell that finds the slots taken by other callers still reports
+  `{:error, :busy}` at once, as in §7, and the caller retries. A slot is held
+  only while a statement runs, never during the waits for the store.
 - **Bound.** `query: [cache_bytes:]` (default 1 GiB). A run trims the least
   recently used replicas when the replicas it built since the last trim add up
   to a tenth of the bound (a trim lists the whole cache, so it does not run at

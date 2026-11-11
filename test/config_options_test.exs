@@ -68,9 +68,8 @@ defmodule Alambique.ConfigOptionsTest do
     assert config.quarantine.concurrency == 8
   end
 
-  test "query concurrency leaves dirty IO schedulers to the cells", ctx do
-    free = :erlang.system_info(:dirty_io_schedulers) - 2
-    assert Alambique.Config.build(base(ctx)).query.concurrency <= max(free, 1)
+  test "query concurrency defaults to 16, whatever the schedulers", ctx do
+    assert Alambique.Config.build(base(ctx)).query.concurrency == 16
     assert Alambique.Config.build(base(ctx, query: [concurrency: 64])).query.concurrency == 64
   end
 

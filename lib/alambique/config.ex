@@ -123,7 +123,7 @@ defmodule Alambique.Config do
 
   @query_defaults [
     cache_bytes: 1_073_741_824,
-    concurrency: nil,
+    concurrency: 16,
     timeout_ms: 30_000,
     page_size: 1_000,
     stale_tmp_seconds: 600,
@@ -834,7 +834,8 @@ defmodule Alambique.Config do
     end
 
     query = Keyword.merge(@query_defaults, query)
-    query = Keyword.update!(query, :concurrency, &(&1 || default_query_concurrency()))
+    # `nil` is the default.
+    query = Keyword.update!(query, :concurrency, &(&1 || @query_defaults[:concurrency]))
 
     %{
       cache_bytes: pos_int!(query, :cache_bytes),
@@ -848,7 +849,7 @@ defmodule Alambique.Config do
   end
 
   # Statements of callers run on the dirty IO schedulers, which the commits of
-  # the node share; the default leaves two for them, like the query default.
+  # the node share; the default leaves two for them.
   defp sql(opts, op_timeout) do
     options!(
       :sql,
@@ -859,13 +860,6 @@ defmodule Alambique.Config do
   end
 
   defp default_statement_slots, do: max(:erlang.system_info(:dirty_io_schedulers) - 2, 1)
-
-  # Every SQLite call of a query runs on a dirty IO scheduler. Leaving two of
-  # them free keeps the commits of the cells on this node from queueing behind
-  # a cross-cell query.
-  defp default_query_concurrency do
-    max(min(System.schedulers_online(), :erlang.system_info(:dirty_io_schedulers) - 2), 1)
-  end
 
   defp options!(name, opts, defaults) do
     opts = checked_keyword!(name, opts, Keyword.keys(defaults))
