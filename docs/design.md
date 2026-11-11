@@ -3917,8 +3917,10 @@ work). Reads during the build go to the owner. The build is followed at once by
 a refresh, and the replica serves only after that refresh, because a restore
 does not read the lease: a cell that moved would otherwise look current.
 
-**Refresh.** Every `poll_ms` after the previous refresh ended, and on demand
-when a read is stale, a task takes `s` and sends, concurrently, a `LIST` of the
+**Refresh.** Every `poll_ms` after the previous refresh ended while the
+replica is read, then less often as it idles (the interval is a quarter of the
+time since the last read, up to `poll_max_ms`, never below `poll_ms`), and on
+demand when a read is stale, a task takes `s` and sends, concurrently, a `LIST` of the
 level-0 files after the head, a `LIST` of the snapshot level and a `GET` of the
 lease. (The snapshot listing is not in the first sketch: without it, a replica
 whose next files were deleted by retention would see an empty run and confirm a
@@ -3972,7 +3974,7 @@ with one `HEAD` when a bounded read finds no replica, and remembers the answer,
 positive or negative, for `marker_ttl_ms`; a store error counts as off and is
 not remembered. A replica reads it again every `marker_ttl_ms` with a refresh and
 stops when it is gone, so turning the switch off takes at most `marker_ttl_ms`
-plus a poll plus the refresh's own time. A node that sees the marker on starts
+plus a poll (`poll_max_ms` for an idle replica) plus the refresh's own time. A node that sees the marker on starts
 the replica for the next read: the read that found the switch is answered by the
 owner. A move to another location (§18) does not carry the switch: the cleanup
 of the old location deletes it, and the host turns it on again for the new one.
@@ -3993,7 +3995,13 @@ and removes its file.
 **Costs.** Three requests per poll and replica (`LIST` of level 0, `LIST` of the
 snapshot level, `GET` of the lease), one `GET` per new segment, one `HEAD` per
 `marker_ttl_ms`: with the defaults about 12 requests per second per replica
-when idle, and each node that reads the cell pays them again. Local work per
+while it is read, and 0.6 once it has idled for 20 s (`poll_max_ms`, 5 s), and
+each node that reads the cell pays them again. Measured with `poll_ms: 20`
+over 1.2 s, starting 0.4 s after the last read: 177 store calls at a fixed
+interval, 22 with the backoff (`test/replica_test.exs`). Slowing the poll of an
+idle replica does not change the bound of a read: the first read after the idle
+time is stale, waits for one refresh (`on_stale: :refresh`) or goes to the
+owner, and the replica polls at `poll_ms` again. Local work per
 change: one reopen of the connection, which empties SQLite's page cache of the
 replica (at most `1000 / poll_ms` times per second, and only when something
 changed). Memory: `cache_kib` plus the process, and a replica's copy of the

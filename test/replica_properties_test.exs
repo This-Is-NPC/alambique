@@ -452,4 +452,25 @@ defmodule Alambique.ReplicaPropertiesTest do
       teardown(w)
     end
   end
+
+  describe "poll_interval" do
+    property "stays within poll_ms and poll_max_ms, and does not shrink as the idle time grows" do
+      check all(
+              poll <- integer(1..1_000),
+              extra <- integer(0..60_000),
+              idle <- integer(0..1_000_000),
+              more <- integer(0..1_000_000)
+            ) do
+        settings = %{poll_ms: poll, poll_max_ms: poll + extra}
+        interval = Replica.poll_interval(settings, idle)
+
+        assert interval >= poll and interval <= poll + extra
+        assert Replica.poll_interval(settings, idle + more) >= interval
+        # A replica that is being read polls at `poll_ms`.
+        assert Replica.poll_interval(settings, min(idle, 4 * poll - 1)) == poll
+        # An idle one reaches the cap.
+        assert Replica.poll_interval(settings, 4 * (poll + extra)) == poll + extra
+      end
+    end
+  end
 end

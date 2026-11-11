@@ -69,6 +69,7 @@ defmodule Alambique.ConfigPropertiesTest do
     {:replicas, :max_bytes},
     {:replicas, :cache_kib},
     {:replicas, :poll_ms},
+    {:replicas, :poll_max_ms},
     {:replicas, :idle_ms},
     {:replicas, :marker_ttl_ms},
     {:replicas, :refresh_timeout_ms},

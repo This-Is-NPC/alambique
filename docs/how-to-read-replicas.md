@@ -36,7 +36,7 @@ reads with it:
  store: {Alambique.Store.S3, s3_config},
  prefix: "myapp",
  data_dir: "/var/lib/myapp/cells",
- replicas: [max_cells: 32, poll_ms: 250]}
+ replicas: [max_cells: 32, poll_ms: 250, poll_max_ms: 5_000]}
 ```
 
 `replicas: []` takes every default. The options are in the `Alambique`
@@ -87,7 +87,8 @@ telemetry: [:alambique, :replica, :read] %{lag_ms: 82} %{source: :replica, cell:
 
 `lag_ms` is how long ago the replica last confirmed that it had everything in
 the store. It is never above the bound. After a write on the owner, the replica
-shows it by the next poll (`poll_ms`, 250 ms by default):
+shows it by the next poll (`poll_ms`, 250 ms by default, for a replica that is
+being read):
 
 ```
 {:ok, %{columns: ["body"], rows: [["hi"], ["there"]]}}
@@ -121,7 +122,8 @@ Alambique.replicas(MyApp.Cells, "org-1", false)
 ```
 
 Each replica reads the switch again every `marker_ttl_ms`. When it is gone, the
-replica stops and removes its file, so within `marker_ttl_ms` plus a poll the
+replica stops and removes its file, so within `marker_ttl_ms` plus a poll
+(`poll_max_ms` if nobody reads it) the
 disk is back to what it was:
 
 ```
@@ -136,10 +138,13 @@ not carry the switch: turn it on again for the new location.
 
 ## What it costs
 
-With the defaults, about 12 store requests per second for each replica when
-nothing changes: a listing of the level-0 files, a listing of the snapshots and
-a read of the lease per poll, four times a second. Add one read per new
-segment. Each node that reads the cell pays this. The replica's file is a
+With the defaults, about 12 store requests per second for each replica that is
+being read when nothing changes: a listing of the level-0 files, a listing of
+the snapshots and a read of the lease per poll, four times a second. A replica
+nobody reads polls less often, a quarter of the idle time up to `poll_max_ms`
+(5 seconds): about 0.6 requests per second after 20 seconds, until `idle_ms`
+stops it. The first read after a quiet period waits for one refresh, or goes to
+the owner with `on_stale: :owner`. Add one read per new segment. Each node that reads the cell pays this. The replica's file is a
 full copy of the database; `max_bytes` bounds the sum of the files on a node and
 a replica that would not fit is not built. The first replica of a cell costs a
 full restore.
