@@ -13,7 +13,9 @@ defmodule Alambique.Load.Verdict do
   #   4. nothing was planned                  -> invalid (`:no_operations`; a
   #                                              step without operations is
   #                                              never good)
-  #   5. errors that say the store is full    -> invalid (`:store_full`)
+  #   5. errors that say the store is full    -> invalid (`:store_full`; a store
+  #                                              5xx counts once the store is
+  #                                              past `store_error_fraction`)
   #   6. fewer than 95% of the planned
   #      operations completed                 -> invalid (not a failure: the
   #                                              harness or the service did not
@@ -123,9 +125,18 @@ defmodule Alambique.Load.Verdict do
 
   @full ~r/no space|nospace|enospc|disk full|volume (is )?full|quota/i
 
-  @doc "Whether the error samples of a step (`%{error: text, count: n}`) say the store is full."
-  @spec store_full?([map]) :: boolean
-  def store_full?(error_samples), do: Enum.any?(error_samples, &(&1.error =~ @full))
+  @server_error ~r/\{:http, 5\d\d/
+
+  @doc """
+  Whether the error samples of a step (`%{error: text, count: n}`) say the store
+  is full: a "no space" text, or a store 5xx while the store was `strained`
+  (near its limit, see `Capacity.strained?/2`; a store that full answers 500
+  without saying why).
+  """
+  @spec store_full?([map], boolean) :: boolean
+  def store_full?(error_samples, strained?) do
+    Enum.any?(error_samples, &(&1.error =~ @full or (strained? and &1.error =~ @server_error)))
+  end
 
   defp latency_bad?(_stats, nil), do: false
 

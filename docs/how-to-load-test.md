@@ -136,7 +136,11 @@ fault; both end the ramp with an invalid step.
   (`ALAMBIQUE_LOAD_STORE_MIN_FREE_MB`), the step stops and is invalid
   `store_full` (not bad), the ramp stops, and the driver says to run the case
   again with `ALAMBIQUE_LOAD_STORE_ON=disk`. Errors that say "no space" are
-  treated the same. The step JSON has `store` (`used_mb_end`, `used_mb_max`,
+  treated the same. So is a store HTTP 5xx in a step whose store tmpfs reached
+  85% of `ALAMBIQUE_LOAD_STORE_MB` (`ALAMBIQUE_LOAD_STORE_ERROR_FRACTION`): a
+  store that nearly full answers 500 `InternalError` without saying why, and
+  the step would otherwise be judged `bad (errors)`; on disk, the same applies
+  with less than 1 GiB free. The step JSON has `store` (`used_mb_end`, `used_mb_max`,
   and `free_mb_min` on disk; on disk, used is the fall of free space since the
   case started) and the summary a `store MB` column.
 
@@ -261,6 +265,7 @@ All are environment variables; set them before `mise run load`.
 | `ALAMBIQUE_LOAD_STORE_LATENCY_MS` | 25 | added to every store request |
 | `ALAMBIQUE_LOAD_DATA_MB` / `_STORE_MB` | 1024 / 4096 | tmpfs of the service data and of the store (`_STORE_MB` is ignored with `_STORE_ON=disk`) |
 | `ALAMBIQUE_LOAD_STORE_FULL_FRACTION`, `_STORE_MIN_FREE_MB` | 0.95, 1024 | the store is full at this share of `_STORE_MB` (tmpfs), or with less than this free (disk) |
+| `ALAMBIQUE_LOAD_STORE_ERROR_FRACTION` | 0.85 | a step with store HTTP 5xx errors, whose store tmpfs reached this share of `_STORE_MB`, is invalid `store_full` |
 | `ALAMBIQUE_LOAD_DATA_ESTIMATE_FRACTION`, `_DATA_FULL_FRACTION` | 0.9, 0.95 | `wakes`: a level whose estimated data goes over the first share of `_DATA_MB` is not run (`data_full`); a failed preparation with the service's shared memory over the second is `data_full` |
 | `ALAMBIQUE_LOAD_CELL_BYTES` | 160000 | `wakes`: bytes one asleep cell is estimated to take on the data tmpfs before one has been measured |
 | `ALAMBIQUE_LOAD_STORE_ON` | `tmpfs` | `tmpfs` or `disk`: where the store keeps its data (below) |
@@ -394,8 +399,9 @@ Not run yet.
   `extra.prepare_error` in the step JSON.
 - A step invalid with `store_full`, and "the store is out of space" in the
   summary: the store's tmpfs reached 95% (or the disk has less than 1 GiB
-  free), or the operation errors said "no space", "volume full" or "quota"
-  (`error_samples` of the step JSON). Run the case again with
+  free), or the operation errors said "no space", "volume full" or "quota", or
+  the store answered HTTP 5xx with its tmpfs at 85% or more
+  (`error_samples` and `store` of the step JSON). Run the case again with
   `ALAMBIQUE_LOAD_STORE_ON=disk`, or raise `ALAMBIQUE_LOAD_STORE_MB`. A full
   store can also show only as timeouts; then check `docker logs` of the store
   container (the id is in `started-containers.txt`).
