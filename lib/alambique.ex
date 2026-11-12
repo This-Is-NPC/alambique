@@ -1262,19 +1262,39 @@ defmodule Alambique do
   Returns `%{cells: ids, next: id | nil, count: n}`. `next` is the last id of
   the page when more cells follow, and passing it as `after:` gives the next
   page; it is `nil` on the last page. `count` is the number of cells on this
-  node. Options: `:after` (a cell id, exclusive; default `nil`, the start) and
-  `:limit` (a positive integer, default 100). Anything else raises
-  `ArgumentError`.
+  node. Options: `:after` (a cell id, exclusive; default `nil`, the start),
+  `:limit` (a positive integer, default 100) and `:details` (default `false`).
+  Anything else raises `ArgumentError`.
+
+  With `details: true` each entry of `cells` is a map instead of an id:
+
+    * `:id` - the cell id.
+    * `:last_used` - the time of the last call the cell served, in
+      `System.monotonic_time(:millisecond)` of this node, so `now - last_used`
+      is the idle time and the smallest value is the least recently used cell.
+      The router reads the same value to hibernate the least recently used
+      cell at `awake.max_cells`. It is monotonic, not wall-clock time, because
+      it is only compared on this node and a clock step must not reorder it.
+      `nil` while the cell is still waking.
+    * `:wal_bytes` - the size of the cell's WAL file after its last
+      acknowledged batch or checkpoint, 0 when there is none. It is not read
+      from disk by this call, so a write still being uploaded is not in it,
+      and it drops to 0 when the cell checkpoints (see `:wal`,
+      `:checkpoint_bytes`).
 
   A page costs in proportion to its size, whatever the number of cells. The
   list follows the registry by a message, so a cell that has just woken or
   stopped may be missing or listed late; entries whose process is gone are
   skipped. Cells on other nodes are not listed: ask each node.
   """
-  @spec cells(instance, keyword) :: %{cells: [cell], next: cell | nil, count: non_neg_integer}
+  @spec cells(instance, keyword) :: %{
+          cells: [cell] | [%{id: cell, last_used: integer | nil, wal_bytes: non_neg_integer}],
+          next: cell | nil,
+          count: non_neg_integer
+        }
   def cells(instance, opts \\ []) do
-    [after: after_id, limit: limit] =
-      opts |> Keyword.validate!(after: nil, limit: 100) |> Enum.sort()
+    [after: after_id, details: details?, limit: limit] =
+      opts |> Keyword.validate!(after: nil, details: false, limit: 100) |> Enum.sort()
 
     unless is_nil(after_id) or is_binary(after_id),
       do: raise(ArgumentError, ":after must be a cell id or nil, got: #{inspect(after_id)}")
@@ -1282,7 +1302,10 @@ defmodule Alambique do
     unless is_integer(limit) and limit > 0,
       do: raise(ArgumentError, ":limit must be a positive integer, got: #{inspect(limit)}")
 
-    Alambique.Live.page(Config.fetch!(instance), after_id, limit)
+    unless is_boolean(details?),
+      do: raise(ArgumentError, ":details must be a boolean, got: #{inspect(details?)}")
+
+    Alambique.Live.page(Config.fetch!(instance), after_id, limit, details?)
   end
 
   @doc """

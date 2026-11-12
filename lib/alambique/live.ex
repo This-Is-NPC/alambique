@@ -4,7 +4,7 @@ defmodule Alambique.Live do
   # by listening to the instance's registry. It starts before the registry,
   # which sends it `:register` and `:unregister` messages.
   #
-  # The table `{id, pid}` may lag the registry by a message, so a walk skips
+  # The table `{id, pid, load}` may lag the registry by a message, so a walk skips
   # entries whose process is gone. A removal only deletes the exact `{id,
   # pid}` pair: a new process under the same id is never removed by the old
   # one's exit, in either message order.
@@ -20,8 +20,8 @@ defmodule Alambique.Live do
   end
 
   @impl true
-  def handle_info({:register, _registry, id, pid, _value}, state) do
-    :ets.insert(state.table, {id, pid})
+  def handle_info({:register, _registry, id, pid, load}, state) do
+    :ets.insert(state.table, {id, pid, load})
     ref = Process.monitor(pid)
     {:noreply, put_in(state.monitors[pid], {id, ref})}
   end
@@ -38,7 +38,7 @@ defmodule Alambique.Live do
   end
 
   defp drop(state, id, pid) do
-    :ets.delete_object(state.table, {id, pid})
+    :ets.match_delete(state.table, {id, pid, :_})
 
     case Map.pop(state.monitors, pid) do
       {{_, ref}, monitors} ->
@@ -50,19 +50,29 @@ defmodule Alambique.Live do
     end
   end
 
-  @doc "Page of live cell ids after `after_id`; see `Alambique.cells/2`."
-  @spec page(Alambique.Config.t(), String.t() | nil, pos_integer) :: map
-  def page(config, after_id, limit) do
+  @doc "Page of live cells after `after_id`; see `Alambique.cells/2`."
+  @spec page(Alambique.Config.t(), String.t() | nil, pos_integer, boolean) :: map
+  def page(config, after_id, limit, details? \\ false) do
     table = config.live
     first = if after_id, do: :ets.next(table, after_id), else: :ets.first(table)
     # One more than the page tells whether anything follows it.
-    ids = walk(table, first, limit + 1)
-    {page, rest} = Enum.split(ids, limit)
+    entries = walk(table, first, limit + 1)
+    {page, rest} = Enum.split(entries, limit)
 
     %{
-      cells: page,
-      next: if(rest == [], do: nil, else: List.last(page)),
+      cells: Enum.map(page, &entry(&1, details?)),
+      next: if(rest == [], do: nil, else: page |> List.last() |> elem(0)),
       count: Registry.count(config.registry)
+    }
+  end
+
+  defp entry({id, _load}, false), do: id
+
+  defp entry({id, load}, true) do
+    %{
+      id: id,
+      last_used: Alambique.Cell.last_used(load),
+      wal_bytes: Alambique.Cell.wal_bytes(load)
     }
   end
 
@@ -73,9 +83,9 @@ defmodule Alambique.Live do
     next = :ets.next(table, key)
 
     case :ets.lookup(table, key) do
-      [{id, pid}] ->
+      [{id, pid, load}] ->
         if Process.alive?(pid),
-          do: [id | walk(table, next, left - 1)],
+          do: [{id, load} | walk(table, next, left - 1)],
           else: walk(table, next, left)
 
       [] ->

@@ -109,6 +109,8 @@ defmodule Alambique.CellsListingPropertiesTest do
           [limit: "5"],
           [after: 5],
           [after: :a],
+          [details: :yes],
+          [details: 1],
           [bogus: 1]
         ] do
       assert_raise ArgumentError, fn -> Alambique.cells(inst, opts) end
@@ -129,7 +131,7 @@ defmodule Alambique.CellsListingPropertiesTest do
     Process.exit(old, :kill)
     :sys.get_state(config.live)
 
-    assert [{"x", ^new}] = :ets.lookup(config.live, "x")
+    assert [{"x", ^new, nil}] = :ets.lookup(config.live, "x")
     assert %{cells: ["x"]} = Alambique.cells(inst)
 
     # The DOWN of the old process arriving alone.
@@ -138,6 +140,6 @@ defmodule Alambique.CellsListingPropertiesTest do
     send(config.live, {:register, config.registry, "y", new, nil})
     Process.exit(old2, :kill)
     :sys.get_state(config.live)
-    assert [{"y", ^new}] = :ets.lookup(config.live, "y")
+    assert [{"y", ^new, nil}] = :ets.lookup(config.live, "y")
   end
 end

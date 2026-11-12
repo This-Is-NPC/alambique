@@ -69,6 +69,24 @@ not raise it.
 ```
 
 `Alambique.cells/2` lists the cells awake on the local node in id order.
+With `details: true` each entry is a map, so a monitor can pick the cell to
+hibernate to free memory or disk without reading files:
+
+```elixir
+%{cells: entries} = Alambique.cells(MyApp.Cells, details: true, limit: 1_000)
+# [%{id: "org-1", last_used: -576460749769, wal_bytes: 24752}, ...]
+
+lru = Enum.min_by(entries, & &1.last_used)    # the least recently used cell
+largest = Enum.max_by(entries, & &1.wal_bytes) # the cell with the largest WAL
+:ok = Alambique.hibernate(MyApp.Cells, largest.id)
+```
+
+`last_used` is in `System.monotonic_time(:millisecond)` of this node, so
+`System.monotonic_time(:millisecond) - last_used` is the idle time; it is `nil`
+while the cell is waking, so skip those entries when you compare. `wal_bytes`
+is the size of the cell's WAL after its last acknowledged batch, read from a
+value the cell keeps and not from the disk; hibernating the cell checkpoints
+it and removes the WAL.
 `Alambique.list_cells/2` lists every cell stored in a location, asleep ones
 too, from the schema index; pass `next` as `after:` for the next page.
 
