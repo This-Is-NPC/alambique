@@ -6,8 +6,9 @@ defmodule Alambique.Admission.Wakes do
   #
   # - `{:begin, wait_ms}` (call): the caller holds a slot, or waits in the
   #   queue until one is handed to it, or is refused.
-  # - `{:transfer, holder, cell}` (cast): the cell that `holder` started takes
-  #   the slot over. A holder that is already gone lost it, so nothing moves.
+  # - `{:transfer, holder, cell}` (call): the cell that `holder` started takes
+  #   the slot over, or is told `:lost` when the holder is already gone and its
+  #   slot was freed; the cell then asks for a slot of its own.
   # - `{:end, pid}` (cast): `pid` gives its slot back, at most once.
   #
   # Every holder and every waiter is monitored, so a slot comes back when its
@@ -55,18 +56,18 @@ defmodule Alambique.Admission.Wakes do
     end
   end
 
-  @impl true
-  def handle_cast({:transfer, holder, cell}, state) do
+  def handle_call({:transfer, holder, cell}, _from, state) do
     case Map.pop(state.holders, holder) do
       {nil, _} ->
-        {:noreply, state}
+        {:reply, :lost, state}
 
       {mon, holders} ->
         Process.demonitor(mon, [:flush])
-        {:noreply, hold(%{state | holders: holders}, cell, Process.monitor(cell))}
+        {:reply, :ok, hold(%{state | holders: holders}, cell, Process.monitor(cell))}
     end
   end
 
+  @impl true
   def handle_cast({:end, pid}, state) do
     case Map.pop(state.holders, pid) do
       {nil, _} ->

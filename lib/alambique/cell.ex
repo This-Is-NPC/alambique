@@ -139,12 +139,13 @@ defmodule Alambique.Cell do
       lease_seen: opts[:lease_seen],
       inflight: Inflight.open(config, id, :cell),
       pipe: Pipe.new(config),
-      load: load
+      load: load,
+      holder: opts[:holder]
     }
 
     # Last: nothing after it can fail, so a slot is never held by a cell that
     # never started.
-    Admission.waking(config, self(), opts[:holder])
+    Admission.waking(config, self())
     {:ok, state, {:continue, :wake}}
   end
 
@@ -153,7 +154,19 @@ defmodule Alambique.Cell do
   @impl true
   def handle_continue(:wake, state), do: Inflight.busy(state.inflight, fn -> wake(state) end)
 
+  # The cell holds a wake slot before any work: its caller's, or its own if
+  # that caller died (design §7). Without one it does not wake, and the
+  # callers already routed to it get the same `:overloaded` as any wake.
   defp wake(state) do
+    Fault.point(:cell_before_take_over, %{cell: state.id})
+
+    case Admission.take_over(state.config, state.holder) do
+      :ok -> run_wake(state)
+      {:error, reason} -> {:stop, {:shutdown, {:wake_failed, reason}}, %{state | mode: :stopped}}
+    end
+  end
+
+  defp run_wake(state) do
     started = System.monotonic_time()
 
     case Wake.run(state) do

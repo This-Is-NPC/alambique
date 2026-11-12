@@ -33,6 +33,8 @@ defmodule Alambique.Cell.State do
     # the wake (`answer` is `:none` or `{:ok, lease}`) and the counters of that
     # read. It saves the wake reading the lease again.
     :lease_seen,
+    # The process that woke the cell, whose wake slot the cell takes over.
+    :holder,
     # Counters of the store requests of the wake (`Store.Metered`).
     :trips,
     :pipe,

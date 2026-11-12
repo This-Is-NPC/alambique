@@ -190,6 +190,57 @@ defmodule Alambique.AdmissionTest do
     assert {:ok, _} = Alambique.touch(inst, unique_cell())
   end
 
+  test "a cell whose caller died takes a slot of its own, or does not wake", env do
+    {:ok, gate} = GatedStore.start_link()
+    on_exit(fn -> if Process.alive?(gate), do: GenServer.stop(gate) end)
+    store = GatedStore.wrap(gate, env.store)
+
+    inst =
+      start_instance(%{env | store: store},
+        migrations: @schema,
+        awake: [max_wakes: 1, wake_queue_ms: 50]
+      )
+
+    config = Alambique.Config.fetch!(inst)
+    orphan = unique_cell()
+    test = self()
+
+    # The cell waits here, before it takes the slot over from its caller.
+    Alambique.Fault.install(fn
+      :cell_before_take_over, %{cell: ^orphan} ->
+        send(test, {:before, self()})
+
+        receive do
+          :go -> :ok
+        end
+
+      _, _ ->
+        :ok
+    end)
+
+    on_exit(&Alambique.Fault.uninstall/0)
+
+    task = Task.async(fn -> Alambique.touch(inst, orphan) end)
+    assert_receive {:before, cell}
+    cell_ref = Process.monitor(cell)
+    Task.shutdown(task, :brutal_kill)
+    eventually(fn -> :sys.get_state(config.wakes).holders == %{} end)
+
+    # Another wake takes the free slot and stays in its restore.
+    GatedStore.hold(gate, ~r{/0000/})
+    other = Task.async(fn -> Alambique.touch(inst, unique_cell()) end)
+    eventually(fn -> map_size(:sys.get_state(config.wakes).holders) == 1 end)
+
+    # The orphan finds no slot: it stops without waking, never a second wake.
+    send(cell, :go)
+    assert_receive {:DOWN, ^cell_ref, _, _, {:shutdown, {:wake_failed, :overloaded}}}
+    assert map_size(:sys.get_state(config.wakes).holders) == 1
+
+    GatedStore.open(gate)
+    assert {:ok, _} = Task.await(other, 10_000)
+    eventually(fn -> :sys.get_state(config.wakes).holders == %{} end)
+  end
+
   test "awake.max_pending is never passed, however many callers check at once", env do
     {:ok, gate} = GatedStore.start_link()
     on_exit(fn -> if Process.alive?(gate), do: GenServer.stop(gate) end)
