@@ -190,6 +190,10 @@ earlier attempts included), and the summary adds the total of the case.
 Prerequisites: Docker, `mise` with the pinned tools, a quiet host with 6 GiB
 free. A full run is long; see the estimate below.
 
+On a fresh clone nothing else is needed: the first case fetches the Mix
+dependencies and compiles the driver (`MIX_ENV=test`) before it starts any
+container, which takes a few minutes with the Rust toolchain.
+
 1. Build the image (the first build takes about 3 minutes and the image is
    about 250 MB; later builds reuse the cached layers):
 
