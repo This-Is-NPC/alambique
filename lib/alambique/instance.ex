@@ -65,7 +65,8 @@ defmodule Alambique.Instance do
     children =
       children ++
         Alambique.Trash.children(config) ++
-        Alambique.Scrub.children(config) ++ Alambique.Cell.LocalCache.children(config)
+        Alambique.Scrub.children(config) ++
+        Alambique.WalBudget.children(config) ++ Alambique.Cell.LocalCache.children(config)
 
     children = children ++ replicas(config)
 

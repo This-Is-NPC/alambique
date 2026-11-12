@@ -49,7 +49,11 @@ defmodule Alambique.Config do
 
   @routing_defaults [hops: 2, attempts: 3, slack_ms: 1_000]
   @wake_defaults [fence_attempts: 5, failure_backoff_ms: 5_000]
-  @wal_defaults [checkpoint_bytes: 67_108_864, checkpoint_deadline_ms: 10_000]
+  @wal_defaults [
+    checkpoint_bytes: 67_108_864,
+    checkpoint_deadline_ms: 10_000,
+    budget_interval_ms: 1_000
+  ]
   @awake_defaults [
     max_cells: 20_000,
     max_wakes: 256,
@@ -251,7 +255,12 @@ defmodule Alambique.Config do
             | nil,
           routing: %{hops: pos_integer, attempts: pos_integer, slack_ms: pos_integer},
           wake: %{fence_attempts: pos_integer, failure_backoff_ms: pos_integer},
-          wal: %{checkpoint_bytes: pos_integer, checkpoint_deadline_ms: pos_integer},
+          wal: %{
+            checkpoint_bytes: pos_integer,
+            checkpoint_deadline_ms: pos_integer,
+            budget_interval_ms: pos_integer,
+            max_bytes: pos_integer | nil
+          },
           awake: %{
             max_cells: pos_integer,
             max_wakes: pos_integer,
@@ -370,7 +379,7 @@ defmodule Alambique.Config do
       sql: sql(opts[:sql], op_timeout),
       routing: options!(:routing, opts[:routing], @routing_defaults),
       wake: options!(:wake, opts[:wake], @wake_defaults),
-      wal: options!(:wal, opts[:wal], @wal_defaults),
+      wal: wal!(opts[:wal]),
       awake: awake!(opts[:awake]),
       relocate: options!(:relocate, opts[:relocate], @relocate_defaults),
       rewind: rewind!(opts[:rewind]),
@@ -883,6 +892,18 @@ defmodule Alambique.Config do
         do: bad!(":#{name} #{inspect(key)} must be a positive integer")
 
     Map.new(merged)
+  end
+
+  # `max_bytes: nil` (the default) sets no budget for the WAL files of the
+  # awake cells (design §6).
+  defp wal!(opts) do
+    opts = checked_keyword!(:wal, opts, [:max_bytes | Keyword.keys(@wal_defaults)])
+    {max_bytes, rest} = Keyword.pop(opts, :max_bytes)
+
+    unless is_nil(max_bytes) or (is_integer(max_bytes) and max_bytes > 0),
+      do: bad!(":wal :max_bytes must be nil or a positive integer")
+
+    options!(:wal, rest, @wal_defaults) |> Map.put(:max_bytes, max_bytes)
   end
 
   # `max_bytes: nil` (the default) leaves the memory of the awake cells

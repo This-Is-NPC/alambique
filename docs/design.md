@@ -662,6 +662,29 @@ still hydrating (§16) waits for the end of the hydration. The cell emits
 `:cell_after_checkpoint`; a cell killed there restores from the store at its
 next wake, like any cell that dies awake (no marker, §7).
 
+**The WAL budget.** `wal.max_bytes` (default `nil`, none) bounds the disk
+that the WALs of all awake cells use together, which `wal.checkpoint_bytes`
+per cell does not: 20 000 cells at 64 MiB each is far more than any disk. A
+process per instance (`Alambique.WalBudget`) wakes every
+`wal.budget_interval_ms` (default 1 000, first round after a random part of
+it) and adds the sizes the cells publish after each landed upload (the same
+stat the checkpoint check takes, slot 4 of the load counter), one registry
+scan and no file access. When the sum is at or above the budget it calls
+`Alambique.checkpoint/3` on the cell with the largest WAL, then on the next,
+until the sum is under the budget. The cell runs its usual `drain` and
+`TRUNCATE`, so no frame that is not replicated is truncated, and only the cell
+being checkpointed answers no other call meanwhile; the round runs in its own
+process and no cell waits for it. A cell that answers `{:error, :busy}`
+(uploads not acknowledged within `wal.checkpoint_deadline_ms`, or SQLite
+busy) or `{:error, :disk_full}` (a checkpoint that finds no room) is skipped until the next round; a round therefore takes at most one
+deadline per busy cell. The default is off because the right value depends on
+the disk, and a value derived from `checkpoint_bytes` would make existing
+nodes checkpoint without being asked; size it as the free space of the
+`:data_dir` volume minus the database files. The sum is only as fresh as the
+last upload of each cell and the interval, so the WAL files can pass the
+budget by what the cells write in one interval. Each round that reached the
+budget emits `[:alambique, :wal, :budget]`.
+
 `Alambique.checkpoint/3` runs the same two steps on request and keeps the cell
 awake. Its `drain` is bounded by `wal.checkpoint_deadline_ms` (default 10 s,
 `:deadline_ms` per call): when the queue has not emptied by then, the call

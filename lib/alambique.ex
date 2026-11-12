@@ -174,7 +174,12 @@ defmodule Alambique do
       above which it moves the WAL into the database file once its uploads are
       acknowledged, default 67 108 864, 64 MiB; design §6) and
       `:checkpoint_deadline_ms` (how long `checkpoint/3` waits for the uploads
-      before it answers `{:error, :busy}`, default 10 000).
+      before it answers `{:error, :busy}`, default 10 000), `:max_bytes` (budget
+      for the sum of the `-wal` files of the awake cells of the node, default
+      `nil`, none: when the sum reaches it, the cell with the largest WAL
+      checkpoints as `checkpoint/3` does, then the next one, until the sum is
+      under it; design §6) and `:budget_interval_ms` (how often the sum is
+      checked, default 1 000).
     * `:awake` - limits that protect a node (design §7): `:max_cells` (cells
       with a process on this node, default 20 000; a call that would wake one
       more hibernates the least recently used cell that has no caller waiting,

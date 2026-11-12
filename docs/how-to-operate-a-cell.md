@@ -4,7 +4,7 @@
 file, freeze it, deal with a cell the instance froze because it crashed the VM,
 move it to another node or another location, get back files that retention
 removed, read what the scrub found, restart a node without failed calls, check that the disk under the cells does not stall
-writes, empty the WAL of an awake cell now, or tell that the disk is full and recover?
+writes, empty the WAL of an awake cell now or keep all WALs under a budget, or tell that the disk is full and recover?
 
 This guide stands alone. It needs the store and, for moving a cell and for
 hibernating a frozen one at once, the running cluster. The background
@@ -536,6 +536,16 @@ frame that is not yet replicated. It answers no other call meanwhile.
 for one call. The call goes to the node that owns the cell, as any other. The
 telemetry event `[:alambique, :cell, :checkpoint]` reports each checkpoint
 ([telemetry.md](telemetry.md)).
+
+To keep the WALs of all awake cells under one limit, set
+`wal: [max_bytes: 2_000_000_000]` (default `nil`, no budget). A background
+round every `wal: [budget_interval_ms: 1_000]` adds the WAL sizes and, at or
+above the limit, checkpoints the cell with the largest WAL as above, then the
+next, until the sum is under it. Cells that answer `:busy` or `{:error, :disk_full}` wait for the
+next round. `[:alambique, :wal, :budget]` reports each round that acted
+([telemetry.md](telemetry.md)); `Alambique.cells(inst, details: true)` lists
+the size of each WAL. The sum can pass the limit by what the cells write in
+one interval.
 
 ## 12. Recover from a full disk
 
