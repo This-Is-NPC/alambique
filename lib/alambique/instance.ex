@@ -43,6 +43,7 @@ defmodule Alambique.Instance do
     children =
       children ++
         [
+          %{id: Wakes, start: {Alambique.Admission.Wakes, :start_link, [config]}},
           %{id: Membership, start: {Membership, :start_link, [config]}},
           {DynamicSupervisor,
            strategy: :one_for_one, name: config.supervisor, max_children: config.awake.max_cells},

@@ -119,7 +119,8 @@ defmodule Alambique.AdmissionTest do
 
     # The first waits for the slot and expires; the second finds the queue full.
     queued = Task.async(fn -> timed(fn -> Alambique.touch(inst, unique_cell()) end) end)
-    eventually(fn -> :ets.info(Alambique.Config.fetch!(inst).wake_queue, :size) == 1 end)
+    config = Alambique.Config.fetch!(inst)
+    eventually(fn -> map_size(:sys.get_state(config.wakes).waiting) == 1 end)
     assert {:error, :overloaded} = Alambique.touch(inst, unique_cell())
     assert_receive {:wake_queue, :full}
 
@@ -158,6 +159,35 @@ defmodule Alambique.AdmissionTest do
     GatedStore.open(gate)
 
     eventually(fn -> match?({:ok, _}, Alambique.touch(inst, unique_cell())) end)
+  end
+
+  test "the wake slot of a caller killed before its cell took it over comes back", env do
+    inst = start_instance(env, migrations: @schema, awake: [max_wakes: 1])
+    config = Alambique.Config.fetch!(inst)
+    stuck = unique_cell()
+    test = self()
+
+    # The caller holds the slot and waits here, before it starts the cell.
+    Alambique.Fault.install(fn
+      :wake_slot_taken, %{cell: ^stuck} ->
+        send(test, {:in_window, self()})
+        Process.sleep(:infinity)
+
+      _, _ ->
+        :ok
+    end)
+
+    on_exit(&Alambique.Fault.uninstall/0)
+
+    task = Task.async(fn -> Alambique.touch(inst, stuck) end)
+    assert_receive {:in_window, caller}
+    assert map_size(:sys.get_state(config.wakes).holders) == 1
+
+    Process.exit(caller, :kill)
+    Task.shutdown(task, :brutal_kill)
+
+    eventually(fn -> :sys.get_state(config.wakes).holders == %{} end)
+    assert {:ok, _} = Alambique.touch(inst, unique_cell())
   end
 
   test "awake.max_pending is never passed, however many callers check at once", env do

@@ -7,178 +7,56 @@ defmodule Alambique.Admission do
   # hibernating the least recently used cells (`crowded?/1`), and the cap on a
   # cell's queue is taken by `Cell.admit/2` in the router.
   #
-  # One public table per instance, created by `Alambique.Membership`: the
-  # counters `:wakes` and `:queued` (wakes waiting for a slot, whose entries
-  # `{seq, pid, ref}`, in the order they came, are in the ordered table
-  # `wake_queue`), the entries `{{:waking, pid}}` of cells that have not
-  # finished waking, the entries `{{:failed, cell}, reason, until_ms}`, and,
-  # with `awake.max_bytes`, the counter `:bytes` and one entry
-  # `{{:cell, pid}, bytes}` per awake cell.
+  # The wake slots and their queue belong to one process,
+  # `Alambique.Admission.Wakes`, which monitors whoever holds a slot.
   #
-  # A wake slot is reserved by the router and becomes the `{:waking, pid}`
-  # entry when the cell starts (`waking/2`). Whoever takes that entry first,
-  # the cell at the end of its wake or `Membership` when it sees the cell die,
-  # gives the slot back, so a cell killed mid-wake cannot leak it.
+  # One public table per instance, created by `Alambique.Membership`: the
+  # entries `{{:failed, cell}, reason, until_ms}` and, with `awake.max_bytes`,
+  # the counter `:bytes` and one entry `{{:cell, pid}, bytes}` per awake cell.
 
-  alias Alambique.{Config, Sqlite, Telemetry}
+  alias Alambique.{Config, Sqlite}
 
   @doc "Creates the table; called by the process that owns it."
   @spec init(Config.t()) :: :ok
   def init(config) do
     :ets.new(config.admission, [:named_table, :public, :set, write_concurrency: true])
-    :ets.new(config.wake_queue, [:named_table, :public, :ordered_set])
-    :ets.insert(config.admission, [{:wakes, 0}, {:queued, 0}, {:bytes, 0}, {:owner, self()}])
+    :ets.insert(config.admission, [{:bytes, 0}, {:owner, self()}])
     :ok
   end
 
   @doc """
-  Reserves one of the `awake.max_wakes` slots. A wake that finds none waits
-  in a FIFO queue of at most `awake.max_wake_queue` places, for up to
-  `wait_ms` (and never past `awake.wake_queue_ms`), and takes over the slot
-  of the first wake that ends; past that, or with no wait, it is refused. The
-  caller gives the slot back with `release/1` when no cell was started; a
-  started cell holds it as `waking/2` until `end_wake/2`.
+  Reserves one of the `awake.max_wakes` slots for the calling process, which
+  holds it until it passes it to a cell (`waking/3`) or gives it back
+  (`release/1`); if it dies first the slot comes back. A wake that finds none
+  waits in a FIFO queue of at most `awake.max_wake_queue` places, for up to
+  `wait_ms` (never more than `awake.wake_queue_ms`), and gets the slot of the
+  first wake that ends; past that, or with no wait, it is refused. See
+  `Alambique.Admission.Wakes`.
   """
   @spec begin_wake(Config.t(), timeout) :: :ok | {:error, :overloaded}
-  def begin_wake(config, wait_ms) do
-    wait_ms = min(wait_ms, config.awake.wake_queue_ms)
+  def begin_wake(config, wait_ms),
+    do:
+      GenServer.call(config.wakes, {:begin, min(wait_ms, config.awake.wake_queue_ms)}, :infinity)
 
-    cond do
-      queued(config) == 0 and take(config, :wakes, config.awake.max_wakes) -> :ok
-      wait_ms <= 0 -> {:error, :overloaded}
-      true -> enqueue(config, wait_ms)
-    end
-  end
-
-  @doc "Gives back a slot that no cell used, or hands it to the first wake waiting for one."
+  @doc "Gives back the slot the calling process holds, when no cell took it over."
   @spec release(Config.t()) :: :ok
-  def release(config) do
-    unless hand_over(config) do
-      :ets.update_counter(config.admission, :wakes, -1)
-
-      # A wake may have queued after the queue was seen empty.
-      if queued(config) > 0 and take(config, :wakes, config.awake.max_wakes),
-        do: release(config)
-    end
-
-    :ok
-  end
-
-  # `key` goes up by one unless it is at `limit`. One atomic step, and a
-  # refusal leaves the counter as it was, so a refused caller never makes
-  # another one fail.
-  defp take(config, key, limit) do
-    spec = [{{key, :"$1"}, [{:<, :"$1", limit}], [{{key, {:+, :"$1", 1}}}]}]
-    :ets.select_replace(config.admission, spec) == 1
-  end
-
-  defp queued(config), do: :ets.lookup_element(config.admission, :queued, 2)
-
-  defp enqueue(config, wait_ms) do
-    started = System.monotonic_time()
-
-    if take(config, :queued, config.awake.max_wake_queue) or
-         (purge_dead(config) and take(config, :queued, config.awake.max_wake_queue)) do
-      seq = :erlang.unique_integer([:monotonic])
-      ref = make_ref()
-      :ets.insert(config.wake_queue, {seq, self(), ref})
-      granted? = wait(config, seq, ref, wait_ms)
-      result = if granted?, do: :granted, else: :expired
-      Telemetry.span_stop([:admission, :wake_queue], started, %{result: result})
-      if granted?, do: :ok, else: {:error, :overloaded}
-    else
-      Telemetry.span_stop([:admission, :wake_queue], started, %{result: :full})
-      {:error, :overloaded}
-    end
-  end
-
-  # A slot may have been freed after the fast path looked, and its release
-  # found nobody to hand it to: try once the place is in the queue.
-  defp wait(config, seq, ref, wait_ms) do
-    if take(config, :wakes, config.awake.max_wakes) do
-      # If a release picked this wake in the meantime, it gave a slot too.
-      if leave(config, seq) == :picked and granted?(config, ref), do: release(config)
-      true
-    else
-      receive do
-        {^ref, :granted} -> true
-      after
-        wait_ms -> leave(config, seq) == :picked and granted?(config, ref)
-      end
-    end
-  end
-
-  # Leaves the queue; the entry is gone already when a release picked it.
-  defp leave(config, seq) do
-    case :ets.take(config.wake_queue, seq) do
-      [_] ->
-        :ets.update_counter(config.admission, :queued, -1)
-        :left
-
-      [] ->
-        :picked
-    end
-  end
-
-  # The release that picked a wake sends the grant right after; wait for it
-  # a bounded time, in case that process died in between.
-  defp granted?(config, ref) do
-    receive do
-      {^ref, :granted} -> true
-    after
-      config.call_timeout_ms -> false
-    end
-  end
-
-  # Gives the slot being released to the first wake in the queue that is
-  # still alive (one whose caller gave up holds no place).
-  defp hand_over(config) do
-    with seq when seq != :"$end_of_table" <- :ets.first(config.wake_queue) do
-      case :ets.take(config.wake_queue, seq) do
-        [{^seq, pid, ref}] ->
-          :ets.update_counter(config.admission, :queued, -1)
-
-          if Process.alive?(pid) do
-            send(pid, {ref, :granted})
-            true
-          else
-            hand_over(config)
-          end
-
-        [] ->
-          hand_over(config)
-      end
-    else
-      _ -> false
-    end
-  end
-
-  # Frees the places of wakes whose caller died; true if there was any.
-  defp purge_dead(config) do
-    config.wake_queue
-    |> :ets.tab2list()
-    |> Enum.reduce(false, fn {seq, pid, _}, purged ->
-      if Process.alive?(pid), do: purged, else: leave(config, seq) == :left or purged
-    end)
-  end
+  def release(config), do: end_wake(config, self())
 
   @doc """
-  Called by the cell `pid` when it starts: the reserved slot is now held by
-  it, and `Membership` is asked to give it back if the cell dies mid-wake.
+  Called by the cell `pid` when it starts: the slot held by `holder`, the
+  process that woke it, is now the cell's, and `Membership` is asked to
+  forget the cell's memory record if it dies.
   """
-  @spec waking(Config.t(), pid) :: :ok
-  def waking(config, pid) do
-    :ets.insert(config.admission, {{:waking, pid}})
+  @spec waking(Config.t(), pid, pid) :: :ok
+  def waking(config, pid, holder) do
+    GenServer.cast(config.wakes, {:transfer, holder, pid})
     [{:owner, owner}] = :ets.lookup(config.admission, :owner)
     GenServer.cast(owner, {:monitor_wake, pid})
   end
 
   @doc "Ends the wake of `pid`: gives its slot back once, however many times it is called."
   @spec end_wake(Config.t(), pid) :: :ok
-  def end_wake(config, pid) do
-    if :ets.take(config.admission, {:waking, pid}) != [], do: release(config)
-    :ok
-  end
+  def end_wake(config, pid), do: GenServer.cast(config.wakes, {:end, pid})
 
   # Failures a retry reproduces at the cost of a full restore. Anything that
   # depends on the lease, the owner or the moment is retried at once.

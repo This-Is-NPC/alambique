@@ -54,11 +54,9 @@ defmodule Alambique.Membership do
     {:noreply, config}
   end
 
-  # A cell that died before its wake ended did not give its wake slot back,
-  # and one that was killed did not drop its memory record.
+  # A cell that was killed did not drop its memory record.
   @impl true
   def handle_info({:DOWN, _ref, :process, pid, _reason}, config) do
-    Alambique.Admission.end_wake(config, pid)
     Alambique.Admission.forget(config, pid)
     {:noreply, config}
   end
