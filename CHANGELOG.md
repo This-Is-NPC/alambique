@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.4.0](https://github.com/This-Is-NPC/alambique/compare/v0.3.1...v0.4.0) (2026-11-12)
+
+
+### Features
+
+* **admission:** queue wakes above max_wakes ([0c26fc3](https://github.com/This-Is-NPC/alambique/commit/0c26fc34b32fd46a2d99e4df20e576e2de9f1957))
+* **cell:** add Alambique.checkpoint/3 for awake cells ([18b2be1](https://github.com/This-Is-NPC/alambique/commit/18b2be156cac001e03fd3981979af31093fd006f))
+* **cells:** list last use and wal size ([9e7cbf3](https://github.com/This-Is-NPC/alambique/commit/9e7cbf30db24dfc9dd8e6195a94c421b1b05ee76))
+* **native:** report a full disk by its code ([c160ab9](https://github.com/This-Is-NPC/alambique/commit/c160ab98b54439136a5d4f01ff10a9b074f645f2))
+* return {:error, :disk_full} for a full disk ([af6a308](https://github.com/This-Is-NPC/alambique/commit/af6a308afd732a4e0dcaf782ae3521bee545648a))
+* **wal:** add a node budget for the WAL files ([499abe5](https://github.com/This-Is-NPC/alambique/commit/499abe50cd50eb3b4e47fcd37c1973b004260f06))
+
+
+### Bug Fixes
+
+* **admission:** free a wake slot when its caller dies ([7d14ff7](https://github.com/This-Is-NPC/alambique/commit/7d14ff73f09ac68f81365a1393cb19343e81cf7a))
+* **admission:** never wake above max_wakes ([0540d22](https://github.com/This-Is-NPC/alambique/commit/0540d22919cf42b934716505f1d7e037337fa184))
+* **cell:** report a full disk when the wake makes its dir ([08e1a81](https://github.com/This-Is-NPC/alambique/commit/08e1a81ae30388f48dc6c04a8bbc6c5724da255b))
+* **load:** list the variant once in the command ([deb31c5](https://github.com/This-Is-NPC/alambique/commit/deb31c58c0d5155895071e9a21ceb94fd3f0b45f))
+* **load:** treat store 5xx near the limit as full ([419ded3](https://github.com/This-Is-NPC/alambique/commit/419ded3ff9e499e253ae23fd8e21d11d98cfd742))
+* **query:** report a full disk on the replica ([5de3ef9](https://github.com/This-Is-NPC/alambique/commit/5de3ef9f9759538489fcd9c7d3d66449a13c14c9))
+
+
+### Performance Improvements
+
+* **feed:** save the feed time in the feed table ([7be9cdb](https://github.com/This-Is-NPC/alambique/commit/7be9cdbc047286460254e498669e00d8b4074cc0))
+
 ## [0.3.1](https://github.com/This-Is-NPC/alambique/compare/v0.3.0...v0.3.1) (2026-11-12)
 
 
