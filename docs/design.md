@@ -1564,7 +1564,7 @@ such a cell makes a row. A failed pass is logged and queued again after
 compactor starts last in the instance tree, so its crash restarts nothing.
 
 **Levels.** A pass merges level-0 files, one per batch, `fanout` (default 8)
-at a time into level 1, level 1 into level 2, up to `max_level` (default 3).
+at a time into level 1, level 1 into level 2, up to `max_level` (default 2).
 Merged files cover *aligned blocks*: level `L` covers blocks of `fanout^L`
 TXIDs, `[j * span + 1, (j + 1) * span]`. The key of a merged file is therefore
 fixed by the TXIDs, and two compactors that see the same files plan the same
@@ -3008,8 +3008,7 @@ done unless the caller asks. With millions of cells, pass the ids you want.
 
 **Running.** `Query.stream/5` and `Query.all/5` take a list or stream of cell
 ids, `:all` or `{:prefix, p}`. Each cell is a task under a `Task.Supervisor` of
-the instance (one idle process), `:concurrency` at a time (default one per
-scheduler), each with `:timeout_ms` for building its replica and running the
+the instance (one idle process), `:concurrency` at a time (default 16), each with `:timeout_ms` for building its replica and running the
 statement (default 30 s). The statement is interrupted at the deadline
 by the progress handler of the connection (§7, "Statements of callers"). A
 cell that fails

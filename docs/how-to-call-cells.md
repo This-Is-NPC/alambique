@@ -52,6 +52,11 @@ define its own rule.
 
 A write returns after its transaction is stored durably.
 
+Each statement is interrupted at the instance's `sql: [statement_timeout_ms:]`
+(default `op_timeout_ms`, 10 s) and returns `{:error, :statement_timeout}`. A
+call can lower that deadline with `statement_timeout_ms:` in its options, but
+not raise it.
+
 ## 3. Find and list cells
 
 ```elixir

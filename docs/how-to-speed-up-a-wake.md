@@ -66,9 +66,10 @@ fence.
 
 3. Keep the chain after the last snapshot short. A wake reads every file after
    the snapshot; they are read together, but a longer chain costs bandwidth and
-   decoding. The compaction defaults (`:snapshot_interval_ms` of one day, merges
-   of eight files) do this; a shorter `:snapshot_interval_ms` for cells that
-   change all day makes the chain after the snapshot shorter.
+   decoding. The compaction defaults (a snapshot after 4096 TXIDs, or when the
+   level-0 bytes reach twice the last snapshot, or after seven days; merges of
+   eight files) do this; a lower `:snapshot_interval_txids` or `:snapshot_ratio`
+   for cells that change all day makes the chain after the snapshot shorter.
 
 4. Keep a local file when you can. A node that hibernated the cell last reuses
    its file and reads only the head of the chain. `local_cache.max_bytes`
