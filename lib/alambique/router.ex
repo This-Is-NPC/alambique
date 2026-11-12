@@ -357,7 +357,9 @@ defmodule Alambique.Router do
     with nil <- Admission.failure(config, cell),
          :ok <- make_room(config),
          :ok <- Admission.begin_wake(config, timeout) do
-      case DynamicSupervisor.start_child(config.supervisor, {Cell, child_arg}) do
+      Fault.point(:wake_slot_taken, %{cell: cell})
+
+      case DynamicSupervisor.start_child(config.supervisor, {Cell, with_holder(child_arg)}) do
         {:ok, pid} ->
           deliver(pid, config |> Cell.find(cell) |> load_of(), args)
 
@@ -375,6 +377,9 @@ defmodule Alambique.Router do
       {:error, _} = error -> {nil, error}
     end
   end
+
+  # The cell takes over the slot this process holds.
+  defp with_holder({config, cell, opts}), do: {config, cell, [{:holder, self()} | opts]}
 
   # A cell wakes only while there is room: while the awake cells fill
   # `awake.max_cells`, or their memory is over `awake.max_bytes`, the least

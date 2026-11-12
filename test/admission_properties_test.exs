@@ -2,7 +2,7 @@ defmodule Alambique.AdmissionPropertiesTest do
   @moduledoc """
   The limits of a node (design §7) against a model, over random command
   sequences: the wake slots in use never pass `awake.max_wakes` and come back
-  exactly once, a wake failure that a retry would repeat is remembered for the
+  exactly once even when their holders die, a wake failure that a retry would repeat is remembered for the
   backoff, the cells awake never pass `awake.max_cells` and a call that
   would wake another one hibernates a cell that is idle, and the calls a
   cell admits never pass `awake.max_pending`.
@@ -19,201 +19,166 @@ defmodule Alambique.AdmissionPropertiesTest do
   @deterministic [:restore, :hydration, :local_file, :open, :migration, :schema_too_new]
   @transient [:lease, :owner, :timeout, :busy]
 
-  defp config(max_wakes, backoff_ms, hint_limit \\ 1_000, queue \\ {0, 0}) do
+  defp config(max_wakes, backoff_ms, hint_limit \\ 1_000, queue \\ {1, 0}) do
     {max_queue, queue_ms} = queue
     id = System.unique_integer([:positive])
 
     %{
       admission: :"admission_#{id}",
-      wake_queue: :"wake_queue_#{id}",
+      wakes: :"wakes_#{id}",
       awake: %{max_wakes: max_wakes, max_wake_queue: max_queue, wake_queue_ms: queue_ms},
-      call_timeout_ms: 1_000,
       hint_limit: hint_limit,
       wake: %{failure_backoff_ms: backoff_ms}
     }
   end
 
-  defp drop(config) do
-    :ets.delete(config.admission)
-    :ets.delete(config.wake_queue)
-  end
+  defp drop(config), do: :ets.delete(config.admission)
 
-  # Model: `slots` in use, `held` of them reserved and not yet used by a
-  # cell, `waking` the cells that hold one.
-  defp command do
-    one_of([
-      constant(:begin),
-      constant(:release),
-      tuple({constant(:start), integer(0..3)}),
-      tuple({constant(:end_wake), integer(0..3)}),
-      tuple({constant(:fail), integer(0..3), member_of(@deterministic ++ @transient)})
-    ])
-  end
-
-  defp step(:begin, {config, model}) do
-    expected = if model.slots < config.awake.max_wakes, do: :ok, else: {:error, :overloaded}
-    assert Admission.begin_wake(config, 0) == expected
-    if expected == :ok, do: %{model | slots: model.slots + 1, held: model.held + 1}, else: model
-  end
-
-  defp step(:release, {config, model}) do
-    if model.held > 0 do
-      assert Admission.release(config) == :ok
-      %{model | slots: model.slots - 1, held: model.held - 1}
-    else
-      model
-    end
-  end
-
-  # A cell starts and takes over a reserved slot.
-  defp step({:start, i}, {config, model}) do
-    if model.held > 0 and i not in model.waking do
-      assert Admission.waking(config, Map.fetch!(model.pids, i)) == :ok
-      %{model | held: model.held - 1, waking: MapSet.put(model.waking, i)}
-    else
-      model
-    end
-  end
-
-  # The end of a wake gives the slot back once, however often it is called.
-  defp step({:end_wake, i}, {config, model}) do
-    assert Admission.end_wake(config, Map.fetch!(model.pids, i)) == :ok
-
-    if i in model.waking,
-      do: %{model | slots: model.slots - 1, waking: MapSet.delete(model.waking, i)},
-      else: model
-  end
-
-  defp step({:fail, i, reason}, {config, model}) do
-    assert Admission.failed(config, "cell-#{i}", {reason, :why}) == :ok
-
-    model
-  end
-
-  defp run(commands, config) do
+  # The slots and the queue of a `Wakes` server run apart from any cell.
+  defp with_wakes(config, fun) do
     :ok = Admission.init(config)
-    pids = Map.new(0..3, &{&1, spawn_link(fn -> Process.sleep(:infinity) end)})
-    model = %{slots: 0, held: 0, waking: MapSet.new(), pids: pids}
+    {:ok, server} = Alambique.Admission.Wakes.start_link(config)
 
     try do
-      model =
-        Enum.reduce(commands, model, fn command, model ->
-          model = step(command, {config, model})
-          [{:wakes, slots}] = :ets.lookup(config.admission, :wakes)
-
-          # The slots in use are the model's and never pass the limit.
-          assert slots == model.slots
-          assert slots <= config.awake.max_wakes
-          model
-        end)
-
-      # Whatever was reserved comes back when each holder gives it up.
-      for i <- model.waking, do: Admission.end_wake(config, pids[i])
-      for _ <- 1..model.held//1, do: Admission.release(config)
-      assert [{:wakes, 0}] = :ets.lookup(config.admission, :wakes)
-
-      model
+      fun.()
     after
-      Enum.each(pids, fn {_, pid} -> Process.unlink(pid) && Process.exit(pid, :kill) end)
+      Process.unlink(server)
+      Process.exit(server, :kill)
       drop(config)
     end
   end
 
-  property "wake slots in use equal the model, stay within max_wakes and all come back" do
-    check all(max <- integer(1..4), commands <- list_of(command(), max_length: 40), max_runs: 300) do
-      run(commands, config(max, 60_000))
-    end
+  defp snapshot(config) do
+    state = :sys.get_state(config.wakes)
+
+    waiting =
+      for mon <- :queue.to_list(state.order), entry = state.waiting[mon], do: entry.pid
+
+    {state.holders |> Map.keys() |> MapSet.new(), waiting}
   end
 
-  # Wakes that find no slot wait in order. Each waiter is a process that calls
-  # `begin_wake/2`; the model is the slots in use and the waiting list.
-  defp spawn_waiter(config, test) do
+  defp process, do: spawn(fn -> Process.sleep(:infinity) end)
+
+  # A caller: begins a wake and reports the answer to the test.
+  defp caller(config, test) do
     spawn(fn ->
-      send(test, {:result, self(), Admission.begin_wake(config, config.awake.wake_queue_ms)})
+      send(test, {:answer, self(), Admission.begin_wake(config, config.awake.wake_queue_ms)})
       Process.sleep(:infinity)
     end)
   end
 
-  defp queued_pids(config),
-    do: config.wake_queue |> :ets.tab2list() |> Enum.map(fn {_seq, pid, _ref} -> pid end)
+  defp kill(pid) do
+    ref = Process.monitor(pid)
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^ref, _, _, _}
+  end
 
-  property "queued wakes keep their order, stay within the cap and take every freed slot" do
+  # Grants in the model what the server grants when a slot frees.
+  defp grant(%{holders: holders, waiting: [next | rest]} = m, max) do
+    if MapSet.size(holders) < max,
+      do: grant(%{m | holders: MapSet.put(holders, next), waiting: rest}, max),
+      else: m
+  end
+
+  defp grant(m, _max), do: m
+
+  defp wake_command do
+    one_of([
+      constant(:arrive),
+      tuple({constant(:start), integer(0..9)}),
+      tuple({constant(:end), integer(0..9)}),
+      tuple({constant(:kill), integer(0..9)})
+    ])
+  end
+
+  property "slots held never pass max_wakes, the queue keeps order and cap, a freed slot is " <>
+             "handed on, and every slot returns, whoever dies and whenever" do
     check all(
             max <- integer(1..3),
             cap <- integer(1..4),
-            commands <- list_of(member_of([:arrive, :release, :kill_last]), max_length: 30),
+            commands <- list_of(wake_command(), max_length: 30),
             max_runs: 150
           ) do
       config = config(max, 60_000, 1_000, {cap, 60_000})
-      :ok = Admission.init(config)
       test = self()
 
-      try do
-        # `slots` in use, `waiting` the queued waiters oldest first.
-        model =
-          Enum.reduce(commands, %{slots: 0, waiting: [], last: nil}, fn
-            :arrive, m ->
-              pid = spawn_waiter(config, test)
+      with_wakes(config, fn ->
+        # `procs` is every process the run made, callers and cells; the
+        # model is the holders and the queue as the server must show them.
+        {m, procs} =
+          Enum.reduce(commands, {%{holders: MapSet.new(), waiting: []}, []}, fn
+            :arrive, {m, procs} ->
+              pid = caller(config, test)
 
-              cond do
-                m.slots < max and m.waiting == [] ->
-                  assert_receive {:result, ^pid, :ok}
-                  %{m | slots: m.slots + 1}
+              m =
+                cond do
+                  m.waiting == [] and MapSet.size(m.holders) < max ->
+                    assert_receive {:answer, ^pid, :ok}
+                    %{m | holders: MapSet.put(m.holders, pid)}
 
-                length(m.waiting) < cap ->
-                  eventually(fn -> pid in queued_pids(config) end)
-                  refute_received {:result, ^pid, _}
-                  %{m | waiting: m.waiting ++ [pid], last: pid}
+                  length(m.waiting) < cap ->
+                    eventually(fn -> pid in elem(snapshot(config), 1) end, 500)
+                    %{m | waiting: m.waiting ++ [pid]}
 
-                true ->
-                  assert_receive {:result, ^pid, {:error, :overloaded}}
-                  m
-              end
+                  true ->
+                    assert_receive {:answer, ^pid, {:error, :overloaded}}
+                    m
+                end
 
-            :release, %{slots: 0} = m ->
-              m
+              {m, procs ++ [pid]}
 
-            :release, %{waiting: [first | rest]} = m ->
-              Admission.release(config)
-              assert_receive {:result, ^first, :ok}
-              %{m | waiting: rest}
+            _, {m, []} ->
+              {m, []}
 
-            :release, m ->
-              Admission.release(config)
-              %{m | slots: m.slots - 1}
+            {:start, i}, {m, procs} ->
+              # The cell takes over the slot of a holder; one that is dead lost it.
+              holder = Enum.at(procs, rem(i, length(procs)))
+              cell = process()
+              GenServer.cast(config.wakes, {:transfer, holder, cell})
 
-            :kill_last, %{last: pid, waiting: waiting} = m ->
-              if pid in waiting do
-                ref = Process.monitor(pid)
-                Process.exit(pid, :kill)
-                assert_receive {:DOWN, ^ref, _, _, _}
-                %{m | waiting: List.delete(waiting, pid), last: nil}
+              if holder in m.holders do
+                holders = m.holders |> MapSet.delete(holder) |> MapSet.put(cell)
+                {%{m | holders: holders}, procs ++ [cell]}
               else
-                m
+                {m, procs ++ [cell]}
               end
+
+            {:end, i}, {m, procs} ->
+              pid = Enum.at(procs, rem(i, length(procs)))
+              Admission.end_wake(config, pid)
+              {grant(%{m | holders: MapSet.delete(m.holders, pid)}, max), procs}
+
+            {:kill, i}, {m, procs} ->
+              pid = Enum.at(procs, rem(i, length(procs)))
+              kill(pid)
+              m = %{m | waiting: List.delete(m.waiting, pid)}
+              {grant(%{m | holders: MapSet.delete(m.holders, pid)}, max), procs}
+          end)
+          |> then(fn {m, procs} ->
+            expected = {m.holders, m.waiting}
+            eventually(fn -> snapshot(config) == expected end, 500)
+            {m, procs}
           end)
 
-        # A dead waiter leaves the table when the cap or a release meets it.
-        live = Enum.filter(queued_pids(config), &Process.alive?/1)
-        assert live == model.waiting
-        assert length(live) <= cap
-        assert [{:wakes, model.slots}] == :ets.lookup(config.admission, :wakes)
-        assert model.slots <= max
+        {holders, waiting} = snapshot(config)
+        assert MapSet.size(holders) <= max
+        assert length(waiting) <= cap
         # A slot is never idle while a wake waits for it.
-        assert model.waiting == [] or model.slots == max
-      after
-        for {_, pid, _} <- :ets.tab2list(config.wake_queue), do: Process.exit(pid, :kill)
-        drop(config)
-      end
+        assert waiting == [] or MapSet.size(holders) == max
+        assert {holders, waiting} == {m.holders, m.waiting}
+
+        # Whatever happens to the processes, every slot comes back.
+        Enum.each(procs, &Process.exit(&1, :kill))
+        eventually(fn -> snapshot(config) == {MapSet.new(), []} end, 500)
+      end)
     end
   end
 
   property "a queued wake is refused once its wait has passed, and not before" do
     check all(wait <- integer(20..80), waiters <- integer(1..4), max_runs: 15) do
       config = config(1, 60_000, 1_000, {4, wait})
-      :ok = Admission.init(config)
 
-      try do
+      with_wakes(config, fn ->
         assert Admission.begin_wake(config, 0) == :ok
         started = System.monotonic_time(:millisecond)
 
@@ -231,11 +196,8 @@ defmodule Alambique.AdmissionPropertiesTest do
         end
 
         # The places of the waiters that gave up are free.
-        assert [{:queued, 0}] = :ets.lookup(config.admission, :queued)
-        assert :ets.tab2list(config.wake_queue) == []
-      after
-        drop(config)
-      end
+        assert {_, []} = snapshot(config)
+      end)
     end
   end
 

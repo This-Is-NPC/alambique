@@ -144,7 +144,7 @@ defmodule Alambique.Cell do
 
     # Last: nothing after it can fail, so a slot is never held by a cell that
     # never started.
-    Admission.waking(config, self())
+    Admission.waking(config, self(), opts[:holder])
     {:ok, state, {:continue, :wake}}
   end
 
