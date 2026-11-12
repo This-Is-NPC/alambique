@@ -37,6 +37,28 @@ Retention marks files for deletion and the trash deletes them
 `deletion_grace_ms` later (default one day), so a file lives that long after
 retention covers it.
 
+### Pages of a small write
+
+A level-0 segment holds each page the batch dirtied once, so a single-row
+commit costs 4 KiB for every page it touches. Measured with
+`test/wal_pages_test.exs` (a row of about 150 bytes in a table with one
+secondary index, one commit per batch, steady state):
+
+| Pages | Feed off | Feed on |
+| --- | --- | --- |
+| The table (the leaf with the new row) | 1 | 1 |
+| The secondary index | 1 | 1 |
+| `_alambique_feed`: the new row, and the removal of the previous batch's | | 1 |
+| `_alambique_feed_txid`: the index the stamp and the removal use | | 1 |
+| **Total** | **2 (8 KiB)** | **4 (16 KiB)** |
+
+Releases up to 0.3.1 added a third page for the feed, `_alambique_feed_state`, which saved
+the latest time on every write; the time now lives in a row of the feed table,
+which the removal writes anyway (before: 5 pages, 20 KiB). Each further index
+and each further table the commit writes adds a page, and a table that grows
+adds the page that splits. Page 1 is written when the file grows. A host with
+6 to 8 pages per commit has 2 to 4 of them in its own tables and indexes.
+
 ## 2. Count it per cell
 
 Sum the `bytes` of four events by `cell`; they cover every object above that

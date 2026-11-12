@@ -44,7 +44,7 @@ defmodule Alambique.LazyRestoreTest do
 
       match?(
         {:ok, %{rows: [[0]]}},
-        Alambique.query(seeder, cell, "SELECT count(*) FROM _alambique_feed")
+        Alambique.query(seeder, cell, "SELECT count(*) FROM _alambique_feed WHERE op <> 'floor'")
       )
     end)
 

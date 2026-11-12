@@ -400,8 +400,7 @@ defmodule Alambique.Feed.Capture do
         [txid, ts, json]
       )
 
-    {:ok, _} = Db.run(conn, "UPDATE #{@state} SET last_time = max(last_time, ?)", [ts])
-    :ok
+    :ok = Db.script(conn, raise_floor(ts))
   end
 
   @doc "Deletes the rows of stamped batches up to `txid` and remembers the time, in the caller's transaction."
@@ -410,7 +409,19 @@ defmodule Alambique.Feed.Capture do
     :ok =
       Db.script(conn, """
       DELETE FROM #{@feed} WHERE txid > 0 AND txid <= #{txid};
-      UPDATE #{@state} SET published_txid = #{txid}, last_time = #{time};
+      #{raise_floor(time)}
       """)
+  end
+
+  # The latest time is saved in a row of the feed table itself (seq 0, TXID 0,
+  # so no batch reads it): the delete above already writes that table's page,
+  # and a row in another table would write one more page on every commit.
+  # Files of the first release saved it in `_alambique_feed_state.last_time`,
+  # which `last_time/1` still reads.
+  defp raise_floor(time) do
+    """
+    INSERT INTO #{@feed} (seq, txid, ts, tbl, op, key) VALUES (0, 0, #{time}, '', 'floor', '{}')
+    ON CONFLICT (seq) DO UPDATE SET ts = max(ts, excluded.ts);
+    """
   end
 end

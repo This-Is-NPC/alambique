@@ -2709,8 +2709,14 @@ stamping by range would change the object format and are not built.
 
 The cell removes published rows lazily: the next write transaction starts with
 `DELETE FROM _alambique_feed WHERE txid BETWEEN 1 AND published` and saves the
-latest time in `_alambique_feed_state`, inside the user's transaction, so a
-rollback keeps the rows and the delete is replicated with the next batch.
+latest time in the row of `_alambique_feed` with `seq` 0, `txid` 0 and `op`
+`floor` (no batch reads it), inside the user's transaction, so a rollback
+keeps the rows and the delete is replicated with the next batch. The time
+lives in the feed table so that the delete and the save write the same page: a
+small write dirties the page of its table, one for each index, and two for the
+feed (the table and its TXID index), 4 KiB each (measurements in
+`docs/how-to-size-storage.md`). Files of the first release saved the time in
+`_alambique_feed_state.last_time`, which a wake still reads.
 `published` is what the sender last reported, so rows of a batch reported
 after a write are removed by the next one. Hibernation does not clean up, and
 a stopping cell drops what its sender had not put. On wake (§7 step 5) the new
@@ -2792,8 +2798,8 @@ key sorts, within a shard, by time, then TXID, then cell.
 - **Time of a batch.** The cell stamps a batch with `max(clock now, floor)`
   and every row of the batch carries it. `floor` is the
   latest time the cell has used: it is kept in memory, and read on wake as the
-  largest of `last_time` in `_alambique_feed_state` and the `ts` of the rows
-  left. So a later TXID of a cell never takes a time below an earlier one,
+  largest of `last_time` in `_alambique_feed_state` (files of the first
+  release) and the `ts` of the rows left, the `floor` row included. So a later TXID of a cell never takes a time below an earlier one,
   even when the clock moved back or an owner's clock is behind the previous
   owner's by up to the skew margin. (Across owners it also holds because a
   publisher only puts while its lease is valid, so the next owner's clock, which
@@ -3939,7 +3945,7 @@ would run again.
 **Feed.** The reconcile step creates the internal tables if the target has
 none and inserts one row into `_alambique_feed` with `txid = head + 1`,
 `tbl = ''`, `op = 'rewind'` and the marker as JSON in `vals`, and raises
-`last_time` to the rewind's time, the larger of the clock, the time floor of
+the time of the `floor` row to the rewind's time, the larger of the clock, the time floor of
 the current state and the floor of the target. The row is part of the segment,
 so it exists exactly when the rewind does, and the first owner publishes it in
 step 5 of the wake (§7) like any row left by a previous owner: after the rows of
