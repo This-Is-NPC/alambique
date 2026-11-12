@@ -17,16 +17,23 @@ defmodule Alambique.Cell.Wake do
 
   @spec run(State.t()) :: {:ok, State.t()} | {:error, term, State.t()}
   def run(%State{} = state) do
-    Local.prepare(state.path)
-    Hold.drop_cell(state.config, state.id)
+    with :ok <- prepare(state) do
+      Hold.drop_cell(state.config, state.id)
 
-    with {:ok, state} <- locate(state),
-         {:ok, state} <- choose_migrations(state),
-         {:ok, state, found} <- overlap(state),
-         {:ok, state} <- load(state, found),
-         {:ok, state} <- migrate(state) do
-      {:ok, Publisher.start(state)}
+      with {:ok, state} <- locate(state),
+           {:ok, state} <- choose_migrations(state),
+           {:ok, state, found} <- overlap(state),
+           {:ok, state} <- load(state, found),
+           {:ok, state} <- migrate(state) do
+        {:ok, Publisher.start(state)}
+      end
     end
+  end
+
+  # The directory is the first write of a wake: a full disk fails it before
+  # anything is held.
+  defp prepare(state) do
+    with {:error, reason} <- Local.prepare(state.path), do: {:error, reason, state}
   end
 
   # The lease, the frozen check and the read of the store's state do not
