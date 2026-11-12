@@ -92,11 +92,16 @@ retry later.
 query spends most of its time waiting for the store, so the count of cells read
 at once, not the CPUs, sets how long a query over many cells takes. SQLite
 statements still take the slots above, but a query lets only
-`min(concurrency, max_concurrent_statements)` of its cells run a statement at
-once, so it never gets `:busy` from its own cells. When other callers hold the
-slots, the cells of a query get `:busy` at once like any read. Lower
-`query: [concurrency:]` if a query over many cells should leave the pool to
-other work.
+`min(concurrency, max(floor(slots * share), 1))` of its cells run a statement
+at once, where `share` is `query: [max_statement_share:]` (default 0.5, above
+0 up to 1). It never gets `:busy` from its own cells, and two queries fit
+together with slots left for cells. With a share of 1 one query takes every
+slot and a second one arriving meanwhile gets `:busy` at once: in a bench of
+20 cells at +25 ms per trip and 8 slots, two overlapping queries got 4-8
+`:busy` per run with share 1 and none with 0.5, at the same latency (56-59 ms
+for one query). When other callers hold the slots, the cells of a query get
+`:busy` at once like any read. Lower the share if a query over many cells
+should leave more of the pool to other work.
 
 ## Check it
 

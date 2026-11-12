@@ -2958,9 +2958,19 @@ statement (`immutable=1`, so no locks and no `-wal`/`-shm`), and closes it.
   cells on a 1-CPU node cost 40 trips in sequence at 25 ms each, 1.1 s. SQLite
   work is still bounded by the statement slots (§7): the cells of one query
   build and refresh `concurrency` at a time, but a gate of
-  `min(concurrency, sql: [max_concurrent_statements:])` places lets only that
+  `min(concurrency, max(floor(slots * share), 1))` places lets only that
   many of them run their statement at once, so a query never gets `:busy` from
-  its own cells. The gate orders the cells of one query and nothing else: a
+  its own cells. `share` is `query: [max_statement_share:]`, a number above 0
+  and at most 1 (default 0.5), also a per-call option like `concurrency:`.
+  With every slot taken by one query (share 1) a second query arriving while
+  the first ran got `:busy` at once, about 1.5% of the queries at one per
+  second in the load test; with half the slots two queries fit together and
+  slots remain for cells. 20 up-to-date cells at +25 ms per trip (`MemoryStore`
+  latency on the listings, 8 slots): one query took 58-61 ms with share 1 and
+  56-59 ms with 0.5; two overlapping queries took 63-66 ms with 4-8 `:busy`
+  per run with share 1, and 65-69 ms with none with 0.5. The places only bound
+  statements, not the wait for the store, so the share does not slow a query
+  down. The gate orders the cells of one query and nothing else: a
   cell that finds the slots taken by other callers still reports
   `{:error, :busy}` at once, as in §7, and the caller retries. A slot is held
   only while a statement runs, never during the waits for the store.
@@ -3011,8 +3021,9 @@ and a result over the `:sql` caps gives `:result_too_large`. The statement
 takes a slot of the node-wide limit on user statements (§7, "Slots"), so
 queries and owner reads together never hold more than
 `sql: [max_concurrent_statements:]` dirty IO schedulers; a cell that finds none
-free gives `{:error, cell, :busy}`. `:concurrency` defaults to the same bound,
-so a query alone never meets it.
+free gives `{:error, cell, :busy}`. A query alone never meets it: it holds at
+most `query: [max_statement_share:]` of the slots (default 0.5), so two
+queries fit together.
 Rows of a cell are returned when that cell is done; a cell's result is held in
 memory.
 
