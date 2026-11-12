@@ -1613,7 +1613,13 @@ directories (`<data_dir>/work`, §20) are not part of the cache; `inflight`,
   `hint: true` it answers from the owner-hint cache when the hinted node runs
   the instance, without a store request; a hint to a node that is gone is
   dropped, and a lease answer naming another node is stored as the hint. The
-  answer can be stale until a routed call corrects the hint.
+  answer can be stale until a routed call corrects the hint. With `peers:
+  true` it asks the member nodes' registries in parallel (`:erpc.multicall/5`
+  with `call_timeout_ms`, target `Router.holds?/2`) and makes no store request
+  and no wake: `{:ok, node}` for the node that holds the cell awake, `:none`
+  otherwise. It sees only processes, so a cell that is waking, a member that
+  does not answer, and a lease held by a node that is not a member all give
+  `:none`; the lease read does not have these gaps.
 - `Alambique.lease/3` is the public read of the lease for takeover callers:
   `{:ok, %{owner, owner_id, epoch, expires_at_ms, released, moved_to,
   moved_from}}` without waking or freezing the cell. It resolves the location

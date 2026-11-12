@@ -56,6 +56,25 @@ defmodule Alambique.ClusterTest do
     assert Cluster.node(c, hd(wakes)) == owner
   end
 
+  test "owner with peers: true finds a remote cell without the store or a wake", %{
+    cluster: c,
+    inst: inst
+  } do
+    cell = cell()
+    assert {:ok, {_, owner}} = on(c, :n1, :transaction, [inst, cell, ClusterFuns.append(1)])
+    asleep = cell()
+
+    for name <- Cluster.names(c) do
+      assert {:ok, ^owner} = on(c, name, :owner, [inst, cell, [peers: true]])
+      assert :none = on(c, name, :owner, [inst, asleep, [peers: true]])
+    end
+
+    woken =
+      for %{event: [:alambique, :cell, :wake], meta: %{cell: ^asleep}} <- Cluster.events(c), do: 1
+
+    assert woken == []
+  end
+
   test "the cell wakes on its preferred node", %{cluster: c, inst: inst} do
     for _ <- 1..6 do
       cell = cell()

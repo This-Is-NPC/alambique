@@ -70,4 +70,26 @@ defmodule Alambique.TouchOwnerTest do
       assert {:ok, node()} == Alambique.owner(inst, cell, hint: true)
     end
   end
+
+  describe "owner with peers: true" do
+    test "answers a local cell, and says none for an asleep one without waking it", ctx do
+      %{inst: inst, counts: counts} = ctx
+      capture([[:alambique, :cell, :wake]])
+      cell = unique_cell()
+      assert {:ok, _} = Alambique.touch(inst, cell)
+      assert_receive {:telemetry, [:alambique, :cell, :wake], _, %{cell: ^cell}}, 5_000
+      CountingStore.reset(counts)
+      assert {:ok, node()} == Alambique.owner(inst, cell, peers: true)
+
+      asleep = unique_cell()
+      assert :none = Alambique.owner(inst, asleep, peers: true)
+      assert Alambique.cells(inst).cells == [cell]
+      refute_receive {:telemetry, [:alambique, :cell, :wake], _, %{cell: ^asleep}}, 100
+      assert CountingStore.count(counts, :get) + CountingStore.count(counts, :head) == 0
+    end
+
+    test "rejects an invalid id", %{inst: inst} do
+      assert {:error, _} = Alambique.owner(inst, "bad/id", peers: true)
+    end
+  end
 end
