@@ -10,7 +10,8 @@
       "prerelease": false,
       "bump-minor-pre-major": true,
       "extra-files": [
-        { "type": "generic", "path": "testkit/mix.exs" }
+        { "type": "generic", "path": "testkit/mix.exs" },
+        { "type": "generic", "path": "README.md" }
       ]
     }
   }
