@@ -2062,8 +2062,9 @@ Compaction and retention add the crash points `:compact_before_put`,
 `:cell_after_land`, `:cell_before_ack` and `:cell_after_ack` around the
 acknowledgement of a batch and `:cell_after_checkpoint` after the checkpoint of
 an awake cell (see [segment-format.md](segment-format.md)). The restore adds
-`:restore_install`, before the restored file is put in place; a handler that
-returns `{:error, :enospc}` makes the restore fail as a full disk does (§6.2).
+`:restore_install`, before the restored file is put in place, and the read
+replica adds `:query_publish` (§14); a handler that returns `{:error, :enospc}`
+at either makes the step fail as a full disk does (§6.2).
 
 The router adds the crash points `:router_after_serve`, reached on the node
 that served a forwarded call before it answers (a handler that closes the
