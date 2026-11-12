@@ -62,6 +62,7 @@ defmodule Alambique.Load.Driver do
       cooldown_memory?: not mod.holds_memory?(),
       store_mb: Env.int("STORE_MB", 4096),
       store_full_fraction: Env.float("STORE_FULL_FRACTION", 0.95),
+      store_error_fraction: Env.float("STORE_ERROR_FRACTION", 0.85),
       store_min_free_mb: Env.float("STORE_MIN_FREE_MB", 1024),
       suspect_throttle_fraction: Env.float("SUSPECT_THROTTLE_FRACTION", 0.1),
       fit_min_r2: Env.float("FIT_MIN_R2", 0.8),
@@ -395,7 +396,11 @@ defmodule Alambique.Load.Driver do
         ok: result.ok,
         errors: result.errors,
         busy: result.busy,
-        store_full: Verdict.store_full?(Map.get(result, :error_samples, [])),
+        store_full:
+          Verdict.store_full?(
+            Map.get(result, :error_samples, []),
+            Capacity.strained?(step.store, ctx.limits)
+          ),
         latency_ms: step.latency_ms,
         net_load_max: step.host.net_load_max,
         swap: swap_verdict_stats(step.swap),

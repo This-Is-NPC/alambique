@@ -37,6 +37,19 @@ defmodule Alambique.Load.Capacity do
 
   def store_full?(%{kind: :disk, free_mb: free}, limits), do: free < limits.store_min_free_mb
 
+  @doc """
+  Whether the store was close enough to full during a step (`store_stats` of
+  the step, nil without readings) for its server errors to mean it is full: a
+  tmpfs at `store_error_fraction` of `store_mb` at most, a disk with less than
+  `store_min_free_mb` free at least.
+  """
+  @spec strained?(map | nil, map) :: boolean
+  def strained?(%{kind: :tmpfs, used_mb_max: used}, limits),
+    do: used >= limits.store_error_fraction * limits.store_mb
+
+  def strained?(%{kind: :disk, free_mb_min: free}, limits), do: free < limits.store_min_free_mb
+  def strained?(nil, _limits), do: false
+
   @doc "Available MiB from the output of `df -P -B1 <dir>`."
   @spec parse_df_free_mb(String.t()) :: float | nil
   def parse_df_free_mb(text) do

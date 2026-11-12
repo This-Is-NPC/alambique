@@ -62,6 +62,34 @@ defmodule Alambique.Load.CapacityTest do
       assert Capacity.store_full?(%{kind: :disk, free_mb: 1_023.9, used_mb: 0}, @limits)
     end
 
+    @strain %{store_mb: 1_536, store_error_fraction: 0.85, store_min_free_mb: 1_024}
+
+    test "a store is strained from 85% of its size, or below 1 GiB free" do
+      # The VM run: 1425.73 MB of 1536 (93%) when the store answered 500.
+      assert Capacity.strained?(%{kind: :tmpfs, used_mb_max: 1_425.73}, @strain)
+      assert Capacity.strained?(%{kind: :tmpfs, used_mb_max: 1_305.6}, @strain)
+      refute Capacity.strained?(%{kind: :tmpfs, used_mb_max: 1_305.5}, @strain)
+      assert Capacity.strained?(%{kind: :disk, free_mb_min: 1_023.9}, @strain)
+      refute Capacity.strained?(%{kind: :disk, free_mb_min: 1_024.0}, @strain)
+      refute Capacity.strained?(nil, @strain)
+    end
+
+    property "a tmpfs store is strained from the fraction on, and stays strained as it fills" do
+      check all(
+              used <- float(min: 0.0, max: 4_096.0),
+              more <- float(min: 0.0, max: 1_000.0),
+              store_mb <- integer(64..4_096),
+              fraction <- float(min: 0.1, max: 0.94)
+            ) do
+        limits = %{store_mb: store_mb, store_error_fraction: fraction}
+        strained? = &Capacity.strained?(%{kind: :tmpfs, used_mb_max: &1}, limits)
+
+        if used < fraction * store_mb,
+          do: refute(strained?.(used)),
+          else: assert(strained?.(used) and strained?.(used + more))
+      end
+    end
+
     test "free space comes from the df line, in MiB" do
       text = """
       Filesystem        1-blocks        Used   Available Capacity Mounted on

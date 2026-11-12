@@ -155,9 +155,35 @@ defmodule Alambique.Load.VerdictTest do
     }
 
     other = %{error: "{:exit, :timeout}", count: 9}
-    assert Verdict.store_full?([other, full])
-    refute Verdict.store_full?([other])
-    refute Verdict.store_full?([])
+    assert Verdict.store_full?([other, full], false)
+    refute Verdict.store_full?([other], false)
+    refute Verdict.store_full?([], false)
+  end
+
+  # Step 3 of the VM run: the store (1536 MB tmpfs) answered 500 InternalError
+  # with 1425.7 MB used, and the commits that timed out are :outcome_unknown.
+  @internal_error %{
+    error:
+      "{:http, 500, \"<Error><Code>InternalError</Code><Message>We encountered an internal error, please try again.</Message></Error>\"}",
+    count: 1
+  }
+  @unknown %{error: ":outcome_unknown", count: 256}
+
+  test "a store 500 is store_full only when the store was strained" do
+    assert Verdict.store_full?([@unknown, @internal_error], true)
+    refute Verdict.store_full?([@unknown, @internal_error], false)
+    refute Verdict.store_full?([@unknown], true)
+    refute Verdict.store_full?([%{error: "{:http, 404, \"\"}", count: 1}], true)
+  end
+
+  test "the VM step with store 500s near the limit is invalid, not bad" do
+    limits = %{store_mb: 1_536, store_error_fraction: 0.85}
+    store = %{kind: :tmpfs, used_mb_max: 1_425.73}
+    samples = [@unknown, @internal_error]
+    strained? = Alambique.Load.Capacity.strained?(store, limits)
+
+    assert judge(%{errors: 285, store_full: Verdict.store_full?(samples, strained?)}) ==
+             {:invalid, :store_full}
   end
 
   describe "swap" do
