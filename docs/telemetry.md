@@ -69,7 +69,7 @@ integers.
 | `[:alambique, :cell, :wake]` | `duration`, and the store requests of the wake: `trips` (all), `gets`, `heads`, `lists`, `puts`, `deletes` | `cell`, `result` (`:ok` or `:error`), `requests` (the same requests by `{operation, kind of object}`, see below), and `location` (the id of the location the cell was woken in), `epoch`, `txid` (the head after the fence and migrations) and `source` (`:empty` for a cell with nothing in the store, `:restore`, or `:local` for a reused file) for `:ok`, or `reason` for `:error` |
 | `[:alambique, :cell, :migrate]` | `duration` | `cell`, `version` |
 | `[:alambique, :cell, :commit]` | `duration`, `transactions` (callers in the batch), `inflight` (batches in flight when this one was sent, itself included), and `queued_ms` (from the encode to the acknowledgement) for `:ok` | `cell`, `location`, `epoch`, `txid`, `result` (`:ok`, `:fenced` or `:error`), and `reason` unless `:ok` |
-| `[:alambique, :cell, :checkpoint]` | `duration`, `bytes` (size of the WAL before) | `cell`, `result` (`:ok`, or `:error` when SQLite was busy or frames were not replicated: the WAL stays for the next acknowledgement) |
+| `[:alambique, :cell, :checkpoint]` | `duration`, `bytes` (size of the WAL before) | `cell`, `result` (`:ok`, or `:error` when SQLite was busy or frames were not replicated: the WAL stays for the next acknowledgement). Also emitted for `Alambique.checkpoint/3`; not for the checkpoint of a hibernation |
 | `[:alambique, :cell, :hibernate]` | `duration` | `cell`, `location`, `epoch`, `reason` (`:idle`, `:request`, `:shutdown` or `:frozen`) |
 | `[:alambique, :admission, :evict]` | `bytes` (recorded for the awake cells after the hibernation) | `cell`, `max_cells`, `max_bytes` (`nil` without a budget): emitted for each cell hibernated because the awake cells filled `awake: [max_cells: ...]` or reached `max_bytes`, so that another could wake (design §7) |
 | `[:alambique, :cell, :relocate]` | `duration` | `cell`, `from` and `to` (location ids), `result` (`:ok` or `:error`), `cleanup` (what the last step did to the objects left at `from`: `:cleaned`, `:waiting` for the grace period, `:error`, queued for the compactor in both cases, or `:none` if the move did not get that far or the cell was already at `to`) |
@@ -89,7 +89,9 @@ location (design §18), whether `relocate` ran it, the compactor or
 (`moved_grace_ms`) has not passed; the cleanup then deleted nothing.
 
 `:checkpoint` is emitted when an awake cell's WAL passes `wal.checkpoint_bytes`
-(design §6); the hibernation checkpoint is part of `:hibernate`.
+and when `Alambique.checkpoint/3` runs it (design §6); a call that answers
+`{:error, :busy}` because the uploads missed the deadline emits none. The
+hibernation checkpoint is part of `:hibernate`.
 
 `:hibernate` with `reason: :frozen` is emitted when a lease renewal finds the
 freeze marker (see "Freeze events"). A wake that finds the marker is reported

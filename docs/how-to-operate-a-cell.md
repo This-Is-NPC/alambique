@@ -3,8 +3,8 @@
 **The question:** how do I look at a cell in the store, restore it to a local
 file, freeze it, deal with a cell the instance froze because it crashed the VM,
 move it to another node or another location, get back files that retention
-removed, read what the scrub found, restart a node without failed calls, or check that the disk under the cells does not stall
-writes?
+removed, read what the scrub found, restart a node without failed calls, check that the disk under the cells does not stall
+writes, or empty the WAL of an awake cell now?
 
 This guide stands alone. It needs the store and, for moving a cell and for
 hibernating a frozen one at once, the running cluster. The background
@@ -510,6 +510,32 @@ tmpfs only (a lab setup that loses the data at a reboot). ext4 and xfs are the
 usual choice, but we did not measure them. We also did not test nodatacow
 volumes for the store, or btrfs mount options. If you cannot move the disk,
 expect every acknowledged write to wait out the stall.
+
+## 11. Empty the WAL of an awake cell now
+
+An awake cell moves its WAL into the database file when the `-wal` file passes
+`wal: [checkpoint_bytes: ...]` (default 64 MiB), and a hibernating cell does
+it before it releases. To free the disk sooner, for example when a monitor sees
+the disk filling, without putting the cell to sleep:
+
+```elixir
+:ok = Alambique.checkpoint(MyApp.Cells, "org-1")
+```
+
+The cell uploads what is pending, waits until the store has acknowledged every
+upload, runs `wal_checkpoint(TRUNCATE)`, and keeps serving. It truncates no
+frame that is not yet replicated. It answers no other call meanwhile.
+
+| Answer | Meaning | What to do |
+| --- | --- | --- |
+| `:ok` | The `-wal` file is empty. | Nothing. |
+| `{:error, :busy}` | The uploads were not acknowledged within `deadline_ms` (default `wal: [checkpoint_deadline_ms: 10_000]`), or SQLite could not finish. The WAL stays and the cell serves. | Repeat later; look at the store if it persists. |
+| `:asleep` | Nobody owns the cell. It is not woken. | Nothing: hibernation already moved its WAL. |
+
+`Alambique.checkpoint(MyApp.Cells, "org-1", deadline_ms: 30_000)` waits longer
+for one call. The call goes to the node that owns the cell, as any other. The
+telemetry event `[:alambique, :cell, :checkpoint]` reports each checkpoint
+([telemetry.md](telemetry.md)).
 
 ## Troubleshooting
 
