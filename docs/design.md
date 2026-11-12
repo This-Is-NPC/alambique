@@ -1157,15 +1157,18 @@ Why each overlap is safe:
   instance, `Alambique.Admission.Wakes`, holds the slots, so each has one
   holder at a time and every change is one message to it. The router asks it
   for a slot (a call) before it starts a cell; the holder is that calling
-  process. The cell, when it starts, takes the slot over from the process that
-  woke it (a cast), and gives it back when its wake ends. The server monitors
-  every holder, so the slot comes back when its holder dies: a caller killed
-  between the grant and the start of the cell, or a cell killed mid-wake
-  (even by `:kill`). Taking a slot, handing it to a cell and giving it back
-  are each applied once: a later `end` from a process that holds nothing, or
-  a hand-over from a holder that already died, changes nothing. If the caller
-  died first the cell wakes without a slot, so for that one wake the node may
-  run one wake above `max_wakes`; the slot was already free for another.
+  process. The cell, in its own process before any wake work, takes the slot
+  over from the process that woke it (a call), and gives it back when its
+  wake ends. The server monitors every holder, so the slot comes back when its
+  holder dies: a caller killed between the grant and the start of the cell, or
+  a cell killed mid-wake (even by `:kill`). Taking a slot, handing it to a
+  cell and giving it back are each applied once: a later `end` from a process
+  that holds nothing changes nothing. If the caller died before the cell took
+  the slot over, the slot was already freed; the cell then asks for one of its
+  own like any wake (it waits in the queue, within the same cap and
+  `wake_queue_ms`), and if it gets none it stops without restoring, and the
+  callers already routed to it get `{:error, :overloaded}` as for a failed
+  wake. So the wakes in progress, cells included, never pass `max_wakes`.
   The messages cost microseconds against a wake that restores a file.
   A wake that finds no free slot does not fail at once: it waits in a FIFO
   queue of at most `max_wake_queue` places (default four times `max_wakes`,

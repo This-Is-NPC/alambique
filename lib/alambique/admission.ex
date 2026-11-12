@@ -43,15 +43,28 @@ defmodule Alambique.Admission do
   def release(config), do: end_wake(config, self())
 
   @doc """
-  Called by the cell `pid` when it starts: the slot held by `holder`, the
-  process that woke it, is now the cell's, and `Membership` is asked to
-  forget the cell's memory record if it dies.
+  Called by the cell `pid` when it starts: `Membership` is asked to forget
+  the cell's memory record if it dies.
   """
-  @spec waking(Config.t(), pid, pid) :: :ok
-  def waking(config, pid, holder) do
-    GenServer.cast(config.wakes, {:transfer, holder, pid})
+  @spec waking(Config.t(), pid) :: :ok
+  def waking(config, pid) do
     [{:owner, owner}] = :ets.lookup(config.admission, :owner)
     GenServer.cast(owner, {:monitor_wake, pid})
+  end
+
+  @doc """
+  Called by the cell, in its own process before any wake work, to hold a
+  slot: the one of `holder`, the process that woke it, which is moved to the
+  cell. If `holder` died, its slot was already freed and the cell takes one
+  like any wake does, waiting in the queue; `{:error, :overloaded}` means the
+  cell must not wake.
+  """
+  @spec take_over(Config.t(), pid | nil) :: :ok | {:error, :overloaded}
+  def take_over(config, holder) do
+    case GenServer.call(config.wakes, {:transfer, holder, self()}) do
+      :ok -> :ok
+      :lost -> begin_wake(config, config.awake.wake_queue_ms)
+    end
   end
 
   @doc "Ends the wake of `pid`: gives its slot back once, however many times it is called."

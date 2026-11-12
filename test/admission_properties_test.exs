@@ -57,14 +57,37 @@ defmodule Alambique.AdmissionPropertiesTest do
     {state.holders |> Map.keys() |> MapSet.new(), waiting}
   end
 
-  defp process, do: spawn(fn -> Process.sleep(:infinity) end)
-
-  # A caller: begins a wake and reports the answer to the test.
-  defp caller(config, test) do
+  # A caller begins a wake; a cell takes over the slot of its holder. Each
+  # reports the answer to the test.
+  defp actor(config, test, holder) do
     spawn(fn ->
-      send(test, {:answer, self(), Admission.begin_wake(config, config.awake.wake_queue_ms)})
+      answer =
+        if holder,
+          do: Admission.take_over(config, holder),
+          else: Admission.begin_wake(config, config.awake.wake_queue_ms)
+
+      send(test, {:answer, self(), answer})
       Process.sleep(:infinity)
     end)
+  end
+
+  # What the server must do with a process that asks for a slot of its own.
+  defp ask(config, test, holder, m, max, cap) do
+    pid = actor(config, test, holder)
+
+    cond do
+      m.waiting == [] and MapSet.size(m.holders) < max ->
+        assert_receive {:answer, ^pid, :ok}
+        {pid, %{m | holders: MapSet.put(m.holders, pid)}}
+
+      length(m.waiting) < cap ->
+        eventually(fn -> pid in elem(snapshot(config), 1) end, 500)
+        {pid, %{m | waiting: m.waiting ++ [pid]}}
+
+      true ->
+        assert_receive {:answer, ^pid, {:error, :overloaded}}
+        {pid, m}
+    end
   end
 
   defp kill(pid) do
@@ -108,38 +131,24 @@ defmodule Alambique.AdmissionPropertiesTest do
         {m, procs} =
           Enum.reduce(commands, {%{holders: MapSet.new(), waiting: []}, []}, fn
             :arrive, {m, procs} ->
-              pid = caller(config, test)
-
-              m =
-                cond do
-                  m.waiting == [] and MapSet.size(m.holders) < max ->
-                    assert_receive {:answer, ^pid, :ok}
-                    %{m | holders: MapSet.put(m.holders, pid)}
-
-                  length(m.waiting) < cap ->
-                    eventually(fn -> pid in elem(snapshot(config), 1) end, 500)
-                    %{m | waiting: m.waiting ++ [pid]}
-
-                  true ->
-                    assert_receive {:answer, ^pid, {:error, :overloaded}}
-                    m
-                end
-
+              {pid, m} = ask(config, test, nil, m, max, cap)
               {m, procs ++ [pid]}
 
             _, {m, []} ->
               {m, []}
 
             {:start, i}, {m, procs} ->
-              # The cell takes over the slot of a holder; one that is dead lost it.
+              # The cell takes over the slot of a holder. If the holder is gone,
+              # or holds none, the cell asks for a slot like any wake.
               holder = Enum.at(procs, rem(i, length(procs)))
-              cell = process()
-              GenServer.cast(config.wakes, {:transfer, holder, cell})
 
               if holder in m.holders do
+                cell = actor(config, test, holder)
+                assert_receive {:answer, ^cell, :ok}
                 holders = m.holders |> MapSet.delete(holder) |> MapSet.put(cell)
                 {%{m | holders: holders}, procs ++ [cell]}
               else
+                {cell, m} = ask(config, test, holder, m, max, cap)
                 {m, procs ++ [cell]}
               end
 
