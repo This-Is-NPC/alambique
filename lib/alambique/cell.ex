@@ -19,7 +19,7 @@ defmodule Alambique.Cell do
   alias Alambique.{Admission, Config, Fault, Freeze, Inflight, Lease, Membership, Telemetry, Tx}
   alias Alambique.Feed.Publisher
   alias Alambique.Store.Metered
-  alias Alambique.Replication.Replicator
+  alias Alambique.Replication.{Replicator, Retry}
 
   # Lifecycle
 
@@ -530,10 +530,11 @@ defmodule Alambique.Cell do
 
   defp info(_message, state), do: {:noreply, state}
 
+  # One attempt: the cell cannot serve while it waits, and a retry that ran to
+  # the end of the lease would leave no time for the renewal. A failed check
+  # counts as not frozen; the next renewal looks again.
   defp frozen?(state),
-    do:
-      Freeze.frozen?(state.repl_ctx, state.id, deadline: State.deadline(state)) ==
-        {:ok, true}
+    do: Freeze.frozen?(state.repl_ctx, state.id, deadline: Retry.deadline_in(0)) == {:ok, true}
 
   # Commit
 

@@ -1130,7 +1130,9 @@ Why each overlap is safe:
   cannot be stopped: a write is durable or not, as in §6.
 
 **Serving.** A call checks `Lease.valid?` first and stops the cell with
-`:lease_expired` if it is false. A timer at `ttl / 3` first looks for the freeze marker (one `HEAD`; a frozen
+`:lease_expired` if it is false. A timer at `ttl / 3` first looks for the freeze marker (one `HEAD`, one
+attempt without retries, because the cell serves nothing while it waits and a
+retry could use up the lease; a failed check counts as not frozen; a frozen
 cell hibernates, §10) and then renews the lease: `:lost` stops the cell with `:lease_lost`; another error keeps the cell until the
 lease stops being valid. A sync that returns `:fenced` stops it with `:fenced`. A cell that is told that
 it was taken over (§5.1) renews at once. A cell that stops for one of these
