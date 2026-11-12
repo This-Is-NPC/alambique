@@ -101,6 +101,29 @@ defmodule Alambique.DiskFullTest do
     end
   end
 
+  describe "read replicas" do
+    test "a replica that cannot be written is :disk_full, not a crash", ctx do
+      owner = start_instance(ctx, migrations: @schema)
+      cell = unique_cell()
+      {:ok, _} = Alambique.execute(owner, cell, "INSERT INTO t (n, v) VALUES (1, 'kept')")
+      :ok = Alambique.hibernate(owner, cell)
+      reader = start_instance(ctx, migrations: @schema)
+
+      Fault.install(fn
+        :query_publish, _ -> {:error, :enospc}
+        _, _ -> :ok
+      end)
+
+      on_exit(&Fault.uninstall/0)
+
+      assert %{rows: [], errors: [{^cell, :disk_full}]} =
+               Alambique.Query.all(reader, [cell], "SELECT n FROM t")
+
+      Fault.uninstall()
+      assert %{errors: [], rows: [_]} = Alambique.Query.all(reader, [cell], "SELECT n FROM t")
+    end
+  end
+
   describe "the classifier" do
     test "names a full disk by its code and leaves other reasons alone" do
       for reason <- [

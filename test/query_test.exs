@@ -419,8 +419,8 @@ defmodule Alambique.QueryTest do
       dir = Cache.dir(Alambique.Config.fetch!(reader))
       Query.all(reader, ["a"], "SELECT 1")
 
-      fresh = Cache.tmp(dir, "a")
-      stale = Cache.tmp(dir, "a")
+      {:ok, fresh} = Cache.tmp(dir, "a")
+      {:ok, stale} = Cache.tmp(dir, "a")
       File.write!(fresh, "x")
       File.write!(stale, "x")
       File.touch!(stale, {{2020, 1, 1}, {0, 0, 0}})
@@ -612,7 +612,7 @@ defmodule Alambique.QueryTest do
 
     test "a trim leaves the directory of a temporary file", ctx do
       dir = Cache.dir(Alambique.Config.fetch!(start_instance(ctx, migrations: @schema)))
-      tmp = Cache.tmp(dir, "a@1")
+      {:ok, tmp} = Cache.tmp(dir, "a@1")
       assert {0, _} = Cache.trim(dir, 1_000_000_000, 600)
       assert File.exists?(tmp)
     end

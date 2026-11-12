@@ -30,16 +30,18 @@ defmodule Alambique.Query.Cache do
   directory without files is removed by `trim/3`, so the file keeps it alive
   while the replica is built.
   """
-  @spec tmp(Path.t(), String.t()) :: Path.t()
+  @spec tmp(Path.t(), String.t()) :: {:ok, Path.t()} | {:error, File.posix()}
   def tmp(dir, cell) do
     cell_dir = cell_dir(dir, cell)
     path = Path.join(cell_dir, ".tmp-#{System.unique_integer([:positive])}")
-    File.mkdir_p!(cell_dir)
 
-    case File.write(path, "", [:exclusive]) do
-      :ok -> path
-      # `trim/3` removed the directory just created: make it again.
-      {:error, :enoent} -> tmp(dir, cell)
+    with :ok <- File.mkdir_p(cell_dir) do
+      case File.write(path, "", [:exclusive]) do
+        :ok -> {:ok, path}
+        # `trim/3` removed the directory just created: make it again.
+        {:error, :enoent} -> tmp(dir, cell)
+        {:error, _} = error -> error
+      end
     end
   end
 
@@ -118,11 +120,12 @@ defmodule Alambique.Query.Cache do
   end
 
   @doc "Flushes a file to disk, so a renamed replica is never a torn one."
-  @spec sync(Path.t()) :: :ok
+  @spec sync(Path.t()) :: :ok | {:error, File.posix()}
   def sync(path) do
-    {:ok, io} = :file.open(path, [:read, :write, :raw, :binary])
-    :ok = :file.sync(io)
-    :ok = :file.close(io)
+    with {:ok, io} <- :file.open(path, [:read, :write, :raw, :binary]),
+         :ok <- :file.sync(io) do
+      :file.close(io)
+    end
   end
 
   @doc "Page size from the header of a SQLite file."

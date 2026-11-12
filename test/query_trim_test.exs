@@ -49,7 +49,7 @@ defmodule Alambique.QueryTrimTest do
     done = Path.join(Cache.cell_dir(dir, "a"), "0000000000000001-1-00000000000000aa.db")
     File.mkdir_p!(Path.dirname(done))
     File.write!(done, String.duplicate("x", 600))
-    building = Cache.tmp(dir, "b")
+    {:ok, building} = Cache.tmp(dir, "b")
     File.write!(building, String.duplicate("y", 600))
 
     assert {1, 600} = Cache.trim(dir, 1_000, 600)

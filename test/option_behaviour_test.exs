@@ -113,7 +113,7 @@ defmodule Alambique.OptionBehaviourTest do
 
   test "temporary replica files use the configured age", ctx do
     dir = Path.join(ctx.dir, "cache")
-    path = Cache.tmp(dir, "cell")
+    {:ok, path} = Cache.tmp(dir, "cell")
     File.write!(path, "x")
 
     old =

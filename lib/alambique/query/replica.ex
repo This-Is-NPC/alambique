@@ -96,18 +96,18 @@ defmodule Alambique.Query.Replica do
   # read: the restore starts again from a fresh listing, `attempts` times in
   # all.
   defp restore(ctx, dir, {cell, key}, target, deadline, attempts) do
-    tmp = Cache.tmp(dir, key)
+    with {:ok, tmp} <- Cache.tmp(dir, key) do
+      case Replication.restore(ctx, cell, tmp, target, timeout_ms: remaining(deadline)) do
+        {:ok, %{txid: txid, epoch: epoch, checksum: checksum, segments: segments}} ->
+          publish(dir, key, tmp, {txid, epoch, checksum}, target, :restore, segments)
 
-    case Replication.restore(ctx, cell, tmp, target, timeout_ms: remaining(deadline)) do
-      {:ok, %{txid: txid, epoch: epoch, checksum: checksum, segments: segments}} ->
-        publish(dir, key, tmp, {txid, epoch, checksum}, target, :restore, segments)
+        {:error, reason} = error ->
+          File.rm(tmp)
 
-      {:error, reason} = error ->
-        File.rm(tmp)
-
-        if attempts > 1 and changed?(reason),
-          do: restore(ctx, dir, {cell, key}, target, deadline, attempts - 1),
-          else: error
+          if attempts > 1 and changed?(reason),
+            do: restore(ctx, dir, {cell, key}, target, deadline, attempts - 1),
+            else: error
+      end
     end
   end
 
@@ -171,8 +171,12 @@ defmodule Alambique.Query.Replica do
   defp limit(:latest), do: :infinity
 
   defp apply_chain(ctx, dir, {cell, key}, target, cached, chain, deadline, reflink?) do
-    tmp = Cache.tmp(dir, key)
+    with {:ok, tmp} <- Cache.tmp(dir, key) do
+      apply_chain_into(tmp, ctx, dir, {cell, key}, target, cached, chain, deadline, reflink?)
+    end
+  end
 
+  defp apply_chain_into(tmp, ctx, dir, {cell, key}, target, cached, chain, deadline, reflink?) do
     try do
       with {:ok, page_size} <- page_size(cached.path),
            {:ok, copy} <- Cache.clone(cached.path, tmp, reflink?),
@@ -247,23 +251,32 @@ defmodule Alambique.Query.Replica do
 
   # Moves the complete temporary file to its final name, and drops the
   # replicas it supersedes.
+  # A write the disk refuses is an `{:error, :enospc}` (`:disk_full` to the
+  # caller, design §6.2); the temporary file is left to the caller to remove.
   defp publish(dir, cell, tmp, {txid, epoch, checksum}, target, source, segments) do
-    Cache.sync(tmp)
     final = Cache.path(dir, cell, txid, epoch, checksum)
-    File.rename!(tmp, final)
 
-    superseded =
-      for entry <- Cache.entries(dir, cell),
-          entry.path != final,
-          target == :latest or entry.txid == txid,
-          do: entry
+    with :ok <- Fault.point(:query_publish, %{cell: cell, path: tmp}),
+         :ok <- Cache.sync(tmp),
+         :ok <- File.rename(tmp, final),
+         {:ok, %{size: bytes}} <- File.stat(final) do
+      superseded =
+        for entry <- Cache.entries(dir, cell),
+            entry.path != final,
+            target == :latest or entry.txid == txid,
+            do: entry
 
-    Cache.remove(superseded)
-    replica = %{path: final, txid: txid, bytes: File.stat!(final).size}
+      Cache.remove(superseded)
+      replica = %{path: final, txid: txid, bytes: bytes}
 
-    case source do
-      {:refresh, copy} -> {:ok, Map.put(replica, :copy, copy), :refresh, segments}
-      source -> {:ok, replica, source, segments}
+      case source do
+        {:refresh, copy} -> {:ok, Map.put(replica, :copy, copy), :refresh, segments}
+        source -> {:ok, replica, source, segments}
+      end
+    else
+      {:error, _} = error ->
+        File.rm(tmp)
+        error
     end
   end
 
