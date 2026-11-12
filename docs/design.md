@@ -990,9 +990,10 @@ connection. The process registers its name first and wakes in
 first calls on one node share one process and one wake. Before the wake the
 process creates its in-flight marker (§10). Wake order:
 
-1. Read the state of the store, take the lease and look for the freeze marker
-   at the same time (the three do not depend on each other; §7.2 says why that
-   is safe):
+1. Take the lease, then look for the freeze marker and read the state of the
+   store at the same time. The wake reads nothing of the cell before it holds
+   the lease, so a lease held elsewhere or a store that fails costs one
+   request, not a restore (§7.2):
    - Acquire the lease (§5), or take it over (§5.1) when the wake was started by
      `Alambique.take_over/4`. A lease that names this instance (`node_id` and
      incarnation, §5) while no process of this node holds the cell is a
@@ -1013,7 +1014,7 @@ process creates its in-flight marker (§10). Wake order:
      first removes the `cell.db.restore-*` files of interrupted restores. A
      clean hibernation writes a marker (`cell.db.meta`: TXID, database
      checksum, page size). A restore deletes it before it touches the file; a
-     wake that reuses the file deletes it once it holds the lease. The file is
+     wake that reuses the file deletes it at the fence. The file is
      reused when the marker equals the newest object in the store
      (`Alambique.Replication.head/2`) and `Replicator.from_restore/3` finds the
      file's own checksum equal to it. Anything else, including a missing marker
@@ -1021,9 +1022,10 @@ process creates its in-flight marker (§10). Wake order:
      reused only when this node hibernated the cell last and nobody has written
      to it since.
 
-   The wake goes on when all three are done. The error it reports is the
-   lease's, then the freeze marker's, then the store's, and what the read made
-   and no cell will use (a lazy plan and its file) is released.
+   The wake goes on when both are done. A failed lease ends it there. The
+   error it reports after that is the freeze marker's, then the store's, and
+   what the read made and no cell will use (a lazy plan and its file) is
+   released.
 2. Open the connection (WAL mode, §6) and write the fence
    (§6). On `:txid_taken` the connection is closed and the wake restores
    again and retries the fence, up to five times. The lease is renewed first
@@ -1071,14 +1073,19 @@ with 12 single-commit files after the last snapshot), the steps are:
 | Router reads the lease | `GET lease` | nothing | 1 | 1 |
 | The wake reads it again | `GET lease` | the router's read | 2 | none (passed on) |
 | Take the lease | `PUT lease` (if-match) | the lease read | 3 | 2 |
-| Frozen marker | `HEAD frozen` | nothing | 4 | 2 |
-| List the cell's files | `LIST` | nothing | 5 | 2 |
-| Chain head, local file reused | `HEAD` of the last 16 files (together), then `GET` range of the last | the listing | 6, 7 | 3 (together) |
-| Chain, full restore | `GET` of the snapshot, then of each file after it, one at a time | the listing | 6 to 20 (14 files) | 3 (together) |
-| Chain, lazy restore | `GET` range of the first and the last 64 KiB of each file | the listing | 6, 7 (after a second `LIST` for a small chain) | 3, 4 |
-| Page 1, lazy restore | `GET` range | the edges | 8 | 5 |
-| Fence | `PUT` segment (if-none-match) | the lease and the state | 8 (local), 21 (full), 9 (lazy) | 4 (local, full), 6 (lazy) |
+| Frozen marker | `HEAD frozen` | the lease | 4 | 3 |
+| List the cell's files | `LIST` | the lease | 5 | 3 |
+| Chain head, local file reused | `HEAD` of the last 16 files (together), then `GET` range of the last | the listing | 6, 7 | 4 (together) |
+| Chain, full restore | `GET` of the snapshot, then of each file after it, one at a time | the listing | 6 to 20 (14 files) | 4 (together) |
+| Chain, lazy restore | `GET` range of the first and the last 64 KiB of each file | the listing | 6, 7 (after a second `LIST` for a small chain) | 4, 5 |
+| Page 1, lazy restore | `GET` range | the edges | 8 | 6 |
+| Fence | `PUT` segment (if-none-match) | the lease and the state | 8 (local), 21 (full), 9 (lazy) | 5 (local, full), 7 (lazy) |
 | Schema index entry | `PUT` | the open (the version) | 22 (full, lazy) | with the fence |
+
+The rounds above follow the order of §7.1 step 1: the lease comes first. The
+latencies below were measured before that change, when the lease, the frozen
+marker and the listing shared one round; the wake now takes one round more
+(25 ms here) and was not measured again.
 
 Measured with 25 ms per request, p50 of the call that wakes the cell and
 lists the 50 newest messages (30 wakes of 3 cells, `mise run bench:wake -- 10`):
@@ -1098,19 +1105,17 @@ round start together and the wake waits for the slowest.
 
 Why each overlap is safe:
 
-- **Reading the state before the lease is held.** Nothing is served and nothing
-  is written (but the lease itself) until all of it is done. The fence is a
-  write at the TXID after the state that was read, with `if-none-match`: if a
-  previous owner wrote between the read and the lease, that TXID exists, the
-  fence fails with `:txid_taken` and the wake reads again (step 2 of the list
-  above). Reading earlier makes the state older, never newer than the lease,
-  and the fence is what orders the new owner after the old one, so the order
-  of the reads and the lease changes nothing about it. `tla/Pipeline.tla`
-  models the restore, the check of the lease and the fence as one step; the
-  bug "NoFence" and the others it already finds are the ones that this order
-  could introduce, and none of them changed.
-- **The frozen marker.** A wake took the lease before looking for it, and
-  still does: a frozen cell fails with `:frozen` and releases the lease.
+- **The lease before any read of the cell.** A node that cannot take the lease
+  (held elsewhere, the store failing on the put) pays one request. Reading in
+  parallel with the lease saved a round, but after a store failure every
+  cell woke together and each restored what it could not use. The state is
+  now read after the lease, so it is never older than it; the fence still
+  fails with `:txid_taken` if a previous owner wrote in between (step 2 of
+  the list above).
+- **The frozen marker.** It is one `HEAD`, not data of the cell, and a frozen
+  cell fails with `:frozen` and releases the lease. It runs beside the read
+  instead of before it, so a frozen cell costs a restore that is released
+  when the marker is found; asking first would add a round to every wake.
 - **The lease from the router's read.** The put is `if-none-match` when no
   lease was read and `if-match` on the etag that was read otherwise. If the
   object changed in between, the put fails and the lease is read again, so a

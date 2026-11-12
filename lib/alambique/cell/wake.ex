@@ -1,8 +1,8 @@
 defmodule Alambique.Cell.Wake do
   @moduledoc false
   require Logger
-  # Wake order of a cell (design §7): the lease, the frozen check and the read
-  # of the store's state run together; then fence, migrations. Every step
+  # Wake order of a cell (design §7): the lease; then the frozen check and the
+  # read of the store's state together; then fence, migrations. Every step
   # returns `{:ok, state}` or `{:error, reason, state}` with the resources
   # taken so far, so the caller can release them.
 
@@ -36,36 +36,32 @@ defmodule Alambique.Cell.Wake do
     with {:error, reason} <- Local.prepare(state.path), do: {:error, reason, state}
   end
 
-  # The lease, the frozen check and the read of the store's state do not
-  # depend on each other, so they run together and a wake takes the time of
-  # the slowest instead of their sum. Nothing serves, and nothing is written
-  # but the lease, until all three are done: the fence below is a conditional
-  # write at the TXID after the state that was read, so a state that went
-  # stale, because a previous owner wrote before the lease was ours, makes it
+  # The lease first: a wake that cannot take it reads nothing of the cell, so
+  # a lease held elsewhere or a store that fails costs one request, not a
+  # restore. The frozen marker and the read of the store's state do not depend
+  # on each other, so they run together once the lease is held. Nothing
+  # serves until both are done; the fence below is a conditional write at the
+  # TXID after the state that was read, so a state that went stale makes it
   # fail with `:txid_taken` and the wake reads again.
   #
-  # The error reported is the lease's, then the frozen marker's, then the
-  # read's. Whatever the read made but no cell will use is released.
+  # The error reported is the frozen marker's, then the read's. Whatever the
+  # read made but no cell will use is released.
   defp overlap(state) do
-    lease = Task.async(fn -> acquire(state) end)
-    frozen = Task.async(fn -> frozen(state) end)
-    data = Task.async(fn -> read_state(state) end)
+    with {:ok, state} <- acquire(state) do
+      frozen = Task.async(fn -> frozen(state) end)
+      data = Task.async(fn -> read_state(state) end)
 
-    case {Task.await(lease, :infinity), Task.await(frozen, :infinity),
-          Task.await(data, :infinity)} do
-      {{:ok, state}, :ok, {:ok, found}} ->
-        {:ok, state, found}
+      case {Task.await(frozen, :infinity), Task.await(data, :infinity)} do
+        {:ok, {:ok, found}} ->
+          {:ok, state, found}
 
-      {{:ok, state}, :ok, {:error, reason}} ->
-        {:error, reason, state}
+        {:ok, {:error, reason}} ->
+          {:error, reason, state}
 
-      {{:ok, state}, {:error, reason}, data} ->
-        release_found(data)
-        {:error, reason, state}
-
-      {{:error, reason, state}, _, data} ->
-        release_found(data)
-        {:error, reason, state}
+        {{:error, reason}, data} ->
+          release_found(data)
+          {:error, reason, state}
+      end
     end
   end
 
@@ -217,11 +213,10 @@ defmodule Alambique.Cell.Wake do
     end
   end
 
-  # The state of the store, read beside the lease: the head of the chain when
-  # the local file may be reused, else a restore. Nothing here needs the
-  # lease. A restore replaces the local file, so the marker that vouches for
-  # it goes first; a file that is reused keeps its marker until the wake has
-  # the lease.
+  # The state of the store, read once the lease is held: the head of the chain
+  # when the local file may be reused, else a restore. A restore replaces the
+  # local file, so the marker that vouches for it goes first; a file that is
+  # reused keeps its marker until the fence.
   defp read_state(state) do
     case Local.read(state.path) do
       nil ->

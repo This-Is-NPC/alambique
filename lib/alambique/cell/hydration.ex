@@ -26,7 +26,7 @@ defmodule Alambique.Cell.Hydration do
   Makes the lazy plan of a restore result and fetches page 1, which opening
   the file reads at once. Returns the `Lazy` for the replicator, or `nil` for
   a result that is a complete file. It needs no lease and no process of the
-  cell, so a wake runs it beside the lease.
+  cell, so a wake runs it beside the frozen check.
   """
   @spec prepare(State.t(), map) :: {:ok, Lazy.t() | nil} | {:error, {:lazy, term}}
   def prepare(state, %{lazy: _} = result) do

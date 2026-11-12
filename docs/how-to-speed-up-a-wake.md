@@ -21,10 +21,11 @@ mailbox of 5 MB with twelve commits after its last snapshot took:
 | Lazy restore | 495 ms | 215 ms | 497 ms | 219 ms |
 
 (Measured by `mise run bench:wake -- 10`, 25 ms added to every request,
-including the first query; the table is in design §7.2.) The floor is four
+including the first query, before the lease moved ahead of the reads; the
+table is in design §7.2.) The floor is now five
 round trips for a reused or fully restored file: the lease read, then the
-lease, the freeze marker and the listing together, then the files, then the
-fence.
+lease, then the freeze marker and the listing together, then the files, then
+the fence.
 
 ## Prerequisites
 

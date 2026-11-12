@@ -48,7 +48,8 @@ defmodule Alambique.WakeOverlapTest do
     end
   end
 
-  test "the lease, the frozen check and the listing run together, then the files", ctx do
+  test "the lease comes first, then the frozen check and the listing together, then the files",
+       ctx do
     {_seeder, cell} = seed(ctx)
 
     {reader, {measurements, meta}, trace} = cold_wake(ctx, cell, lazy_restore: false)
@@ -57,8 +58,9 @@ defmodule Alambique.WakeOverlapTest do
     lease = request(trace, :put, ~r|/lease$|)
     frozen = request(trace, :head, ~r|/frozen$|)
     listing = request(trace, :list, ~r|/cells/|)
-    assert TracingStore.overlap?(lease, frozen)
-    assert TracingStore.overlap?(lease, listing)
+    assert elem(lease, 3) <= elem(frozen, 2)
+    assert elem(lease, 3) <= elem(listing, 2)
+    assert TracingStore.overlap?(frozen, listing)
 
     # The files of the chain are read at the same time as well, and only the
     # fence waits for all of it.
@@ -71,7 +73,7 @@ defmodule Alambique.WakeOverlapTest do
     assert elem(lease, 3) <= fence_from
 
     # Before: one request after the other, about 22 of them (880 ms).
-    assert System.convert_time_unit(measurements.duration, :native, :millisecond) < 12 * @latency
+    assert System.convert_time_unit(measurements.duration, :native, :millisecond) < 13 * @latency
 
     assert {:ok, %{rows: [[@commits]]}} = Alambique.query(reader, cell, "SELECT count(*) FROM t")
   end
