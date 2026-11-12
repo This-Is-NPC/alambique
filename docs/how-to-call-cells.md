@@ -65,11 +65,21 @@ not raise it.
 ```elixir
 {:ok, node} = Alambique.owner(MyApp.Cells, "org-1")
 {:ok, node} = Alambique.owner(MyApp.Cells, "org-1", hint: true)  # cached owner, no store read
+:none = Alambique.owner(MyApp.Cells, "org-2", peers: true)       # asks the nodes, no store, no wake
 {:ok, %{epoch: epoch}} = Alambique.lease(MyApp.Cells, "org-1")   # without waking
 {:ok, node} = Alambique.touch(MyApp.Cells, "org-1")              # wake it and say where
 %{cells: ids, next: next, count: n} = Alambique.cells(MyApp.Cells, limit: 100)
 {:ok, %{cells: ids, next: next}} = Alambique.list_cells(MyApp.Cells, prefix: "org-", limit: 100)
 ```
+
+`owner/3` never wakes a cell. By default it reads the lease. With `peers:
+true` it asks the processes instead: the local registry, then the other
+members of the instance in parallel, with no store request. `{:ok, node}`
+names the node that holds the cell awake; `:none` means no member does. The
+answer can be one message stale: a cell that is waking may still be reported
+`:none`, and a member that does not answer within `call_timeout_ms` counts as
+not holding the cell. Use the default when `:none` must mean that the lease is
+free.
 
 `Alambique.cells/2` lists the cells awake on the local node in id order.
 With `details: true` each entry is a map, so a monitor can pick the cell to

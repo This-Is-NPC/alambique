@@ -98,16 +98,45 @@ defmodule Alambique.Router do
     end
   end
 
-  @spec owner(atom, String.t(), boolean) :: {:ok, node} | :none | {:error, term}
-  def owner(name, cell, hint? \\ false) do
+  # `source` is `:lease` (read the lease), `:hint` (owner-hint cache first) or
+  # `:peers` (the registries of the member nodes, no store request).
+  @spec owner(atom, String.t(), :lease | :hint | :peers) :: {:ok, node} | :none | {:error, term}
+  def owner(name, cell, source \\ :lease) do
     config = Config.fetch!(name)
 
     with :ok <- Placement.validate_id(config, cell) do
       case Cell.whereis(config, cell) do
         pid when is_pid(pid) -> {:ok, node()}
-        nil when hint? -> hinted_owner(config, cell)
+        nil when source == :hint -> hinted_owner(config, cell)
+        nil when source == :peers -> peer_owner(config, cell)
         nil -> lease_owner(config, cell)
       end
+    end
+  end
+
+  # Asks the other members in parallel whether their registry holds the cell.
+  # A node that does not answer within the call timeout counts as not holding it.
+  defp peer_owner(config, cell) do
+    peers = Membership.nodes(config) -- [node()]
+
+    results =
+      :erpc.multicall(peers, __MODULE__, :holds?, [config.name, cell], config.call_timeout_ms)
+
+    peers
+    |> Enum.zip(results)
+    |> Enum.find_value(:none, fn
+      {peer, {:ok, true}} -> {:ok, peer}
+      _ -> nil
+    end)
+  end
+
+  @doc false
+  # Whether a process of this node holds the cell; the `:erpc` target of `peer_owner/2`.
+  @spec holds?(atom, String.t()) :: boolean
+  def holds?(name, cell) do
+    case Config.fetch(name) do
+      {:ok, config} -> Cell.whereis(config, cell) != nil
+      :error -> false
     end
   end
 

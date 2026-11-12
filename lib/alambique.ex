@@ -1108,10 +1108,28 @@ defmodule Alambique do
   stored as the hint. A hinted answer can be stale, for example after the cell
   moved; a routed call corrects the hint when it forwards. Default: `false`,
   which always reads the lease.
+
+  With `peers: true` the answer comes from the processes and never from the
+  store: a local process answers `{:ok, node()}`, otherwise the other members
+  of the instance are asked in parallel whether they hold the cell, and the
+  one that does is the answer. `:none` means no member holds it awake. The
+  cell is never woken. A cell that is waking can be reported `:none` until its
+  process is registered, and a member that does not answer within
+  `call_timeout_ms` counts as not holding it, so `:none` can also hide an
+  owner that is unreachable or not a member; the default reads the lease and
+  does not have these gaps. `peers: true` wins over `hint: true`.
   """
   @spec owner(instance, cell, keyword) :: {:ok, node} | :none | {:error, term}
   def owner(instance, cell, opts \\ []),
-    do: Router.owner(instance, cell, opts[:hint] == true)
+    do: Router.owner(instance, cell, owner_source(opts))
+
+  defp owner_source(opts) do
+    cond do
+      opts[:peers] == true -> :peers
+      opts[:hint] == true -> :hint
+      true -> :lease
+    end
+  end
 
   @typedoc """
   The public view of a lease (`lease/3`).
