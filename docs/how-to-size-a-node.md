@@ -30,7 +30,7 @@ node memory  =  base  +  N × (min(database size, cache_kib) + schema + 150 KiB)
 the samples that led to this guide. Leave a quarter of the machine for the
 operating system, the file cache of the data directory and spikes.
 
-Three options turn the rule into a limit:
+Four options turn the rule into a limit:
 
 - `awake: [max_cells: ...]` bounds N. At the limit, a call that would wake
   another cell hibernates the least recently used cell that has no caller
@@ -43,6 +43,13 @@ Three options turn the rule into a limit:
   that finds none to hibernate gets `{:error, :overloaded}`.
   `max_bytes` does not count the 150 KiB per cell, so bound the cells with
   `max_cells` too: `max_cells × 150 KiB` is the rest.
+- `awake: [max_wakes: ...]` bounds the cells waking at once (default 256), and
+  with them the restores in flight. A wake above it waits in a queue of
+  `max_wake_queue` places (default `4 × max_wakes`) for up to `wake_queue_ms`
+  (default 500) and then gets `{:error, :overloaded}`; a full queue refuses at
+  once. Size `max_wakes` by the memory of a wake in progress and let the queue
+  absorb bursts of cold wakes: a 512 MiB node that wakes 63 cells at once
+  needs a queue of about that size, not a larger `max_wakes`.
 
 `idle_timeout_ms` (default 300 000) sets how long a cell keeps its memory
 after its last call. Lower it when many cells are touched once.
@@ -121,6 +128,10 @@ should leave more of the pool to other work.
    Evictions that never stop mean the budget is smaller than the working set of
    the cells your users touch: raise the memory of the node, or accept the
    cost of waking cells again.
+5. Watch `[:alambique, :admission, :wake_queue]`. Many `:granted` with a long
+   `duration` mean bursts wait for slots; any `:expired` or `:full` is a
+   caller that got `:overloaded`: raise `wake_queue_ms` or `max_wake_queue`
+   if the callers can wait, or `max_wakes` if the node has the memory.
 
 ## Troubleshooting
 
@@ -131,6 +142,9 @@ should leave more of the pool to other work.
   Every awake cell has callers waiting, or (`max_bytes`) each cell is larger
   than the budget allows. Raise the limit, add nodes, or lower `cache_kib`. A
   client should retry later.
+- **A burst of cold wakes gets `{:error, :overloaded}` with `max_wakes` set.**
+  The wakes waited `wake_queue_ms` for a slot, or found `max_wake_queue`
+  waiters ahead. See step 5 above.
 - **Memory grows but `sqlite_memory_used` does not.** The memory is not in the
   cells. Compare `:erlang.memory/0` by type: binaries, ETS and processes have
   their own entries. A data directory on a tmpfs (such as `/dev/shm`) also puts

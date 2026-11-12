@@ -1159,6 +1159,31 @@ Why each overlap is safe:
   its wake ends; the entry is taken once, by the cell or, if the cell dies
   first (even by `:kill`), by `Membership`, which monitors it. A cell that
   dies mid-wake therefore cannot leak a slot.
+  A wake that finds no free slot does not fail at once: it waits in a FIFO
+  queue of at most `max_wake_queue` places (default four times `max_wakes`,
+  1 024 with the default `max_wakes`), for at most `wake_queue_ms` (default
+  500) and never longer than its own call timeout. The first wake to end
+  hands its slot to the head of the queue; the slot is not decremented and
+  incremented again, so no slot sits idle while a wake waits and no later
+  arrival passes the queue (a wake takes a free slot directly only while the
+  queue is empty). The queue is an ordered ETS table of `{seq, pid, ref}`,
+  `seq` a monotonic integer; a place is taken from the `:queued` counter
+  with the same atomic step as the slots (`select_replace`, which leaves the
+  counter alone when it refuses), so the cap is never passed. A waiter that
+  expires and a release that picks it race for the same table entry (`take`
+  returns it to one of them only), so a slot is never given to a wake that
+  left, and a release skips the entries of dead callers; a full queue
+  purges them before it refuses. Above the cap, or when the wait ends, the
+  reply is `{:error, :overloaded}` as before. The wait does not count in
+  `max_pending` or `max_cells`: the queue is checked after `make_room`, before
+  the cell exists, so a queued wake holds no cell. Each wake that queued, or
+  met a full queue, emits `[:alambique, :admission, :wake_queue]`. The
+  defaults come from the case that motivated them: a burst of 63 cold wakes
+  on a node with few slots. A wake takes tens to hundreds of milliseconds (an estimate, not measured here), so
+  500 ms covers a few rounds of slots without holding a caller past the
+  point where it is better to answer `:overloaded` and let it retry; the cap
+  of four times `max_wakes` is what the slots can drain in about those
+  rounds.
 - `max_pending` (default 10 000) bounds the calls waiting on one cell: the
   calls sent and not yet run by the cell plus the callers it accepted
   and has not answered (`Cell.load/2`). Other messages of the mailbox, such as

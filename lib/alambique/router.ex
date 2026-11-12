@@ -351,11 +351,12 @@ defmodule Alambique.Router do
   end
 
   # A wake takes a slot (`awake.max_wakes`) that the cell gives back when its
-  # wake ends; a start that created no cell gives it back here.
-  defp start_cell({config, cell, _, _, _, _} = args, child_arg) do
+  # wake ends; a start that created no cell gives it back here. Without a free
+  # slot it waits in the queue, never longer than its caller does.
+  defp start_cell({config, cell, _, timeout, _, _} = args, child_arg) do
     with nil <- Admission.failure(config, cell),
          :ok <- make_room(config),
-         :ok <- Admission.begin_wake(config) do
+         :ok <- Admission.begin_wake(config, timeout) do
       case DynamicSupervisor.start_child(config.supervisor, {Cell, child_arg}) do
         {:ok, pid} ->
           deliver(pid, config |> Cell.find(cell) |> load_of(), args)

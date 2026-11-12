@@ -179,7 +179,10 @@ defmodule Alambique do
       with a process on this node, default 20 000; a call that would wake one
       more hibernates the least recently used cell that has no caller waiting,
       and gives `{:error, :overloaded}` if there is none), `:max_wakes` (cells
-      waking at once, default 256; also `{:error, :overloaded}`) and
+      waking at once, default 256; a wake above it waits in a FIFO queue of
+      `:max_wake_queue` places, default four times `:max_wakes`, for up to
+      `:wake_queue_ms`, default 500 and never past the call timeout, and then
+      gives `{:error, :overloaded}`, as a full queue does) and
       `:max_pending` (calls waiting on one cell, queued or for an upload,
       default 10 000; more give `{:error, :busy}`, never passed; a call whose
       caller gave up before the cell reached it is not run). The memory of the awake

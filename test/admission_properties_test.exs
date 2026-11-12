@@ -19,13 +19,23 @@ defmodule Alambique.AdmissionPropertiesTest do
   @deterministic [:restore, :hydration, :local_file, :open, :migration, :schema_too_new]
   @transient [:lease, :owner, :timeout, :busy]
 
-  defp config(max_wakes, backoff_ms, hint_limit \\ 1_000) do
+  defp config(max_wakes, backoff_ms, hint_limit \\ 1_000, queue \\ {0, 0}) do
+    {max_queue, queue_ms} = queue
+    id = System.unique_integer([:positive])
+
     %{
-      admission: :"admission_#{System.unique_integer([:positive])}",
-      awake: %{max_wakes: max_wakes},
+      admission: :"admission_#{id}",
+      wake_queue: :"wake_queue_#{id}",
+      awake: %{max_wakes: max_wakes, max_wake_queue: max_queue, wake_queue_ms: queue_ms},
+      call_timeout_ms: 1_000,
       hint_limit: hint_limit,
       wake: %{failure_backoff_ms: backoff_ms}
     }
+  end
+
+  defp drop(config) do
+    :ets.delete(config.admission)
+    :ets.delete(config.wake_queue)
   end
 
   # Model: `slots` in use, `held` of them reserved and not yet used by a
@@ -42,7 +52,7 @@ defmodule Alambique.AdmissionPropertiesTest do
 
   defp step(:begin, {config, model}) do
     expected = if model.slots < config.awake.max_wakes, do: :ok, else: {:error, :overloaded}
-    assert Admission.begin_wake(config) == expected
+    assert Admission.begin_wake(config, 0) == expected
     if expected == :ok, do: %{model | slots: model.slots + 1, held: model.held + 1}, else: model
   end
 
@@ -105,13 +115,127 @@ defmodule Alambique.AdmissionPropertiesTest do
       model
     after
       Enum.each(pids, fn {_, pid} -> Process.unlink(pid) && Process.exit(pid, :kill) end)
-      :ets.delete(config.admission)
+      drop(config)
     end
   end
 
   property "wake slots in use equal the model, stay within max_wakes and all come back" do
     check all(max <- integer(1..4), commands <- list_of(command(), max_length: 40), max_runs: 300) do
       run(commands, config(max, 60_000))
+    end
+  end
+
+  # Wakes that find no slot wait in order. Each waiter is a process that calls
+  # `begin_wake/2`; the model is the slots in use and the waiting list.
+  defp spawn_waiter(config, test) do
+    spawn(fn ->
+      send(test, {:result, self(), Admission.begin_wake(config, config.awake.wake_queue_ms)})
+      Process.sleep(:infinity)
+    end)
+  end
+
+  defp queued_pids(config),
+    do: config.wake_queue |> :ets.tab2list() |> Enum.map(fn {_seq, pid, _ref} -> pid end)
+
+  property "queued wakes keep their order, stay within the cap and take every freed slot" do
+    check all(
+            max <- integer(1..3),
+            cap <- integer(1..4),
+            commands <- list_of(member_of([:arrive, :release, :kill_last]), max_length: 30),
+            max_runs: 150
+          ) do
+      config = config(max, 60_000, 1_000, {cap, 60_000})
+      :ok = Admission.init(config)
+      test = self()
+
+      try do
+        # `slots` in use, `waiting` the queued waiters oldest first.
+        model =
+          Enum.reduce(commands, %{slots: 0, waiting: [], last: nil}, fn
+            :arrive, m ->
+              pid = spawn_waiter(config, test)
+
+              cond do
+                m.slots < max and m.waiting == [] ->
+                  assert_receive {:result, ^pid, :ok}
+                  %{m | slots: m.slots + 1}
+
+                length(m.waiting) < cap ->
+                  eventually(fn -> pid in queued_pids(config) end)
+                  refute_received {:result, ^pid, _}
+                  %{m | waiting: m.waiting ++ [pid], last: pid}
+
+                true ->
+                  assert_receive {:result, ^pid, {:error, :overloaded}}
+                  m
+              end
+
+            :release, %{slots: 0} = m ->
+              m
+
+            :release, %{waiting: [first | rest]} = m ->
+              Admission.release(config)
+              assert_receive {:result, ^first, :ok}
+              %{m | waiting: rest}
+
+            :release, m ->
+              Admission.release(config)
+              %{m | slots: m.slots - 1}
+
+            :kill_last, %{last: pid, waiting: waiting} = m ->
+              if pid in waiting do
+                ref = Process.monitor(pid)
+                Process.exit(pid, :kill)
+                assert_receive {:DOWN, ^ref, _, _, _}
+                %{m | waiting: List.delete(waiting, pid), last: nil}
+              else
+                m
+              end
+          end)
+
+        # A dead waiter leaves the table when the cap or a release meets it.
+        live = Enum.filter(queued_pids(config), &Process.alive?/1)
+        assert live == model.waiting
+        assert length(live) <= cap
+        assert [{:wakes, model.slots}] == :ets.lookup(config.admission, :wakes)
+        assert model.slots <= max
+        # A slot is never idle while a wake waits for it.
+        assert model.waiting == [] or model.slots == max
+      after
+        for {_, pid, _} <- :ets.tab2list(config.wake_queue), do: Process.exit(pid, :kill)
+        drop(config)
+      end
+    end
+  end
+
+  property "a queued wake is refused once its wait has passed, and not before" do
+    check all(wait <- integer(20..80), waiters <- integer(1..4), max_runs: 15) do
+      config = config(1, 60_000, 1_000, {4, wait})
+      :ok = Admission.init(config)
+
+      try do
+        assert Admission.begin_wake(config, 0) == :ok
+        started = System.monotonic_time(:millisecond)
+
+        tasks =
+          for _ <- 1..waiters do
+            Task.async(fn ->
+              {Admission.begin_wake(config, 60_000), System.monotonic_time(:millisecond)}
+            end)
+          end
+
+        for task <- tasks do
+          assert {{:error, :overloaded}, at} = Task.await(task, 2_000)
+          assert at - started >= wait - 1
+          assert at - started <= wait + 250
+        end
+
+        # The places of the waiters that gave up are free.
+        assert [{:queued, 0}] = :ets.lookup(config.admission, :queued)
+        assert :ets.tab2list(config.wake_queue) == []
+      after
+        drop(config)
+      end
     end
   end
 
@@ -136,7 +260,7 @@ defmodule Alambique.AdmissionPropertiesTest do
           assert Admission.failure(config, "cell-#{i}") == expected
         end
       after
-        :ets.delete(config.admission)
+        drop(config)
       end
     end
   end
@@ -151,7 +275,7 @@ defmodule Alambique.AdmissionPropertiesTest do
         assert Admission.failure(config, "cell-#{i}") == nil
         assert :ets.lookup(config.admission, {:failed, "cell-#{i}"}) == []
       after
-        :ets.delete(config.admission)
+        drop(config)
       end
     end
   end
@@ -168,7 +292,7 @@ defmodule Alambique.AdmissionPropertiesTest do
           assert :ets.info(config.admission, :size) <= limit + 3
         end
       after
-        :ets.delete(config.admission)
+        drop(config)
       end
     end
   end
