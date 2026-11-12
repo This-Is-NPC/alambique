@@ -36,6 +36,10 @@ defmodule Alambique.Query do
     * `:at` - `:latest` (default), `{:txid, n}` or `{:timestamp, ms}`: the
       state to read. A timestamp always restores the cell from scratch.
     * `:concurrency` - cells read at once (instance option `:query`, default 16).
+    * `:max_statement_share` - the share of the node's statement slots the
+      query may hold at once, above 0 and at most 1 (instance option `:query`,
+      default 0.5: two queries fit together). The places of the query are
+      `min(concurrency, max(floor(slots * share), 1))`.
     * `:timeout_ms` - time one cell may take, including building its replica
       (instance option `:query`). A running statement is interrupted at the
       deadline.
@@ -191,10 +195,13 @@ defmodule Alambique.Query do
     concurrency = Keyword.get(opts, :concurrency, config.query.concurrency)
     explicit = explicit_target(config, cells, opts)
 
-    # The cells wait for the store `concurrency` at a time, but never run more
-    # statements at once than the slots allow, so the query does not meet its
-    # own `:busy`.
-    places = min(concurrency, config.sql.max_concurrent_statements)
+    share = Keyword.get(opts, :max_statement_share, config.query.max_statement_share)
+
+    # The cells wait for the store `concurrency` at a time, but run at most a
+    # share of the slots at once (never above the slots), so the query does
+    # not meet its own `:busy` and leaves slots for others.
+    slots = config.sql.max_concurrent_statements
+    places = min(concurrency, min(max(floor(slots * share), 1), slots))
 
     Stream.resource(
       fn -> {:open, Gate.start(places)} end,
