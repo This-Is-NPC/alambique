@@ -569,7 +569,7 @@ NIF so that nothing else can move frames into the file:
 the only checkpoint, and `Replicator.checkpoint/2` the only caller in a
 cell. The cell calls it at hibernation and, while awake, when the `-wal` file
 passes `wal.checkpoint_bytes` (default 64 MiB; "The WAL of an awake cell"
-below).
+below) or when `Alambique.checkpoint/3` asks.
 
 **Commit pipeline.** A write call is acknowledged to the caller only after
 its transaction is durable in the store:
@@ -631,7 +631,7 @@ replicator state is the *encoded* head and is ahead of `acked` by the queue.
     read, which changes nothing.
   The model checks the rule (`tla/Pipeline.tla`, `NoRefusedDurable`).
 - `position`, `migrate`, hibernation, drain, shutdown and the checkpoint of an
-  awake cell (below) first encode what is pending and wait until the queue is
+  awake cell (below, also on request) first encode what is pending and wait until the queue is
   empty (`drain`). The cell answers no
   other call meanwhile, for at most the upload deadlines (`op_timeout_ms`). The
   checkpoint of the hibernation runs on an empty queue, so every frame it
@@ -661,6 +661,20 @@ still hydrating (§16) waits for the end of the hydration. The cell emits
 `[:alambique, :cell, :checkpoint]` and reaches the crash point
 `:cell_after_checkpoint`; a cell killed there restores from the store at its
 next wake, like any cell that dies awake (no marker, §7).
+
+`Alambique.checkpoint/3` runs the same two steps on request and keeps the cell
+awake. Its `drain` is bounded by `wal.checkpoint_deadline_ms` (default 10 s,
+`:deadline_ms` per call): when the queue has not emptied by then, the call
+answers `{:error, :busy}` and the uploads go on untouched (the cell does not
+stop, unlike a drain that exceeds the upload deadlines). The drain is what keeps
+the rule: `Replicator.checkpoint/2` only refuses frames that no batch has
+encoded yet, so frames of a batch in flight would be truncated before the store
+acknowledged them. `test/checkpoint_test.exs` holds a put in a gated store and
+requires the truncation to wait for it (it fails if the checkpoint runs
+before the drain). A cell nobody owns answers `:asleep` and is not woken, as for
+`migrate` without `wake: true`. A hydrating file (§16) answers `{:error,
+:busy}`.
+
 `test/wal_bound_test.exs` checks the bound with sequential and concurrent
 writers, a restore from the store and a kill after a checkpoint.
 
