@@ -12,8 +12,8 @@ measures=${2:-all}
 [ "$scenarios" != all ] || scenarios="A B"
 [ "$measures" != all ] || measures="commits cells wakes query"
 
-# The settings the user made, to print the command that reproduces a case.
-user_env=$(env | grep '^ALAMBIQUE_LOAD_' | sort | tr '\n' ' ' || true)
+# The settings the user made (the variant is added per case), to print the command that reproduces a case.
+user_env=$(env | grep '^ALAMBIQUE_LOAD_' | grep -v '^ALAMBIQUE_LOAD_VARIANT=' | sort | tr '\n' ' ' || true)
 
 export ALAMBIQUE_LOAD_RUN_ID=${ALAMBIQUE_LOAD_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}
 echo "run ${ALAMBIQUE_LOAD_RUN_ID}, results in ${ALAMBIQUE_LOAD_RESULTS:-results/load}/${ALAMBIQUE_LOAD_RUN_ID}"
