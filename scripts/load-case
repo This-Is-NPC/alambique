@@ -35,6 +35,12 @@ case "$store_on" in
   *) echo "ALAMBIQUE_LOAD_STORE_ON must be tmpfs or disk, not $store_on" >&2; exit 1 ;;
 esac
 
+# The driver is the root project in MIX_ENV=test: fetch its dependencies and
+# compile it now, so that neither a fresh clone nor the build runs inside the
+# measured case. Both are quick when there is nothing to do.
+MIX_ENV=test mix deps.get
+MIX_ENV=test mix compile
+
 mkdir -p "$out"
 store_dir=""    # the directory this script created for the store (disk only)
 containers=()   # ids of the containers this script started, the only ones it removes
