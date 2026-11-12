@@ -73,6 +73,19 @@ defmodule Alambique.ConfigOptionsTest do
     assert Alambique.Config.build(base(ctx, query: [concurrency: 64])).query.concurrency == 64
   end
 
+  test "query max_statement_share defaults to 0.5 and is above 0 up to 1", ctx do
+    assert Alambique.Config.build(base(ctx)).query.max_statement_share == 0.5
+
+    config = Alambique.Config.build(base(ctx, query: [max_statement_share: 1]))
+    assert config.query.max_statement_share == 1
+
+    for bad <- [0, 0.0, -0.5, 1.5, "0.5", nil] do
+      assert_raise ArgumentError, ~r/max_statement_share/, fn ->
+        Alambique.Config.build(base(ctx, query: [max_statement_share: bad]))
+      end
+    end
+  end
+
   test "lease_renew_jitter defaults to 0.1 and is a fraction up to 0.5", ctx do
     assert Alambique.Config.build(base(ctx)).renew_jitter == 0.1
     assert Alambique.Config.build(base(ctx, lease_renew_jitter: 0)).renew_jitter == 0

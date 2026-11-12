@@ -124,6 +124,7 @@ defmodule Alambique.Config do
   @query_defaults [
     cache_bytes: 1_073_741_824,
     concurrency: 16,
+    max_statement_share: 0.5,
     timeout_ms: 30_000,
     page_size: 1_000,
     stale_tmp_seconds: 600,
@@ -214,6 +215,7 @@ defmodule Alambique.Config do
           query: %{
             cache_bytes: pos_integer,
             concurrency: pos_integer,
+            max_statement_share: float,
             timeout_ms: pos_integer,
             page_size: pos_integer,
             stale_tmp_seconds: pos_integer,
@@ -840,6 +842,7 @@ defmodule Alambique.Config do
     %{
       cache_bytes: pos_int!(query, :cache_bytes),
       concurrency: pos_int!(query, :concurrency),
+      max_statement_share: share!(query),
       timeout_ms: pos_int!(query, :timeout_ms),
       page_size: pos_int!(query, :page_size),
       stale_tmp_seconds: pos_int!(query, :stale_tmp_seconds),
@@ -1041,6 +1044,15 @@ defmodule Alambique.Config do
       do: bad!(":lease_renew_jitter must be a number from 0 to 0.5")
 
     jitter
+  end
+
+  defp share!(query) do
+    share = query[:max_statement_share]
+
+    unless is_number(share) and share > 0 and share <= 1,
+      do: bad!(":query :max_statement_share must be a number above 0 and at most 1")
+
+    share
   end
 
   defp pos_int!(opts, key) do

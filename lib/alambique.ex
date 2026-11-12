@@ -233,6 +233,9 @@ defmodule Alambique do
     * `:query` - defaults of `Alambique.Query`: `:cache_bytes` (default 1 GiB),
       `:concurrency` (cells read at once, default 16: the wait for the store
       dominates a cell, so the default does not follow the CPUs),
+      `:max_statement_share` (share of `:max_concurrent_statements` one query
+      may hold at once, above 0 up to 1, default 0.5: two queries fit
+      together and slots remain for cells),
       `:timeout_ms` (per cell, default 30 000), `:page_size` (ids per listing
       request, default 1 000), `:stale_tmp_seconds` (age at which a
       temporary replica file is removed, default 600), `:restore_attempts`
