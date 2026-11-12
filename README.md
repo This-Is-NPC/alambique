@@ -16,13 +16,38 @@ replicates as LTX files (the format Litestream 0.5 writes; Litestream 0.5.18 res
 compacts its history, migrates schemas with an N-1 window, moves cells between
 locations and publishes a per-cell change feed.
 
+## Status
+
+<!-- x-release-please-start-version -->
+The current version is 0.3.1. It is not published on Hex: depend on a release
+by its git tag.
+<!-- x-release-please-end -->
+Before 1.0, a new minor version may change behavior. What changed since the
+first release (0.1.0):
+
+- 0.2.0: `drain/2` takes a deadline for the whole drain and reports through
+  telemetry and `drain_status/1`. A lease carries an incarnation, so two
+  nodes with the same `node_id` fence each other.
+- 0.3.0: every SQL statement, migration and store request has a deadline, and
+  a call can lower its statement deadline. Admission is exact at `max_pending`
+  and hibernates the least recently used cell at `max_cells`. The start
+  refuses a `data_dir` that another instance holds or that ignores case.
+  Relocation cleanups survive a restart and the change feed keeps object
+  keys in commit order.
+- 0.3.1: a cross-cell query takes at most `query: [max_statement_share:]`
+  (default 0.5) of the statement slots, and `query: [concurrency:]` is 16.
+
+The full list is in [CHANGELOG.md](CHANGELOG.md).
+
 ## Installation
 
-Add Alambique to `mix.exs`:
+Add Alambique to `mix.exs`, by tag:
 
 ```elixir
 def deps do
-  [{:alambique, "~> 0.1.0"}]
+  [
+    {:alambique, git: "https://github.com/This-Is-NPC/alambique.git", tag: "v0.3.1"} # x-release-please-version
+  ]
 end
 ```
 
