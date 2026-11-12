@@ -51,6 +51,22 @@ defmodule Alambique.FeedCaptureTest do
     assert rows(conn, 0, 9) == [{4, 2_000, "notes", "insert"}]
   end
 
+  test "the time of the last batch survives the removal of its rows, and an older release's is kept",
+       %{conn: conn} do
+    :ok = Db.writable_script(conn, "INSERT INTO notes VALUES (1, 'a')")
+    :ok = Capture.stamp(conn, 3, 1_000)
+    {:ok, :ok} = Db.transaction(conn, 1, &Capture.cleanup(&1.conn, 3, 1_000))
+    assert rows(conn, 0, 9) == []
+    assert Capture.last_time(conn) == 1_000
+
+    # An older release saved the time in the state table.
+    :ok = Db.writable_script(conn, "UPDATE _alambique_feed_state SET last_time = 5_000")
+    {:ok, :ok} = Db.transaction(conn, 1, &Capture.cleanup(&1.conn, 3, 1_000))
+    assert Capture.last_time(conn) == 5_000
+    {:ok, :ok} = Db.transaction(conn, 1, &Capture.cleanup(&1.conn, 3, 6_000))
+    assert Capture.last_time(conn) == 6_000
+  end
+
   test "rows stamped by an older release keep their TXID and time", %{conn: conn} do
     :ok = Db.writable_script(conn, "INSERT INTO notes VALUES (1, 'a')")
     :ok = Db.writable_script(conn, "UPDATE _alambique_feed SET txid = 2, ts = 700")

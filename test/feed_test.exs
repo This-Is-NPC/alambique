@@ -568,7 +568,11 @@ defmodule Alambique.FeedTest do
       exec(inst, cell, "INSERT INTO _host_jobs VALUES (2)")
 
       assert {:ok, %{rows: [[0]]}} =
-               Alambique.query(inst, cell, "SELECT count(*) FROM _alambique_feed")
+               Alambique.query(
+                 inst,
+                 cell,
+                 "SELECT count(*) FROM _alambique_feed WHERE op <> 'floor'"
+               )
     end
 
     test "a function migration can create its schema with a script", ctx do
@@ -768,11 +772,16 @@ defmodule Alambique.FeedTest do
 
       exec(inst, cell, "INSERT INTO notes VALUES (1, 'a')")
       records(ctx, 1)
-      assert [[1]] = durable_rows(ctx, cell, "SELECT count(*) FROM _alambique_feed")
+
+      assert [[1]] =
+               durable_rows(ctx, cell, "SELECT count(*) FROM _alambique_feed WHERE op <> 'floor'")
 
       exec(inst, cell, "INSERT INTO notes VALUES (2, 'b')")
       records(ctx, 2)
-      assert [[1]] = durable_rows(ctx, cell, "SELECT count(*) FROM _alambique_feed")
+
+      assert [[1]] =
+               durable_rows(ctx, cell, "SELECT count(*) FROM _alambique_feed WHERE op <> 'floor'")
+
       assert [[1]] = durable_rows(ctx, cell, "SELECT count(*) FROM _alambique_feed_state")
 
       :ok = Alambique.hibernate(inst, cell)
