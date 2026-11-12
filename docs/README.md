@@ -5,7 +5,7 @@
 | [concepts.md](concepts.md) | What do cell, lease, epoch, segment and the other words mean? |
 | [how-to-call-cells.md](how-to-call-cells.md) | How do I start an instance and call cells from my application? |
 | [design.md](design.md) | How do cells, leases, replication, routing and the test kit work? |
-| [how-to-operate-a-cell.md](how-to-operate-a-cell.md) | How do I inspect, restore, freeze or move a cell, what do I do with one the instance froze for crashing the VM, how do I restart a node without failed calls, and how do I check that the disk under the cells does not stall writes? |
+| [how-to-operate-a-cell.md](how-to-operate-a-cell.md) | How do I inspect, restore, freeze or move a cell, what do I do with one the instance froze for crashing the VM, how do I restart a node without failed calls, how do I check that the disk under the cells does not stall writes, and what do I do when the disk is full? |
 | [how-to-swap-a-node.md](how-to-swap-a-node.md) | How do I replace one node by another that started beside it, with no cluster between them, and what do callers see meanwhile? |
 | [how-to-size-a-node.md](how-to-size-a-node.md) | How much memory does a node need for N awake cells, and which `awake` options keep it from running out? |
 | [how-to-speed-up-a-wake.md](how-to-speed-up-a-wake.md) | Why does the first call to a hibernated cell take long, how do I measure it for each user, and which options change it? |

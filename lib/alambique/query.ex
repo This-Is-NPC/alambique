@@ -64,7 +64,7 @@ defmodule Alambique.Query do
       `false`: the order they finish in).
   """
 
-  alias Alambique.{Config, Inflight, Location, Placement, Telemetry}
+  alias Alambique.{Config, DiskFull, Inflight, Location, Placement, Telemetry}
   alias Alambique.Cell.Db
   alias Alambique.Query.{Cache, Gate, Replica}
   alias Alambique.Replication.Retry
@@ -390,6 +390,8 @@ defmodule Alambique.Query do
         {:error, _} = error ->
           error
       end
+    else
+      {:error, reason} -> {:error, DiskFull.classify(reason)}
     end
   end
 

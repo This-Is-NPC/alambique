@@ -317,19 +317,24 @@ defmodule Alambique.Replication.Restore do
 
   defp finish(env, state) do
     state = Map.drop(state, [:lazy, :files, :bytes])
-    if state.txid == 0, do: File.write!(env.tmp, "")
-    sync_file(env.tmp)
-    File.rm(env.dest <> "-wal")
-    File.rm(env.dest <> "-shm")
-    File.rename!(env.tmp, env.dest)
 
-    {:ok, Map.merge(state, %{cell: env.cell, path: env.dest})}
+    # A write the disk refuses (`:enospc`) fails the restore: the caller sees
+    # `:disk_full` (design §6.4).
+    with :ok <- Fault.point(:restore_install, %{cell: env.cell, path: env.tmp}),
+         :ok <- if(state.txid == 0, do: File.write(env.tmp, ""), else: :ok),
+         :ok <- sync_file(env.tmp),
+         _ = File.rm(env.dest <> "-wal"),
+         _ = File.rm(env.dest <> "-shm"),
+         :ok <- File.rename(env.tmp, env.dest) do
+      {:ok, Map.merge(state, %{cell: env.cell, path: env.dest})}
+    end
   end
 
   defp sync_file(path) do
-    {:ok, io} = :file.open(path, [:read, :write, :raw, :binary])
-    :ok = :file.sync(io)
-    :ok = :file.close(io)
+    with {:ok, io} <- :file.open(path, [:read, :write, :raw, :binary]),
+         :ok <- :file.sync(io) do
+      :file.close(io)
+    end
   end
 
   # Reading a file of the chain. Whole files go into the database file one

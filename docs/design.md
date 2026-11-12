@@ -922,6 +922,42 @@ cursor is in an ETS table owned by the instance (shared by the background scrub 
 the cost is `cells` times the size of a cell in `GET`s per round, per node.
 Every node scrubs on its own cursor.
 
+### 6.2 A full local disk
+
+A full local disk is `{:error, :disk_full}` to the caller, told by code and
+never by SQLite's text: `SQLITE_FULL` (what an `ENOSPC` on the database, the
+WAL or a temporary file becomes), `ENOSPC` and `EDQUOT` from the native
+library (`Error::DiskFull`) and `:enospc` and `:edquot` from Elixir's file
+operations. A step that wraps the reason of the step below it
+(`{:migration, version, reason}`, `{:restore, key, reason}`) gives
+`:disk_full` when the reason it wraps is one (`Alambique.DiskFull`).
+
+What the cell does:
+
+- A statement or transaction that hits it rolls back and answers
+  `{:error, :disk_full}`. The cell stays awake and serves: the failure is the
+  same kind as `:statement_timeout`. Nothing acknowledged is lost, because a
+  write is acknowledged only after it is durable in the store, and the refused
+  write left no row in the file or the WAL. The next write that fits goes
+  through; the node recovers when space is freed.
+- A wake that cannot write the file (restore, migrations) fails with
+  `:disk_full`. The cell stops and the caller gets the error. The failure is
+  not remembered (`Admission.failed/3` keeps only the failures a retry would
+  repeat), so the next call wakes the cell again and succeeds once space is
+  free. Telemetry carries `reason: :disk_full` on `[:cell, :wake]`.
+- A checkpoint or the marker of a hibernating cell that the disk refuses leaves
+  the WAL in place or the file unmarked. No caller is waiting and nothing is
+  lost: the store has every acknowledged write, and the next wake restores
+  instead of reusing the file.
+- A page the hydrator of a lazy restore cannot write is retried with backoff,
+  like a failed fetch (§16); a statement that waits for it ends at its deadline.
+
+`PRAGMA max_page_count` makes SQLite refuse growth the way a full disk does,
+without filling a disk, which is how `test/disk_full_test.exs` and
+`test/disk_full_properties_test.exs` reproduce it. The crash point
+`:restore_install` (§11) fails the last step of a restore with `{:error,
+:enospc}`.
+
 ## 7. Cells
 
 Each awake cell is one process (`Alambique.Cell`) under a
@@ -2025,7 +2061,9 @@ Compaction and retention add the crash points `:compact_before_put`,
 (§9.1); the cell adds
 `:cell_after_land`, `:cell_before_ack` and `:cell_after_ack` around the
 acknowledgement of a batch and `:cell_after_checkpoint` after the checkpoint of
-an awake cell (see [segment-format.md](segment-format.md)).
+an awake cell (see [segment-format.md](segment-format.md)). The restore adds
+`:restore_install`, before the restored file is put in place; a handler that
+returns `{:error, :enospc}` makes the restore fail as a full disk does (§6.2).
 
 The router adds the crash points `:router_after_serve`, reached on the node
 that served a forwarded call before it answers (a handler that closes the
