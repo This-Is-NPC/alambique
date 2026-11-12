@@ -4,7 +4,7 @@
 file, freeze it, deal with a cell the instance froze because it crashed the VM,
 move it to another node or another location, get back files that retention
 removed, read what the scrub found, restart a node without failed calls, check that the disk under the cells does not stall
-writes, or empty the WAL of an awake cell now?
+writes, empty the WAL of an awake cell now, or tell that the disk is full and recover?
 
 This guide stands alone. It needs the store and, for moving a cell and for
 hibernating a frozen one at once, the running cluster. The background
@@ -536,6 +536,32 @@ frame that is not yet replicated. It answers no other call meanwhile.
 for one call. The call goes to the node that owns the cell, as any other. The
 telemetry event `[:alambique, :cell, :checkpoint]` reports each checkpoint
 ([telemetry.md](telemetry.md)).
+
+## 12. Recover from a full disk
+
+When the disk under `:data_dir` has no room, the calls that need it return
+`{:error, :disk_full}`: writes, reads that need temporary space, and wakes (a
+restore or a migration that cannot write the file). The write did not run. Cells
+that are awake keep serving reads and the writes that fit, and nothing they
+acknowledged is lost, because the store holds it.
+
+1. Match on the atom, not on SQLite's text:
+
+   ```elixir
+   case Alambique.execute(MyApp.Cells, cell, sql, params) do
+     {:ok, result} -> result
+     {:error, :disk_full} -> :retry_later
+   end
+   ```
+
+2. Free space. The local files of hibernated cells are a cache, so you can
+   remove them, or lower `:local_cache` `:max_bytes`, which evicts them
+   ([design.md](design.md) section 7.1). Section 11 empties the WAL of an
+   awake cell without putting it to sleep.
+3. Repeat the call. A cell whose wake failed wakes again on the next call.
+
+Expected result: the next write that fits is acknowledged with `{:ok, _}`. The
+wake event shows `reason: :disk_full` (`[:alambique, :cell, :wake]`).
 
 ## Troubleshooting
 

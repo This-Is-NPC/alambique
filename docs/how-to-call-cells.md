@@ -50,7 +50,10 @@ define its own rule.
   end)
 ```
 
-A write returns after its transaction is stored durably.
+A write returns after its transaction is stored durably. When the node's disk
+is full, a call returns `{:error, :disk_full}`: the write did not run, the cell
+keeps serving what it acknowledged, and the call can be repeated once space is
+free ([how-to-operate-a-cell.md](how-to-operate-a-cell.md), section 12).
 
 Each statement is interrupted at the instance's `sql: [statement_timeout_ms:]`
 (default `op_timeout_ms`, 10 s) and returns `{:error, :statement_timeout}`. A

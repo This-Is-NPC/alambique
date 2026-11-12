@@ -387,6 +387,11 @@ defmodule Alambique do
   for what it promises), or `{:error, :timeout}` when the outcome of a write
   is unknown.
 
+  A full local disk is `{:error, :disk_full}`, from a statement, a transaction,
+  a migration, a wake or a read replica alike (design §6.2). The call did not
+  run and is safe to repeat once space is free; the cell keeps serving and
+  holds everything it acknowledged.
+
   A cell that stops while a write's batch is in flight (`:lease_lost`,
   `:fenced`, `:lease_expired`, a failed upload) answers that write
   `{:error, :outcome_unknown}`: the batch may be in the store, so do not repeat
@@ -443,7 +448,9 @@ defmodule Alambique do
   and the cell keeps serving), `{:error, :result_too_large}` when its result
   has more than `:max_result_rows` rows or `:max_result_bytes` bytes,
   `{:error, {:bad_params, message}}` for a wrong number or type of
-  parameters, and `{:error, message}` with SQLite's message for the rest.
+  parameters, `{:error, :disk_full}` when the disk has no room for what the
+  statement needs (temporary files of a sort, for example), and
+  `{:error, message}` with SQLite's message for the rest.
 
   Options: `:timeout`, `:statement_timeout_ms`, `:verify_lease` (default
   `false`) and `:consistency`. `:statement_timeout_ms` is a positive integer
@@ -533,7 +540,8 @@ defmodule Alambique do
   parameters apply here too (`{:error, :statement_timeout}`,
   `{:error, :result_too_large}` for the `RETURNING` rows,
   `{:error, {:bad_params, message}}`); the write then rolls back and the cell
-  keeps serving.
+  keeps serving. So does `{:error, :disk_full}`, when the disk has no room for
+  the write.
 
   Options: `:timeout`, `:statement_timeout_ms` (as in `query/5`),
   `:idempotent` (default `false`, see "Calls") and `:isolated` (default

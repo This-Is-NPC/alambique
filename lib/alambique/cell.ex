@@ -16,7 +16,20 @@ defmodule Alambique.Cell do
 
   alias Alambique.Cell.{Commit, Db, Hydration, Local, Pipe, State, Wake}
   alias Alambique.Compaction.{Compactor, Hold}
-  alias Alambique.{Admission, Config, Fault, Freeze, Inflight, Lease, Membership, Telemetry, Tx}
+
+  alias Alambique.{
+    Admission,
+    Config,
+    DiskFull,
+    Fault,
+    Freeze,
+    Inflight,
+    Lease,
+    Membership,
+    Telemetry,
+    Tx
+  }
+
   alias Alambique.Feed.Publisher
   alias Alambique.Store.Metered
   alias Alambique.Replication.{Replicator, Retry}
@@ -162,6 +175,7 @@ defmodule Alambique.Cell do
         {:noreply, serve(state)}
 
       {:error, reason, state} ->
+        reason = DiskFull.classify(reason)
         Admission.end_wake(state.config, self())
         {state, requests} = Wake.unmeter(state)
 
@@ -412,7 +426,7 @@ defmodule Alambique.Cell do
         {:reply, {:error, reason}, state}
 
       {:error, {:migration, version, _} = reason, state} when is_integer(version) ->
-        migrated(state, before, reason)
+        migrated(state, before, DiskFull.classify(reason))
 
       {:error, reason, state} ->
         stop_reason = stop_reason(reason)

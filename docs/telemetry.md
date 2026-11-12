@@ -77,6 +77,9 @@ integers.
 | `[:alambique, :cell, :cleanup]` | `duration`, `objects` (deleted, for `:ok`) | `cell`, `location` (id of the location cleaned), `result` (`:ok`, `:waiting` or `:error`), and `ready_at_ms` for `:waiting` or `reason` for `:error` |
 | `[:alambique, :cell, :stop]` | none | `cell`, `epoch`, `reason` (`:lease_expired`, `:lease_lost`, `:fenced` or `{:sync_failed, reason}`) |
 
+A wake that fails because the local disk is full has `reason: :disk_full`
+(design §6.2).
+
 `[:cell, :stop]` gives the reason the cell stopped, which is not always the
 answer of its writers: the writers of a batch that was in flight get
 `{:error, :outcome_unknown}` (design §6). `[:cell, :commit]` with `result:

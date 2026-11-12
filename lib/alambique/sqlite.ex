@@ -10,7 +10,9 @@ defmodule Alambique.Sqlite do
   text, other atoms as their name, and `{:blob, binary}` as blobs. Rows are
   lists of integers, floats, binaries (text and blobs) and `nil`. A failed
   call returns `{:error, message}` with SQLite's message, or
-  `{:error, :not_authorized}` for a statement the connection refuses (below).
+  `{:error, :not_authorized}` for a statement the connection refuses (below),
+  or `{:error, :disk_full}` when SQLite reports `SQLITE_FULL` (the disk or the
+  `max_page_count` limit has no room).
 
   A connection refuses `ATTACH`, `DETACH` and `VACUUM` unless it was opened
   with `attach: true`, and is opened defensive (no writes to the schema or to
