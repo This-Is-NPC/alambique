@@ -372,11 +372,70 @@ settle window (30 s, 5 to 6 minutes per ramp). A busy host makes the run longer:
 each wait lasts until the host is quiet, up to 30 minutes per step, and each
 repeat waits again. This is an estimate: no full ramp has been run.
 
-## Results
+## Results on the reference VM (order 022)
 
-<!-- The tables of the full run go here. -->
+These are the first full set of numbers. Runs were cut by host shutdowns, so
+some cases are unconfirmed: a level is **confirmed** when a repeat of it was
+also good, **not repeated** when it was good once, and **not measured** when no
+step reached it.
 
-Not run yet.
+### Setup
+
+- A VM with 4 vCPU and 5.9 GB of RAM, 11.8 GB of zram swap, a 100 GB virtual
+  disk (rotational, btrfs), cgroup v2 and Docker 29.7.2.
+- The driver runs on the same VM, outside the measured container, and **shares
+  the 4 vCPUs** with the service and the store. The numbers include that
+  contention.
+- The store is seaweedfs with +25 ms per request (`ALAMBIQUE_LOAD_STORE_LATENCY_MS`),
+  on a tmpfs, or on the VM's disk in the rows marked "store on disk". Those
+  rows measure the VM's virtual disk, not the library.
+- Settings changed, and why: `ALAMBIQUE_LOAD_MIN_AVAILABLE_GIB` 1.0 (the
+  default, 6, is above the VM's 5.9 GB; the first run used 0.5),
+  `ALAMBIQUE_LOAD_STORE_MB=1536` and `ALAMBIQUE_LOAD_DATA_MB=768` (the default
+  tmpfs of 4096 and 1024 MB do not fit). No other limit was changed.
+- Scenario A is 1 CPU and 512 MB, scenario B is 2 CPU and 2 GB. The service
+  container's memory limit is the scenario's plus `DATA_MB`, with swap equal to
+  memory, and the memory criterion is `memory.current` minus the tmpfs.
+- The swap of the service, the driver and the store was 0 in every step. The
+  host's swap was 270 to 291 MB in the first run (recorded only; the limit is
+  512) and 0 in the others.
+
+### Capacity
+
+Cost per unit: "CPU" is milliseconds of CPU per operation, the same as cores
+per 1000 operations per second; "memory" is the process memory without the
+tmpfs.
+
+| measure | A (1 CPU, 512 MB) | B (2 CPU, 2 GB) | cost per unit |
+| --- | --- | --- | --- |
+| small commits/s, store on tmpfs | 400 good but CPU-throttled, not confirmed; **200 clean** (p99 46 ms) | **800 good**, not repeated (p99 185 ms); the next level, 1600, hit `store_full` | A 2.5 to 3.9 ms CPU per commit, memory 116 MB + 0.248 MB per commit/s; B 2.5 to 5.2 ms |
+| small commits/s, store on disk | not measured: the case was cut before it ended | **300 confirmed** (p99 196 to 197 ms) | B 4.5 ms CPU per commit, memory 108 MB + 0.418 MB per commit/s (R² 0.96) |
+| 75 KB commits/s, store on tmpfs | 10 good, not repeated | 10 good, not repeated | 21 to 26 ms CPU per commit, about 236 KB sent per commit |
+| 75 KB commits/s, store on disk | 7 good, its repeat bad | 5 bad (p99 319 ms), one step | same |
+| awake cells | **1000** (2000 exceeds the memory criterion) | **8000** (4000 with a 256 KiB cache), not repeated | about 0.21 MB per awake cell, 140 MB fixed (B); 27 to 44 ms CPU per operation |
+| cold wakes/s (restore from the store) | **20**, not repeated (p99 156 ms) | **20**, not repeated (p99 147 ms) | 15 to 23 ms CPU per wake, 3.1 to 3.3 MB per wake/s |
+| `query` over 20 cells, queries/s (with `max_statement_share`) | **4 confirmed** (p99 184 ms, 0.9% `:busy`) | 8 good (p99 106 ms), its repeat bad with 1.5% `:busy`; **4 clean** | 63 to 71 ms CPU per query, about 40 store requests per query |
+
+Stop criteria are the defaults: p99 above 250 ms, memory above its fraction
+of the limit, errors or `:busy` above 1%, and the harness invalidations
+(`data_full`, `store_full`, `host_busy`, `no_cooldown`).
+
+### What these numbers do not say
+
+- Small commits in A have no clean confirmation: the repeat of 400/s ran with
+  the store at 86% and failed on memory. Small commits in B at 800/s were not
+  repeated, and the gap between 800 (tmpfs) and 300 (disk) is the disk's
+  latency.
+- 75 KB commits on tmpfs ended on a full store (HTTP 500 at 93% use) before
+  they were confirmed. On disk the p99 passes 250 ms already at 5 to 10/s, so
+  that row measures the virtual disk. Ten commits/s on tmpfs is the best
+  number there is, without a repeat.
+- Cells and wakes: none of the good levels was repeated, because the next level
+  ended the case. The wakes ceiling is the harness's data tmpfs (768 MB; 40/s
+  was `data_full`), not the service.
+- Runs were made before a store HTTP 5xx near the limit counted as
+  `store_full` (see "Room of the harness"), which is why those steps show as
+  `bad (errors)` in the first run.
 
 ## Troubleshooting
 
