@@ -317,6 +317,17 @@ defmodule Alambique.Cell do
 
   defp serve_call(:touch, _from, state), do: {:reply, :ok, state}
 
+  # Like `hibernate/2` and the checkpoint of a big WAL: every upload is
+  # acknowledged before the WAL is truncated, but the cell stays awake. A queue
+  # that does not empty within the deadline leaves the WAL for later.
+  defp serve_call({:checkpoint, deadline_ms}, _from, state) do
+    case drain_within(state, deadline_ms) do
+      {:ok, state} -> requested_checkpoint(state)
+      {:busy, state} -> {:reply, {:error, :busy}, state}
+      {:stop, reason, state} -> stop_serving(state, reason, {:error, reason})
+    end
+  end
+
   defp serve_call(:hibernate, _from, state) do
     case hibernate(state, :request) do
       {:ok, state, released} -> {:stop, :normal, released, %{state | mode: :stopped}}
@@ -716,7 +727,8 @@ defmodule Alambique.Cell do
     with {:ok, %{size: size}} when size >= limit <- File.stat(state.path <> "-wal"),
          false <- Hydration.hydrating?(state),
          {:ok, state} <- drain(state) do
-      {:ok, checkpoint(state, size)}
+      {_result, state} = checkpoint(state, size)
+      {:ok, state}
     else
       {:stop, _, _} = stop -> stop
       _ -> {:ok, state}
@@ -724,6 +736,25 @@ defmodule Alambique.Cell do
   end
 
   defp checkpoint_if_due(state), do: {:ok, state}
+
+  # A file that is still being filled has no WAL to move yet.
+  defp requested_checkpoint(state) do
+    if Hydration.hydrating?(state) do
+      {:reply, {:error, :busy}, state}
+    else
+      case checkpoint(state, wal_bytes(state)) do
+        {:ok, state} -> {:reply, :ok, state}
+        {:error, state} -> {:reply, {:error, :busy}, state}
+      end
+    end
+  end
+
+  defp wal_bytes(state) do
+    case File.stat(state.path <> "-wal") do
+      {:ok, %{size: size}} -> size
+      {:error, _} -> 0
+    end
+  end
 
   # Busy or unreplicated frames leave the WAL for the next acknowledgement.
   defp checkpoint(state, bytes) do
@@ -740,15 +771,22 @@ defmodule Alambique.Cell do
     case result do
       {:ok, repl} ->
         Fault.point(:cell_after_checkpoint, %{cell: state.id, txid: repl.txid})
-        %{state | repl: repl}
+        {:ok, %{state | repl: repl}}
 
       {:error, _} ->
-        state
+        {:error, state}
     end
   end
 
   # Waits for one upload process, bounded by the upload deadlines.
   defp await(state) do
+    case await(state, 2 * state.config.op_timeout_ms) do
+      {:timeout, state} -> upload_failed(state, hd(state.pipe.queue), :timeout)
+      answer -> answer
+    end
+  end
+
+  defp await(state, timeout_ms) do
     pids = Pipe.pids(state.pipe)
 
     receive do
@@ -762,14 +800,30 @@ defmodule Alambique.Cell do
           {:upload_exit, reason}
         )
     after
-      2 * state.config.op_timeout_ms ->
-        upload_failed(state, hd(state.pipe.queue), :timeout)
+      timeout_ms -> {:timeout, state}
     end
   end
 
   # Encodes what is pending and waits until every batch is acknowledged.
   defp drain(state) do
     with {:ok, state} <- flush_now(state), do: settle(state)
+  end
+
+  # Like `drain/1`, but gives up at the deadline and leaves the queue as it
+  # is: the uploads go on and their callers are answered as usual.
+  defp drain_within(state, deadline_ms) do
+    limit = System.monotonic_time(:millisecond) + deadline_ms
+    with {:ok, state} <- flush_now(state), do: settle_within(state, limit)
+  end
+
+  defp settle_within(%State{pipe: %{queue: []}} = state, _limit), do: {:ok, state}
+
+  defp settle_within(state, limit) do
+    case await(state, max(limit - System.monotonic_time(:millisecond), 0)) do
+      {:ok, state} -> settle_within(state, limit)
+      {:timeout, state} -> {:busy, state}
+      {:stop, _, _} = stop -> stop
+    end
   end
 
   defp settle(%State{pipe: %{queue: []}} = state), do: {:ok, state}

@@ -172,7 +172,9 @@ defmodule Alambique do
       5 000).
     * `:wal` - `:checkpoint_bytes` (size of the `-wal` file of an awake cell
       above which it moves the WAL into the database file once its uploads are
-      acknowledged, default 67 108 864, 64 MiB; design §6).
+      acknowledged, default 67 108 864, 64 MiB; design §6) and
+      `:checkpoint_deadline_ms` (how long `checkpoint/3` waits for the uploads
+      before it answers `{:error, :busy}`, default 10 000).
     * `:awake` - limits that protect a node (design §7): `:max_cells` (cells
       with a process on this node, default 20 000; a call that would wake one
       more hibernates the least recently used cell that has no caller waiting,
@@ -740,6 +742,38 @@ defmodule Alambique do
   @spec hibernate(instance, cell, keyword) :: :ok | {:error, term}
   def hibernate(instance, cell, opts \\ []),
     do: Router.call(instance, cell, :hibernate, opts[:timeout])
+
+  @doc """
+  Moves the WAL of an awake cell into its database file now, without
+  hibernating it (design §6): the cell encodes what is pending, waits until
+  the store has acknowledged every upload, then runs `wal_checkpoint(TRUNCATE)`,
+  so the `-wal` file ends empty. It never truncates a frame that is not
+  replicated. The cell answers no other call meanwhile.
+
+  Returns `:ok`; `{:error, :busy}` when the uploads were not acknowledged
+  within the deadline or SQLite could not finish (the cell keeps serving, the
+  WAL stays, and the call can be repeated); or `:asleep` when nobody owns the
+  cell: it is not woken, and its hibernation left no WAL.
+
+  Options: `:deadline_ms` (default `:wal` `:checkpoint_deadline_ms`) and
+  `:timeout` (milliseconds, default `:call_timeout_ms`, or the deadline plus
+  `:routing` `:slack_ms` when that is longer).
+  """
+  @spec checkpoint(instance, cell, keyword) :: :ok | :asleep | {:error, term}
+  def checkpoint(instance, cell, opts \\ []) do
+    [deadline_ms: deadline, timeout: timeout] =
+      opts |> Keyword.validate!(deadline_ms: nil, timeout: nil) |> Enum.sort()
+
+    config = Config.fetch!(instance)
+    deadline = deadline || config.wal.checkpoint_deadline_ms
+
+    unless is_integer(deadline) and deadline > 0,
+      do:
+        raise(ArgumentError, ":deadline_ms must be a positive integer, got: #{inspect(deadline)}")
+
+    timeout = timeout || max(config.call_timeout_ms, deadline + config.routing.slack_ms)
+    Router.call(instance, cell, {:checkpoint, deadline}, timeout)
+  end
 
   @doc """
   Migrates an awake cell now, instead of at its next wake. It runs the same

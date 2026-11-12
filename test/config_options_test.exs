@@ -32,7 +32,7 @@ defmodule Alambique.ConfigOptionsTest do
 
     assert config.routing == %{hops: 2, attempts: 3, slack_ms: 1_000}
     assert config.wake == %{fence_attempts: 5, failure_backoff_ms: 5_000}
-    assert config.wal == %{checkpoint_bytes: 67_108_864}
+    assert config.wal == %{checkpoint_bytes: 67_108_864, checkpoint_deadline_ms: 10_000}
 
     assert config.awake == %{
              max_cells: 20_000,
@@ -140,7 +140,7 @@ defmodule Alambique.ConfigOptionsTest do
 
     assert config.routing == %{hops: 1, attempts: 1, slack_ms: 20}
     assert config.wake == %{fence_attempts: 2, failure_backoff_ms: 50}
-    assert config.wal == %{checkpoint_bytes: 1_000}
+    assert config.wal == %{checkpoint_bytes: 1_000, checkpoint_deadline_ms: 10_000}
 
     assert config.awake == %{
              max_cells: 7,

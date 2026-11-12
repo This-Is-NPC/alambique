@@ -310,6 +310,7 @@ defmodule Alambique.Router do
   # An asleep cell is not woken to say where its chain ends.
   defp free({config, cell, :position, _, _, _}, _seen), do: {nil, stored_position(config, cell)}
   defp free({_, _, {:migrate, false}, _, _, _}, _seen), do: {nil, {:ok, :asleep}}
+  defp free({_, _, {:checkpoint, _}, _, _, _}, _seen), do: {nil, :asleep}
 
   defp free({config, cell, _, _, hops, _} = args, seen) do
     preferred = Membership.preferred(config, cell)
@@ -590,6 +591,7 @@ defmodule Alambique.Router do
   defp repeatable?({:idempotent, _}), do: true
   # Migrating again runs only the migrations still pending.
   defp repeatable?({:migrate, _wake}), do: true
+  defp repeatable?({:checkpoint, _deadline}), do: true
   defp repeatable?({kind, _, _, _}), do: kind in [:query, :checked_query]
   defp repeatable?(request), do: request in [:touch, :hibernate]
 

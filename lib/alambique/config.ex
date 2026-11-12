@@ -49,7 +49,7 @@ defmodule Alambique.Config do
 
   @routing_defaults [hops: 2, attempts: 3, slack_ms: 1_000]
   @wake_defaults [fence_attempts: 5, failure_backoff_ms: 5_000]
-  @wal_defaults [checkpoint_bytes: 67_108_864]
+  @wal_defaults [checkpoint_bytes: 67_108_864, checkpoint_deadline_ms: 10_000]
   @awake_defaults [max_cells: 20_000, max_wakes: 256, max_pending: 10_000, cache_kib: 512]
   @relocate_defaults [fence_attempts: 5, timeout_ms: 60_000, poll_ms: 100]
   @rewind_defaults [fence_attempts: 5, timeout_ms: 60_000, poll_ms: 100, max_bytes: 268_435_456]
@@ -245,7 +245,7 @@ defmodule Alambique.Config do
             | nil,
           routing: %{hops: pos_integer, attempts: pos_integer, slack_ms: pos_integer},
           wake: %{fence_attempts: pos_integer, failure_backoff_ms: pos_integer},
-          wal: %{checkpoint_bytes: pos_integer},
+          wal: %{checkpoint_bytes: pos_integer, checkpoint_deadline_ms: pos_integer},
           awake: %{
             max_cells: pos_integer,
             max_wakes: pos_integer,
