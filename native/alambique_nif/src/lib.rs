@@ -33,7 +33,7 @@ use wal::WalPos;
 
 mod atoms {
     rustler::atoms! {
-        ok, error, none, invalid, io, pre_apply_mismatch, post_apply_mismatch,
+        ok, error, none, invalid, io, disk_full, pre_apply_mismatch, post_apply_mismatch,
     }
 }
 
@@ -74,6 +74,7 @@ pub(crate) fn error_term<'a>(env: Env<'a>, e: Error) -> Term<'a> {
     let reason = match e {
         Error::Invalid(m) => (atoms::invalid(), m).encode(env),
         Error::Io(m) => (atoms::io(), m).encode(env),
+        Error::DiskFull => atoms::disk_full().encode(env),
         Error::PreApplyMismatch { expected, got } => {
             (atoms::pre_apply_mismatch(), expected, got).encode(env)
         }

@@ -468,11 +468,11 @@ impl Lazy {
 
     /// Stores a page that came from the store. A page the database already
     /// wrote is not replaced. True when this was the last missing page.
-    pub fn install(&self, pgno: u32, page: &[u8]) -> std::result::Result<bool, String> {
+    pub fn install(&self, pgno: u32, page: &[u8]) -> crate::error::Result<bool> {
         let crc = page_crc(pgno, page);
         let mut g = self.inner();
         if pgno == 0 || pgno > g.orig || page.len() != self.page_size as usize {
-            return Err(format!("page {pgno} is not part of the plan"));
+            return crate::error::invalid(format!("page {pgno} is not part of the plan"));
         }
         if g.set_local(pgno) {
             if let Err(e) = self
@@ -482,7 +482,7 @@ impl Lazy {
                 // Not installed: leave the page missing.
                 let i = (pgno - 1) as usize / 64;
                 g.local[i] &= !(1 << ((pgno - 1) % 64));
-                return Err(e.to_string());
+                return Err(e.into());
             }
         }
         let f = &mut g.flags[pgno as usize - 1];

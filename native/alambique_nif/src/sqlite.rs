@@ -31,7 +31,7 @@ const PROGRESS_OPS: c_int = 1000;
 mod atoms {
     rustler::atoms! {
         ok, error, blob, nil, undefined, idle, transaction,
-        connection_closed, argument_error, busy,
+        connection_closed, argument_error, busy, disk_full,
         statement_timeout, result_too_large, not_authorized, cache_used,
         schema_used, stmt_used, lookaside_used,
     }
@@ -122,6 +122,7 @@ enum Failure {
     TooLarge,
     Denied,
     Busy,
+    DiskFull,
 }
 
 impl Failure {
@@ -134,6 +135,7 @@ impl Failure {
             Failure::TooLarge => atoms::result_too_large().encode(env),
             Failure::Denied => atoms::not_authorized().encode(env),
             Failure::Busy => atoms::busy().encode(env),
+            Failure::DiskFull => atoms::disk_full().encode(env),
         };
         (atoms::error(), reason).encode(env)
     }
@@ -153,14 +155,15 @@ fn message(db: *mut ffi::sqlite3) -> String {
         .into_owned()
 }
 
-/// The failure of the latest call on `db`: the authorizer's refusal, or
-/// SQLite's message.
+/// The failure of the latest call on `db`, told by its result code: the
+/// authorizer's refusal, a full disk (`SQLITE_FULL`, which an `ENOSPC` of the
+/// database, the WAL or a temporary file becomes), or SQLite's message.
 fn failure(db: *mut ffi::sqlite3) -> Failure {
     // SAFETY: `db` is a live connection.
-    if unsafe { ffi::sqlite3_errcode(db) } == ffi::SQLITE_AUTH {
-        Failure::Denied
-    } else {
-        Failure::Message(message(db))
+    match unsafe { ffi::sqlite3_errcode(db) } & 0xff {
+        ffi::SQLITE_AUTH => Failure::Denied,
+        ffi::SQLITE_FULL => Failure::DiskFull,
+        _ => Failure::Message(message(db)),
     }
 }
 
@@ -647,14 +650,14 @@ fn sqlite_open<'a>(
             )
         };
         if rc != ffi::SQLITE_OK {
-            let m = if db.is_null() {
-                "out of memory".to_string()
+            let failure = if db.is_null() {
+                Failure::Message("out of memory".into())
             } else {
-                message(db)
+                failure(db)
             };
             // SAFETY: `db` is the handle `sqlite3_open_v2` returned.
             unsafe { close_v2(db) };
-            return Err(Failure::Message(m));
+            return Err(failure);
         }
         // SAFETY: `db` is a live connection that nothing else uses yet.
         unsafe {
@@ -844,7 +847,7 @@ fn sqlite_checkpoint<'a>(env: Env<'a>, conn: ResourceArc<Conn>) -> Term<'a> {
             match rc {
                 ffi::SQLITE_OK => Ok(atoms::ok().encode(env)),
                 ffi::SQLITE_BUSY => Ok((atoms::error(), atoms::busy()).encode(env)),
-                _ => Err(Failure::Message(message(db))),
+                _ => Err(failure(db)),
             }
         }),
     )

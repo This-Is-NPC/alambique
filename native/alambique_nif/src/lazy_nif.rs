@@ -146,7 +146,7 @@ fn lazy_deliver<'a>(
             .ok_or_else(|| Error::Invalid("frame outside the fetched data".into()));
         let installed = frame
             .and_then(|f| lazy::decode_frame(f, pgno, l.page_size))
-            .and_then(|page| l.install(pgno, &page).map_err(Error::Io));
+            .and_then(|page| l.install(pgno, &page));
         match installed {
             Ok(d) => done |= d,
             Err(e) => return error_term(env, e),
