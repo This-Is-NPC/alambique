@@ -173,8 +173,8 @@ defmodule Alambique.Admission do
     config.registry
     |> Registry.select([{{:"$1", :"$2", :"$3"}, [], [{{:"$1", :"$2", :"$3"}}]}])
     |> Enum.flat_map(fn {id, pid, load} ->
-      case :atomics.get(load, 3) do
-        0 -> []
+      case Alambique.Cell.last_used(load) do
+        nil -> []
         last -> [{last, pid, load, id}]
       end
     end)

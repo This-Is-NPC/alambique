@@ -1112,7 +1112,7 @@ Why each overlap is safe:
   much, never too little. The woken cell may pass the budget as its cache
   fills; the next wake makes room. Each hibernation emits
   `[:alambique, :admission, :evict]`. The time of the last call is the third
-  slot of the load counter of each cell (set when its wake ends, so a cell
+  slot of the load counter of each cell (also listed by `cells(details: true)`, §8; set when its wake ends, so a cell
   that is still waking is never chosen). Finding the oldest cells reads the
   counter of every awake cell and sorts them (O(n log n), n up to
   `max_cells`), which is paid by each wake at the ceiling of `max_cells` or
@@ -1546,6 +1546,16 @@ directories (`<data_dir>/work`, §20) are not part of the cache; `inflight`,
   `:ets.next/2`, so it costs its size and not the number of cells, and
   `count` is `Registry.count/1`. The set can lag the registry by a message; a
   walk skips entries whose process is gone and keeps going to fill the page.
+  The row is `{id, pid, load}`, with the load counter the registry holds as the
+  cell's value. With `details: true` a page reads two slots of that counter for
+  each entry and nothing else: slot 3, the monotonic ms of the last call (the
+  value admission sorts to pick the least recently used cell, `nil` while the
+  wake lasts), and slot 4, the size of the `-wal` file. Monotonic time because
+  the values are only compared on this node and a clock step must not reorder
+  them. The cell writes slot 4 with the `File.stat` it already makes after each
+  landed upload for the checkpoint check (§6), at the end of its wake and
+  after a checkpoint, so a call to `cells/2` costs no file access and the size
+  can lag a write by the upload that is still in flight.
 - **Cell load.** `Alambique.load/2` answers `{:ok, %{pending: n}}` for a cell
   with a process on this node and `:none` otherwise, without a call into the
   cell. Each cell registers a `:counters` reference as its registry value; the

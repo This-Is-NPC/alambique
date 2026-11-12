@@ -69,7 +69,8 @@ defmodule Alambique.Cell do
   @doc false
   # Slot 1 counts the callers the cell accepted and has not answered; slot 2
   # the calls the router sent that the cell has not finished with (`admit/2`);
-  # slot 3 is the monotonic ms of the last call, 0 until the wake ends.
+  # slot 3 is the monotonic ms of the last call, 0 until the wake ends; slot 4
+  # is the size of the WAL after the last landed batch or checkpoint.
   @spec pending(pid, :atomics.atomics_ref()) :: {:ok, non_neg_integer} | :none
   def pending(pid, load) do
     if Process.alive?(pid),
@@ -79,7 +80,21 @@ defmodule Alambique.Cell do
 
   @doc false
   @spec new_load() :: :atomics.atomics_ref()
-  def new_load, do: :atomics.new(3, [])
+  def new_load, do: :atomics.new(4, [])
+
+  @doc false
+  # The monotonic ms of the last call, `nil` until the wake ends.
+  @spec last_used(:atomics.atomics_ref()) :: integer | nil
+  def last_used(load) do
+    case :atomics.get(load, 3) do
+      0 -> nil
+      last -> last
+    end
+  end
+
+  @doc false
+  @spec wal_bytes(:atomics.atomics_ref()) :: non_neg_integer
+  def wal_bytes(load), do: :atomics.get(load, 4)
 
   @doc false
   # Counts a call before it is sent, so it counts while it waits in the
@@ -200,6 +215,7 @@ defmodule Alambique.Cell do
     Process.send_after(self(), :idle, config.idle_timeout_ms)
     state = %{state | mode: :serving, last_active: System.monotonic_time(:millisecond)}
     :atomics.put(state.load, 3, state.last_active)
+    wal_size(state)
     track(state)
     state
   end
@@ -723,8 +739,9 @@ defmodule Alambique.Cell do
   # A file that is still being filled waits for the end of the hydration.
   defp checkpoint_if_due(%State{conn: conn} = state) when conn != nil do
     limit = state.config.wal.checkpoint_bytes
+    size = wal_size(state)
 
-    with {:ok, %{size: size}} when size >= limit <- File.stat(state.path <> "-wal"),
+    with true <- size >= limit,
          false <- Hydration.hydrating?(state),
          {:ok, state} <- drain(state) do
       {_result, state} = checkpoint(state, size)
@@ -742,18 +759,24 @@ defmodule Alambique.Cell do
     if Hydration.hydrating?(state) do
       {:reply, {:error, :busy}, state}
     else
-      case checkpoint(state, wal_bytes(state)) do
+      case checkpoint(state, wal_size(state)) do
         {:ok, state} -> {:reply, :ok, state}
         {:error, state} -> {:reply, {:error, :busy}, state}
       end
     end
   end
 
-  defp wal_bytes(state) do
-    case File.stat(state.path <> "-wal") do
-      {:ok, %{size: size}} -> size
-      {:error, _} -> 0
-    end
+  # Publishes the size of the WAL for `Alambique.cells/2`; the stat is the
+  # one the checkpoint check needs anyway.
+  defp wal_size(state) do
+    size =
+      case File.stat(state.path <> "-wal") do
+        {:ok, %{size: size}} -> size
+        _ -> 0
+      end
+
+    :atomics.put(state.load, 4, size)
+    size
   end
 
   # Busy or unreplicated frames leave the WAL for the next acknowledgement.
@@ -771,9 +794,11 @@ defmodule Alambique.Cell do
     case result do
       {:ok, repl} ->
         Fault.point(:cell_after_checkpoint, %{cell: state.id, txid: repl.txid})
+        wal_size(state)
         {:ok, %{state | repl: repl}}
 
       {:error, _} ->
+        wal_size(state)
         {:error, state}
     end
   end
