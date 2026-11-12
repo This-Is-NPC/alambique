@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.1](https://github.com/This-Is-NPC/alambique/compare/v0.3.0...v0.3.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* **cell:** check the freeze marker once per renewal ([c106d92](https://github.com/This-Is-NPC/alambique/commit/c106d92f259f854a74d57cdd5a29ff64552deff8))
+* **load:** fetch and compile the driver first ([df7432f](https://github.com/This-Is-NPC/alambique/commit/df7432fc3cd00e5f9f0fc611b84c87e18446d0f3))
+
+
+### Performance Improvements
+
+* **query:** cap a query at a share of the slots ([106bfa4](https://github.com/This-Is-NPC/alambique/commit/106bfa473c56d394940959e27dc88ac460be617b))
+* **query:** list both levels of a cell together ([5211fb8](https://github.com/This-Is-NPC/alambique/commit/5211fb8e003743438d7c765d8cbb107ade8ab50b))
+* **query:** make the default concurrency 16 ([25adae2](https://github.com/This-Is-NPC/alambique/commit/25adae20745ff4417ce21c5eb298aeea6162d7d5))
+
 ## [0.3.0](https://github.com/This-Is-NPC/alambique/compare/v0.2.0...v0.3.0) (2026-11-11)
 
 
