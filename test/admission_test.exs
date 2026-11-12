@@ -72,7 +72,7 @@ defmodule Alambique.AdmissionTest do
     assert awake(inst) == 1
   end
 
-  test "awake.max_wakes refuses a wake while that many are in progress", env do
+  test "a wake above awake.max_wakes waits for a slot instead of being refused", env do
     {:ok, gate} = GatedStore.start_link()
     on_exit(fn -> if Process.alive?(gate), do: GenServer.stop(gate) end)
     store = GatedStore.wrap(gate, env.store)
@@ -83,19 +83,61 @@ defmodule Alambique.AdmissionTest do
     cells = for _ <- 1..6, do: unique_cell()
     tasks = for cell <- cells, do: Task.async(fn -> Alambique.touch(inst, cell) end)
 
-    # Two wakes wait for the store; the others are refused at once.
+    # Two wakes wait for the store and the other four wait for a slot.
     eventually(fn -> length(GatedStore.held(gate)) == 2 end)
     eventually(fn -> Enum.count(cells, &(Alambique.load(inst, &1) != :none)) == 2 end)
 
     GatedStore.open(gate)
-    replies = Enum.map(tasks, &Task.await(&1, 10_000))
-
-    assert Enum.count(replies, &match?({:ok, _}, &1)) >= 2
-    assert Enum.count(replies, &(&1 == {:error, :overloaded})) >= 1
-
-    # The slots come back: later wakes are admitted.
-    for cell <- cells, do: eventually(fn -> match?({:ok, _}, Alambique.touch(inst, cell)) end)
+    assert Enum.all?(tasks, &match?({:ok, _}, Task.await(&1, 10_000)))
   end
+
+  test "a wake that does not get a slot in awake.wake_queue_ms is refused", env do
+    {:ok, gate} = GatedStore.start_link()
+    on_exit(fn -> if Process.alive?(gate), do: GenServer.stop(gate) end)
+    store = GatedStore.wrap(gate, env.store)
+    GatedStore.hold(gate, ~r{/0000/})
+
+    inst =
+      start_instance(%{env | store: store},
+        migrations: @schema,
+        awake: [max_wakes: 1, wake_queue_ms: 100, max_wake_queue: 1]
+      )
+
+    waking = Task.async(fn -> Alambique.touch(inst, unique_cell()) end)
+    eventually(fn -> length(GatedStore.held(gate)) == 1 end)
+
+    handler = "wake-queue-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler,
+      [:alambique, :admission, :wake_queue],
+      &__MODULE__.forward_queue/4,
+      self()
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    # The first waits for the slot and expires; the second finds the queue full.
+    queued = Task.async(fn -> timed(fn -> Alambique.touch(inst, unique_cell()) end) end)
+    eventually(fn -> :ets.info(Alambique.Config.fetch!(inst).wake_queue, :size) == 1 end)
+    assert {:error, :overloaded} = Alambique.touch(inst, unique_cell())
+    assert_receive {:wake_queue, :full}
+
+    assert {{:error, :overloaded}, ms} = Task.await(queued, 5_000)
+    assert ms >= 100 and ms < 1_000
+    assert_receive {:wake_queue, :expired}
+
+    GatedStore.open(gate)
+    assert {:ok, _} = Task.await(waking, 10_000)
+  end
+
+  defp timed(fun) do
+    started = System.monotonic_time(:millisecond)
+    {fun.(), System.monotonic_time(:millisecond) - started}
+  end
+
+  @doc false
+  def forward_queue(_event, _measurements, meta, test), do: send(test, {:wake_queue, meta.result})
 
   test "the wake slot of a cell killed while waking comes back", env do
     {:ok, gate} = GatedStore.start_link()

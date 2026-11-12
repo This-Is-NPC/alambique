@@ -27,6 +27,7 @@ defmodule Alambique.ConfigPropertiesTest do
     {:awake, :max_cells},
     {:awake, :max_wakes},
     {:awake, :max_pending},
+    {:awake, :wake_queue_ms},
     {:relocate, :fence_attempts},
     {:relocate, :timeout_ms},
     {:relocate, :poll_ms},

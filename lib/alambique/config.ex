@@ -50,7 +50,13 @@ defmodule Alambique.Config do
   @routing_defaults [hops: 2, attempts: 3, slack_ms: 1_000]
   @wake_defaults [fence_attempts: 5, failure_backoff_ms: 5_000]
   @wal_defaults [checkpoint_bytes: 67_108_864, checkpoint_deadline_ms: 10_000]
-  @awake_defaults [max_cells: 20_000, max_wakes: 256, max_pending: 10_000, cache_kib: 512]
+  @awake_defaults [
+    max_cells: 20_000,
+    max_wakes: 256,
+    max_pending: 10_000,
+    cache_kib: 512,
+    wake_queue_ms: 500
+  ]
   @relocate_defaults [fence_attempts: 5, timeout_ms: 60_000, poll_ms: 100]
   @rewind_defaults [fence_attempts: 5, timeout_ms: 60_000, poll_ms: 100, max_bytes: 268_435_456]
   @schema_defaults [check_page: 1_000, listing_timeout_ms: nil]
@@ -251,6 +257,8 @@ defmodule Alambique.Config do
             max_wakes: pos_integer,
             max_pending: pos_integer,
             cache_kib: pos_integer,
+            wake_queue_ms: pos_integer,
+            max_wake_queue: pos_integer,
             max_bytes: pos_integer | nil
           },
           relocate: %{fence_attempts: pos_integer, timeout_ms: pos_integer, poll_ms: pos_integer},
@@ -275,6 +283,7 @@ defmodule Alambique.Config do
           hints: atom,
           drain_status: atom,
           admission: atom,
+          wake_queue: atom,
           locations: atom,
           query_supervisor: atom,
           inflight: atom,
@@ -381,6 +390,7 @@ defmodule Alambique.Config do
       hints: Module.concat(name, Hints),
       drain_status: Module.concat(name, DrainStatus),
       admission: Module.concat(name, Admission),
+      wake_queue: Module.concat(name, WakeQueue),
       locations: Module.concat(name, Locations),
       compactor: Module.concat(name, Compactor),
       cleanups: Module.concat(name, Cleanups),
@@ -876,15 +886,23 @@ defmodule Alambique.Config do
   end
 
   # `max_bytes: nil` (the default) leaves the memory of the awake cells
-  # unbounded.
+  # unbounded; `max_wake_queue: nil` is four times `max_wakes`.
   defp awake!(opts) do
-    opts = checked_keyword!(:awake, opts, [:max_bytes | Keyword.keys(@awake_defaults)])
+    opts =
+      checked_keyword!(:awake, opts, [:max_bytes, :max_wake_queue | Keyword.keys(@awake_defaults)])
+
     {max_bytes, rest} = Keyword.pop(opts, :max_bytes)
+    {queue, rest} = Keyword.pop(rest, :max_wake_queue)
 
-    unless is_nil(max_bytes) or (is_integer(max_bytes) and max_bytes > 0),
-      do: bad!(":awake :max_bytes must be nil or a positive integer")
+    for {key, value} <- [max_bytes: max_bytes, max_wake_queue: queue],
+        not (is_nil(value) or (is_integer(value) and value > 0)),
+        do: bad!(":awake #{inspect(key)} must be nil or a positive integer")
 
-    options!(:awake, rest, @awake_defaults) |> Map.put(:max_bytes, max_bytes)
+    awake = options!(:awake, rest, @awake_defaults)
+
+    awake
+    |> Map.put(:max_bytes, max_bytes)
+    |> Map.put(:max_wake_queue, queue || 4 * awake.max_wakes)
   end
 
   # `max_bytes: nil` turns the size limit of a rewind off.

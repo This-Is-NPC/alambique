@@ -27,6 +27,17 @@ defmodule Alambique.ConfigOptionsTest do
     )
   end
 
+  test "awake.max_wake_queue is four times max_wakes unless given, and is a positive integer",
+       ctx do
+    assert Alambique.Config.build(base(ctx, awake: [max_wakes: 7])).awake.max_wake_queue == 28
+
+    for bad <- [0, -1, :many] do
+      assert_raise ArgumentError, ~r/max_wake_queue/, fn ->
+        Alambique.Config.build(base(ctx, awake: [max_wake_queue: bad]))
+      end
+    end
+  end
+
   test "the operational groups have documented defaults", ctx do
     config = Alambique.Config.build(base(ctx))
 
@@ -39,6 +50,8 @@ defmodule Alambique.ConfigOptionsTest do
              max_wakes: 256,
              max_pending: 10_000,
              cache_kib: 512,
+             wake_queue_ms: 500,
+             max_wake_queue: 1_024,
              max_bytes: nil
            }
 
@@ -125,7 +138,15 @@ defmodule Alambique.ConfigOptionsTest do
           routing: [hops: 1, attempts: 1, slack_ms: 20],
           wake: [fence_attempts: 2, failure_backoff_ms: 50],
           wal: [checkpoint_bytes: 1_000],
-          awake: [max_cells: 7, max_wakes: 3, max_pending: 9, cache_kib: 64, max_bytes: 5_000_000],
+          awake: [
+            max_cells: 7,
+            max_wakes: 3,
+            max_pending: 9,
+            cache_kib: 64,
+            wake_queue_ms: 40,
+            max_wake_queue: 5,
+            max_bytes: 5_000_000
+          ],
           relocate: [fence_attempts: 2, timeout_ms: 30_000, poll_ms: 5],
           rewind: [fence_attempts: 3, timeout_ms: 20_000, poll_ms: 7, max_bytes: nil],
           schema: [check_page: 10],
@@ -147,6 +168,8 @@ defmodule Alambique.ConfigOptionsTest do
              max_wakes: 3,
              max_pending: 9,
              cache_kib: 64,
+             wake_queue_ms: 40,
+             max_wake_queue: 5,
              max_bytes: 5_000_000
            }
 
