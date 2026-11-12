@@ -36,6 +36,11 @@ first release (0.1.0):
   keys in commit order.
 - 0.3.1: a cross-cell query takes at most `query: [max_statement_share:]`
   (default 0.5) of the statement slots, and `query: [concurrency:]` is 16.
+- 0.4.0: `Alambique.checkpoint/3` empties the WAL of an awake cell, and
+  `wal: [max_bytes:]` bounds the WAL files of all awake cells. A full disk
+  gives `{:error, :disk_full}`. A wake above `awake: [max_wakes:]` waits in a
+  queue (`wake_queue_ms`, `max_wake_queue`) before it gives `:overloaded`.
+  `cells(details: true)` lists the last use and the WAL size of each cell.
 
 The full list is in [CHANGELOG.md](CHANGELOG.md).
 
