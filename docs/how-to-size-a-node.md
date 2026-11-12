@@ -145,6 +145,10 @@ should leave more of the pool to other work.
 - **A burst of cold wakes gets `{:error, :overloaded}` with `max_wakes` set.**
   The wakes waited `wake_queue_ms` for a slot, or found `max_wake_queue`
   waiters ahead. See step 5 above.
+- **The disk fills with `-wal` files.** Each awake cell moves its WAL at
+  `wal: [checkpoint_bytes:]` (default 64 MiB), and many cells below that limit
+  can still add up. Set `wal: [max_bytes:]` to a part of the free space of the
+  data volume ([how-to-operate-a-cell.md](how-to-operate-a-cell.md#11-empty-the-wal-of-an-awake-cell-now)).
 - **Memory grows but `sqlite_memory_used` does not.** The memory is not in the
   cells. Compare `:erlang.memory/0` by type: binaries, ETS and processes have
   their own entries. A data directory on a tmpfs (such as `/dev/shm`) also puts

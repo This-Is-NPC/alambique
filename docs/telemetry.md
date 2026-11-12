@@ -69,6 +69,7 @@ integers.
 | `[:alambique, :cell, :wake]` | `duration`, and the store requests of the wake: `trips` (all), `gets`, `heads`, `lists`, `puts`, `deletes` | `cell`, `result` (`:ok` or `:error`), `requests` (the same requests by `{operation, kind of object}`, see below), and `location` (the id of the location the cell was woken in), `epoch`, `txid` (the head after the fence and migrations) and `source` (`:empty` for a cell with nothing in the store, `:restore`, or `:local` for a reused file) for `:ok`, or `reason` for `:error` |
 | `[:alambique, :cell, :migrate]` | `duration` | `cell`, `version` |
 | `[:alambique, :cell, :commit]` | `duration`, `transactions` (callers in the batch), `inflight` (batches in flight when this one was sent, itself included), and `queued_ms` (from the encode to the acknowledgement) for `:ok` | `cell`, `location`, `epoch`, `txid`, `result` (`:ok`, `:fenced` or `:error`), and `reason` unless `:ok` |
+| `[:alambique, :wal, :budget]` | `duration`, `bytes` (sum of the WALs before), `cells` (checkpointed), `busy` | `instance` |
 | `[:alambique, :cell, :checkpoint]` | `duration`, `bytes` (size of the WAL before) | `cell`, `result` (`:ok`, or `:error` when SQLite was busy or frames were not replicated: the WAL stays for the next acknowledgement). Also emitted for `Alambique.checkpoint/3`; not for the checkpoint of a hibernation |
 | `[:alambique, :cell, :hibernate]` | `duration` | `cell`, `location`, `epoch`, `reason` (`:idle`, `:request`, `:shutdown` or `:frozen`) |
 | `[:alambique, :admission, :evict]` | `bytes` (recorded for the awake cells after the hibernation) | `cell`, `max_cells`, `max_bytes` (`nil` without a budget): emitted for each cell hibernated because the awake cells filled `awake: [max_cells: ...]` or reached `max_bytes`, so that another could wake (design §7) |
@@ -91,6 +92,12 @@ answer of its writers: the writers of a batch that was in flight get
 location (design §18), whether `relocate` ran it, the compactor or
 `Alambique.cleanup_moved/4`. `result: :waiting` means the grace period
 (`moved_grace_ms`) has not passed; the cleanup then deleted nothing.
+
+`[:alambique, :wal, :budget]` is emitted by each round of the WAL budget
+(`wal.max_bytes`, design §6) that found the sum of the WALs at or above the
+budget: `bytes` is the sum before, `cells` the cells it checkpointed and `busy`
+the cells that answered `{:error, :busy}` or `{:error, :disk_full}` and were left for the next round.
+The checkpoints themselves emit `[:alambique, :cell, :checkpoint]`.
 
 `:checkpoint` is emitted when an awake cell's WAL passes `wal.checkpoint_bytes`
 and when `Alambique.checkpoint/3` runs it (design §6); a call that answers
