@@ -101,6 +101,24 @@ defmodule Alambique.DiskFullTest do
     end
   end
 
+  describe "the cell directory" do
+    test "a wake that cannot make its directory is :disk_full", ctx do
+      inst = start_instance(ctx, migrations: @schema)
+      cell = unique_cell()
+
+      Fault.install(fn
+        :local_prepare, _ -> {:error, :enospc}
+        _, _ -> :ok
+      end)
+
+      on_exit(&Fault.uninstall/0)
+
+      assert {:error, :disk_full} = Alambique.execute(inst, cell, "INSERT INTO t (n) VALUES (1)")
+      Fault.uninstall()
+      assert {:ok, _} = Alambique.execute(inst, cell, "INSERT INTO t (n) VALUES (1)")
+    end
+  end
+
   describe "read replicas" do
     test "a replica that cannot be written is :disk_full, not a crash", ctx do
       owner = start_instance(ctx, migrations: @schema)

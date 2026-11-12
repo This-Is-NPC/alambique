@@ -31,16 +31,24 @@ defmodule Alambique.Cell.Local do
   @work_kinds [:relocate, :rewind, :scrub]
 
   @doc "Creates `dir` (and its parents) readable only by the owner."
+  @spec private_dir(Path.t()) :: :ok | {:error, File.posix()}
+  def private_dir(dir) do
+    with :ok <- File.mkdir_p(dir) do
+      case File.chmod(dir, 0o700) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("Alambique could not restrict #{dir}: #{inspect(reason)}")
+      end
+    end
+  end
+
+  @doc "`private_dir/1`, raising when the directory cannot be made."
   @spec private_dir!(Path.t()) :: :ok
   def private_dir!(dir) do
-    File.mkdir_p!(dir)
-
-    case File.chmod(dir, 0o700) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("Alambique could not restrict #{dir}: #{inspect(reason)}")
+    with {:error, reason} <- private_dir(dir) do
+      raise File.Error, reason: reason, action: "make directory", path: dir
     end
   end
 
@@ -68,15 +76,23 @@ defmodule Alambique.Cell.Local do
 
   defp work_root(config), do: Path.join(config.data_dir, "work")
 
-  @doc "Creates the directory and removes temporary files of an interrupted restore."
-  @spec prepare(Path.t()) :: :ok
+  @doc """
+  Creates the directory and removes temporary files of an interrupted restore.
+  A full disk is `{:error, :enospc}`.
+  """
+  @spec prepare(Path.t()) :: :ok | {:error, File.posix()}
   def prepare(db_path) do
     dir = Path.dirname(db_path)
-    private_dir!(dir)
     temp = @file_name <> ".restore-"
 
-    for name <- File.ls!(dir), String.starts_with?(name, temp), do: File.rm(Path.join(dir, name))
-    :ok
+    with :ok <- Fault.point(:local_prepare, %{path: db_path}),
+         :ok <- private_dir(dir) do
+      for name <- File.ls!(dir),
+          String.starts_with?(name, temp),
+          do: File.rm(Path.join(dir, name))
+
+      :ok
+    end
   end
 
   @doc "Reads the marker of the local file, if it is valid."
