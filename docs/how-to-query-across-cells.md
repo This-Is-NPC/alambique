@@ -112,14 +112,23 @@ requests: [get: 1, list: 4]
 Per instance, in `Alambique` options:
 
 ```elixir
-query: [cache_bytes: 2_147_483_648, concurrency: 16, timeout_ms: 30_000,
-        page_size: 1_000, stale_tmp_seconds: 600, restore_attempts: 3,
-        reflink: true]
+query: [cache_bytes: 2_147_483_648, concurrency: 16, max_statement_share: 0.5,
+        timeout_ms: 30_000, page_size: 1_000, stale_tmp_seconds: 600,
+        restore_attempts: 3, reflink: true]
 ```
 
 Per call: `location:` (an `Alambique.Location`, its id, or `{store, prefix}`, or
-a list of them for scans, instead of the locations of the placement), `concurrency:`, `timeout_ms:`, `ordered:` (rows in input order, default
-completion order).
+a list of them for scans, instead of the locations of the placement), `concurrency:`, `max_statement_share:`, `timeout_ms:`, `ordered:` (rows in
+input order, default completion order).
+
+`max_statement_share:` is the share of the statement slots
+(`sql: [max_concurrent_statements:]`) one query may hold at once, above 0 and
+at most 1. With the default 0.5, a query runs at most half the slots' worth of
+statements at once (4 with the default 8 slots), so two queries fit together
+and slots remain for cells. With 1 a query may take every slot and a second
+query that arrives meanwhile gets `:busy`. It limits statements only, not the
+cells waiting for the store (`concurrency:`). See
+[how-to-size-a-node.md](how-to-size-a-node.md).
 
 `timeout_ms` covers building the replica and running the statement; a statement
 that runs past it is interrupted and the cell reports `:timeout`.
