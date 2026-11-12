@@ -4,7 +4,7 @@ defmodule AlambiqueTestkit.MixProject do
   def project do
     [
       app: :alambique_testkit,
-      version: "0.3.0", # x-release-please-version
+      version: "0.3.1", # x-release-please-version
       elixir: "~> 1.17",
       start_permanent: false,
       description: "Test helpers for applications built on Alambique.",
