@@ -6,8 +6,9 @@ defmodule Alambique.Compaction.Compactor do
   # Cells tell it about commits through `notify/3`, which writes one row per
   # cell into a bounded public ETS table: `{cell, first_txid, last_txid,
   # due_ms}`. A row is ready when `fanout` TXIDs were committed since it
-  # appeared or when `max_age_ms` passed. A tick takes the ready rows that
-  # waited longest, deletes them and runs one pass for each, `concurrency` at a time. A cell
+  # appeared or when `max_age_ms` passed. A tick takes the ready rows with
+  # `max_chain_segments` TXIDs or more first, then those that waited longest,
+  # deletes them and runs one pass for each, `concurrency` at a time. A cell
   # nobody writes has no row and costs nothing. Notifications for new cells
   # are dropped while the table is full; the next commit makes a new one.
   #
@@ -217,8 +218,9 @@ defmodule Alambique.Compaction.Compactor do
   end
 
   @doc false
-  # The rows a tick takes: at most `concurrency * batch_factor`, the rows that
-  # waited longest (smallest `due`). Every ready row is read and sorted, so a tick costs O(ready log
+  # The rows a tick takes: at most `concurrency * batch_factor`, chains over
+  # `max_chain_segments` first, then the rows that waited longest (smallest
+  # `due`). Every ready row is read and sorted, so a tick costs O(ready log
   # ready), bounded by `queue_limit`; hash order would let the same cells
   # take every batch while others never get one.
   @spec ready(atom, map, integer) :: [tuple]
@@ -231,8 +233,8 @@ defmodule Alambique.Compaction.Compactor do
 
     table
     |> :ets.select(spec)
-    |> Enum.sort_by(fn {cell, _first, _last, due} ->
-      {due, cell}
+    |> Enum.sort_by(fn {cell, first, last, due} ->
+      {if(first > 0 and last - first >= c.max_chain_segments - 1, do: 0, else: 1), due, cell}
     end)
     |> Enum.take(c.concurrency * c.batch_factor)
   end

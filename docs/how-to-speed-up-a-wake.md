@@ -71,6 +71,10 @@ the fence.
    level-0 bytes reach twice the last snapshot, or after seven days; merges of
    eight files) do this; a lower `:snapshot_interval_txids` or `:snapshot_ratio`
    for cells that change all day makes the chain after the snapshot shorter.
+   When many cells are written at once, the compactor takes the cells that
+   waited longest, and first any cell with `compaction: [max_chain_segments:]`
+   (default 256) uncompacted commits. Lower it if a busy node must wake cells
+   quickly; design §9.
 
 4. Keep a local file when you can. A node that hibernated the cell last reuses
    its file and reads only the head of the chain. `local_cache.max_bytes`

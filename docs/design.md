@@ -1885,8 +1885,9 @@ A row is ready when `fanout` TXIDs were committed since it appeared, or when
 `concurrency * batch_factor` ready rows, deletes them, and runs one pass for
 each, `concurrency` at a time, each with its own deadline. When more rows are
 ready than fit in a batch, the choice is not left to the hash order of the
-table: the rows with the smallest `due`, the ones that waited longest, go
-first. A row that is taken is deleted and a new commit makes a new row with a later `due`, so a
+table: the rows with `max_chain_segments` (default 256) TXIDs or more go first,
+then the rows with the smallest `due`, the ones that waited longest. A row that
+is taken is deleted and a new commit makes a new row with a later `due`, so a
 ready row is overtaken only by the rows that were ready before it: with `R`
 ready rows and a batch of `B`, it is taken within `ceil(R / B)` ticks, however
 busy the other cells are. This reads every ready row each tick and sorts them,
@@ -1896,6 +1897,20 @@ table holds `queue_limit` rows, notifications for new cells are dropped; the
 next commit of such a cell makes a row. A failed pass is logged and queued
 again after `retry_ms`; a pass that ran out of merge budget is queued at once.
 The compactor starts last in the instance tree, so its crash restarts nothing.
+
+**Chain cap.** A row counts the TXIDs from its first commit to its last, one
+per batch, so `last - first + 1` is the number of level-0 files the cell added
+since the compactor last took its row. Rows with `max_chain_segments` or more
+(at least `fanout`, so they are ready anyway) go ahead of all other rows. A
+cell is therefore not left with a growing chain because other cells are busier:
+while fewer cells than a batch are over the cap, a cell waits one tick, and
+its chain is the cap plus what it commits during that tick and its pass. That
+bounds the level-0 files a restore reads to about the cap, on top of the
+merged files of "Levels" below. It does not hold when the compactor is down, when more
+cells are over the cap than a batch (they are served oldest first, in
+`ceil(over / batch)` ticks), or while a pass fails: a row taken for a failed
+pass is queued again after `retry_ms` with no TXID count, so its chain is not
+measured until it commits again after a pass that worked.
 
 **Levels.** A pass merges level-0 files, one per batch, `fanout` (default 8)
 at a time into level 1, level 1 into level 2, up to `max_level` (default 2).
