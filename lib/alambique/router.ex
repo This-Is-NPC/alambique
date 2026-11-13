@@ -274,10 +274,22 @@ defmodule Alambique.Router do
     end
   end
 
+  # A store that failed for this cell is not asked again until its backoff
+  # ends (`Admission.failed/3`): the call gets the remembered error and makes
+  # no request.
   defp read_lease({config, cell, _, _, _, _} = args) do
+    case Admission.store_failure(config, cell) do
+      {:error, _} = error -> {nil, error}
+      nil -> read_lease_unless_backed_off(args)
+    end
+  end
+
+  defp read_lease_unless_backed_off({config, cell, _, _, _, _} = args) do
     case read_lease_of(config, cell) do
       {:error, reason} ->
-        {nil, {:error, Breaker.classify({:lease_unreadable, reason})}}
+        error = Breaker.classify({:lease_unreadable, reason})
+        Admission.failed(config, cell, error)
+        {nil, {:error, error}}
 
       %{answer: :none} = seen ->
         free(args, seen)

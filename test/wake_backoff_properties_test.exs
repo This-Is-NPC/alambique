@@ -107,7 +107,9 @@ defmodule Alambique.WakeBackoffPropertiesTest do
                 {:moved, :x},
                 {:contended, "n", 1},
                 {:restore, {:bad_snapshot, "k"}},
-                {:lease, :lost}
+                {:lease, :lost},
+                {:lease_unreadable, {:owned, "n", 1}},
+                {:lease_unreadable, {:unavailable, "n", 1}}
               ])
           ) do
       config = config(wake)

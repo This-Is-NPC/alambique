@@ -26,6 +26,8 @@ defmodule Alambique.WakeStoreBackoffTest do
   # wake at its first step, and each wake costs the same number of PUTs.
   defp puts(env), do: CountingStore.count(env.counts, :put)
 
+  defp requests(env), do: puts(env) + CountingStore.count(env.counts, :get)
+
   defp start(env) do
     start_instance(env,
       migrations: @schema,
@@ -58,6 +60,26 @@ defmodule Alambique.WakeStoreBackoffTest do
     MemoryStore.remove(env.store_config, fault)
     Process.sleep(450)
     assert {:ok, _} = Alambique.query(inst, cell, "SELECT 1")
+  end
+
+  test "a store that fails every request is not asked again by the calls during the backoff",
+       env do
+    inst = start(env)
+    cell = unique_cell()
+
+    MemoryStore.inject(env.store_config, kind: :error, reason: :timeout, ops: [:get, :put])
+
+    CountingStore.reset(env.counts)
+    assert {:error, {:lease_unreadable, _} = reason} = Alambique.query(inst, cell, "SELECT 1")
+    one = requests(env)
+    assert one > 0
+
+    for _ <- 1..49, do: assert({:error, ^reason} = Alambique.query(inst, cell, "SELECT 1"))
+    assert requests(env) == one
+
+    Process.sleep(450)
+    assert {:error, _} = Alambique.query(inst, cell, "SELECT 1")
+    assert requests(env) == 2 * one
   end
 
   test "another cell is not affected by the backoff of one", env do
