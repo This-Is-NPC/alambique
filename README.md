@@ -49,11 +49,14 @@ first release (0.1.0):
   [backoff_ms:]`), and a cell keeps a failed upload and retries it while its
   lease is valid (`upload:`). `owner/3` takes `peers: true` to ask the nodes
   instead of the store.
-- Unreleased: nodes find each other through the store. The `registry:` option
+- 0.6.0: nodes find each other through the store. The `registry:` option
   writes an entry under `<prefix>/nodes/`, and `Alambique.peers/1` lists the
   live peers ([how-to](docs/how-to-discover-nodes.md)).
   `Alambique.breaker_status/1` reports the state of the store circuit breaker
-  of each location.
+  of each location. The S3 store derives the AWS endpoint from the region and
+  takes a `session_token` or a `credentials` function that renews temporary
+  credentials ([how-to](docs/how-to-configure-the-s3-store.md)); the ops tasks
+  take `--session-token`. There is no breaking change.
 
 The full list is in [CHANGELOG.md](CHANGELOG.md).
 
