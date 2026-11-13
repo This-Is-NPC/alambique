@@ -251,6 +251,36 @@ defmodule Alambique.ConfigPropertiesTest do
       end
     end
 
+    property "the wake backoff takes a first delay up to its cap, a factor of 1 or more, a jitter below 1" do
+      check all(
+              first <- integer(1..1_000),
+              cap <- integer(1..1_000),
+              factor <- one_of([integer(1..5), float(min: 1.0, max: 5.0)]),
+              jitter <- one_of([float(min: 0.0, max: 0.999), member_of([0, 0.0])]),
+              bad_factor <- float(max: 0.999),
+              bad_jitter <- one_of([float(min: 1.0, max: 5.0), float(max: -1.0e-9)])
+            ) do
+        wake = [
+          backoff_ms: first,
+          backoff_max_ms: cap,
+          backoff_factor: factor,
+          backoff_jitter: jitter
+        ]
+
+        if first <= cap do
+          assert %{backoff_ms: ^first, backoff_max_ms: ^cap, backoff_factor: ^factor} =
+                   Config.build(base(wake: wake)).wake
+        else
+          assert_raise ArgumentError, ~r/backoff_ms/, fn -> Config.build(base(wake: wake)) end
+        end
+
+        for bad <- [[backoff_factor: bad_factor], [backoff_jitter: bad_jitter]] do
+          error = assert_raise ArgumentError, fn -> Config.build(base(wake: bad)) end
+          assert error.message =~ "backoff"
+        end
+      end
+    end
+
     property "lease_ttl_ms must exceed twice skew_margin_ms" do
       check all(skew <- integer(0..20), around <- integer(-2..2)) do
         ttl = max(2 * skew + around, 1)

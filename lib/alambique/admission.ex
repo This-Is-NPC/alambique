@@ -1,8 +1,9 @@
 defmodule Alambique.Admission do
   @moduledoc false
   # Limits that protect a node from more cells than it can hold (design §7):
-  # the cells waking at once, and a short memory of wakes that failed for a
-  # reason a retry cannot change. The cap on awake cells is the
+  # the cells waking at once, and a short memory of wakes that failed, for a
+  # fixed time when a retry cannot change the reason and with an exponential
+  # backoff when the store failed. The cap on awake cells is the
   # `max_children` of the cell supervisor, which the router keeps free by
   # hibernating the least recently used cells (`crowded?/1`), and the cap on a
   # cell's queue is taken by `Cell.admit/2` in the router.
@@ -11,10 +12,10 @@ defmodule Alambique.Admission do
   # `Alambique.Admission.Wakes`, which monitors whoever holds a slot.
   #
   # One public table per instance, created by `Alambique.Membership`: the
-  # entries `{{:failed, cell}, reason, until_ms}` and, with `awake.max_bytes`,
+  # entries `{{:failed, cell}, reason, until_ms, failures_in_a_row}` and, with `awake.max_bytes`,
   # the counter `:bytes` and one entry `{{:cell, pid}, bytes}` per awake cell.
 
-  alias Alambique.{Config, Sqlite}
+  alias Alambique.{Config, Sqlite, Telemetry}
 
   @doc "Creates the table; called by the process that owns it."
   @spec init(Config.t()) :: :ok
@@ -71,35 +72,131 @@ defmodule Alambique.Admission do
   @spec end_wake(Config.t(), pid) :: :ok
   def end_wake(config, pid), do: GenServer.cast(config.wakes, {:end, pid})
 
-  # Failures a retry reproduces at the cost of a full restore. Anything that
-  # depends on the lease, the owner or the moment is retried at once.
+  # Failures a retry reproduces at the cost of a full restore: remembered for
+  # `wake.failure_backoff_ms`.
   @deterministic [:restore, :hydration, :local_file, :open, :migration, :schema_too_new]
 
-  @doc "Remembers a failed wake of `cell` for `wake.failure_backoff_ms`, if a retry would repeat it."
-  @spec failed(Config.t(), String.t(), term) :: :ok
-  def failed(config, cell, reason) do
-    if is_tuple(reason) and elem(reason, 0) in @deterministic do
-      if :ets.info(config.admission, :size) > config.hint_limit,
-        do: :ets.match_delete(config.admission, {{:failed, :_}, :_, :_})
+  # What a wrapped reason says about its origin: the step that failed.
+  @wrappers [:restore, :hydration, :lease, :frozen_check, :placement, :lazy]
 
-      until = System.monotonic_time(:millisecond) + config.wake.failure_backoff_ms
-      :ets.insert(config.admission, {{:failed, cell}, reason, until})
+  @transport [
+    :timeout,
+    :closed,
+    :store_unavailable,
+    :econnrefused,
+    :econnreset,
+    :econnaborted,
+    :etimedout,
+    :ehostunreach,
+    :enetunreach,
+    :enetdown,
+    :nxdomain,
+    :epipe,
+    :connect_timeout
+  ]
+
+  @doc """
+  Whether `reason` is a store that failed or did not answer: a timeout, an
+  HTTP answer, a crashed request, a refused or dropped connection, an open
+  circuit breaker (`:store_unavailable`), alone or inside the reason of the
+  step that met it (`{:lease, _}`, `{:restore, _}`, `{kind, key, _}`...).
+  Anything else is not: another node that owns the cell, a frozen or draining
+  cell, a full disk, a damaged chain.
+  """
+  @spec store_error?(term) :: boolean
+  def store_error?(reason) when reason in @transport, do: true
+  def store_error?({tag, _, _}) when tag in [:http, :store_crashed, :request_crashed], do: true
+  def store_error?({tag, reason}) when tag in @wrappers, do: store_error?(reason)
+
+  def store_error?({kind, key, reason}) when is_atom(kind) and is_binary(key),
+    do: store_error?(reason)
+
+  def store_error?(_), do: false
+
+  @doc """
+  Remembers a failed wake of `cell`, if a retry would not do better.
+
+  A store error is remembered with an exponential backoff: `wake.backoff_ms`,
+  times `wake.backoff_factor` for each failure in a row, up to
+  `wake.backoff_max_ms`, less a random share of up to `wake.backoff_jitter`.
+  A deterministic failure is remembered for `wake.failure_backoff_ms`. The
+  count starts over after a wake that succeeds (`recovered/2`) or a quiet time
+  as long as the longest delay. Anything else is retried at once.
+  """
+  @spec failed(Config.t(), String.t(), term, integer) :: :ok
+  def failed(config, cell, reason, now \\ System.monotonic_time(:millisecond)) do
+    cond do
+      store_error?(reason) ->
+        attempts = attempts(config, cell, now) + 1
+        delay = delay(config.wake, attempts)
+        remember(config, cell, reason, now + delay, attempts, now)
+
+        Telemetry.emit([:admission, :wake_backoff], %{delay_ms: delay, failures: attempts}, %{
+          cell: cell,
+          reason: reason
+        })
+
+      is_tuple(reason) and elem(reason, 0) in @deterministic ->
+        remember(config, cell, reason, now + config.wake.failure_backoff_ms, 0, now)
+
+      true ->
+        :ok
     end
+  end
 
+  # The delay after the `attempts`-th failure in a row before the random
+  # share is taken away.
+  defp ceiling(wake, attempts),
+    do:
+      min(
+        wake.backoff_max_ms,
+        round(wake.backoff_ms * :math.pow(wake.backoff_factor, attempts - 1))
+      )
+
+  defp delay(wake, attempts) do
+    top = ceiling(wake, attempts)
+    max(1, round(top * (1 - wake.backoff_jitter * :rand.uniform())))
+  end
+
+  defp attempts(config, cell, now) do
+    case :ets.lookup(config.admission, {:failed, cell}) do
+      [{_, _, until, attempts}] when now <= until + config.wake.backoff_max_ms -> attempts
+      _ -> 0
+    end
+  end
+
+  defp remember(config, cell, reason, until, attempts, now) do
+    if :ets.info(config.admission, :size) > config.hint_limit, do: purge(config, now)
+    :ets.insert(config.admission, {{:failed, cell}, reason, until, attempts})
     :ok
   end
 
-  @doc "The remembered failure of `cell`, while it lasts."
-  @spec failure(Config.t(), String.t()) :: {:error, term} | nil
-  def failure(config, cell) do
+  # The entries whose backoff and quiet time ended are dropped first; the rest
+  # only if that was not enough, which loses the counts of the cells in backoff.
+  defp purge(config, now) do
+    quiet = config.wake.backoff_max_ms
+
+    :ets.select_delete(config.admission, [
+      {{{:failed, :_}, :_, :"$1", :_}, [{:<, {:+, :"$1", quiet}, now}], [true]}
+    ])
+
+    if :ets.info(config.admission, :size) > config.hint_limit,
+      do: :ets.match_delete(config.admission, {{:failed, :_}, :_, :_, :_})
+  end
+
+  @doc "Ends the backoff of `cell`, which woke: the next failure starts from the first delay."
+  @spec recovered(Config.t(), String.t()) :: :ok
+  def recovered(config, cell) do
+    :ets.delete(config.admission, {:failed, cell})
+    :ok
+  end
+
+  @doc "The remembered failure of `cell`, while its backoff lasts."
+  @spec failure(Config.t(), String.t(), integer) :: {:error, term} | nil
+  def failure(config, cell, now \\ System.monotonic_time(:millisecond)) do
     case :ets.lookup(config.admission, {:failed, cell}) do
-      [{_, reason, until}] ->
-        if System.monotonic_time(:millisecond) < until do
-          {:error, reason}
-        else
-          :ets.delete(config.admission, {:failed, cell})
-          nil
-        end
+      [{_, reason, until, _}] ->
+        if now < until, do: {:error, reason}
 
       [] ->
         nil

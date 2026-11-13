@@ -42,7 +42,15 @@ defmodule Alambique.ConfigOptionsTest do
     config = Alambique.Config.build(base(ctx))
 
     assert config.routing == %{hops: 2, attempts: 3, slack_ms: 1_000}
-    assert config.wake == %{fence_attempts: 5, failure_backoff_ms: 5_000}
+
+    assert config.wake == %{
+             fence_attempts: 5,
+             failure_backoff_ms: 5_000,
+             backoff_ms: 200,
+             backoff_max_ms: 10_000,
+             backoff_factor: 2,
+             backoff_jitter: 0.2
+           }
 
     assert config.wal == %{
              checkpoint_bytes: 67_108_864,
@@ -144,7 +152,14 @@ defmodule Alambique.ConfigOptionsTest do
         base(ctx,
           op_timeout_ms: 1_000,
           routing: [hops: 1, attempts: 1, slack_ms: 20],
-          wake: [fence_attempts: 2, failure_backoff_ms: 50],
+          wake: [
+            fence_attempts: 2,
+            failure_backoff_ms: 50,
+            backoff_ms: 20,
+            backoff_max_ms: 400,
+            backoff_factor: 3,
+            backoff_jitter: 0.5
+          ],
           wal: [checkpoint_bytes: 1_000],
           awake: [
             max_cells: 7,
@@ -170,7 +185,15 @@ defmodule Alambique.ConfigOptionsTest do
       )
 
     assert config.routing == %{hops: 1, attempts: 1, slack_ms: 20}
-    assert config.wake == %{fence_attempts: 2, failure_backoff_ms: 50}
+
+    assert config.wake == %{
+             fence_attempts: 2,
+             failure_backoff_ms: 50,
+             backoff_ms: 20,
+             backoff_max_ms: 400,
+             backoff_factor: 3,
+             backoff_jitter: 0.5
+           }
 
     assert config.wal == %{
              checkpoint_bytes: 1_000,

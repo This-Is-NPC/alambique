@@ -90,6 +90,7 @@ integers.
 | `[:alambique, :cell, :hibernate]` | `duration` | `cell`, `location`, `epoch`, `reason` (`:idle`, `:request`, `:shutdown` or `:frozen`) |
 | `[:alambique, :admission, :evict]` | `bytes` (recorded for the awake cells after the hibernation) | `cell`, `max_cells`, `max_bytes` (`nil` without a budget): emitted for each cell hibernated because the awake cells filled `awake: [max_cells: ...]` or reached `max_bytes`, so that another could wake (design §7) |
 | `[:alambique, :admission, :wake_queue]` | `duration` (time in the queue; about 0 for `:full`) | `result` (`:granted`: it got a slot, `:expired`: `awake: [wake_queue_ms: ...]` passed, `:full`: the queue held `max_wake_queue` waiters): emitted for each wake that found no free `max_wakes` slot; `:expired` and `:full` end in `{:error, :overloaded}` (design §7) |
+| `[:alambique, :admission, :wake_backoff]` | `delay_ms` (how long calls for the cell get the remembered error), `failures` (wakes in a row that failed because of the store) | `cell`, `reason`: emitted when a wake fails because of the store or the lease request and the cell is remembered with an exponential backoff (design §7) |
 | `[:alambique, :cell, :relocate]` | `duration` | `cell`, `from` and `to` (location ids), `result` (`:ok` or `:error`), `cleanup` (what the last step did to the objects left at `from`: `:cleaned`, `:waiting` for the grace period, `:error`, queued for the compactor in both cases, or `:none` if the move did not get that far or the cell was already at `to`) |
 | `[:alambique, :cell, :rewind]` | `duration` | `cell`, `target` (`{:txid, n}` or `{:timestamp, ms}`), `result` (`:ok` or `:error`), and `from` (the head that was replaced), `to` (the restored TXID) and `txid` (the TXID of the rewind) for `:ok`, or `reason` for `:error` |
 | `[:alambique, :cell, :cleanup]` | `duration`, `objects` (deleted, for `:ok`) | `cell`, `location` (id of the location cleaned), `result` (`:ok`, `:waiting` or `:error`), and `ready_at_ms` for `:waiting` or `reason` for `:error` |
@@ -362,7 +363,7 @@ reuses the cell's local file without migrating emits nothing.
 
 ## Local cache events
 
-Emitted by the local cache (design §7.1) every `local_cache.interval_ms`.
+Emitted by the local cache (design §7) every `local_cache.interval_ms`.
 
 | Event | Measurements | Metadata |
 | --- | --- | --- |

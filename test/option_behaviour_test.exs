@@ -55,7 +55,16 @@ defmodule Alambique.OptionBehaviourTest do
 
     config = Config.fetch!(inst)
     assert config.routing == %{hops: 1, attempts: 2, slack_ms: 10}
-    assert config.wake == %{fence_attempts: 2, failure_backoff_ms: 5_000}
+
+    assert config.wake == %{
+             fence_attempts: 2,
+             failure_backoff_ms: 5_000,
+             backoff_ms: 200,
+             backoff_max_ms: 10_000,
+             backoff_factor: 2,
+             backoff_jitter: 0.2
+           }
+
     assert config.relocate == %{fence_attempts: 2, timeout_ms: 30_000, poll_ms: 5}
     assert config.schema == %{check_page: 10, listing_timeout_ms: 1_000}
     assert config.hydrator == %{poll_ms: 10}

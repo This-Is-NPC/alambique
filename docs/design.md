@@ -1023,7 +1023,7 @@ What the cell does:
 - A wake that cannot write the file (restore, migrations) fails with
   `:disk_full`. The cell stops and the caller gets the error. The failure is
   not remembered (`Admission.failed/3` keeps only the failures a retry would
-  repeat), so the next call wakes the cell again and succeeds once space is
+  repeat and the store's), so the next call wakes the cell again and succeeds once space is
   free. Telemetry carries `reason: :disk_full` on `[:cell, :wake]`.
 - A checkpoint or the marker of a hibernating cell that the disk refuses leaves
   the WAL in place or the file unmarked. No caller is waiting and nothing is
@@ -1161,11 +1161,32 @@ of a restore (`{:restore, _}`, `{:hydration, _}`, `{:open, _}`,
 `{:local_file, _}`, `{:migration, ...}`, `{:schema_too_new, _}`) is
 remembered for `wake.failure_backoff_ms` (5 s): calls for that cell on this
 node get the same error after the lease read, without a listing or a
-download (`Alambique.Admission`; an ETS table cleared when it passes
-`hint_limit` entries). The restore errors include a store that was
-unreachable at that moment, so a cell can stay refused for up to that time
-after the store came back. Failures that depend on the lease, the owner or
-the moment (`{:owned, ...}`, `:frozen`, `{:lease, _}`) are never remembered.
+download (`Alambique.Admission`).
+
+A wake that fails because the store does (a timeout, an HTTP answer, a
+crashed request, a dropped connection, `:store_unavailable` from an open
+circuit breaker), whether in the lease request, the frozen check or the
+restore, is remembered with an exponential backoff instead: the first delay is
+`wake.backoff_ms` (200 ms), each failure in a row multiplies it by
+`wake.backoff_factor` (2) up to `wake.backoff_max_ms` (10 s), and a random
+share of up to `wake.backoff_jitter` (0.2) is taken from each delay so that the
+cells that failed together do not return together. Calls for the cell that
+arrive meanwhile get the remembered error at once and start no wake. The count
+starts over when a wake succeeds, or when the next failure comes more than
+`backoff_max_ms` after the backoff ended. The defaults give 200, 400, 800 ms,
+1.6, 3.2, 6.4 s and then 10 s at most (less the jitter). The cap is below the
+lease TTL (30 s), so a cell is not kept away longer than a lease lives, and
+above the 5 s cool-down of a circuit breaker, so the wakes that follow it do
+not probe the store faster than the breaker lets requests through. The
+`[:alambique, :admission, :wake_backoff]` event reports each delay. Only the
+shapes of store errors that the library knows (`Alambique.Admission.store_error?/1`)
+count; a reason that is none of them is retried at once.
+
+The memory of both kinds is one ETS table entry per cell. When it passes
+`hint_limit` entries, the ones whose backoff and quiet time ended go first, and
+all of them only if that was not enough. Failures that depend on the lease, the
+owner or the moment (`{:owned, ...}`, `:frozen`, `:draining`, `:disk_full`)
+are never remembered.
 
 ### 7.2 Round trips of a wake
 

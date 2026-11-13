@@ -172,6 +172,7 @@ defmodule Alambique.Cell do
     case Wake.run(state) do
       {:ok, state} ->
         Admission.end_wake(state.config, self())
+        Admission.recovered(state.config, state.id)
         {state, requests} = Wake.unmeter(state)
 
         Telemetry.span_stop([:cell, :wake], started, Metered.measurements(requests), %{

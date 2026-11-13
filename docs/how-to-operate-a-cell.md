@@ -609,6 +609,15 @@ wake event shows `reason: :disk_full` (`[:alambique, :cell, :wake]`).
   (design.md section 6, "The tail").
 - **Restore fails with `:history_truncated` or `{:history_coarse, txid}`**: the
   point is older than what retention keeps. Only newer points can be restored.
+- **Calls for a cell fail at once with the same store error, and the store log
+  shows few requests**: the wake failed because the store did, and the node
+  remembers it with a backoff (`wake: [backoff_ms: 200, backoff_factor: 2,
+  backoff_max_ms: 10_000, backoff_jitter: 0.2]`, design section 7). Calls
+  for the cell get the error until the delay ends, then one call wakes it
+  again; the delay grows with each failure in a row up to the cap and starts
+  over after a wake succeeds. Each delay is in the `delay_ms` of
+  `[:alambique, :admission, :wake_backoff]`. Wait for the store to answer, or
+  lower `backoff_max_ms` if a cell must retry sooner.
 - **A cell fails to wake with `{:restore, {:epoch_regression, key, ...}}`**: a
   file of a lower epoch sits past the chain and it is not a tail (a merged file,
   a snapshot, or a file more than 16 TXIDs past the head), so the tail rule

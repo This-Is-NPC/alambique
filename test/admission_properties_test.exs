@@ -28,7 +28,7 @@ defmodule Alambique.AdmissionPropertiesTest do
       wakes: :"wakes_#{id}",
       awake: %{max_wakes: max_wakes, max_wake_queue: max_queue, wake_queue_ms: queue_ms},
       hint_limit: hint_limit,
-      wake: %{failure_backoff_ms: backoff_ms}
+      wake: %{failure_backoff_ms: backoff_ms, backoff_max_ms: 10_000}
     }
   end
 
@@ -236,7 +236,7 @@ defmodule Alambique.AdmissionPropertiesTest do
     end
   end
 
-  property "a remembered failure is forgotten once its backoff has passed" do
+  property "a remembered failure is answered no more once its backoff has passed" do
     check all(i <- integer(0..3), reason <- member_of(@deterministic)) do
       config = config(1, 0)
       :ok = Admission.init(config)
@@ -244,7 +244,6 @@ defmodule Alambique.AdmissionPropertiesTest do
       try do
         :ok = Admission.failed(config, "cell-#{i}", {reason, :why})
         assert Admission.failure(config, "cell-#{i}") == nil
-        assert :ets.lookup(config.admission, {:failed, "cell-#{i}"}) == []
       after
         drop(config)
       end
