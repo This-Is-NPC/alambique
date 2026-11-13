@@ -8,7 +8,7 @@ defmodule Alambique.StoreBreakerTest do
   use ExUnit.Case, async: true
 
   import Alambique.CellHelpers,
-    only: [capture: 1, setup_store: 0, start_instance: 2, unique_cell: 0]
+    only: [capture: 1, eventually: 1, setup_store: 0, start_instance: 2, unique_cell: 0]
 
   alias Alambique.Replication
   alias Alambique.Replication.{Objects, Retry}
@@ -335,12 +335,22 @@ defmodule Alambique.StoreBreakerTest do
           migrations: [{1, "CREATE TABLE t (n INTEGER)"}],
           compaction: false,
           breaker: [failures: 2, cooldown_ms: 60_000],
-          retry: [max_attempts: 1]
+          retry: [max_attempts: 1],
+          wake: [backoff_ms: 1, backoff_max_ms: 1, backoff_jitter: 0.0]
         )
 
       MemoryStore.inject(ctx.store_config, kind: :error, reason: {:http, 503, ""})
 
-      answers = for _ <- 1..4, do: Alambique.execute(reader, cell, "INSERT INTO t VALUES (2)", [])
+      # Each call waits for the wake backoff of the one before to end, so it
+      # reaches the store and the breaker.
+      config = Alambique.Config.fetch!(reader)
+
+      answers =
+        for _ <- 1..4 do
+          eventually(fn -> Alambique.Admission.store_failure(config, cell) == nil end)
+          Alambique.execute(reader, cell, "INSERT INTO t VALUES (2)", [])
+        end
+
       assert List.last(answers) == {:error, :store_unavailable}
     end
 
