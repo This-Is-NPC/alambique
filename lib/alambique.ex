@@ -169,7 +169,13 @@ defmodule Alambique do
       default 5) and `:failure_backoff_ms` (how long a wake that failed for a
       reason a retry repeats, such as an unreadable restore, is remembered, and
       calls for the cell get the same error without a new restore; default
-      5 000).
+      5 000). A wake that failed because of the store is remembered with an
+      exponential backoff (design §7): `:backoff_ms` (first delay, default
+      200), `:backoff_factor` (multiplier for each failure in a row, default
+      2), `:backoff_max_ms` (cap, default 10 000) and `:backoff_jitter` (share
+      of each delay taken away at random, from 0 up to 1, default 0.2). Calls
+      for the cell during the delay get the remembered error and start no
+      wake; a wake that succeeds starts the count over.
     * `:wal` - `:checkpoint_bytes` (size of the `-wal` file of an awake cell
       above which it moves the WAL into the database file once its uploads are
       acknowledged, default 67 108 864, 64 MiB; design §6) and

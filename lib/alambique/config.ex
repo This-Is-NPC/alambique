@@ -50,7 +50,14 @@ defmodule Alambique.Config do
   ]
 
   @routing_defaults [hops: 2, attempts: 3, slack_ms: 1_000]
-  @wake_defaults [fence_attempts: 5, failure_backoff_ms: 5_000]
+  @wake_defaults [
+    fence_attempts: 5,
+    failure_backoff_ms: 5_000,
+    backoff_ms: 200,
+    backoff_max_ms: 10_000
+  ]
+  @wake_backoff_factor 2
+  @wake_backoff_jitter 0.2
   @wal_defaults [
     checkpoint_bytes: 67_108_864,
     checkpoint_deadline_ms: 10_000,
@@ -258,7 +265,14 @@ defmodule Alambique.Config do
             }
             | nil,
           routing: %{hops: pos_integer, attempts: pos_integer, slack_ms: pos_integer},
-          wake: %{fence_attempts: pos_integer, failure_backoff_ms: pos_integer},
+          wake: %{
+            fence_attempts: pos_integer,
+            failure_backoff_ms: pos_integer,
+            backoff_ms: pos_integer,
+            backoff_max_ms: pos_integer,
+            backoff_factor: number,
+            backoff_jitter: float
+          },
           wal: %{
             checkpoint_bytes: pos_integer,
             checkpoint_deadline_ms: pos_integer,
@@ -389,7 +403,7 @@ defmodule Alambique.Config do
       query: query,
       sql: sql(opts[:sql], op_timeout),
       routing: options!(:routing, opts[:routing], @routing_defaults),
-      wake: options!(:wake, opts[:wake], @wake_defaults),
+      wake: wake!(opts[:wake]),
       wal: wal!(opts[:wal]),
       awake: awake!(opts[:awake]),
       relocate: options!(:relocate, opts[:relocate], @relocate_defaults),
@@ -907,6 +921,33 @@ defmodule Alambique.Config do
         do: bad!(":#{name} #{inspect(key)} must be a positive integer")
 
     Map.new(merged)
+  end
+
+  # The factor and the jitter of the wake backoff are numbers, not integers
+  # (design §7).
+  defp wake!(opts) do
+    opts =
+      checked_keyword!(
+        :wake,
+        opts,
+        [:backoff_factor, :backoff_jitter | Keyword.keys(@wake_defaults)]
+      )
+
+    {factor, rest} = Keyword.pop(opts, :backoff_factor, @wake_backoff_factor)
+    {jitter, rest} = Keyword.pop(rest, :backoff_jitter, @wake_backoff_jitter)
+
+    unless is_number(factor) and factor >= 1,
+      do: bad!(":wake :backoff_factor must be a number of at least 1")
+
+    unless is_number(jitter) and jitter >= 0 and jitter < 1,
+      do: bad!(":wake :backoff_jitter must be a number from 0 up to 1 (not included)")
+
+    wake = options!(:wake, rest, @wake_defaults)
+
+    unless wake.backoff_ms <= wake.backoff_max_ms,
+      do: bad!(":wake :backoff_ms must not exceed :backoff_max_ms")
+
+    Map.merge(wake, %{backoff_factor: factor, backoff_jitter: jitter})
   end
 
   # `max_bytes: nil` (the default) sets no budget for the WAL files of the

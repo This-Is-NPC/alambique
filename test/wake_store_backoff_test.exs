@@ -1,0 +1,73 @@
+defmodule Alambique.WakeStoreBackoffTest do
+  @moduledoc """
+  A wake that fails because the store does is remembered per cell with an
+  exponential backoff, so a store that is down does not get a wake from every
+  call (design §7).
+  """
+  use ExUnit.Case, async: false
+
+  import Alambique.CellHelpers
+
+  alias Alambique.CountingStore
+  alias AlambiqueTestkit.MemoryStore
+
+  @moduletag capture_log: true
+
+  @schema [{1, "CREATE TABLE t (n INTEGER PRIMARY KEY)"}]
+
+  setup do
+    env = setup_store()
+    counting = CountingStore.wrap(env.store)
+    {_, counts} = counting
+    Map.merge(env, %{store: counting, counts: counts})
+  end
+
+  # The lease of a new cell is a PUT: a store that refuses every PUT fails the
+  # wake at its first step, and each wake costs the same number of PUTs.
+  defp puts(env), do: CountingStore.count(env.counts, :put)
+
+  defp start(env) do
+    start_instance(env,
+      migrations: @schema,
+      compaction: false,
+      wake: [backoff_ms: 400, backoff_max_ms: 400, backoff_jitter: 0.0]
+    )
+  end
+
+  defp refuse_puts(env),
+    do: MemoryStore.inject(env.store_config, kind: :error, reason: :timeout, ops: [:put])
+
+  test "calls during the backoff do not start a wake, and the next one after it does", env do
+    inst = start(env)
+    cell = unique_cell()
+    fault = refuse_puts(env)
+
+    CountingStore.reset(env.counts)
+    assert {:error, reason} = Alambique.query(inst, cell, "SELECT 1")
+    one = puts(env)
+    assert one > 0
+
+    for _ <- 1..49, do: assert({:error, ^reason} = Alambique.query(inst, cell, "SELECT 1"))
+    assert puts(env) == one
+
+    Process.sleep(450)
+    assert {:error, _} = Alambique.query(inst, cell, "SELECT 1")
+    assert puts(env) == 2 * one
+
+    # The store is back: the wake that follows the backoff succeeds.
+    MemoryStore.remove(env.store_config, fault)
+    Process.sleep(450)
+    assert {:ok, _} = Alambique.query(inst, cell, "SELECT 1")
+  end
+
+  test "another cell is not affected by the backoff of one", env do
+    inst = start(env)
+    broken = unique_cell()
+    fault = refuse_puts(env)
+    assert {:error, _} = Alambique.query(inst, broken, "SELECT 1")
+    MemoryStore.remove(env.store_config, fault)
+
+    assert {:error, _} = Alambique.query(inst, broken, "SELECT 1")
+    assert {:ok, _} = Alambique.query(inst, unique_cell(), "SELECT 1")
+  end
+end
