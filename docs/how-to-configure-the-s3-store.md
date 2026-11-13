@@ -64,12 +64,9 @@ function instead. It returns `{access_key_id, secret_access_key, token}`, or
 the same with the `DateTime` of expiry as a fourth element:
 
 ```elixir
-%{bucket: "my-bucket", region: "eu-west-1",
-  credentials: fn ->
-    # Your chain: environment, profile, ECS or EC2 metadata, web identity.
-    {key, secret, token, expires_at} = MyApp.AwsCredentials.fetch()
-    {key, secret, token, expires_at}
-  end}
+# MyApp.AwsCredentials.fetch/0 runs your chain: environment, profile, ECS or
+# EC2 metadata, web identity. It returns {key, secret, token, expires_at}.
+%{bucket: "my-bucket", region: "eu-west-1", credentials: &MyApp.AwsCredentials.fetch/0}
 ```
 
 It may also return `{:error, reason}`; the request then answers
@@ -85,7 +82,9 @@ The store calls the function once and caches the result. It calls it again:
   request is sent once more with the new credentials. A second refusal is the
   result.
 
-The instance does not restart. Requests that run at the same time can call the
+Pass a stable function, such as `&MyApp.AwsCredentials.fetch/0`: the cache is
+keyed by the function, so a new closure for every config leaves an extra cache
+entry. The instance does not restart. Requests that run at the same time can call the
 function more than once, so it should be cheap or cache by itself.
 
 ## 4. From an `s3://` URL
@@ -112,7 +111,9 @@ anything but `s3://bucket` or `s3://bucket/path`.
   in closures (design section 3). Keep them out of the code you commit; read
   them from the environment or from your secret store.
 
-The `mix alambique.*` tasks still take the endpoint, the key pair and no token
+The `mix alambique.*` tasks take the same settings as flags or environment
+variables, including `ALAMBIQUE_S3_SESSION_TOKEN` and an optional endpoint,
+but not a `:credentials` function
 ([how-to-operate-a-cell.md](how-to-operate-a-cell.md)).
 
 ## Next steps

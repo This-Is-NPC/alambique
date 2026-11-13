@@ -419,13 +419,30 @@ defmodule Alambique.OpsTest do
       assert Options.ctx([]).prefix == "alambique"
     end
 
+    test "the endpoint is optional and the session token is a flag or a variable" do
+      flags = ~w(--bucket b --region eu-west-1 --access-key-id k --secret-access-key s)
+
+      {parsed, _} =
+        OptionParser.parse!(flags ++ ~w(--session-token t), strict: Options.switches())
+
+      assert {Alambique.Store.S3, %{bucket: "b", region: "eu-west-1", session_token: "t"} = c} =
+               Options.ctx(parsed).store
+
+      refute Map.has_key?(c, :endpoint)
+
+      System.put_env("ALAMBIQUE_S3_SESSION_TOKEN", "env-token")
+
+      assert {_, %{session_token: "env-token"}} =
+               Options.ctx(bucket: "b", access_key_id: "k", secret_access_key: "s").store
+    end
+
     test "a missing store or a missing S3 setting is explained" do
       assert_raise Mix.Error, ~r/no store configured/, fn -> Options.ctx([]) end
 
       assert_raise Mix.Error,
                    ~r/missing store settings: --access-key-id, --secret-access-key/,
                    fn ->
-                     Options.ctx(endpoint: "http://x", bucket: "b")
+                     Options.ctx(bucket: "b")
                    end
     end
   end

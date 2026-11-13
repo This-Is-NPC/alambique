@@ -25,7 +25,8 @@ defmodule Alambique.Store.S3 do
       answers `ExpiredToken` with status 400 or 403 (the request is then sent
       once more with the new credentials). Concurrent requests may call it
       more than once. The cache lives in `:persistent_term`, keyed by the
-      function.
+      function: pass a stable one such as `&MyMod.creds/0`, because a new
+      closure per config leaves an extra entry.
     * The library keeps the credentials in functions (see `conceal/1`), which
       print as `#Function<...>`, so a crash report, a process dump or an error
       never shows them. A placement that builds its own store configs should
