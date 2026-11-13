@@ -68,6 +68,7 @@ defmodule Alambique.Query do
   alias Alambique.Cell.Db
   alias Alambique.Query.{Cache, Gate, Replica}
   alias Alambique.Replication.Retry
+  alias Alambique.Store.Breaker
 
   defmodule Row do
     @moduledoc """
@@ -391,7 +392,7 @@ defmodule Alambique.Query do
           error
       end
     else
-      {:error, reason} -> {:error, DiskFull.classify(reason)}
+      {:error, reason} -> {:error, reason |> DiskFull.classify() |> Breaker.classify()}
     end
   end
 

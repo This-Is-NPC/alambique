@@ -25,6 +25,22 @@ lease is unchanged in both cases.
 is no longer the caller's. The matching `:renew` or `:release` event also
 reports `result: :lost`.
 
+## Store events
+
+Emitted by `Alambique.Store.Breaker`, the circuit breaker of a store (design
+§3). There is one breaker for each location of an instance. `instance` is the
+instance name and `location` the id of the location.
+
+| Event | Measurements | Metadata |
+| --- | --- | --- |
+| `[:alambique, :store, :breaker, :open]` | `cooldown_ms` (the configured cool-down; the wait is up to 20 % longer) | `instance`, `location`, `reason` (`:failures`: `breaker: [failures:]` failures in a row; `:probe_failed`: the probe after a cool-down failed) |
+| `[:alambique, :store, :breaker, :close]` | none | `instance`, `location` |
+
+While the breaker is open a store request answers `{:error, :store_unavailable}`
+without reaching the store, and emits nothing. A failed request that reached
+the store is in the events of its operation (`[:alambique, :lease, ...]`,
+`[:alambique, :replication, ...]`) with its own reason.
+
 ## Drain events
 
 Emitted by `Alambique.drain/2` and by the drain of a stop (design §8), once

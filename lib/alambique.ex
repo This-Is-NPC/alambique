@@ -224,6 +224,16 @@ defmodule Alambique do
       times this, see `docs/how-to-size-a-node.md`).
     * `:hydrator` - `:poll_ms` (time between background hydration passes,
       default 100).
+    * `:retry` - `:max_attempts` (attempts of one store request that is
+      retried, whatever time is left before its deadline, default 10; design
+      §3).
+    * `:breaker` - the circuit breaker of each store (design §3): `:failures`
+      (failures in a row that open it, default 5), `:cooldown_ms` (how long it
+      refuses requests before it lets one probe through, default 5 000, plus up
+      to 20 % at random) and `:probe_timeout_ms` (how long a probe that never
+      answers holds the place of the probe, default 10 000). While it is open a
+      store request answers `{:error, :store_unavailable}` without reaching the
+      store.
     * `:sql` - limits on the statements (design §7): `:statement_timeout_ms`
       (the statements of callers, `query/5`, `execute/5` and the statements of
       `transaction/4`; a statement that runs longer is interrupted, default
@@ -398,6 +408,12 @@ defmodule Alambique do
   for what it promises), or `{:error, :timeout}` when the outcome of a write
   is unknown.
 
+  While the circuit breaker of the store is open (`:breaker`) a call that
+  needs the store, such as a wake, answers `{:error, :store_unavailable}` at
+  once. A write that was in a batch when the store failed answers
+  `{:error, :outcome_unknown}` as for any failed upload. The call did not
+  reach the store and is safe to repeat once the store answers again.
+
   A full local disk is `{:error, :disk_full}`, from a statement, a transaction,
   a migration, a wake or a read replica alike (design §6.2). The call did not
   run and is safe to repeat once space is free; the cell keeps serving and
@@ -493,7 +509,8 @@ defmodule Alambique do
   its own acquisition. Otherwise it stops serving without answering and the
   router sends the call to the new owner, so the read sees every write
   acknowledged before the call was issued. If the lease cannot be read the
-  answer is `{:error, {:lease_unreadable, reason}}` and the cell keeps serving.
+  answer is `{:error, {:lease_unreadable, reason}}` and the cell keeps serving
+  (`reason` is `:store_unavailable` while the circuit breaker is open).
   """
   @spec query(instance, cell, String.t(), list, keyword) :: {:ok, result} | {:error, term}
   def query(instance, cell, sql, params \\ [], opts \\ [])

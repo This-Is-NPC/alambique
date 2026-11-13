@@ -584,6 +584,18 @@ wake event shows `reason: :disk_full` (`[:alambique, :cell, :wake]`).
   running instance; pass the name given to `{Alambique, name: ...}`.
 - **`{:error, :unknown_node}` from `move` to a node just started**: the node
   runs with `join: false` and has not called `Alambique.join/1` (step 9).
+- **`{:error, :store_unavailable}` from calls.** The circuit breaker of the
+  store is open: it saw `breaker: [failures:]` failures in a row (default 5:
+  5xx, timeouts, connection errors) and refuses requests without reaching the
+  store for `breaker: [cooldown_ms:]` (default 5 000, plus up to 20 %). Then it
+  lets one request through and closes if it succeeds. Look for
+  `[:alambique, :store, :breaker, :open]` events (see
+  [telemetry.md](telemetry.md#store-events)), whose `reason` says whether the
+  failures or the probe opened it, and check the store, not the node. Calls are
+  safe to repeat when the store answers again. Raise `failures` if a store
+  that fails now and then opens the breaker too often. `retry:
+  [max_attempts:]` (default 10) limits how often one request is repeated while
+  the breaker is closed.
 - **`{:error, :frozen}` from a call**: unfreeze the cell (step 4). If you did
   not freeze it, look at its `Crashes:` line first: the instance may have frozen
   it.
