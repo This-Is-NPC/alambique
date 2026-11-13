@@ -40,6 +40,7 @@ defmodule Alambique.Config do
     schema: [],
     restore: [],
     retry: [],
+    upload: [],
     breaker: [],
     hydrator: [],
     lazy_restore: [],
@@ -76,6 +77,7 @@ defmodule Alambique.Config do
   @restore_defaults [edge_bytes: 65_536, fetch_concurrency: 16, max_inflight_bytes: 67_108_864]
   @hydrator_defaults [poll_ms: 100]
   @retry_defaults [max_attempts: 10]
+  @upload_defaults [retry_backoff_ms: 500, retry_backoff_max_ms: 5_000]
   @breaker_defaults [failures: 5, cooldown_ms: 5_000, probe_timeout_ms: 10_000]
 
   @compaction_defaults [
@@ -302,6 +304,7 @@ defmodule Alambique.Config do
             max_inflight_bytes: pos_integer
           },
           retry: %{max_attempts: pos_integer},
+          upload: %{retry_backoff_ms: pos_integer, retry_backoff_max_ms: pos_integer},
           breaker: %{
             failures: pos_integer,
             cooldown_ms: pos_integer,
@@ -411,6 +414,7 @@ defmodule Alambique.Config do
       schema: schema!(opts[:schema], op_timeout),
       restore: options!(:restore, opts[:restore], @restore_defaults),
       retry: options!(:retry, opts[:retry], @retry_defaults),
+      upload: upload!(opts[:upload]),
       breaker: options!(:breaker, opts[:breaker], @breaker_defaults),
       hydrator: options!(:hydrator, opts[:hydrator], @hydrator_defaults),
       lazy_restore: lazy_restore!(opts[:lazy_restore]),
@@ -1160,6 +1164,15 @@ defmodule Alambique.Config do
     value = opts[key]
     unless is_boolean(value), do: bad!("#{inspect(key)} must be true or false")
     value
+  end
+
+  defp upload!(opts) do
+    upload = options!(:upload, opts, @upload_defaults)
+
+    if upload.retry_backoff_max_ms < upload.retry_backoff_ms,
+      do: bad!(":upload retry_backoff_max_ms must be at least retry_backoff_ms")
+
+    upload
   end
 
   defp pipeline_depth!(opts) do

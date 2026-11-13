@@ -18,8 +18,12 @@ defmodule Alambique.Cell.Pipe do
   @type batch :: %{
           txid: pos_integer,
           ref: reference,
-          pid: pid,
+          # `nil` while the batch waits to be uploaded again
+          pid: pid | nil,
           landed: boolean,
+          # failed uploads so far, and the reason of the last
+          attempts: non_neg_integer,
+          last: term,
           # newest first
           items: list,
           writes: non_neg_integer,
@@ -49,10 +53,12 @@ defmodule Alambique.Cell.Pipe do
   @spec find(t, reference) :: batch | nil
   def find(pipe, ref), do: Enum.find(pipe.queue, &(&1.ref == ref))
 
+  @spec update(t, reference, (batch -> batch)) :: t
+  def update(pipe, ref, fun),
+    do: %{pipe | queue: Enum.map(pipe.queue, &if(&1.ref == ref, do: fun.(&1), else: &1))}
+
   @spec land(t, reference) :: t
-  def land(pipe, ref) do
-    %{pipe | queue: Enum.map(pipe.queue, &if(&1.ref == ref, do: %{&1 | landed: true}, else: &1))}
-  end
+  def land(pipe, ref), do: update(pipe, ref, &%{&1 | landed: true})
 
   @doc """
   Makes `items` (newest first, like the items of a batch) wait for the newest
@@ -68,7 +74,7 @@ defmodule Alambique.Cell.Pipe do
 
   @doc "Batch pids by pid, for selective receives."
   @spec pids(t) :: %{pid => true}
-  def pids(pipe), do: Map.new(pipe.queue, &{&1.pid, true})
+  def pids(pipe), do: for(%{pid: pid} <- pipe.queue, pid != nil, into: %{}, do: {pid, true})
 
   @doc "Every waiting item of the queue."
   @spec items(t) :: list
@@ -81,7 +87,7 @@ defmodule Alambique.Cell.Pipe do
   @doc "Stops the upload processes."
   @spec kill(t) :: :ok
   def kill(pipe) do
-    for %{pid: pid} <- pipe.queue do
+    for %{pid: pid} <- pipe.queue, pid != nil do
       Process.unlink(pid)
       Process.exit(pid, :kill)
     end

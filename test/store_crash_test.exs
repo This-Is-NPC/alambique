@@ -63,9 +63,13 @@ defmodule Alambique.StoreCrashTest do
         capture_log(fn ->
           MemoryStore.inject(ctx.store_config, kind: unquote(kind), ops: [:put])
 
-          # The write cannot be stored: the caller gets an error and the cell stops.
-          assert {:error, _} = Alambique.execute(inst, cell, "INSERT INTO t VALUES (2)")
-          assert {_, %{reason: {:sync_failed, _}}} = await_event([:alambique, :cell, :stop], cell)
+          # The write cannot be stored: the cell uploads it again until its
+          # lease runs out, and then the caller gets an error.
+          assert {:error, :outcome_unknown} =
+                   Alambique.execute(inst, cell, "INSERT INTO t VALUES (2)")
+
+          assert {_, %{reason: reason}} = await_event([:alambique, :cell, :stop], cell)
+          assert reason == :lease_expired or match?({:sync_failed, _}, reason)
         end)
 
       refute log =~ "terminating"

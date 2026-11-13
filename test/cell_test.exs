@@ -414,23 +414,14 @@ defmodule Alambique.CellTest do
       assert Enum.any?(commits, fn {%{transactions: t}, _} -> t > 1 end)
     end
 
-    test "a failed upload leaves every writer of the batch unknown and stops the cell", ctx do
-      # The uploads are retried until the breaker would refuse the next read.
-      inst = start_instance(ctx, migrations: @schema, breaker: [failures: 1_000_000])
-      cell = unique_cell()
-      assert {:ok, _} = put(inst, cell, 0)
+    test "a read behind an unacknowledged write waits for it, even when its upload is retried",
+         ctx do
+      inst =
+        start_instance(ctx,
+          migrations: @schema,
+          upload: [retry_backoff_ms: 20, retry_backoff_max_ms: 50]
+        )
 
-      MemoryStore.inject(ctx.store_config, kind: :error, ops: [:put], key: ~r{/0000/})
-
-      assert {:error, :outcome_unknown} = put(inst, cell, 1)
-      assert {_, %{reason: {:sync_failed, _}}} = await_event([:alambique, :cell, :stop], cell)
-      MemoryStore.clear(ctx.store_config)
-
-      assert {:ok, %{rows: [[0]]}} = numbers(inst, cell)
-    end
-
-    test "a read behind an unacknowledged write waits for it and fails with the reason", ctx do
-      inst = start_instance(ctx, migrations: @schema)
       cell = unique_cell()
       assert {:ok, _} = put(inst, cell, 0)
       pid = Alambique.Cell.whereis(Alambique.Config.fetch!(inst), cell)
@@ -446,8 +437,13 @@ defmodule Alambique.CellTest do
       eventually(fn -> queued(pid) == 2 end)
       :sys.resume(pid)
 
-      assert {:error, :outcome_unknown} = Task.await(write)
-      assert {:error, {:sync_failed, _}} = Task.await(read)
+      # The upload fails and is repeated: nobody is answered before it lands.
+      assert Task.yield(write, 300) == nil
+      assert Task.yield(read, 0) == nil
+      MemoryStore.clear(ctx.store_config)
+
+      assert {:ok, _} = Task.await(write)
+      assert {:ok, %{rows: [[0], [1]]}} = Task.await(read)
     end
   end
 

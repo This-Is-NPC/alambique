@@ -176,19 +176,28 @@ defmodule Alambique.PipelineTest do
   end
 
   describe "failure" do
-    test "a failed put leaves every queued write unknown and stops the cell", env do
-      owner = start(env, 4, op_timeout_ms: 300)
+    test "a failed put is uploaded again and the writers are answered in order", env do
+      owner =
+        start(env, 4,
+          op_timeout_ms: 300,
+          retry: [max_attempts: 1],
+          upload: [retry_backoff_ms: 20, retry_backoff_max_ms: 50]
+        )
+
       head = state(owner).repl.txid
       reqs = for n <- 1..3, do: send_write(owner, n)
 
       land(env, owner, head + 3)
-      for _ <- 1..30, do: GatedStore.fail(env.gate, key(owner, head + 1))
+      for _ <- 1..3, do: GatedStore.fail(env.gate, key(owner, head + 1))
+      :ok = GatedStore.await(env.gate, key(owner, head + 1))
 
-      for req <- reqs, do: assert({:reply, {:error, :outcome_unknown}} = answer(req, 5_000))
-      eventually(fn -> Cell.whereis(Config.fetch!(owner.inst), owner.cell) == nil end)
+      # The batch behind the failed one has landed and nobody is answered yet.
+      assert Enum.all?(reqs, &(answer(&1) == :timeout))
+      assert Process.alive?(owner.pid)
 
-      # Nothing past the gap is part of the state a restore gives.
-      assert rows(env, owner) == [0]
+      for txid <- [head + 1, head + 2], do: land(env, owner, txid)
+      assert Enum.all?(reqs, &match?({:reply, {:ok, _}}, answer(&1, 5_000)))
+      assert rows(env, owner) == [0, 1, 2, 3]
     end
 
     test "a crash of an upload process stops the cell like a failed put", env do
