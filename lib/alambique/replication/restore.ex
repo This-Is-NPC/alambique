@@ -49,7 +49,12 @@ defmodule Alambique.Replication.Restore do
           # Weight of the file the walk is working on, held until its next read.
           current: :atomics.new(1, []),
           lazy: opts[:lazy],
-          prefetched: :ets.new(:restore_prefetched, [:set, :public])
+          prefetched: :ets.new(:restore_prefetched, [:set, :public]),
+          # The read ahead process and the messages it and the walk exchange:
+          # `{tag, :changed}` to the walk, `:room` and `:stop` to the read ahead.
+          owner: self(),
+          tag: make_ref(),
+          reader: nil
         }
 
         try do
@@ -123,10 +128,17 @@ defmodule Alambique.Replication.Restore do
   defp attempt(env, start) do
     File.rm(env.tmp)
 
-    with :ok <- prefetch(env, start),
-         {:ok, state} <- begin_chain(env, start),
-         {:ok, state} <- walk(env, state) do
-      check_target(env, state)
+    with {:ok, reader} <- prefetch(env, start) do
+      env = %{env | reader: reader}
+
+      try do
+        with {:ok, state} <- begin_chain(env, start),
+             {:ok, state} <- walk(env, state) do
+          check_target(env, state)
+        end
+      after
+        stop_reader(env)
+      end
     end
   end
 
@@ -465,7 +477,12 @@ defmodule Alambique.Replication.Restore do
   # guess costs requests, not correctness: the walk reads what is missing.
   defp prefetch(env, start) do
     keys = guess(env, start)
-    if env.lazy, do: prefetch_edges(env, keys), else: prefetch_bodies(env, keys)
+
+    if env.lazy do
+      with :ok <- prefetch_edges(env, keys), do: {:ok, nil}
+    else
+      {:ok, prefetch_bodies(env, keys)}
+    end
   end
 
   defp guess(env, start) do
@@ -534,20 +551,64 @@ defmodule Alambique.Replication.Restore do
     end
   end
 
-  # Whole files, in the order of the walk and as many as the budget takes, so
-  # that they are not held in memory without limit. The first range of each
-  # says its size, and is the whole file when the file is small. The keys go
-  # `concurrency` at a time, and the first file that does not fit ends it: the
-  # files after it would be held while the walk reads that one.
+  # Whole files, in the order of the walk, kept in memory under the budget.
+  # The first range of each says its size, and is the whole file when the file
+  # is small. A task reads them `concurrency` at a time while the walk runs:
+  # whenever the walk gives weight back, the task takes it for the next files
+  # (`read_ahead/3`). All the files are claimed first, so that the walk waits
+  # for them instead of reading them again. What an earlier attempt kept is
+  # dropped.
   defp prefetch_bodies(env, keys) do
-    keys
-    |> Enum.chunk_every(env.concurrency)
-    |> Enum.reduce_while(:ok, fn chunk, :ok ->
-      probes = parallel(env, chunk, &probe_body(env, &1))
-      {admitted, rest} = admit(env, probes, [])
-      parallel(env, admitted, &prefetch_body(env, &1))
-      if rest == [], do: {:cont, :ok}, else: {:halt, :ok}
+    evict(env)
+    claim(env, keys)
+
+    spawn_link(fn ->
+      try do
+        read_ahead(env, keys, [])
+      after
+        unclaim(env)
+      end
     end)
+  end
+
+  defp claim(env, keys), do: :ets.insert(env.prefetched, Enum.map(keys, &{&1, :claimed, 0}))
+
+  # `buffer` holds the probes made and not yet admitted, in order, at most
+  # `concurrency` of them. A file is admitted only when it fits the budget and
+  # every file before it is kept or being read, so what is kept never blocks
+  # the file the walk needs next: the walk drops what is stale before it waits
+  # (`await_claim/2`), and a file that does not fit alone ends the read ahead.
+  defp read_ahead(env, keys, buffer) do
+    flush(:room)
+    {new, later} = Enum.split(keys, env.concurrency - length(buffer))
+    probes = buffer ++ parallel(env, new, &probe_body(env, &1))
+    {admitted, left} = admit(env, probes, [])
+
+    for {key, _head, _total, _meta} <- admitted,
+        do: :ets.update_element(env.prefetched, key, {2, :reading})
+
+    parallel(env, admitted, &prefetch_body(env, &1))
+
+    cond do
+      stopped?() or blocked?(env, left) ->
+        :ok
+
+      left == [] and later == [] ->
+        :ok
+
+      # Nothing fit and nothing new was probed: wait for the walk to free
+      # room, until the deadline of the restore.
+      admitted == [] and new == [] ->
+        receive do
+          :room -> read_ahead(env, later, left)
+          :stop -> :ok
+        after
+          max(env.deadline - System.monotonic_time(:millisecond), 0) -> :ok
+        end
+
+      true ->
+        read_ahead(env, later, left)
+    end
   end
 
   # A missing file is not worth waiting for: the walk will say so.
@@ -568,15 +629,71 @@ defmodule Alambique.Replication.Restore do
 
   defp admit(_env, probes, admitted), do: {Enum.reverse(admitted), probes}
 
-  defp prefetch_body(env, {key, head, total, meta}) when total <= env.window do
-    :ets.insert(env.prefetched, {key, {:ok, head, meta}, total})
-  end
+  # What waits at the head can never be admitted: it failed, or it is larger
+  # than the budget and is read alone by the walk.
+  defp blocked?(_env, []), do: false
+
+  defp blocked?(env, [{_key, {:ok, _head, total, _meta}} | _]),
+    do: total > env.ctx.max_inflight_bytes
+
+  defp blocked?(_env, _left), do: true
+
+  defp prefetch_body(env, {key, head, total, meta}) when total <= env.window,
+    do: keep(env, key, {:ok, head, meta}, total)
 
   defp prefetch_body(env, {key, _head, total, _meta}) do
     case Objects.fetch_optional(env.ctx, key, env.deadline) do
-      {:ok, body, meta} -> :ets.insert(env.prefetched, {key, {:ok, body, meta}, total})
-      _ -> Budget.release(env.budget, total)
+      {:ok, body, meta} -> keep(env, key, {:ok, body, meta}, total)
+      _ -> forget(env, key, total)
     end
+  end
+
+  # Only a claimed file is kept: after the claims were dropped nobody waits
+  # for the weight.
+  defp keep(env, key, result, weight) do
+    unless :ets.update_element(env.prefetched, key, [{2, result}, {3, weight}]),
+      do: Budget.release(env.budget, weight)
+
+    changed(env)
+  end
+
+  defp forget(env, key, weight) do
+    :ets.delete(env.prefetched, key)
+    Budget.release(env.budget, weight)
+    changed(env)
+  end
+
+  defp unclaim(env) do
+    :ets.match_delete(env.prefetched, {:_, :claimed, :_})
+    changed(env)
+  end
+
+  defp changed(env), do: send(env.owner, {env.tag, :changed})
+
+  # The walk gave weight back.
+  defp room(%{reader: nil}), do: :ok
+  defp room(env), do: send(env.reader, :room)
+
+  defp stopped?, do: receive(do: (:stop -> true), after: (0 -> false))
+
+  defp flush(message), do: receive(do: (^message -> flush(message)), after: (0 -> :ok))
+
+  # Waits until the read ahead is gone, so that the walk and the read ahead
+  # never exceed `concurrency` requests together.
+  defp end_read_ahead(%{reader: nil}), do: :ok
+
+  defp end_read_ahead(env) do
+    ref = Process.monitor(env.reader)
+    send(env.reader, :stop)
+
+    receive do
+      {:DOWN, ^ref, :process, _, _} -> :ok
+    end
+  end
+
+  defp stop_reader(env) do
+    end_read_ahead(env)
+    flush({env.tag, :changed})
   end
 
   defp parallel(env, items, fun) do
@@ -596,14 +713,40 @@ defmodule Alambique.Replication.Restore do
 
   defp fetch(env, key) do
     retire(env)
+    flush({env.tag, :changed})
 
-    case :ets.take(env.prefetched, key) do
-      [{_, {:ok, body, meta}, weight}] ->
+    case await_claim(env, key) do
+      {:ok, {:ok, body, meta}, weight} ->
         :atomics.add(env.current, 1, weight)
         {:ok, body, meta}
 
-      [] ->
+      :miss ->
+        # Not where the read ahead is going: it ends, the walk reads alone.
+        end_read_ahead(env)
         fetch_bounded(env, key)
+    end
+  end
+
+  # A file the read ahead is reading is waited for, after dropping the files
+  # it kept that the walk skipped, so that the budget has room for it.
+  defp await_claim(env, key) do
+    case :ets.lookup(env.prefetched, key) do
+      [{_, state, _}] when state in [:claimed, :reading] ->
+        # Not admitted yet: what is kept is stale and holds the room it needs.
+        if state == :claimed, do: evict(env)
+
+        receive do
+          {tag, :changed} when tag == env.tag -> await_claim(env, key)
+        after
+          max(env.deadline - System.monotonic_time(:millisecond), 0) -> :miss
+        end
+
+      [{_, result, weight}] ->
+        :ets.delete(env.prefetched, key)
+        {:ok, result, weight}
+
+      [] ->
+        :miss
     end
   end
 
@@ -631,7 +774,15 @@ defmodule Alambique.Replication.Restore do
   # The weight of what the walk holds for the file it works on goes back to the
   # budget when it reads the next one. To fit a read, what was read ahead and
   # has not been used is dropped: the walk reads it again if it needs it.
-  defp retire(env), do: Budget.release(env.budget, :atomics.exchange(env.current, 1, 0))
+  defp retire(env) do
+    release(env, :atomics.exchange(env.current, 1, 0))
+  end
+
+  defp release(env, weight) do
+    Budget.release(env.budget, weight)
+    if weight > 0, do: room(env)
+    :ok
+  end
 
   defp hold(env, bytes) do
     weight = Budget.weigh(env.budget, bytes)
@@ -652,14 +803,14 @@ defmodule Alambique.Replication.Restore do
   end
 
   defp shrink(env, bytes) do
-    Budget.release(env.budget, bytes)
+    release(env, bytes)
     :atomics.sub(env.current, 1, bytes)
   end
 
   defp evict(env) do
-    for entry <- :ets.tab2list(env.prefetched) do
+    for entry <- :ets.tab2list(env.prefetched), elem(entry, 1) not in [:claimed, :reading] do
       :ets.delete(env.prefetched, elem(entry, 0))
-      Budget.release(env.budget, elem(entry, tuple_size(entry) - 1))
+      release(env, elem(entry, tuple_size(entry) - 1))
     end
 
     :ok
