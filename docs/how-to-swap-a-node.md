@@ -31,6 +31,11 @@ released is taken at once.
 every start of an instance also draws a random incarnation, and the lease
 names both (design section 5). See "Troubleshooting".
 
+If the instances use the `registry` option, one `node_id` is one registry
+entry: B takes it over from A at once, and A leaves the list of peers. Use
+different ids if both should stay visible
+([how-to-discover-nodes.md](how-to-discover-nodes.md)).
+
 ## 1. Start B beside A
 
 Start the instance on B as on A. Nothing else changes on A.

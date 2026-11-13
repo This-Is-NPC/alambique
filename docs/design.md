@@ -418,6 +418,7 @@ of the default placement. For cell `c`:
 | `<prefix>/trash/<due>/<c>/<id>` | Manifest of a delayed deletion, JSON `{"cell": c, "keys": [...]}`; `<due>` is the time the keys may go, in milliseconds, sixteen digits (§9.1). |
 | `<prefix>/cells/<c>/crashes` | Crash counter of the cell: JSON, written with conditional puts (§10). |
 | `<prefix>/schema/<version>/<c>` | Empty schema index entry of cell `c` at `<version>`, ten digits (§17). |
+| `<prefix>/nodes/<node_id>` | Entry of a node in the node registry, JSON (§22). |
 | `<prefix>/feed/<shard>/<time>-<txid>-<c>` | Change feed object of cell `c`, one per published group of one or more batches with row changes; `<txid>` is that of the last batch; `<shard>` is a hash of `c` (§13, §19). |
 
 Every segment and snapshot carries object metadata: `epoch`, `data` (the data
@@ -4510,3 +4511,102 @@ stay off at the new location. Use `consistency: :strong` (or `verify_lease:
 true`) for reads that must not go back in time, keep replicas for cells whose
 size fits `max_bytes`, and call `Alambique.replicas/3` again after moving a
 cell.
+
+## 22. Node registry
+
+Nodes of one deployment need to find each other, and the one thing they all
+share is the store. With the `registry` option each node writes a small object
+under `<prefix>/nodes/` and reads the others', so a node that starts learns
+who is there without a seed list, a DNS name or a service of its own.
+`Alambique.peers/1` returns them. The registry is discovery only: it decides
+nothing about who owns a cell (that is the lease and its fencing, §5), and
+Alambique never calls `Node.connect/1` with what it reads. The application
+decides what `advertise` means and whether to connect.
+
+**Key and entry.** One object per node id, `<prefix>/nodes/<node_id>`, in the
+first location of the placement by id (§18). It sits beside `cells/`, never
+under it, so no listing of the library reaches it: the listings of
+one cell (`Replication.Objects`: retention, compaction, cleanup and replicas,
+under `<prefix>/cells/<cell>/`), the cell listing of cross-cell queries
+(`<prefix>/cells/`), the schema index that scrub and the sweeper read
+(`<prefix>/schema/`), the feed (`<prefix>/feed/<shard>/`), the trash
+(`<prefix>/trash/`) and the moved markers (`<prefix>/moved/`) all have a
+longer prefix. No code lists `<prefix>/` itself; `test/nodes_test.exs` checks that the key is outside each
+of those prefixes. The JSON body:
+
+| Field | Meaning |
+| --- | --- |
+| `node_id`, `incarnation` | The instance: the option `node_id` and the random id drawn at each start (§5). |
+| `advertise` | An opaque string for the application, such as `"10.0.0.7:4369"`. |
+| `meta` | A JSON map for the application. |
+| `started_at_ms` | When this registration was written. |
+| `expires_at_ms` | When the entry stops being live, by the writer's clock. |
+| `seq`, `token` | `seq` grows with every write, so two writes never have the same bytes (S3 etags are content hashes). `token` identifies one registration. |
+| `released` | Set by a node that leaves. |
+
+**Rules** (`Alambique.Nodes`, one conditional write each, built on the same
+helpers as the lease: `Alambique.Conditional`).
+
+- `register` creates the key with `If-None-Match`. An existing entry is taken
+  over with `If-Match` on its etag when it is released, when it has expired
+  (`now > expires_at_ms + skew_margin_ms` by the reader's clock, as for a
+  lease), or when it is another incarnation of the same node id: a restart
+  that is faster than the TTL. `takeover: :free` skips the last case.
+- `renew` rewrites the entry with `If-Match`. If the key now holds another
+  write it answers `{:error, :lost}`; a failed write whose answer was lost is
+  read back and adopted.
+- `deregister` writes `released: true` with `If-Match`, so the node leaves
+  `list` at once. It is not a delete: the store has no conditional delete, and
+  an unconditional one could remove the entry of a node that took the id in
+  between.
+- `list` pages through `<prefix>/nodes/`, reads each entry and hides the
+  released and expired ones. An object that does not decode counts as a
+  released entry.
+- `sweep` deletes released and expired entries, reading each again before the
+  delete. Because the delete is unconditional, a node that registers in the
+  instant between that read and the delete loses its entry; its next `renew`
+  answers `:lost` and it registers again. A live entry is never selected.
+
+`ttl_ms` must be greater than twice `skew_margin_ms`, as for the lease, and each
+request is bounded by `ttl_ms - skew_margin_ms`.
+
+**The process.** `Alambique.NodeRegistry` is the last child of the instance
+tree, like the compactor: a crash restarts nothing else, and it stops first,
+so a stopping node leaves the registry before its cells hibernate. It
+registers at start, renews every `renew_ms` and lists the peers every
+`refresh_ms`; `Alambique.peers/1` reads an ETS table the process owns, so it
+sends no message and never waits for the store. A drain (`Alambique.drain/2`)
+deregisters at once, and the node stays out while it drains; `join/1` puts it
+back within `renew_ms`. A stop deregisters in `terminate/2`, bounded by one
+request. A store failure in any round is logged and emitted as
+`[:alambique, :registry, :error]`; the instance keeps running and the last
+peers stay readable. Requests go through the breaker of the store like any
+other (§3).
+
+**Losing the entry.** If `renew` finds another write (someone swept the key, or
+another instance with the same node id registered), the node registers again
+at once with `takeover: :free` and the same incarnation: it is the same
+instance, so its cells and leases are unchanged. A live entry of another
+incarnation is not taken back: two live instances with one node id would
+otherwise take the key from each other at every round. The node waits, quietly,
+until that entry is released or expires.
+
+**Node id.** The option `node_id`, by default `Atom.to_string(node())`. It
+must be unique among the nodes that should see each other, and stable across a
+restart if the new run should replace the old entry at once.
+
+**Trust.** Whoever can write under `<prefix>/nodes/` decides which addresses
+the nodes of the deployment find, and so which hosts an application connects
+to if it follows `advertise`. Give the credentials that can write there only
+to the nodes, as for `cells/` (§3.1). The registry carries no secrets of its
+own; keep them out of `meta`.
+
+**Telemetry.** `[:alambique, :nodes, :registered | :renewed | :expired | :lost]`
+and `[:alambique, :registry, :peers_changed | :error]` (telemetry.md).
+
+**Verification.** `test/nodes_properties_test.exs` checks, with StreamData over
+random schedules and a manual clock, that an expired entry leaves the listing,
+that one node id is never live under two incarnations, and that `deregister`
+removes an entry from the listing at once. `test/node_registry_test.exs` runs
+the process: start, renew, loss and re-registration, drain, stop, store
+failure, and `peers_changed` between two instances on one store.
