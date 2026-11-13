@@ -84,12 +84,15 @@ the fence.
    to the size of a typical mailbox if the first query reads most of it.
 
 6. Check `restore: [fetch_concurrency:]` (default 16) and
-   `restore: [prefetch_bytes:]` (default 64 MiB). A full restore reads the
+   `restore: [max_inflight_bytes:]` (default 64 MiB). A full restore reads the
    files of the chain `fetch_concurrency` at a time and holds at most
-   `prefetch_bytes` of them before it applies them. A store that limits
+   `max_inflight_bytes` of them before it applies them. A store that limits
    concurrent requests may need a lower `fetch_concurrency`; a cell larger than
-   `prefetch_bytes` that you restore in full (`lazy_restore: false`) reads the
-   rest one file at a time.
+   `max_inflight_bytes` that you restore in full (`lazy_restore: false`) reads
+   the files that do not fit one at a time, and each file larger than the
+   limit costs one more request, for its size. Lowering the limit to save
+   memory (see [how-to-size-a-node.md](how-to-size-a-node.md)) makes wakes of
+   cells larger than it slower in the same way.
 
 ## Troubleshooting
 

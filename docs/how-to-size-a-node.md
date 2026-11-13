@@ -51,6 +51,35 @@ Four options turn the rule into a limit:
   absorb bursts of cold wakes: a 512 MiB node that wakes 63 cells at once
   needs a queue of about that size, not a larger `max_wakes`.
 
+## What a wake in progress costs
+
+A restore holds, besides the cell it is building, the files it reads from the
+store. `restore: [max_inflight_bytes:]` (default 67 108 864, 64 MiB) caps them
+for one wake, restore and hydration alike, and one file larger than the cap is
+read alone. The worst case of one wake is
+
+```
+max(max_inflight_bytes, largest file) + (fetch_concurrency + 2) × edge_bytes
+```
+
+With the defaults that is 64 MiB + 18 × 64 KiB, about 65 MiB, and N wakes in
+progress cost N times it, N being at most `max_wakes`. That is the figure to
+budget: 256 wakes at the defaults can hold 16 GiB. Choose it from the memory
+you give to wakes:
+
+```
+max_inflight_bytes  =  wake memory ÷ max_wakes  -  (fetch_concurrency + 2) × edge_bytes
+```
+
+A 2 GB node that gives 256 MiB to wakes with `max_wakes: 32` sets
+`max_inflight_bytes` to 8 MiB less 1.1 MiB, about 6.9 MiB (7 000 000). A cell
+whose files are larger than that is still restored, one file at a time and
+alone in the limit, so the formula needs the size of your largest file: ask
+the store for the largest object under a cell's `files/` prefix and use it
+when it is larger than `max_inflight_bytes`. The limit counts the files a
+restore reads, not the SQLite page cache and not the working set of applying a
+file; add the cell terms above for the cell that wakes.
+
 `idle_timeout_ms` (default 300 000) sets how long a cell keeps its memory
 after its last call. Lower it when many cells are touched once.
 

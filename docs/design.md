@@ -981,6 +981,54 @@ without filling a disk, which is how `test/disk_full_test.exs` and
 `:restore_install` (§11) fails the last step of a restore with `{:error,
 :enospc}`.
 
+### 6.3 Memory of a restore
+
+A restore, and the hydration of a lazily restored cell, hold at most
+`restore: [max_inflight_bytes:]` (default 67 108 864, 64 MiB) of what they
+read from the store. `Replication.Budget` counts it: a read takes its weight
+before it is made and gives it back when the bytes are no longer needed. An
+object larger than the cap weighs the cap, so it is read alone and the
+ceiling is `max(max_inflight_bytes, largest object)`.
+
+- **Full restore.** The store gives no size before a read, so the first range
+  of a file (`min(edge_bytes, max_inflight_bytes)` bytes) says it, and is the
+  whole file when the file is that small. Larger files cost one more request,
+  a `GET` after the range. The files the walk is expected to need are read in
+  its order, `fetch_concurrency` ranges at a time; the files that fit the
+  budget are read and kept, and the first that does not fit ends the read
+  ahead, because the files after it would be held while the walk reads it. The
+  walk takes a kept file from memory (its weight moves to the file it works
+  on) and gives the weight of the previous file back before it reads the next.
+  A file the read ahead did not take is read when the walk reaches it, after
+  dropping what was read ahead and not used (a wrong guess of the chain), so
+  that the file is alone in the budget. The LTX body is decoded in the native
+  library one page at a time; the budget counts the body, not that working
+  set.
+- **Lazy restore.** The edges of the files (the first range and the trailer,
+  each `edge_bytes`) read ahead stay under the budget too; the walk reads the
+  rest as it reaches them. A page index larger than the trailer read is read
+  whole and counted past the budget (it is sized by the object, see §16).
+- **Hydration.** Every ranged read that installs pages (`Lazy.fetch_run/3`:
+  background runs of `batch_bytes`, misses, the pages the replicator needs)
+  waits for room in the budget of the cell. Under the defaults four runs of
+  4 MiB never wait; with a small cap they take turns, and a read that waits
+  past its deadline fails like a slow one.
+
+What is outside the budget is fixed: the first ranges of one read-ahead round
+(`fetch_concurrency × edge_bytes`, 1 MiB by default) before the files that do
+not fit are dropped, and the edges of the file the walk reads of a lazy
+restore (`2 × edge_bytes`). A restore and a hydration of one cell do not
+overlap, so the memory of one wake is
+
+```
+max(max_inflight_bytes, largest file) + (fetch_concurrency + 2) × edge_bytes
+```
+
+and the memory of N wakes in progress is N times that, N being at most
+`awake: [max_wakes:]`. Not covered: the refresh of a replica
+(`@round_bytes`, 32 MiB, plus the files of a round), compaction, retention,
+rewind and the scrub, which have their own bounds.
+
 ## 7. Cells
 
 Each awake cell is one process (`Alambique.Cell`) under a
@@ -3390,8 +3438,9 @@ Small chains are restored in full: if the files add up to less than
 repeats as a full one, from the same listing and without reading the
 trailers (the sizes come with the first ranges). A full restore reads the
 whole files of the chain it expects in parallel, `restore: [fetch_concurrency:]`
-(16) at a time and at most `restore: [prefetch_bytes:]` (64 MiB) of them; the
-walk then takes each from memory instead of waiting for it. A guess that is
+(16) at a time, in the order of the walk and as many as fit the byte budget of
+the restore (§6.3); the walk then takes each from memory instead of waiting
+for it. A guess that is
 wrong costs requests, and the walk reads what is missing. The files themselves are not checksummed when they are
 read lazily (their file checksum covers all pages); every page is covered by
 the database checksum check at the end instead.
