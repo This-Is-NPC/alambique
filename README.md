@@ -72,39 +72,76 @@ def deps do
 end
 ```
 
-The native crate is compiled with your project, so you need a Rust toolchain
-and a C compiler (see Requirements).
+The native crate is compiled with your project, so you need a C compiler and
+a Rust toolchain of 1.97.1 or later (tested with 1.97.1 and 1.100.0). With
+[mise](https://mise.jdx.dev), `mise use rust@1.97.1` installs it; `rustup`
+works too. The first `mix compile` downloads the crates and builds the
+native library: about 75 seconds on 2 vCPUs.
 
 ## Example
 
-Start one instance per node, with the same name, store and prefix on every
-node of the cluster:
+Try it against a local SeaweedFS. This container is disposable and its data
+lives inside it:
+
+```sh
+docker run -d --name alambique-first-try -p 127.0.0.1:18333:8333 \
+  -e AWS_ACCESS_KEY_ID=alambique -e AWS_SECRET_ACCESS_KEY=alambique-secret \
+  chrislusf/seaweedfs:4.48 \
+  mini -dir=/data -ip=127.0.0.1 -ip.bind=0.0.0.0 -s3.port=8333 -admin.ui=false
+```
+
+Alambique does not create the bucket; SeaweedFS creates it on the first
+write. On AWS S3 create it first. Save this as `example.exs` in your project
+and run `mix run example.exs`:
 
 ```elixir
+s3_config = %{
+  endpoint: "http://127.0.0.1:18333",
+  bucket: "demo-bucket",
+  access_key_id: "alambique",
+  secret_access_key: "alambique-secret"
+}
+
+# One instance per node, with the same name, store and prefix on every node.
 children = [
   {Alambique,
    name: MyApp.Cells,
    store: {Alambique.Store.S3, s3_config},
    prefix: "myapp",
-   data_dir: "/var/lib/myapp/cells",
+   data_dir: Path.expand("data"),
    migrations: [{1, "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)"}]}
 ]
+
+{:ok, _} = Supervisor.start_link(children, strategy: :one_for_one)
+
+# Call any cell from any node.
+IO.inspect(Alambique.execute(MyApp.Cells, "org-1", "INSERT INTO notes (body) VALUES (?)", ["hi"]))
+IO.inspect(Alambique.query(MyApp.Cells, "org-1", "SELECT body FROM notes"))
+IO.inspect(Alambique.drain(MyApp.Cells))
 ```
 
-Then call any cell from any node:
+The output of the first run, and of the second with one more row:
 
-```elixir
-{:ok, _} = Alambique.execute(MyApp.Cells, "org-1", "INSERT INTO notes (body) VALUES (?)", ["hi"])
-{:ok, %{columns: ["body"], rows: [["hi"]]}} = Alambique.query(MyApp.Cells, "org-1", "SELECT body FROM notes")
 ```
+{:ok, %{columns: [], rows: []}}
+{:ok, %{columns: ["body"], rows: [["hi"]]}}
+{:ok, %{errors: [], hibernated: 1}}
+```
+
+`drain/2` writes what is pending and releases the leases before the script
+ends. Without it, a run within the next 30 s (`lease_ttl_ms`) gets
+`{:error, {:unavailable, "nonode@nohost", expires_at_ms}}`, because the stopped
+process still holds the lease. Wait until `expires_at_ms` (a Unix time in
+milliseconds) and call again. Remove the container with
+`docker rm -f alambique-first-try`.
 
 More calls, placement and the other features are in
 [docs/how-to-call-cells.md](docs/how-to-call-cells.md).
 
 ## Requirements
 
-- Elixir 1.17 or later, a Rust toolchain and a C compiler. The native crate in
-  `native/alambique_nif` bundles SQLite and is built through Rustler.
+- Elixir 1.17 or later, Rust 1.97.1 or later and a C compiler. The native
+  crate in `native/alambique_nif` bundles SQLite and is built through Rustler.
 - An S3-compatible store with atomic conditional writes (`If-None-Match: *`
   and `If-Match`). SeaweedFS 4.48 is the only one tested; AWS S3 and
   Cloudflare R2 have not been run
@@ -120,7 +157,8 @@ More calls, placement and the other features are in
   lock needs a local file system: on NFS `flock` may not exclude other hosts.
   A `node_id` need not be unique for safety:
   leases also carry a random incarnation per start (design section 5).
-- Docker, only to run the SeaweedFS tests.
+- Docker, only to run the SeaweedFS of the example and the SeaweedFS tests.
+  A store that meets the S3 requirement above works instead.
 
 ## Limitations
 
