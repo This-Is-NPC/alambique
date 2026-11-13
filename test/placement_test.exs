@@ -711,7 +711,9 @@ defmodule Alambique.PlacementTest do
     @moduletag :capture_log
 
     defp relocated(ctx, opts \\ []) do
-      inst = instance(ctx, Keyword.merge([moved_grace_ms: 0, skew_margin_ms: 0], opts))
+      # The cleanups here fail one key for longer than a breaker would let them be retried.
+      defaults = [moved_grace_ms: 0, skew_margin_ms: 0, breaker: [failures: 1_000_000]]
+      inst = instance(ctx, Keyword.merge(defaults, opts))
       assert {:ok, _} = put(inst, "home-a", 1)
       :ok = Alambique.hibernate(inst, "home-a")
       inst

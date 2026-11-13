@@ -415,7 +415,8 @@ defmodule Alambique.CellTest do
     end
 
     test "a failed upload leaves every writer of the batch unknown and stops the cell", ctx do
-      inst = start_instance(ctx, migrations: @schema)
+      # The uploads are retried until the breaker would refuse the next read.
+      inst = start_instance(ctx, migrations: @schema, breaker: [failures: 1_000_000])
       cell = unique_cell()
       assert {:ok, _} = put(inst, cell, 0)
 

@@ -85,6 +85,15 @@ defmodule Alambique.Store.Breaker do
   @doc false
   def monotonic_ms, do: System.monotonic_time(:millisecond)
 
+  @doc "`store` without its breaker: a request of it neither waits for the breaker nor counts."
+  @spec bypass({module, term}) :: {module, term}
+  def bypass({__MODULE__, %{store: store}}), do: store
+
+  def bypass({Alambique.Store.Metered, %{store: store} = metered}),
+    do: {Alambique.Store.Metered, %{metered | store: bypass(store)}}
+
+  def bypass(store), do: store
+
   @doc "Whether `breaker` is open or half-open."
   @spec open?(t) :: boolean
   def open?(%{ref: ref}), do: :atomics.get(ref, 1) != 0
