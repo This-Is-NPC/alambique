@@ -4,7 +4,7 @@ defmodule Alambique.Replication.Restore do
 
   alias Alambique.Fault
   alias Alambique.Telemetry
-  alias Alambique.Replication.{Chain, Native, Objects, Retry}
+  alias Alambique.Replication.{Budget, Chain, Native, Objects, Retry}
 
   @flag Bitwise.bsl(1, 63)
 
@@ -43,8 +43,11 @@ defmodule Alambique.Replication.Restore do
           dest: dest,
           tmp: "#{dest}.restore-#{System.unique_integer([:positive])}",
           edge_bytes: ctx.edge_bytes,
+          window: min(ctx.edge_bytes, ctx.max_inflight_bytes),
           concurrency: ctx.fetch_concurrency,
-          prefetch_bytes: ctx.prefetch_bytes,
+          budget: Budget.new(ctx.max_inflight_bytes),
+          # Weight of the file the walk is working on, held until its next read.
+          current: :atomics.new(1, []),
           lazy: opts[:lazy],
           prefetched: :ets.new(:restore_prefetched, [:set, :public])
         }
@@ -53,7 +56,7 @@ defmodule Alambique.Replication.Restore do
           case attempt_all(env, starts(env), nil) do
             # Too little to be worth a lazy restore: read everything, from the
             # same listing.
-            :small -> attempt_all(%{env | lazy: nil}, starts(env), nil)
+            :small -> attempt_all(%{reset(env) | lazy: nil}, starts(env), nil)
             result -> result
           end
         after
@@ -365,6 +368,10 @@ defmodule Alambique.Replication.Restore do
           {:ok, state, {:staged, header, post, total}, header, post}
 
         {:need_tail, n} ->
+          # A page index larger than the edge is read whole, past the cap if it
+          # must be: the file itself says how large it is.
+          grow(env, n)
+
           with {:ok, tail, _total, _meta} <- range(env, key, max(total - n, 0), n),
                do: inspect_file(env, state, {:edges, head, tail, total}, kind, key)
 
@@ -422,9 +429,16 @@ defmodule Alambique.Replication.Restore do
   # header and the trailer with the page index, and its size. Fetched ahead of
   # the walk when the chain can be guessed from the listing.
   defp edges(env, key) do
-    case :ets.lookup(env.prefetched, key) do
-      [{_, result}] -> result
-      [] -> fetch_edges(env, key)
+    retire(env)
+
+    case :ets.take(env.prefetched, key) do
+      [{_, result, weight}] ->
+        :atomics.add(env.current, 1, weight)
+        result
+
+      [] ->
+        hold(env, 2 * env.edge_bytes)
+        fetch_edges(env, key)
     end
   end
 
@@ -479,39 +493,90 @@ defmodule Alambique.Replication.Restore do
 
   # The first range of every file says its size. Files that add up to less than
   # `min_bytes` are not worth a lazy restore, so the trailers are not read.
+  # What is read ahead stays under the budget; the walk reads the rest.
   defp prefetch_edges(env, keys) do
-    heads = parallel(env, keys, &range(env, &1, 0, env.edge_bytes))
-    found = for {key, {:ok, head, total, meta}} <- heads, do: {key, head, total, meta}
+    heads = parallel(env, keys, &prefetch_head(env, &1))
+    found = for {key, {:ok, total}} <- heads, do: {key, total}
 
     if keys != [] and length(found) == length(keys) and
-         Enum.sum(for {_, _, total, _} <- found, do: total) < env.lazy.min_bytes do
+         Enum.sum(for {_, total} <- found, do: total) < env.lazy.min_bytes do
       :small
     else
-      tails = parallel(env, found, fn {key, head, total, _} -> tail(env, key, head, total) end)
-
-      for {{key, head, total, meta}, {:ok, tail}} <- tails do
-        :ets.insert(env.prefetched, {key, {:ok, {head, tail, total}, meta}})
-      end
-
+      parallel(env, found, fn {key, total} -> prefetch_tail(env, key, total) end)
       :ok
     end
   end
 
-  # Whole files, up to `prefetch_bytes` of them, so that they are not held in
-  # memory without limit.
+  defp prefetch_head(env, key) do
+    with {:ok, head, total, meta} <- range(env, key, 0, env.edge_bytes),
+         weight = byte_size(head),
+         :ok <- Budget.try_acquire(env.budget, weight) do
+      :ets.insert(env.prefetched, {{:head, key}, head, total, meta, weight})
+      {:ok, total}
+    else
+      _ -> :skip
+    end
+  end
+
+  defp prefetch_tail(env, key, total) do
+    [{_, head, ^total, meta, weight}] = :ets.take(env.prefetched, {:head, key})
+    tail_weight = if total <= env.edge_bytes, do: 0, else: env.edge_bytes
+
+    with :ok <- Budget.try_acquire(env.budget, tail_weight),
+         {:ok, tail} <- tail(env, key, head, total) do
+      # A short tail returns what it did not use.
+      weight = weight + min(tail_weight, byte_size(tail))
+      Budget.release(env.budget, tail_weight - min(tail_weight, byte_size(tail)))
+      :ets.insert(env.prefetched, {key, {:ok, {head, tail, total}, meta}, weight})
+    else
+      :full -> Budget.release(env.budget, weight)
+      {:error, _} -> Budget.release(env.budget, weight + tail_weight)
+    end
+  end
+
+  # Whole files, in the order of the walk and as many as the budget takes, so
+  # that they are not held in memory without limit. The first range of each
+  # says its size, and is the whole file when the file is small. The keys go
+  # `concurrency` at a time, and the first file that does not fit ends it: the
+  # files after it would be held while the walk reads that one.
   defp prefetch_bodies(env, keys) do
-    fetched = :atomics.new(1, [])
-
-    parallel(env, keys, fn key ->
-      if :atomics.get(fetched, 1) < env.prefetch_bytes do
-        with {:ok, body, meta} <- Objects.fetch_optional(env.ctx, key, env.deadline) do
-          :atomics.add(fetched, 1, byte_size(body))
-          :ets.insert(env.prefetched, {key, {:ok, body, meta}})
-        end
-      end
+    keys
+    |> Enum.chunk_every(env.concurrency)
+    |> Enum.reduce_while(:ok, fn chunk, :ok ->
+      probes = parallel(env, chunk, &probe_body(env, &1))
+      {admitted, rest} = admit(env, probes, [])
+      parallel(env, admitted, &prefetch_body(env, &1))
+      if rest == [], do: {:cont, :ok}, else: {:halt, :ok}
     end)
+  end
 
-    :ok
+  # A missing file is not worth waiting for: the walk will say so.
+  defp probe_body(env, key) do
+    Objects.fetch_range(Map.put(env.ctx, :missing_final, true), key, 0, env.window, env.deadline)
+  end
+
+  # The probes that fit the budget, in order, with their weight taken.
+  defp admit(_env, [], admitted), do: {Enum.reverse(admitted), []}
+
+  defp admit(env, [{key, {:ok, head, total, meta}} | rest] = probes, admitted) do
+    if total <= env.ctx.max_inflight_bytes and Budget.try_acquire(env.budget, total) == :ok do
+      admit(env, rest, [{key, head, total, meta} | admitted])
+    else
+      {Enum.reverse(admitted), probes}
+    end
+  end
+
+  defp admit(_env, probes, admitted), do: {Enum.reverse(admitted), probes}
+
+  defp prefetch_body(env, {key, head, total, meta}) when total <= env.window do
+    :ets.insert(env.prefetched, {key, {:ok, head, meta}, total})
+  end
+
+  defp prefetch_body(env, {key, _head, total, _meta}) do
+    case Objects.fetch_optional(env.ctx, key, env.deadline) do
+      {:ok, body, meta} -> :ets.insert(env.prefetched, {key, {:ok, body, meta}, total})
+      _ -> Budget.release(env.budget, total)
+    end
   end
 
   defp parallel(env, items, fun) do
@@ -530,9 +595,79 @@ defmodule Alambique.Replication.Restore do
   defp wrap({:error, reason}, kind, key), do: {:error, {kind, key, reason}}
 
   defp fetch(env, key) do
+    retire(env)
+
     case :ets.take(env.prefetched, key) do
-      [{_, {:ok, body, meta}}] -> {:ok, body, meta}
-      [] -> Objects.fetch(env.ctx, key, env.deadline)
+      [{_, {:ok, body, meta}, weight}] ->
+        :atomics.add(env.current, 1, weight)
+        {:ok, body, meta}
+
+      [] ->
+        fetch_bounded(env, key)
     end
+  end
+
+  # A file the prefetch did not take. The first range says its size and is the
+  # whole file when it is small; otherwise the budget is made to fit the file
+  # before it is read.
+  defp fetch_bounded(env, key) do
+    hold(env, env.window)
+
+    case range(env, key, 0, env.window) do
+      {:ok, body, total, meta} when total <= env.window and byte_size(body) == total ->
+        shrink(env, env.window - total)
+        {:ok, body, meta}
+
+      {:ok, _head, total, _meta} ->
+        shrink(env, env.window)
+        hold(env, total)
+        Objects.fetch(env.ctx, key, env.deadline)
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  # The weight of what the walk holds for the file it works on goes back to the
+  # budget when it reads the next one. To fit a read, what was read ahead and
+  # has not been used is dropped: the walk reads it again if it needs it.
+  defp retire(env), do: Budget.release(env.budget, :atomics.exchange(env.current, 1, 0))
+
+  defp hold(env, bytes) do
+    weight = Budget.weigh(env.budget, bytes)
+
+    with :full <- Budget.try_acquire(env.budget, weight) do
+      evict(env)
+      with :full <- Budget.try_acquire(env.budget, weight), do: Budget.force(env.budget, weight)
+    end
+
+    :atomics.add(env.current, 1, weight)
+  end
+
+  defp grow(env, bytes) do
+    weight = Budget.weigh(env.budget, bytes)
+    evict(env)
+    Budget.force(env.budget, weight)
+    :atomics.add(env.current, 1, weight)
+  end
+
+  defp shrink(env, bytes) do
+    Budget.release(env.budget, bytes)
+    :atomics.sub(env.current, 1, bytes)
+  end
+
+  defp evict(env) do
+    for entry <- :ets.tab2list(env.prefetched) do
+      :ets.delete(env.prefetched, elem(entry, 0))
+      Budget.release(env.budget, elem(entry, tuple_size(entry) - 1))
+    end
+
+    :ok
+  end
+
+  defp reset(env) do
+    retire(env)
+    evict(env)
+    env
   end
 end

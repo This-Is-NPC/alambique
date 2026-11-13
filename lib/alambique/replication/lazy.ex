@@ -4,15 +4,25 @@ defmodule Alambique.Replication.Lazy do
   # `Restore` (a NIF resource the VFS reads) and where its frames live in the
   # store. `fetch_run/3` is the one way a page gets from the store into the file.
 
-  alias Alambique.Replication.{Native, Objects}
+  alias Alambique.Replication.{Budget, Native, Objects}
 
-  @enforce_keys [:handle, :files, :ctx]
-  defstruct [:handle, :files, :ctx, :checksum, :cell, miss_pages: 16, batch_bytes: 4_194_304]
+  @enforce_keys [:handle, :files, :ctx, :budget]
+  defstruct [
+    :handle,
+    :files,
+    :ctx,
+    :budget,
+    :checksum,
+    :cell,
+    miss_pages: 16,
+    batch_bytes: 4_194_304
+  ]
 
   @type t :: %__MODULE__{
           handle: reference,
           files: tuple,
           ctx: map,
+          budget: Budget.t(),
           checksum: integer | nil,
           cell: String.t() | nil,
           miss_pages: pos_integer,
@@ -24,29 +34,44 @@ defmodule Alambique.Replication.Lazy do
   def new(%{lazy: handle, files: files, checksum: checksum, cell: cell}, ctx, opts \\ []) do
     struct!(
       __MODULE__,
-      [handle: handle, files: List.to_tuple(files), ctx: ctx, checksum: checksum, cell: cell] ++
-        opts
+      [
+        handle: handle,
+        files: List.to_tuple(files),
+        ctx: ctx,
+        budget: Budget.new(ctx.max_inflight_bytes),
+        checksum: checksum,
+        cell: cell
+      ] ++ opts
     )
   end
 
   @doc """
   Reads one run of frames with a single ranged read and installs its pages.
   Returns `{:ok, done}`, where `done` says that this was the last missing page.
+  The run waits for room in the budget of the cell, so the runs under way hold
+  at most `ctx.max_inflight_bytes` (a longer run is read alone).
   """
   @spec fetch_run(t, {non_neg_integer, non_neg_integer, pos_integer, list}, integer) ::
           {:ok, boolean} | {:error, term}
   def fetch_run(%__MODULE__{} = lazy, {file, offset, len, pages}, deadline) do
     key = elem(lazy.files, file)
+    weight = Budget.weigh(lazy.budget, len)
 
-    case fetch_range(lazy.ctx, key, offset, len, deadline) do
-      {:ok, body, _total, _meta} when byte_size(body) == len ->
-        Native.lazy_deliver(lazy.handle, body, pages)
+    with :ok <- Budget.acquire(lazy.budget, weight, deadline) do
+      try do
+        case fetch_range(lazy.ctx, key, offset, len, deadline) do
+          {:ok, body, _total, _meta} when byte_size(body) == len ->
+            Native.lazy_deliver(lazy.handle, body, pages)
 
-      {:ok, _short, _total, _meta} ->
-        {:error, {:short_read, key}}
+          {:ok, _short, _total, _meta} ->
+            {:error, {:short_read, key}}
 
-      {:error, reason} ->
-        {:error, if(reason == :not_found, do: {:not_found, key}, else: reason)}
+          {:error, reason} ->
+            {:error, if(reason == :not_found, do: {:not_found, key}, else: reason)}
+        end
+      after
+        Budget.release(lazy.budget, weight)
+      end
     end
   end
 
