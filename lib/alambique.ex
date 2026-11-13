@@ -158,6 +158,19 @@ defmodule Alambique do
       (passes over the cells still awake, default 3), `:page_size` (cells listed
       per request, default 1 000) and `:shutdown_ms` (time the supervisor gives
       the drain when the instance stops, default 75 000).
+    * `:registry` - registers this node in the store so that nodes find each
+      other (design §22; `docs/how-to-discover-nodes.md`). `false` (default)
+      turns it off; a keyword list turns it on and sets `:advertise` (required:
+      a non-empty string, opaque to the library, such as `"10.0.0.7:4369"`),
+      `:meta` (a JSON-encodable map for the application, default `%{}`),
+      `:ttl_ms` (how long an entry stays live without a renewal, default
+      `:lease_ttl_ms`; it must be greater than twice `:skew_margin_ms`),
+      `:renew_ms` (renewal period, default a third of `:ttl_ms`; it must be
+      less than `:ttl_ms`), `:refresh_ms` (how often `peers/1` is refreshed,
+      default `:renew_ms`), `:page_size` (keys per listing request, default
+      100) and `:sweep_ms` (how often released and expired entries of other
+      nodes are deleted, default 3 600 000). The node id is the `:node_id`
+      option. Alambique never connects nodes: `peers/1` only tells who is there.
     * `:list_cells` - defaults of `list_cells/2`: a keyword list with
       `:page_size` (ids per page, default 100), `:max_limit` (largest `:limit`
       a call may ask for, default 1 000) and `:timeout_ms` (time budget of one
@@ -954,6 +967,20 @@ defmodule Alambique do
           left: non_neg_integer
         }
   def drain_status(instance), do: Drain.status(Config.fetch!(instance))
+
+  @doc """
+  The other live nodes of the deployment, from the last listing of the node
+  registry (design §22): a list of `%{node_id, incarnation, advertise, meta}`
+  (this node is not in it). The list is refreshed every `:refresh_ms` of the
+  `:registry` option and kept while the store fails. It is `[]` when the
+  instance has no `:registry`. Alambique does not connect to the nodes: that
+  is for the caller, who knows what `advertise` means. A change is reported by
+  `[:alambique, :registry, :peers_changed]` (`docs/telemetry.md`).
+  """
+  @spec peers(instance) :: [
+          %{node_id: String.t(), incarnation: String.t(), advertise: String.t(), meta: map}
+        ]
+  def peers(instance), do: Alambique.NodeRegistry.peers(Config.fetch!(instance))
 
   @doc """
   Makes this node a member of the instance (design §8): other nodes can choose

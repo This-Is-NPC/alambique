@@ -60,6 +60,7 @@ defmodule Alambique.Drain do
 
     started = System.monotonic_time()
     :ok = Membership.leave(config)
+    :ok = Alambique.NodeRegistry.deregister(config)
     cells = Registry.count(config.registry)
     begin(config, cells)
     meta = %{instance: config.name, node_id: config.node_id}
