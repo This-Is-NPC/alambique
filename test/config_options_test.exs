@@ -79,6 +79,8 @@ defmodule Alambique.ConfigOptionsTest do
            }
 
     assert config.hydrator == %{poll_ms: 100}
+    assert config.retry == %{max_attempts: 10}
+    assert config.breaker == %{failures: 5, cooldown_ms: 5_000, probe_timeout_ms: 10_000}
     assert config.query.page_size == 1_000
     assert config.query.stale_tmp_seconds == 600
     assert config.query.restore_attempts == 3
@@ -158,6 +160,8 @@ defmodule Alambique.ConfigOptionsTest do
           schema: [check_page: 10],
           restore: [edge_bytes: 1_024, fetch_concurrency: 3, max_inflight_bytes: 5_000],
           hydrator: [poll_ms: 10],
+          retry: [max_attempts: 3],
+          breaker: [failures: 2, cooldown_ms: 7, probe_timeout_ms: 9],
           query: [page_size: 10, stale_tmp_seconds: 5, restore_attempts: 7],
           feed: [publish_retry_ms: 5],
           compaction: [batch_factor: 2],
@@ -197,6 +201,8 @@ defmodule Alambique.ConfigOptionsTest do
     assert config.schema == %{check_page: 10, listing_timeout_ms: 5_000}
     assert config.restore == %{edge_bytes: 1_024, fetch_concurrency: 3, max_inflight_bytes: 5_000}
     assert config.hydrator == %{poll_ms: 10}
+    assert config.retry == %{max_attempts: 3}
+    assert config.breaker == %{failures: 2, cooldown_ms: 7, probe_timeout_ms: 9}
     assert config.query.page_size == 10
     assert config.query.stale_tmp_seconds == 5
     assert config.query.restore_attempts == 7
@@ -218,6 +224,10 @@ defmodule Alambique.ConfigOptionsTest do
       {[restore: [fetch_concurrency: 0]], ~r/:restore :fetch_concurrency/},
       {[restore: [max_inflight_bytes: 0]], ~r/:restore :max_inflight_bytes/},
       {[hydrator: [poll_ms: 0]], ~r/:hydrator :poll_ms/},
+      {[retry: [max_attempts: 0]], ~r/:retry :max_attempts/},
+      {[breaker: [failures: 0]], ~r/:breaker :failures/},
+      {[breaker: [cooldown_ms: 0]], ~r/:breaker :cooldown_ms/},
+      {[breaker: [probe_timeout_ms: 0]], ~r/:breaker :probe_timeout_ms/},
       {[query: [page_size: 0]], ~r/:page_size/},
       {[query: [restore_attempts: 0]], ~r/:restore_attempts/},
       {[feed: [publish_retry_ms: 0]], ~r/:publish_retry_ms/},

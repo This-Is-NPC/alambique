@@ -23,6 +23,8 @@ defmodule Alambique.Replication do
       segments (default `{Alambique.Clock.System, nil}`)
     * `:backoff_ms` / `:max_backoff_ms` - first and largest retry delay
       (default 50 and 1000)
+    * `:max_attempts` - attempts of one retried request, whatever time is
+      left (default 10)
     * `:timeout_ms` - default time budget of one call (default 10000)
     * `:edge_bytes` - bytes read from each end of an LTX file to find its
       header, trailer and page index (default 65 536)
@@ -39,6 +41,7 @@ defmodule Alambique.Replication do
           clock: {module, term},
           backoff_ms: pos_integer,
           max_backoff_ms: pos_integer,
+          max_attempts: pos_integer,
           timeout_ms: pos_integer,
           edge_bytes: pos_integer,
           fetch_concurrency: pos_integer,
@@ -55,6 +58,7 @@ defmodule Alambique.Replication do
         clock: {Alambique.Clock.System, nil},
         backoff_ms: 50,
         max_backoff_ms: 1000,
+        max_attempts: 10,
         timeout_ms: 10_000,
         edge_bytes: 65_536,
         fetch_concurrency: 16,
@@ -68,6 +72,7 @@ defmodule Alambique.Replication do
         :clock,
         :backoff_ms,
         :max_backoff_ms,
+        :max_attempts,
         :timeout_ms,
         :edge_bytes,
         :fetch_concurrency,
@@ -83,13 +88,15 @@ defmodule Alambique.Replication do
           node: n,
           backoff_ms: b,
           max_backoff_ms: m,
+          max_attempts: a,
           timeout_ms: t,
           edge_bytes: e,
           fetch_concurrency: c,
           max_inflight_bytes: pb
         }
         when is_binary(p) and is_binary(n) and is_integer(b) and b > 0 and is_integer(m) and
-               m >= b and is_integer(t) and t > 0 and is_integer(e) and e > 0 and is_integer(c) and
+               m >= b and is_integer(a) and a > 0 and is_integer(t) and t > 0 and is_integer(e) and
+               e > 0 and is_integer(c) and
                c > 0 and
                is_integer(pb) and pb > 0,
         ctx

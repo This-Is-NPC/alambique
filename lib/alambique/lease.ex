@@ -535,13 +535,13 @@ defmodule Alambique.Lease do
   defp bound(ctx), do: ctx.ttl_ms - ctx.skew_margin_ms
 
   defp put(%{store: {store, config}} = ctx, lease, condition) do
-    Retry.once(bound(ctx), fn ->
+    Retry.once(ctx.store, bound(ctx), fn ->
       store.put(config, key(ctx, lease.cell), encode(lease), condition, %{})
     end)
   end
 
   defp fetch(%{store: {store, config}} = ctx, cell) do
-    case Retry.once(bound(ctx), fn -> store.get(config, key(ctx, cell)) end) do
+    case Retry.once(ctx.store, bound(ctx), fn -> store.get(config, key(ctx, cell)) end) do
       {:ok, body, etag, _meta} -> decode(body, etag)
       {:error, reason} -> {:error, reason}
     end

@@ -297,6 +297,49 @@ the panic tests abort the VM when `guard` does not catch.
   failed `put`. `Alambique.Store.S3` ends a request after `:receive_timeout`,
   8 000 ms by default, below the default `op_timeout_ms` (10 000), so the
   client gives up before the library does; raise the two together.
+- **Attempts.** A request that `Replication.Retry.run/3` repeats stops at
+  `retry: [max_attempts:]` attempts (default 10) as well as at its deadline.
+  With the default backoff (50 ms doubling to 1 000 ms) ten attempts end after
+  about 5.5 s of waiting, before the 10 s of `op_timeout_ms`, so a store that
+  fails fast is asked less often than before. The process per attempt stays:
+  the hard deadline needs a process that can be killed, and it costs less than
+  the request it bounds (above).
+- **Circuit breaker.** Every context the library builds for a location
+  (`Config.lease_ctx/2`, `Config.repl_ctx/2`) wraps the guarded store in
+  `Alambique.Store.Breaker`, one breaker for each location of the instance,
+  shared by all its cells, so a store that fails is seen once and not once per
+  cell. Its state is three `:atomics`, found once when the context is built and
+  read without a message: a request costs one atomic read while it is closed.
+  `breaker: [failures: 5, cooldown_ms: 5_000, probe_timeout_ms: 10_000]`:
+  - Closed, `failures` failures in a row open it; any success resets the run.
+  - Open, a request answers `{:error, :store_unavailable}` at once and never
+    reaches the store. `Retry.run/3` does not repeat that answer. A wake that
+    fails with it fails as `{:error, :store_unavailable}`, not as
+    `{:restore, ...}` or `{:lease, ...}`, and is not remembered
+    (`wake: [failure_backoff_ms:]`): asking the breaker is cheaper than a
+    restore. A cell that stops for a failed upload ends with
+    `{:sync_failed, :store_unavailable}` and its writers get
+    `:outcome_unknown`; a lease renewal fails as for any store error and the
+    cell stops with `:lease_expired` when the lease runs out.
+  - After `cooldown_ms` (plus up to 20 % at random, so the nodes of a cluster
+    do not probe together) one request is the probe. It is claimed with a
+    compare-and-swap, so there is never a second one; the others still get
+    `:store_unavailable`. A success closes the breaker, a failure opens it
+    again for another cool-down. A probe that never answers (its process was
+    killed) is given up after `probe_timeout_ms` and the next request is the
+    probe.
+  - A failure is what says the store may be down: a timeout, including a
+    request killed at its deadline, a transport error, a crash of the store
+    module, and an HTTP 5xx. `:not_found` and `:precondition_failed` are
+    answers of a working store, normal for leases, fences and `if_none_match`
+    uploads, and an HTTP 4xx (a bad request, a refused credential) is a
+    problem that another request would repeat, not an outage. A request killed
+    at its deadline never answers, so `Retry` reports it; only a closed breaker
+    counts it.
+  - Requests that started before it opened and end after do not change its
+    state. The change feed reads its own guarded stores and has no breaker.
+  Telemetry: `[:alambique, :store, :breaker, :open]` and `:close`
+  ([telemetry.md](telemetry.md)).
 - `Alambique.Store.S3` implements it with Req and AWS SigV4, with a
   path-style option. SeaweedFS is the only store it is tested on
   ([storage-compatibility.md](storage-compatibility.md)). It does not follow
@@ -526,7 +569,9 @@ if the stored lease still has the cell's `epoch` and `token` and is not
 released. Otherwise the cell stops with `:lease_lost` without answering; the
 call exits with the cell, and the router looks again (§8), which reaches the
 new owner, or an error while nobody can serve. If the lease cannot be read the
-answer is `{:error, {:lease_unreadable, reason}}` and the cell keeps serving.
+answer is `{:error, {:lease_unreadable, reason}}` and the cell keeps serving
+(`reason` is `:store_unavailable` while the circuit breaker of the store is
+open, §3).
 
 Reading the lease after the statement, not before, is what makes the answer
 linearizable. Let `R` be a checked read issued after a write `w` was

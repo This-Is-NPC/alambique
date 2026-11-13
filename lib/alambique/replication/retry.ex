@@ -1,15 +1,21 @@
 defmodule Alambique.Replication.Retry do
   @moduledoc false
-  # Retry with exponential backoff until an absolute deadline. Every attempt
-  # runs in its own process, killed at the deadline, so a store call that never
-  # returns ends the operation in time (design §3).
+  # Retry with exponential backoff until an absolute deadline or
+  # `ctx.max_attempts`. Every attempt runs in its own process, killed at the
+  # deadline, so a store call that never returns ends the operation in time
+  # (design §3). A killed attempt is reported to the circuit breaker of the
+  # store, which cannot see it (`Store.Breaker`).
+
+  alias Alambique.Store.Breaker
 
   @doc "Monotonic deadline `ms` from now."
   def deadline_in(ms), do: System.monotonic_time(:millisecond) + ms
 
   @doc """
   Calls `fun` until it returns something other than `{:retry, reason}`. A
-  retry that would sleep past `deadline` ends with `{:error, reason}`. An
+  retry that would sleep past `deadline`, one after `ctx.max_attempts`
+  attempts, and `{:retry, :store_unavailable}` (an open breaker: another
+  attempt would fail the same way) end with `{:error, reason}`. An
   attempt still running at `deadline` is killed and ends with the reason of
   the last failure, or `{:error, :timeout}` if there was none. An attempt that
   starts at or past the deadline (`deadline_in(0)` asks for exactly one) gets
@@ -18,37 +24,46 @@ defmodule Alambique.Replication.Retry do
   """
   @spec run(map, integer, (-> term)) :: term
   def run(ctx, deadline, fun),
-    do: loop(ctx.backoff_ms, ctx.max_backoff_ms, deadline, fun, ctx.backoff_ms)
+    do: loop(ctx, ctx.backoff_ms, deadline, fun, 1, :timeout)
 
   @doc """
   One attempt of `fun`, killed after `timeout_ms` with `{:error, :timeout}`:
   for a request that must not be repeated by the caller's loop, such as the
-  lease requests.
+  lease requests. `store` is the one `fun` calls, to report the kill to its
+  breaker.
   """
-  @spec once(pos_integer, (-> term)) :: term
-  def once(timeout_ms, fun) do
+  @spec once(term, pos_integer, (-> term)) :: term
+  def once(store \\ nil, timeout_ms, fun) do
     case attempt(timeout_ms, fun) do
-      :killed -> {:error, :timeout}
-      result -> result
+      :killed ->
+        Breaker.timed_out(store)
+        {:error, :timeout}
+
+      result ->
+        result
     end
   end
 
-  defp loop(delay, max, deadline, fun, grace, last \\ :timeout) do
+  defp loop(ctx, delay, deadline, fun, attempts, last) do
     # An attempt that starts at or past the deadline (`deadline_in(0)` asks for
-    # exactly one) still gets `grace` ms, the first backoff.
-    remaining = max(deadline - System.monotonic_time(:millisecond), grace)
+    # exactly one) still gets `ctx.backoff_ms`, the first backoff.
+    remaining = max(deadline - System.monotonic_time(:millisecond), ctx.backoff_ms)
 
     case attempt(remaining, fun) do
       # Killed at the deadline: the reason of the last failure says more.
       :killed ->
+        Breaker.timed_out(ctx.store)
         {:error, last}
 
+      {:retry, :store_unavailable} ->
+        {:error, :store_unavailable}
+
       {:retry, reason} ->
-        if System.monotonic_time(:millisecond) + delay >= deadline do
+        if attempts >= ctx.max_attempts or System.monotonic_time(:millisecond) + delay >= deadline do
           {:error, reason}
         else
           Process.sleep(delay)
-          loop(min(delay * 2, max), max, deadline, fun, grace, reason)
+          loop(ctx, min(delay * 2, ctx.max_backoff_ms), deadline, fun, attempts + 1, reason)
         end
 
       other ->

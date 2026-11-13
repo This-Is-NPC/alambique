@@ -31,7 +31,7 @@ defmodule Alambique.Cell do
   }
 
   alias Alambique.Feed.Publisher
-  alias Alambique.Store.Metered
+  alias Alambique.Store.{Breaker, Metered}
   alias Alambique.Replication.{Replicator, Retry}
 
   # Lifecycle
@@ -188,7 +188,7 @@ defmodule Alambique.Cell do
         {:noreply, serve(state)}
 
       {:error, reason, state} ->
-        reason = DiskFull.classify(reason)
+        reason = reason |> DiskFull.classify() |> Breaker.classify()
         Admission.end_wake(state.config, self())
         {state, requests} = Wake.unmeter(state)
 

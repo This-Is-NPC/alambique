@@ -32,6 +32,7 @@ defmodule Alambique.Membership do
     Process.flag(:trap_exit, true)
     :ets.new(config.hints, [:named_table, :public, :set, read_concurrency: true])
     :ets.new(config.locations, [:named_table, :public, :set, read_concurrency: true])
+    :ets.new(config.breakers, [:named_table, :public, :set, read_concurrency: true])
     Alambique.Admission.init(config)
     {_ref, _groups} = :pg.monitor_scope(config.scope)
     :ok = :pg.join(config.scope, {:node_id, config.node_id, config.incarnation}, self())

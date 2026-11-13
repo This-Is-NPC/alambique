@@ -30,7 +30,8 @@ defmodule Alambique.Replication.RetryPropertiesTest do
     {fun, fn -> agent |> Agent.get(& &1) |> Enum.reverse() end}
   end
 
-  defp ctx(backoff, max), do: %{backoff_ms: backoff, max_backoff_ms: max}
+  defp ctx(backoff, max),
+    do: %{backoff_ms: backoff, max_backoff_ms: max, max_attempts: 1_000_000, store: nil}
 
   property "the first result that is not {:retry, _} is returned as it is, after that many calls" do
     check all(

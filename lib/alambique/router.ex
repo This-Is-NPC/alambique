@@ -27,6 +27,7 @@ defmodule Alambique.Router do
     Membership,
     Placement,
     Replication,
+    Store.Breaker,
     Store.Metered,
     Telemetry
   }
@@ -170,7 +171,7 @@ defmodule Alambique.Router do
   defp lease_owner(config, cell) do
     case read_lease_of(config, cell) do
       {:error, reason} ->
-        {:error, {:lease_unreadable, reason}}
+        {:error, Breaker.classify({:lease_unreadable, reason})}
 
       %{answer: :none} ->
         :none
@@ -276,7 +277,7 @@ defmodule Alambique.Router do
   defp read_lease({config, cell, _, _, _, _} = args) do
     case read_lease_of(config, cell) do
       {:error, reason} ->
-        {nil, {:error, {:lease_unreadable, reason}}}
+        {nil, {:error, Breaker.classify({:lease_unreadable, reason})}}
 
       %{answer: :none} = seen ->
         free(args, seen)

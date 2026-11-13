@@ -39,6 +39,8 @@ defmodule Alambique.Config do
     rewind: [],
     schema: [],
     restore: [],
+    retry: [],
+    breaker: [],
     hydrator: [],
     lazy_restore: [],
     drain: [],
@@ -66,6 +68,8 @@ defmodule Alambique.Config do
   @schema_defaults [check_page: 1_000, listing_timeout_ms: nil]
   @restore_defaults [edge_bytes: 65_536, fetch_concurrency: 16, max_inflight_bytes: 67_108_864]
   @hydrator_defaults [poll_ms: 100]
+  @retry_defaults [max_attempts: 10]
+  @breaker_defaults [failures: 5, cooldown_ms: 5_000, probe_timeout_ms: 10_000]
 
   @compaction_defaults [
     interval_ms: 5_000,
@@ -283,6 +287,12 @@ defmodule Alambique.Config do
             fetch_concurrency: pos_integer,
             max_inflight_bytes: pos_integer
           },
+          retry: %{max_attempts: pos_integer},
+          breaker: %{
+            failures: pos_integer,
+            cooldown_ms: pos_integer,
+            probe_timeout_ms: pos_integer
+          },
           hydrator: %{poll_ms: pos_integer},
           supervisor: atom,
           registry: atom,
@@ -290,6 +300,7 @@ defmodule Alambique.Config do
           scope: atom,
           store_identity: String.t(),
           hints: atom,
+          breakers: atom,
           drain_status: atom,
           admission: atom,
           wakes: atom,
@@ -385,6 +396,8 @@ defmodule Alambique.Config do
       rewind: rewind!(opts[:rewind]),
       schema: schema!(opts[:schema], op_timeout),
       restore: options!(:restore, opts[:restore], @restore_defaults),
+      retry: options!(:retry, opts[:retry], @retry_defaults),
+      breaker: options!(:breaker, opts[:breaker], @breaker_defaults),
       hydrator: options!(:hydrator, opts[:hydrator], @hydrator_defaults),
       lazy_restore: lazy_restore!(opts[:lazy_restore]),
       drain: drain!(opts[:drain]),
@@ -397,6 +410,7 @@ defmodule Alambique.Config do
       scope: Module.concat(name, Scope),
       store_identity: store_identity(placement),
       hints: Module.concat(name, Hints),
+      breakers: Module.concat(name, Breakers),
       drain_status: Module.concat(name, DrainStatus),
       admission: Module.concat(name, Admission),
       wakes: Module.concat(name, Wakes),
@@ -467,13 +481,13 @@ defmodule Alambique.Config do
 
   # Every store call of the cell, the compactor and the router goes through a
   # context built here, so the store is guarded once (design §3).
-  defp guarded(%Location{store: store}), do: {Alambique.Store.Guard, store}
+  defp guarded(config, location), do: Alambique.Store.Breaker.guard(config, location)
 
   @doc "Lease context for the cell data in `location`."
   @spec lease_ctx(t, Location.t()) :: Lease.ctx()
   def lease_ctx(config, %Location{} = location) do
     Lease.ctx(
-      store: guarded(location),
+      store: guarded(config, location),
       clock: config.clock,
       prefix: location.prefix,
       ttl_ms: config.ttl_ms,
@@ -486,11 +500,12 @@ defmodule Alambique.Config do
   @spec repl_ctx(t, Location.t()) :: Replication.ctx()
   def repl_ctx(config, %Location{} = location) do
     Replication.ctx(
-      store: guarded(location),
+      store: guarded(config, location),
       prefix: location.prefix,
       node: config.node_id,
       clock: config.clock,
       timeout_ms: config.op_timeout_ms,
+      max_attempts: config.retry.max_attempts,
       edge_bytes: config.restore.edge_bytes,
       fetch_concurrency: config.restore.fetch_concurrency,
       max_inflight_bytes: config.restore.max_inflight_bytes
