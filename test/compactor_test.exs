@@ -99,6 +99,54 @@ defmodule Alambique.CompactorTest do
       assert cells == 1
     end
 
+    test "every ready cell is compacted although commits never stop", ctx do
+      inst =
+        start_instance(ctx,
+          migrations: @schema,
+          retention: false,
+          compaction: [
+            interval_ms: 600_000,
+            max_age_ms: 600_000,
+            fanout: 2,
+            concurrency: 2,
+            batch_factor: 4
+          ]
+        )
+
+      config = Alambique.Config.fetch!(inst)
+      cells = for _ <- 1..12, do: unique_cell()
+      for cell <- cells, n <- 1..2, do: assert({:ok, _} = put(inst, cell, n))
+
+      # Every pass is followed by new commits of its cell, so more cells are
+      # ready than a tick takes, tick after tick, until `total` passes.
+      total = 48
+      passes = :ets.new(:passes, [:public, :set])
+      me = self()
+      id = {__MODULE__, make_ref()}
+
+      :telemetry.attach(
+        id,
+        [:alambique, :compaction, :pass],
+        fn _event, _measurements, %{cell: cell}, _ ->
+          count = :ets.update_counter(passes, cell, 1, {cell, 0})
+
+          if :ets.foldl(fn {_, n}, acc -> acc + n end, 0, passes) < total do
+            Alambique.Compaction.Compactor.notify(config, cell, 1_000 * count + 1)
+            Alambique.Compaction.Compactor.notify(config, cell, 1_000 * count + 2)
+          else
+            send(me, :done)
+          end
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(id) end)
+
+      send(:ets.info(config.compactor, :owner), :tick)
+      assert_receive :done, 30_000
+      assert for(cell <- cells, :ets.lookup(passes, cell) == [], do: cell) == []
+    end
+
     test "cells nobody writes cost nothing", ctx do
       inst =
         start_instance(ctx,

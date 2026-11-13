@@ -5,9 +5,9 @@ defmodule Alambique.Compaction.Compactor do
   #
   # Cells tell it about commits through `notify/3`, which writes one row per
   # cell into a bounded public ETS table: `{cell, first_txid, last_txid,
-  # due_ms}`. A row is ready when `fanout` TXIDs were committed since
-  # it appeared or when `max_age_ms` passed. A tick takes the ready rows,
-  # deletes them and runs one pass for each, `concurrency` at a time. A cell
+  # due_ms}`. A row is ready when `fanout` TXIDs were committed since it
+  # appeared or when `max_age_ms` passed. A tick takes the ready rows that
+  # waited longest, deletes them and runs one pass for each, `concurrency` at a time. A cell
   # nobody writes has no row and costs nothing. Notifications for new cells
   # are dropped while the table is full; the next commit makes a new one.
   #
@@ -97,7 +97,7 @@ defmodule Alambique.Compaction.Compactor do
     c = config.compaction
     started = System.monotonic_time()
     batch = c.concurrency * c.batch_factor
-    rows = ready(config.compactor, c.fanout, batch)
+    rows = ready(config.compactor, c, now_ms())
 
     rows
     |> Task.async_stream(&pass(config, &1),
@@ -216,19 +216,25 @@ defmodule Alambique.Compaction.Compactor do
     cleanup(config, cell, location_id, config.compaction.retry_ms)
   end
 
-  defp ready(table, fanout, limit) do
-    now = now_ms()
-
+  @doc false
+  # The rows a tick takes: at most `concurrency * batch_factor`, the rows that
+  # waited longest (smallest `due`). Every ready row is read and sorted, so a tick costs O(ready log
+  # ready), bounded by `queue_limit`; hash order would let the same cells
+  # take every batch while others never get one.
+  @spec ready(atom, map, integer) :: [tuple]
+  def ready(table, c, now) do
     spec = [
       {{:"$1", :"$2", :"$3", :"$4"},
-       [{:orelse, {:>=, {:-, :"$3", :"$2"}, fanout - 1}, {:"=<", :"$4", now}}],
+       [{:orelse, {:>=, {:-, :"$3", :"$2"}, c.fanout - 1}, {:"=<", :"$4", now}}],
        [{{:"$1", :"$2", :"$3", :"$4"}}]}
     ]
 
-    case :ets.select(table, spec, limit) do
-      {rows, _continuation} -> rows
-      :"$end_of_table" -> []
-    end
+    table
+    |> :ets.select(spec)
+    |> Enum.sort_by(fn {cell, _first, _last, due} ->
+      {due, cell}
+    end)
+    |> Enum.take(c.concurrency * c.batch_factor)
   end
 
   # One pass for one row. The row is deleted first, but only if nothing was

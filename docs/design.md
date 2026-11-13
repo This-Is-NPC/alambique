@@ -1881,13 +1881,21 @@ and one timer. Cells do not have either. A cell tells the compactor about every
 acknowledged batch and every wake fence with one `:ets.update_element` on a
 bounded public table: a row `{cell, first_txid, last_txid, due_ms}`.
 A row is ready when `fanout` TXIDs were committed since it appeared, or when
-`max_age_ms` passed. Every `interval_ms` the compactor takes the ready rows,
-deletes them, and runs one pass for each, `concurrency` at a time, each with
-its own deadline. A cell nobody writes has no row. When the table holds
-`queue_limit` rows, notifications for new cells are dropped; the next commit of
-such a cell makes a row. A failed pass is logged and queued again after
-`retry_ms`; a pass that ran out of merge budget is queued at once. The
-compactor starts last in the instance tree, so its crash restarts nothing.
+`max_age_ms` passed. Every `interval_ms` the compactor takes up to
+`concurrency * batch_factor` ready rows, deletes them, and runs one pass for
+each, `concurrency` at a time, each with its own deadline. When more rows are
+ready than fit in a batch, the choice is not left to the hash order of the
+table: the rows with the smallest `due`, the ones that waited longest, go
+first. A row that is taken is deleted and a new commit makes a new row with a later `due`, so a
+ready row is overtaken only by the rows that were ready before it: with `R`
+ready rows and a batch of `B`, it is taken within `ceil(R / B)` ticks, however
+busy the other cells are. This reads every ready row each tick and sorts them,
+`O(R log R)` with `R` at most `queue_limit` (10 000 by default). A full batch
+makes the next tick follow at once. A cell nobody writes has no row. When the
+table holds `queue_limit` rows, notifications for new cells are dropped; the
+next commit of such a cell makes a row. A failed pass is logged and queued
+again after `retry_ms`; a pass that ran out of merge budget is queued at once.
+The compactor starts last in the instance tree, so its crash restarts nothing.
 
 **Levels.** A pass merges level-0 files, one per batch, `fanout` (default 8)
 at a time into level 1, level 1 into level 2, up to `max_level` (default 2).
