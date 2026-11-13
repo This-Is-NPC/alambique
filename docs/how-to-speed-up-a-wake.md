@@ -91,12 +91,10 @@ the fence.
    `restore: [max_inflight_bytes:]` (default 64 MiB). A full restore reads the
    files of the chain `fetch_concurrency` at a time and holds at most
    `max_inflight_bytes` of them before it applies them. A store that limits
-   concurrent requests may need a lower `fetch_concurrency`; a cell larger than
-   `max_inflight_bytes` that you restore in full (`lazy_restore: false`) reads
-   the files that do not fit one at a time, and each file larger than the
-   limit costs one more request, for its size. Lowering the limit to save
-   memory (see [how-to-size-a-node.md](how-to-size-a-node.md)) makes wakes of
-   cells larger than it slower in the same way. Do not set
+   concurrent requests may need a lower `fetch_concurrency`; a chain larger
+   than `max_inflight_bytes` that you restore in full (`lazy_restore: false`)
+   is read ahead as the restore frees room, and each file larger than the
+   limit is read alone and costs one more request, for its size. Do not set
    `fetch_concurrency: 1` to save memory: it costs one round trip per file
    (table below), and the memory it saves is at most
    `fetch_concurrency × edge_bytes`, 1 MiB at the defaults.
@@ -104,28 +102,27 @@ the fence.
 ### What the two options cost
 
 `mise run bench:restore-concurrency` restores a cell whose chain has 800
-segments (5.4 MB in all, about 6.8 KB each, no compaction) from the in-memory
+segments (3.0 MB in all, about 3.8 KB each, no compaction) from the in-memory
 store with 25 ms added to every request. Median of three runs, full restore,
-seconds:
+seconds, before and after the read ahead refilled as the walk gave budget back
+(design §6.3):
 
-| `fetch_concurrency` | `max_inflight_bytes` 64 MiB | `max_inflight_bytes` 2.4 MiB |
-| ------------------: | --------------------------: | ---------------------------: |
-|                   1 |                       21.11 |                        21.02 |
-|                   2 |                       10.77 |                        16.12 |
-|                   4 |                        5.49 |                        13.78 |
-|                   8 |                        2.93 |                        12.57 |
-|                  16 |                        1.59 |                        11.92 |
+| `fetch_concurrency` | 64 MiB, before | 64 MiB, after | 2.4 MiB, before | 2.4 MiB, after |
+| ------------------: | -------------: | ------------: | --------------: | -------------: |
+|                   1 |          21.11 |         20.86 |           21.02 |          20.86 |
+|                   2 |          10.77 |         10.54 |           16.12 |          10.48 |
+|                   4 |           5.49 |          5.40 |           13.78 |           5.29 |
+|                   8 |           2.93 |          2.76 |           12.57 |           2.77 |
+|                  16 |           1.59 |          1.45 |           11.92 |           1.45 |
 
-With a budget that holds the whole chain, time falls with the concurrency,
-about 13 times from 1 to 16. With 2.4 MiB the budget holds about 350 of the 800
-files; the read ahead stops at the first file that does not fit and the walk
-reads the remaining ones one at a time, so concurrency 16 gains less (21 s to
-12 s). Two things follow. Keep the default of 16 on small nodes: the memory it
-adds is bounded (`fetch_concurrency × edge_bytes`, and a file smaller than
-`edge_bytes` weighs its own size). And a long chain on a small budget is slow
-whatever the concurrency; compaction (design §9)
-shortens the chain, and a larger
-`max_inflight_bytes` lets the read ahead cover it.
+Time falls with the concurrency, about 15 times from 1 to 16, and a budget
+smaller than the chain costs nothing more: the read ahead takes the weight the
+walk gives back for the next files. Before, it stopped at the first file that
+did not fit and the walk read the rest one at a time. Keep the default of 16 on
+small nodes: the memory it adds is bounded (`fetch_concurrency × edge_bytes`,
+and a file smaller than `edge_bytes` weighs its own size). A file larger than
+`max_inflight_bytes` still ends the read ahead and is read alone; compaction
+(design §9) shortens the chain.
 
 ## Troubleshooting
 

@@ -1121,15 +1121,23 @@ ceiling is `max(max_inflight_bytes, largest object)`.
 - **Full restore.** The store gives no size before a read, so the first range
   of a file (`min(edge_bytes, max_inflight_bytes)` bytes) says it, and is the
   whole file when the file is that small. Larger files cost one more request,
-  a `GET` after the range. The files the walk is expected to need are read in
-  its order, `fetch_concurrency` ranges at a time; the files that fit the
-  budget are read and kept, and the first that does not fit ends the read
-  ahead, because the files after it would be held while the walk reads it
-  (it does not resume: with a long chain and a small cap the rest is read one
-  file at a time, see how-to-speed-up-a-wake.md for the measurement). The
-  walk takes a kept file from memory (its weight moves to the file it works
+  a `GET` after the range. A task reads the files the walk is expected to
+  need, in its order and `fetch_concurrency` ranges at a time, while the walk
+  runs. It claims every file first, so the walk waits for a file the task is
+  reading instead of reading it again. A file is kept when it fits the budget
+  and every file before it is kept or being read; when it does not fit, the
+  task waits for the walk to give weight back and takes it for the next files,
+  so the read ahead keeps going through a chain longer than the budget (the
+  measurement is in how-to-speed-up-a-wake.md). It ends for good at a file
+  that is larger than the budget, which the walk reads alone, or that failed
+  to read, and when the walk asks for a file it did not claim (a wrong guess of
+  the chain): the walk then waits for the requests in flight and reads alone,
+  so the walk and the task never exceed `fetch_concurrency` requests together.
+  The walk takes a kept file from memory (its weight moves to the file it works
   on) and gives the weight of the previous file back before it reads the next.
-  A file the read ahead did not take is read when the walk reaches it, after
+  When the walk waits for a file, it first drops the files kept before it that
+  it skipped, so a stale file never holds the room that file needs.
+  A file the read ahead did not claim is read when the walk reaches it, after
   dropping what was read ahead and not used (a wrong guess of the chain), so
   that the file is alone in the budget. The LTX body is decoded in the native
   library one page at a time; the budget counts the body, not that working
@@ -1145,9 +1153,8 @@ ceiling is `max(max_inflight_bytes, largest object)`.
   past its deadline fails like a slow one.
 
 What is outside the budget is fixed: the first ranges of one read-ahead round
-(`fetch_concurrency × edge_bytes`, 1 MiB by default) before the files that do
-not fit are dropped, and the edges of the file the walk reads of a lazy
-restore (`2 × edge_bytes`). A restore and a hydration of one cell do not
+(`fetch_concurrency × edge_bytes`, 1 MiB by default) that wait for room, and
+the edges of the file the walk reads of a lazy restore (`2 × edge_bytes`). A restore and a hydration of one cell do not
 overlap, so the memory of one wake is
 
 ```

@@ -104,6 +104,78 @@ defmodule Alambique.RestoreMemoryCapTest do
     def delete(%{inner: {m, c}}, key), do: m.delete(c, key)
   end
 
+  defmodule CountStore do
+    @moduledoc """
+    Slows every read and keeps, per key, the most requests that were in flight
+    when one for that key started, and the most of all. Whole objects that
+    were returned and not yet applied are counted like `PeakStore` does.
+    """
+    @behaviour Alambique.Store
+
+    def new(inner) do
+      %{
+        inner: inner,
+        now: :atomics.new(1, []),
+        peak: :atomics.new(1, []),
+        keys: :ets.new(:count_store_keys, [:set, :public]),
+        fetched: :atomics.new(1, []),
+        applied: :atomics.new(1, []),
+        held: :atomics.new(1, [])
+      }
+    end
+
+    def peak(%{peak: peak}), do: :atomics.get(peak, 1)
+    def held(%{held: held}), do: :atomics.get(held, 1)
+    def key_peak(%{keys: keys}, key), do: :ets.lookup_element(keys, key, 2, 0)
+    def applied(%{applied: applied}, bytes), do: :atomics.put(applied, 1, bytes)
+
+    defp slow(%{now: now, peak: peak, keys: keys}, key, fun) do
+      n = :atomics.add_get(now, 1, 1)
+      if n > :atomics.get(peak, 1), do: :atomics.put(peak, 1, n)
+      :ets.insert(keys, {key, max(n, :ets.lookup_element(keys, key, 2, 0))})
+      Process.sleep(3)
+      fun.()
+    after
+      :atomics.sub(now, 1, 1)
+    end
+
+    defp note(%{fetched: fetched, applied: applied, held: held}, bytes) do
+      now = :atomics.add_get(fetched, 1, bytes) - :atomics.get(applied, 1)
+      if now > :atomics.get(held, 1), do: :atomics.put(held, 1, now)
+    end
+
+    @impl true
+    def get(%{inner: {m, c}} = s, key) do
+      slow(s, key, fn ->
+        with {:ok, body, _, _} = result <- m.get(c, key) do
+          note(s, byte_size(body))
+          result
+        end
+      end)
+    end
+
+    @impl true
+    def get_range(%{inner: {m, c}} = s, key, offset, length) do
+      slow(s, key, fn ->
+        with {:ok, body, total, _} = result <- m.get_range(c, key, offset, length) do
+          if offset == 0 and byte_size(body) == total, do: note(s, total)
+          result
+        end
+      end)
+    end
+
+    @impl true
+    def put(%{inner: {m, c}}, key, body, condition, meta),
+      do: m.put(c, key, body, condition, meta)
+
+    @impl true
+    def head(%{inner: {m, c}}, key), do: m.head(c, key)
+    @impl true
+    def list(%{inner: {m, c}}, prefix, after_key, limit), do: m.list(c, prefix, after_key, limit)
+    @impl true
+    def delete(%{inner: {m, c}}, key), do: m.delete(c, key)
+  end
+
   # Commits one blob of each size, so that the cell has one segment per size.
   defp seed(sizes) do
     {_pid, {_, cfg} = store} = start_store()
@@ -250,5 +322,89 @@ defmodule Alambique.RestoreMemoryCapTest do
 
     assert_receive {:hydrated, ^hydrator}, 10_000
     assert dump_file(dest) == dump(conn)
+  end
+
+  # Restores `sizes` against a CountStore; returns the result, the store and
+  # the segments (txid, bytes).
+  defp counted_restore(sizes, cap, concurrency, dest_name) do
+    {conn, dir, ctx, cfg} = seed(sizes)
+    segments = segment_sizes(ctx, cfg)
+    store = CountStore.new({MemoryStore, cfg})
+
+    CrashPoints.arm(
+      :repl_mid_restore,
+      fn _name, %{txid: txid} ->
+        CountStore.applied(
+          store,
+          for({max, bytes} <- segments, max <= txid, reduce: 0, do: (acc -> acc + bytes))
+        )
+      end,
+      times: :infinity
+    )
+
+    ctx =
+      Map.merge(ctx, %{
+        store: {CountStore, store},
+        max_inflight_bytes: cap,
+        edge_bytes: @edge,
+        fetch_concurrency: concurrency
+      })
+
+    dest = Path.join(dir, dest_name)
+    result = Replication.restore(ctx, "cell", dest, :latest)
+    CrashPoints.reset()
+    {result, store, segments, conn, dir, dest}
+  end
+
+  test "the read ahead goes on as the walk gives the budget back" do
+    sizes = List.duplicate(2_000, 24)
+    {conn, dir, ctx, cfg} = seed(sizes)
+    segments = segment_sizes(ctx, cfg)
+    total = segments |> Enum.map(&elem(&1, 1)) |> Enum.sum()
+    store = CountStore.new({MemoryStore, cfg})
+
+    ctx =
+      Map.merge(ctx, %{
+        store: {CountStore, store},
+        # About a quarter of the chain fits.
+        max_inflight_bytes: div(total, 4),
+        fetch_concurrency: 4
+      })
+
+    dest = Path.join(dir, "dest.db")
+    assert {:ok, %{txid: 24}} = Replication.restore(ctx, "cell", dest, :latest)
+    assert dump_file(dest) == dump(conn)
+
+    {:ok, {segs, _}} =
+      Replication.Objects.list_cell(ctx, "cell", System.monotonic_time(:millisecond) + 5_000)
+
+    # The files past the first budget were read together, not one at a time.
+    late = segs |> Enum.sort_by(& &1.max) |> Enum.drop(18)
+    assert Enum.any?(late, &(CountStore.key_peak(store, &1.key) > 1))
+  end
+
+  property "the read ahead keeps to the budget and the concurrency and builds the same database" do
+    check all(
+            sizes <- list_of(member_of([10, 2_000, 5_000, 30_000]), min_length: 1, max_length: 12),
+            cap <- member_of([1, 8_000, 40_000, 150_000, 50_000_000]),
+            concurrency <- member_of([1, 2, 4]),
+            max_runs: 15
+          ) do
+      {result, store, segments, conn, dir, dest} =
+        counted_restore(sizes, cap, concurrency, "d.db")
+
+      try do
+        largest = segments |> Enum.map(&elem(&1, 1)) |> Enum.max()
+
+        assert {:ok, %{txid: txid}} = result
+        assert txid == length(sizes)
+        assert CountStore.peak(store) <= concurrency
+        assert CountStore.held(store) <= max(cap, largest) + concurrency * @edge
+        assert dump_file(dest) == dump(conn)
+      after
+        Alambique.Sqlite.close(conn)
+        File.rm_rf(dir)
+      end
+    end
   end
 end
