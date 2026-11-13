@@ -394,4 +394,40 @@ defmodule Alambique.ConfigOptionsTest do
     config = Alambique.Config.build(base(ctx, replicas: replicas))
     assert %{on_stale: :owner, drift_ppm: 0, max_cells: 1, poll_ms: 250} = config.replicas
   end
+
+  test "registry is off by default and derives its timings from the lease", ctx do
+    assert Alambique.Config.build(base(ctx)).nodes == nil
+
+    config = Alambique.Config.build(base(ctx, registry: [advertise: "h:1"]))
+
+    assert config.nodes == %{
+             advertise: "h:1",
+             ttl_ms: 3_000,
+             renew_ms: 1_000,
+             refresh_ms: 1_000,
+             meta: %{},
+             page_size: 100,
+             sweep_ms: 3_600_000
+           }
+
+    config = Alambique.Config.build(base(ctx, registry: [advertise: "h:1", renew_ms: 400]))
+    assert %{renew_ms: 400, refresh_ms: 400} = config.nodes
+  end
+
+  test "registry options are validated", ctx do
+    bad = fn opts, message ->
+      assert_raise ArgumentError, message, fn ->
+        Alambique.Config.build(base(ctx, registry: opts))
+      end
+    end
+
+    bad.([], ~r/:advertise/)
+    bad.([advertise: ""], ~r/:advertise/)
+    bad.([advertise: "h", meta: [1]], ~r/:meta/)
+    bad.([advertise: "h", renew_ms: 3_000], ~r/:renew_ms must be less than :ttl_ms/)
+    bad.([advertise: "h", ttl_ms: 1_000], ~r/:ttl_ms must be greater than twice/)
+    bad.([advertise: "h", refresh_ms: 0], ~r/:refresh_ms/)
+    bad.([advertise: "h", other: 1], ~r/unknown/)
+    bad.(true, ~r/keyword list/)
+  end
 end

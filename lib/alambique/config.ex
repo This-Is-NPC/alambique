@@ -47,6 +47,7 @@ defmodule Alambique.Config do
     drain: [],
     list_cells: [],
     quarantine: [],
+    registry: false,
     replicas: false
   ]
 
@@ -107,6 +108,18 @@ defmodule Alambique.Config do
     startup_timeout_ms: 5_000,
     retry_ms: 30_000,
     concurrency: 8
+  ]
+
+  # `ttl_ms` defaults to `lease_ttl_ms` and `renew_ms` to a third of `ttl_ms`;
+  # `refresh_ms` defaults to `renew_ms`. `advertise` has no default.
+  @registry_defaults [
+    advertise: nil,
+    ttl_ms: nil,
+    renew_ms: nil,
+    refresh_ms: nil,
+    meta: %{},
+    page_size: 100,
+    sweep_ms: 3_600_000
   ]
 
   @list_cells_defaults [page_size: 100, max_limit: 1_000, timeout_ms: nil]
@@ -421,6 +434,7 @@ defmodule Alambique.Config do
       drain: drain!(opts[:drain]),
       quarantine: quarantine!(opts[:quarantine]),
       replicas: replicas!(opts[:replicas]),
+      nodes: registry!(opts[:registry], ttl, skew),
       list_cells: list_cells!(opts[:list_cells], op_timeout),
       supervisor: Module.concat(name, CellSupervisor),
       registry: Module.concat(name, Registry),
@@ -441,7 +455,9 @@ defmodule Alambique.Config do
       replica_registry: Module.concat(name, ReplicaRegistry),
       replica_supervisor: Module.concat(name, ReplicaSupervisor),
       replica_manager: Module.concat(name, Replicas),
-      replica_memo: Module.concat(name, ReplicaMemo)
+      replica_memo: Module.concat(name, ReplicaMemo),
+      node_registry: Module.concat(name, NodeRegistry),
+      peers: Module.concat(name, Peers)
     }
   end
 
@@ -511,6 +527,19 @@ defmodule Alambique.Config do
       ttl_ms: config.ttl_ms,
       skew_margin_ms: config.skew_margin_ms,
       incarnation: config.incarnation
+    )
+  end
+
+  @doc "Node registry context for `location`; its TTL is the `:registry` one."
+  @spec nodes_ctx(t, Location.t()) :: Alambique.Nodes.ctx()
+  def nodes_ctx(%{nodes: registry} = config, %Location{} = location) do
+    Alambique.Nodes.ctx(
+      store: guarded(config, location),
+      clock: config.clock,
+      prefix: location.prefix,
+      ttl_ms: registry.ttl_ms,
+      skew_margin_ms: config.skew_margin_ms,
+      page_size: registry.page_size
     )
   end
 
@@ -834,6 +863,36 @@ defmodule Alambique.Config do
         do: bad!(":quarantine #{inspect(key)} must be a positive integer")
 
     Map.new(merged)
+  end
+
+  defp registry!(false, _lease_ttl, _skew), do: nil
+
+  defp registry!(opts, lease_ttl, skew) do
+    opts = checked_keyword!(:registry, opts, Keyword.keys(@registry_defaults))
+    merged = Keyword.merge(@registry_defaults, opts)
+    ttl = merged[:ttl_ms] || lease_ttl
+    renew = merged[:renew_ms] || div(ttl, 3)
+    refresh = merged[:refresh_ms] || renew
+
+    unless is_binary(merged[:advertise]) and merged[:advertise] != "",
+      do: bad!(":registry :advertise must be a non-empty string")
+
+    unless is_map(merged[:meta]), do: bad!(":registry :meta must be a map")
+
+    for {key, value} <-
+          [ttl_ms: ttl, renew_ms: renew, refresh_ms: refresh] ++
+            Keyword.take(merged, [:page_size, :sweep_ms]),
+        not (is_integer(value) and value > 0),
+        do: bad!(":registry #{inspect(key)} must be a positive integer")
+
+    unless ttl > 2 * skew,
+      do: bad!(":registry :ttl_ms must be greater than twice :skew_margin_ms")
+
+    unless renew < ttl, do: bad!(":registry :renew_ms must be less than :ttl_ms")
+
+    merged
+    |> Keyword.merge(ttl_ms: ttl, renew_ms: renew, refresh_ms: refresh)
+    |> Map.new()
   end
 
   defp replicas!(false), do: nil

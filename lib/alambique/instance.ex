@@ -70,6 +70,11 @@ defmodule Alambique.Instance do
 
     children = children ++ replicas(config)
 
+    # Last, like the compactor: a crash restarts nothing else, and it stops
+    # first, so the node leaves the registry before its cells hibernate.
+    children =
+      if config.nodes, do: children ++ [Alambique.NodeRegistry.child_spec(config)], else: children
+
     Supervisor.init(children, strategy: :rest_for_one)
   end
 

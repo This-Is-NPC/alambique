@@ -37,6 +37,23 @@ All have no measurements. `node_id` and `incarnation` are strings.
 | `[:alambique, :nodes, :expired]` | `node_id`, `incarnation` and `expires_at_ms` of an entry that expired without being released, `by` (`:register`: a node took it over; `:sweep`: `Alambique.Nodes.sweep/2` deleted it) |
 | `[:alambique, :nodes, :lost]` | `node_id`, `incarnation`, `op` (`:renew` or `:deregister`): the stored entry is no longer the caller's |
 
+## Registry events
+
+Emitted by the process that keeps a node in the registry, when the instance has
+the `registry` option (design §22). `instance` is the instance name.
+
+| Event | Measurements | Metadata |
+| --- | --- | --- |
+| `[:alambique, :registry, :peers_changed]` | `peers` (live peers now) | `instance`, `node_id` (this node), `joined` and `left` (lists of the `%{node_id, incarnation, advertise, meta}` of `Alambique.peers/1` that entered and left it since the last event) |
+| `[:alambique, :registry, :error]` | none | `instance`, `node_id`, `op` (`:register`, `:renew`, `:deregister`, `:sweep` or `:list`), `reason` |
+
+The first listing reports every peer as `joined`. A peer whose `advertise` or
+`meta` changed, or that restarted (a new `incarnation`), is in `left` and in
+`joined` of one event. `:error` is a store failure of one round: the process
+logs it, keeps the last peers and tries again at the next round. A node that
+lost its entry to another live incarnation of its id emits
+`[:alambique, :nodes, :lost]` once and then waits quietly.
+
 ## Store events
 
 Emitted by `Alambique.Store.Breaker`, the circuit breaker of a store (design
