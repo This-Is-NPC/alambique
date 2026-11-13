@@ -41,6 +41,14 @@ first release (0.1.0):
   gives `{:error, :disk_full}`. A wake above `awake: [max_wakes:]` waits in a
   queue (`wake_queue_ms`, `max_wake_queue`) before it gives `:overloaded`.
   `cells(details: true)` lists the last use and the WAL size of each cell.
+- 0.5.0: **breaking:** `restore: [prefetch_bytes:]` is removed; use
+  `restore: [max_inflight_bytes:]` (default 64 MiB), which caps the bytes a
+  restore holds in memory. A wake takes the lease before it reads the store.
+  A circuit breaker (`breaker:`) answers `{:error, :store_unavailable}` while
+  the store fails, a wake that fails on the store backs off (`wake:
+  [backoff_ms:]`), and a cell keeps a failed upload and retries it while its
+  lease is valid (`upload:`). `owner/3` takes `peers: true` to ask the nodes
+  instead of the store.
 
 The full list is in [CHANGELOG.md](CHANGELOG.md).
 
