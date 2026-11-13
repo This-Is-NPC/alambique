@@ -106,6 +106,9 @@ anything but `s3://bucket` or `s3://bucket/path`.
   (or `:endpoint`) to its region.
 - `{:error, {:http, 403, body}}` with `SignatureDoesNotMatch` or
   `InvalidToken`: the token does not belong to the keys, or the region is wrong.
+- `{:error, {:http, 403, _}}` from a `HEAD` request, with credentials that
+  expired: the answer has no body, so the store cannot tell the expired token
+  and does not renew. The next request with a body does.
 - `{:error, {:credentials, reason}}`: the `:credentials` function failed.
 - The secrets never appear in an error or a crash report: the store keeps them
   in closures (design section 3). Keep them out of the code you commit; read

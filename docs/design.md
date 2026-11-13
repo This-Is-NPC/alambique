@@ -381,6 +381,9 @@ the panic tests abort the VM when `guard` does not catch.
   has already, and sends the request once more. Concurrent requests with an
   expired cache may each call the function; the last result is kept. The
   token and the key pair of a request always come from the same call.
+  A `head` that is refused for an expired token is not recognised, because
+  a HEAD answer has no body to hold the code: it is the plain `{:http, 403,
+  _}` error, and the next request that has a body renews the credentials.
   `from_url/2` builds the config from `s3://bucket/prefix`. It does not follow
   redirects: Req would sign the request again for the new host and send it the
   body, so a 3xx is `{:error, {:http, status, body}}` and the endpoint must be
