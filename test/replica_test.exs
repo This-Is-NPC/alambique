@@ -368,12 +368,12 @@ defmodule Alambique.ReplicaTest do
       GatedStore.release(t.gate, t.key.(t.head + 2))
       assert settled(t) == [1]
 
-      # The first batch never lands: the owner stops, the next one takes over.
-      for _ <- 1..30, do: GatedStore.fail(t.gate, t.key.(t.head + 1))
-      for req <- t.reqs, do: assert({:reply, {:error, _}} = :gen_server.wait_response(req, 5_000))
-
+      # The first batch never lands and the owner keeps trying while it holds
+      # the lease: the next one takes the cell over, which stops the owner.
       taker = start_instance(t, migrations: @schema, compaction: false)
       assert {:ok, _} = Alambique.take_over(taker, t.cell, :test, timeout: 5_000)
+      for req <- t.reqs, do: assert({:reply, {:error, _}} = :gen_server.wait_response(req, 5_000))
+
       {:ok, _} = Alambique.execute(taker, t.cell, "INSERT INTO t (n) VALUES (4)")
       assert settled(t) == [1, 4]
     end
