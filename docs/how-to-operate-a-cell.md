@@ -596,6 +596,18 @@ wake event shows `reason: :disk_full` (`[:alambique, :cell, :wake]`).
   that fails now and then opens the breaker too often. `retry:
   [max_attempts:]` (default 10) limits how often one request is repeated while
   the breaker is closed.
+- **Writes wait or time out while the store fails.** A cell whose upload fails
+  for a store reason (an error, a timeout, a 5xx, `:store_unavailable`) does
+  not stop: it keeps the batch and uploads it again, waiting
+  `upload: [retry_backoff_ms:]` (default 500) and doubling up to
+  `retry_backoff_max_ms` (default 5 000), for as long as its lease is valid.
+  Writers wait for it, so a caller sees `{:error, :timeout}` when its own
+  timeout passes (the write may still land: treat it as unknown) and
+  `{:error, :busy}` when `awake: [max_pending:]` calls wait on the cell. Look
+  for `[:alambique, :cell, :upload_retry]` events (see
+  [telemetry.md](telemetry.md)). The cell stops with `{:sync_failed, reason}`
+  and its writers get `{:error, :outcome_unknown}` only when the store stays
+  down until the lease runs out; the next call wakes it from the store.
 - **`{:error, :frozen}` from a call**: unfreeze the cell (step 4). If you did
   not freeze it, look at its `Crashes:` line first: the instance may have frozen
   it.

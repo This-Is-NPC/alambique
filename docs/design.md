@@ -317,10 +317,10 @@ the panic tests abort the VM when `guard` does not catch.
     fails with it fails as `{:error, :store_unavailable}`, not as
     `{:restore, ...}` or `{:lease, ...}`, and is not remembered
     (`wake: [failure_backoff_ms:]`): asking the breaker is cheaper than a
-    restore. A cell that stops for a failed upload ends with
-    `{:sync_failed, :store_unavailable}` and its writers get
-    `:outcome_unknown`; a lease renewal fails as for any store error and the
-    cell stops with `:lease_expired` when the lease runs out.
+    restore. An upload that fails with it is repeated by the cell while its
+    lease is valid (§6, "Upload failures"); a lease renewal fails as for any
+    store error and the cell stops with `:lease_expired` when the lease runs
+    out.
   - After `cooldown_ms` (plus up to 20 % at random, so the nodes of a cluster
     do not probe together) one request is the probe. It is claimed with a
     compare-and-swap, so there is never a second one; the others still get
@@ -666,9 +666,43 @@ replicator state is the *encoded* head and is ahead of `acked` by the queue.
   a batch that is not acknowledged may never become durable.
 - A read waits for the newest batch (the open one when it has items), which
   implies every earlier write is acknowledged.
-- Any failure stops the cell: a put that returns `:taken` (`:fenced`) or an
-  error, an upload process that exits, or a capture error; so does a lost or
-  expired lease. It kills the upload processes. Nothing is re-encoded and
+- Upload failures. A put that fails for a store reason (an error, a timeout,
+  a 5xx, `:store_unavailable`) says nothing about the lease, so it does not
+  stop the cell. The upload process has already retried until its deadline
+  (`op_timeout_ms`, cut at the end of the lease; `retry: [max_attempts:]`);
+  when it reports the error the cell keeps the batch in its place in the
+  queue and, after a backoff, starts a new upload process for the same
+  `upload` (`upload: [retry_backoff_ms: 500, retry_backoff_max_ms: 5_000]`:
+  the wait doubles up to the maximum; `[:cell, :upload_retry]`). This goes on
+  while the lease is valid by this node's clock and the skew margin, which is
+  the deadline of the retries: a store that is down for less than a lease does
+  not stop any cell, and one that is down longer stops each cell when its
+  lease runs out. Why a retry is safe:
+  - The key of a batch is a function of the cell and its TXID, and the put is
+    `:if_none_match`: a second put of the same batch cannot create a second
+    object. If the first one landed and its answer was lost, the retry gets
+    `:precondition_failed`, reads the object, finds the same bytes and epoch
+    and answers `:ok` (the put rule below). If another owner took the TXID it
+    gets `:taken`, which is not a store failure and stops the cell as before.
+  - A retry keeps the place of its batch in the queue and only the head is
+    acknowledged, so the answers stay in TXID order whatever the order of the
+    landings; the retried batch is never re-encoded, so no later batch can
+    take its TXID.
+  - New writes meanwhile commit locally and wait for the next batch, behind
+    the unconfirmed ones; a full pipeline defers the flush, as without
+    failures. They count in `max_pending`, so the callers waiting on a cell
+    that cannot upload meet `{:error, :busy}` at the limit and nothing grows
+    without bound.
+  - A writer waits for the acknowledgement of its batch for as long as its own
+    call timeout. A caller that stops waiting gets `{:error, :timeout}`; the
+    write is still in the cell, may land with a later retry, and must be
+    treated as unknown.
+  The stop that remains: a put that returns `:taken` (`:fenced`), an upload
+  process that exits, a capture error, a lost or expired lease, or a retry
+  that finds the lease no longer valid (`{:sync_failed, reason}`, the reason of
+  the last failure). A drain (hibernation, `position`, migrations) waits for
+  the retries too, so it can last until the lease runs out. The stop kills the
+  upload processes. Nothing is re-encoded and
   nothing is acknowledged out of order. The callers get these answers:
   - A write of a batch that was encoded and sent gets
     `{:error, :outcome_unknown}`, whatever stopped the cell and whether or not
@@ -697,7 +731,11 @@ replicator state is the *encoded* head and is ahead of `acked` by the queue.
   kills `owner_pid` crashes the cell), and the cell adds `:cell_after_land` and
   `:cell_before_ack`.
 
-`test/pipeline_properties_test.exs` checks it with a gated store that decides
+`test/upload_retry_test.exs` and `test/upload_retry_properties_test.exs` check
+the retries: random store failures and a lease that runs out leave the segments
+as TXIDs 1..N once each, the rows of the acknowledged writes in commit order,
+and a stopped cell only when the lease was lost.
+`test/pipeline_properties_test.exs` checks the pipeline with a gated store that decides
 the landing order, crashes at the fault points and takeovers: every
 acknowledged write is in the state a restore gives, the restored state only
 grows and nothing is deleted. `tla/Pipeline.tla` models the same rules.
@@ -1378,8 +1416,9 @@ reasons answers every waiting reader, and every writer whose batch was not
 sent, with `{:error, reason}`, and every writer of a sent batch with
 `{:error, :outcome_unknown}` (§6, except a batch refused with `:fenced`). It
 closes the connection, and releases the lease unless it was fenced or lost. A
-sync that fails for any other reason stops the cell with `{:sync_failed,
-reason}`; the writers are answered the same way.
+sync that fails for a store reason is repeated while the lease is valid
+(§6); when the lease runs out, or the sync fails for any other reason, the cell
+stops with `{:sync_failed, reason}` and the writers are answered the same way.
 
 **Statements of callers.** Everything a caller's SQL may do is decided by
 the connection, in the NIF, and not by looking at the SQL text:

@@ -107,8 +107,10 @@ To run one by hand: `scripts/tla-check --mutation OverwriteAny` (through
   writers got a definite refusal. A put that meets another writer's object
   (taken) refuses its own batch; a stop refuses nothing else, because the
   other sent batches may still land (their writers get `outcome_unknown`).
-- **Crashes** at any point. An upload failure also stops the cell, so it is
-  modelled as a crash with the request still in flight.
+- **Crashes** at any point. A stop of the cell (a fence, a lost lease, or a
+  failed upload that outlasts the lease) is modelled as a crash with the
+  request still in flight. A failed upload that is retried while the lease
+  holds is a put that has not landed yet, which the model already allows.
 
 Not modelled: the 16-file window and the level-0 rule that keep real history
 loss loud (the model treats every unreachable file after the chain as a

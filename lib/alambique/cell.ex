@@ -492,6 +492,13 @@ defmodule Alambique.Cell do
     end
   end
 
+  defp info({:retry_upload, ref}, %State{mode: :serving} = state) do
+    case retry_upload(state, ref) do
+      {:ok, state} -> {:noreply, state}
+      {:stop, reason, state} -> stop_serving(state, reason)
+    end
+  end
+
   defp info({:feed_published, pid, txid, time, count}, %State{mode: :serving} = state),
     do: {:noreply, Publisher.published(state, pid, txid, time, count)}
 
@@ -641,22 +648,15 @@ defmodule Alambique.Cell do
 
       {:ok, repl, up} ->
         ref = make_ref()
-        parent = self()
-        ctx = state.repl_ctx
-
-        pid =
-          spawn_link(fn ->
-            result = Replicator.upload(up, ctx, deadline: deadline)
-            # A crash before this point reaches the cell as an exit signal.
-            Process.unlink(parent)
-            send(parent, {:landed, ref, result})
-          end)
+        pid = start_upload(state, up, ref)
 
         batch = %{
           txid: up.txid,
           ref: ref,
           pid: pid,
           landed: false,
+          attempts: 0,
+          last: nil,
           items: items,
           writes: writes,
           started: started,
@@ -674,6 +674,20 @@ defmodule Alambique.Cell do
     end
   end
 
+  # The upload process of a batch. It reports to the cell and ends; a crash
+  # before the report reaches the cell as an exit signal.
+  defp start_upload(state, up, ref) do
+    parent = self()
+    ctx = state.repl_ctx
+    deadline = State.deadline(state)
+
+    spawn_link(fn ->
+      result = Replicator.upload(up, ctx, deadline: deadline)
+      Process.unlink(parent)
+      send(parent, {:landed, ref, result})
+    end)
+  end
+
   # Items of a flush that changed nothing wait for the queue, if any.
   defp release(%State{pipe: %{queue: []}} = state, items) do
     verdict = check_reads(items, state)
@@ -684,8 +698,9 @@ defmodule Alambique.Cell do
   defp release(state, items), do: {:ok, %{state | pipe: Pipe.attach(state.pipe, items)}}
 
   # An upload process reported. A landed batch is acknowledged once every
-  # batch before it has landed; any failure stops the cell (nothing is
-  # re-encoded, the outcome of the batches behind it is unknown).
+  # batch before it has landed. A fencing conflict or a crashed upload stops
+  # the cell (nothing is re-encoded, the outcome of the batches behind it is
+  # unknown); a store failure keeps the batch for a new upload.
   defp landed(state, ref, result) do
     case Pipe.find(state.pipe, ref) do
       nil ->
@@ -696,7 +711,55 @@ defmodule Alambique.Cell do
         pop(%{state | pipe: Pipe.land(state.pipe, ref)}, false)
 
       batch ->
-        upload_failed(state, batch, result)
+        failed(state, batch, result)
+    end
+  end
+
+  # A store failure is no verdict on the lease: the same key and bytes are put
+  # again after a backoff (an earlier attempt that landed is found and
+  # accepted, so the batch is never written twice), while the lease is valid.
+  # The batch keeps its place, so the acknowledgements stay in order.
+  defp failed(state, batch, {:error, reason} = result) do
+    if State.lease_valid?(state) do
+      %{retry_backoff_ms: base, retry_backoff_max_ms: max} = state.config.upload
+      delay = min(base * Integer.pow(2, min(batch.attempts, 20)), max)
+      Process.send_after(self(), {:retry_upload, batch.ref}, delay)
+
+      Telemetry.emit(
+        [:cell, :upload_retry],
+        %{delay_ms: delay},
+        Map.merge(commit_meta(state, batch), %{attempt: batch.attempts + 1, reason: reason})
+      )
+
+      pipe =
+        Pipe.update(
+          state.pipe,
+          batch.ref,
+          &%{&1 | pid: nil, attempts: &1.attempts + 1, last: reason}
+        )
+
+      {:ok, %{state | pipe: pipe}}
+    else
+      upload_failed(state, batch, result)
+    end
+  end
+
+  defp failed(state, batch, result), do: upload_failed(state, batch, result)
+
+  # The backoff of a batch ended. A lease that ran out meanwhile stops the cell
+  # with the last failure.
+  defp retry_upload(state, ref) do
+    case Pipe.find(state.pipe, ref) do
+      nil ->
+        {:ok, state}
+
+      batch ->
+        if State.lease_valid?(state) do
+          pid = start_upload(state, batch.upload, ref)
+          {:ok, %{state | pipe: Pipe.update(state.pipe, ref, &%{&1 | pid: pid})}}
+        else
+          upload_failed(state, batch, {:error, batch.last})
+        end
     end
   end
 
@@ -833,7 +896,7 @@ defmodule Alambique.Cell do
 
   # Waits for one upload process, bounded by the upload deadlines.
   defp await(state) do
-    case await(state, 2 * state.config.op_timeout_ms) do
+    case await(state, 2 * state.config.op_timeout_ms + state.config.upload.retry_backoff_max_ms) do
       {:timeout, state} -> upload_failed(state, hd(state.pipe.queue), :timeout)
       answer -> answer
     end
@@ -845,6 +908,9 @@ defmodule Alambique.Cell do
     receive do
       {:landed, ref, result} ->
         landed(state, ref, result)
+
+      {:retry_upload, ref} ->
+        retry_upload(state, ref)
 
       {:EXIT, pid, reason} when reason != :normal and is_map_key(pids, pid) ->
         upload_failed(

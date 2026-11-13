@@ -233,6 +233,11 @@ defmodule Alambique do
     * `:retry` - `:max_attempts` (attempts of one store request that is
       retried, whatever time is left before its deadline, default 10; design
       §3).
+    * `:upload` - what a cell does when the upload of a batch fails for a
+      store reason (design §6): `:retry_backoff_ms` (wait before the first new
+      upload, default 500) and `:retry_backoff_max_ms` (the wait doubles up to
+      this, default 5 000). The cell keeps the batch and uploads it again for
+      as long as its lease is valid; only the loss of the lease stops it.
     * `:breaker` - the circuit breaker of each store (design §3): `:failures`
       (failures in a row that open it, default 5), `:cooldown_ms` (how long it
       refuses requests before it lets one probe through, default 5 000, plus up
