@@ -96,7 +96,36 @@ the fence.
    the files that do not fit one at a time, and each file larger than the
    limit costs one more request, for its size. Lowering the limit to save
    memory (see [how-to-size-a-node.md](how-to-size-a-node.md)) makes wakes of
-   cells larger than it slower in the same way.
+   cells larger than it slower in the same way. Do not set
+   `fetch_concurrency: 1` to save memory: it costs one round trip per file
+   (table below), and the memory it saves is at most
+   `fetch_concurrency × edge_bytes`, 1 MiB at the defaults.
+
+### What the two options cost
+
+`mise run bench:restore-concurrency` restores a cell whose chain has 800
+segments (5.4 MB in all, about 6.8 KB each, no compaction) from the in-memory
+store with 25 ms added to every request. Median of three runs, full restore,
+seconds:
+
+| `fetch_concurrency` | `max_inflight_bytes` 64 MiB | `max_inflight_bytes` 2.4 MiB |
+| ------------------: | --------------------------: | ---------------------------: |
+|                   1 |                       21.11 |                        21.02 |
+|                   2 |                       10.77 |                        16.12 |
+|                   4 |                        5.49 |                        13.78 |
+|                   8 |                        2.93 |                        12.57 |
+|                  16 |                        1.59 |                        11.92 |
+
+With a budget that holds the whole chain, time falls with the concurrency,
+about 13 times from 1 to 16. With 2.4 MiB the budget holds about 350 of the 800
+files; the read ahead stops at the first file that does not fit and the walk
+reads the remaining ones one at a time, so concurrency 16 gains less (21 s to
+12 s). Two things follow. Keep the default of 16 on small nodes: the memory it
+adds is bounded (`fetch_concurrency × edge_bytes`, and a file smaller than
+`edge_bytes` weighs its own size). And a long chain on a small budget is slow
+whatever the concurrency; compaction (design §9)
+shortens the chain, and a larger
+`max_inflight_bytes` lets the read ahead cover it.
 
 ## Troubleshooting
 
