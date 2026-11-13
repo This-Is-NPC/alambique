@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/This-Is-NPC/alambique/compare/v0.5.0...v0.6.0) (2026-11-13)
+
+
+### Features
+
+* **breaker:** report the breaker status ([9396ae6](https://github.com/This-Is-NPC/alambique/commit/9396ae6a8cd2da6ed197e02acda86c22be393f74))
+* **nodes:** add the node registry in the store ([abe77c9](https://github.com/This-Is-NPC/alambique/commit/abe77c9094abb5c9d8cb3e20c2169802234a6334))
+* **ops:** accept AWS settings in the mix tasks ([449bbf1](https://github.com/This-Is-NPC/alambique/commit/449bbf1958ac42f8b87ca27eafb86924729e4d70))
+* **registry:** keep the node in the registry ([7a45bf2](https://github.com/This-Is-NPC/alambique/commit/7a45bf23b3625b66defaa518a2dca37aebd2e705))
+* **s3:** accept AWS endpoint and renewable credentials ([d1c8032](https://github.com/This-Is-NPC/alambique/commit/d1c80320653d414a0f08b999eede10e1f6d0c6c7))
+
 ## [0.5.0](https://github.com/This-Is-NPC/alambique/compare/v0.4.0...v0.5.0) (2026-11-13)
 
 
