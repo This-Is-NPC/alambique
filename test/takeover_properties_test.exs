@@ -34,6 +34,7 @@ defmodule Alambique.TakeoverPropertiesTest do
   @who [:x, :y, :z]
   @ttl_ms 1_500
   @skew_ms 300
+  @cooldown_ms 500
   @call_timeout_ms 2_000
   # Slack for scheduling and for the requests of a renewal.
   @slack_ms 500
@@ -135,6 +136,7 @@ defmodule Alambique.TakeoverPropertiesTest do
           skew_margin_ms: @skew_ms,
           op_timeout_ms: 1_000,
           call_timeout_ms: @call_timeout_ms,
+          breaker: [cooldown_ms: @cooldown_ms],
           compaction: false
         )
 
@@ -361,6 +363,23 @@ defmodule Alambique.TakeoverPropertiesTest do
 
   # After the faults
 
+  # A store the breaker still counts as down refuses the heal at once
+  # (`:store_unavailable`): that is the breaker's contract. The first heal
+  # after its cool-down is the probe, so the heal is repeated until the
+  # breaker lets it through, bounded.
+  defp heal(name, cell) do
+    eventually(
+      fn ->
+        case Alambique.take_over(name, cell, :heal, call_opts()) do
+          {:ok, _} -> true
+          {:error, :store_unavailable} -> false
+          other -> flunk("heal of #{cell}: #{inspect(other)}")
+        end
+      end,
+      @cooldown_ms * 10
+    )
+  end
+
   defp settle(ctx, run, prefix) do
     CrashPoints.reset()
     MemoryStore.clear(ctx.store_config)
@@ -378,7 +397,7 @@ defmodule Alambique.TakeoverPropertiesTest do
 
       # The cell is served again, from any instance, and agrees with the store.
       name = inst(run, :x)
-      assert {:ok, _} = Alambique.take_over(name, cell, :heal, call_opts())
+      heal(name, cell)
       opts = [verify_lease: true] ++ call_opts()
 
       assert {:ok, %{rows: rows}} =
