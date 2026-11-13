@@ -280,7 +280,7 @@ impl Slot {
         }
         // A refused call never raises the count, so it never exceeds `max`.
         USER_STATEMENTS
-            .fetch_update(AcqRel, Acquire, |n| (n < max).then_some(n + 1))
+            .try_update(AcqRel, Acquire, |n| (n < max).then_some(n + 1))
             .map(|_| Some(Slot))
             .map_err(|_| Failure::Busy)
     }
