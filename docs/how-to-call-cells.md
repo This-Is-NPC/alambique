@@ -9,7 +9,8 @@ documentation of `Alambique`; the words are in [concepts.md](concepts.md).
 ## Prerequisites
 
 - An S3-compatible store with conditional writes and its credentials
-  ([storage-compatibility.md](storage-compatibility.md)).
+  ([storage-compatibility.md](storage-compatibility.md)); the S3 store's
+  options are in [how-to-configure-the-s3-store.md](how-to-configure-the-s3-store.md).
 - A local directory for `:data_dir`, used by one instance only. A second
   instance on it fails to start with `{:error, {:data_dir_in_use, path}}`.
 

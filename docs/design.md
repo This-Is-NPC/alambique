@@ -354,15 +354,30 @@ the panic tests abort the VM when `guard` does not catch.
   ([telemetry.md](telemetry.md)).
 - `Alambique.Store.S3` implements it with Req and AWS SigV4, with a
   path-style option. SeaweedFS is the only store it is tested on
-  ([storage-compatibility.md](storage-compatibility.md)). It does not follow
+  ([storage-compatibility.md](storage-compatibility.md)); the AWS paths are
+  tested against a stub of the HTTP client and an independent SigV4 signer
+  (`test/s3_credentials_test.exs`). Without `:endpoint` it derives
+  `https://s3.<region>.amazonaws.com` from `:region`, and keeps the path style
+  it uses for any endpoint (`/<bucket>/<key>`; `path_style: false` gives
+  `<bucket>.s3.<region>.amazonaws.com`). `:session_token` is sent as
+  `x-amz-security-token` and signed. A `:credentials` function returns
+  `{key, secret, token | nil}` and optionally an expiry; the store caches it in
+  `:persistent_term`, keyed by the function, with the refresh time computed when
+  it is called (expiry minus `:credentials_refresh_margin_ms`, or
+  `:credentials_ttl_ms` without an expiry; both default to 300 000). A 400 or
+  403 whose body has the code `ExpiredToken` renews it, unless another request
+  has already, and sends the request once more. Concurrent requests with an
+  expired cache may each call the function; the last result is kept. The
+  token and the key pair of a request always come from the same call.
+  `from_url/2` builds the config from `s3://bucket/prefix`. It does not follow
   redirects: Req would sign the request again for the new host and send it the
   body, so a 3xx is `{:error, {:http, status, body}}` and the endpoint must be
   the region of the bucket.
 - **Credentials.** The cell state, the contexts and the placement hold the
   store config, and OTP prints them in a crash report. A store can implement
   the optional `conceal/1`, which the library applies to the `:store` option;
-  `Alambique.Store.S3` moves `:access_key_id` and `:secret_access_key` into
-  closures, which print as `#Function<...>` in a crash report, `:sys.get_state`,
+  `Alambique.Store.S3` moves `:access_key_id`, `:secret_access_key` and
+  `:session_token` into closures (`:credentials` is one already), which print as `#Function<...>` in a crash report, `:sys.get_state`,
   `inspect/1` and `~p` alike, and resolves them only when it signs. A missing
   key raises an `ArgumentError` that names the key. A custom placement that
   builds its own store configs conceals them itself (`S3` accepts a function of

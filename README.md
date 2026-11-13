@@ -100,7 +100,10 @@ More calls, placement and the other features are in
 - An S3-compatible store with atomic conditional writes (`If-None-Match: *`
   and `If-Match`). SeaweedFS 4.48 is the only one tested; AWS S3 and
   Cloudflare R2 have not been run
-  ([docs/storage-compatibility.md](docs/storage-compatibility.md)).
+  ([docs/storage-compatibility.md](docs/storage-compatibility.md)). The S3
+  store accepts an AWS endpoint derived from the region, session tokens and
+  renewable credentials
+  ([docs/how-to-configure-the-s3-store.md](docs/how-to-configure-the-s3-store.md)).
 - For nodes that run many cells, the VM flags `+Mdai max +MMmcs 0`
   ([docs/design.md](docs/design.md), section 12).
 - A local, case-sensitive file system for `:data_dir`, used by one instance
