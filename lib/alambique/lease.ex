@@ -160,6 +160,11 @@ defmodule Alambique.Lease do
   """
   @spec renew(ctx, t) :: {:ok, t} | error
   def renew(ctx, %__MODULE__{} = lease) do
+    # A renewal keeps a lease the cell already holds: it is one request in a
+    # third of the TTL for each cell, and an open breaker must not make a cell
+    # lose its lease after the store recovered (design §3).
+    ctx = %{ctx | store: Alambique.Store.Breaker.bypass(ctx.store)}
+
     traced(:renew, lease, fn ->
       next = %{lease | seq: lease.seq + 1, expires_at_ms: now(ctx) + ctx.ttl_ms}
       Fault.point(:lease_before_put, point_context(:renew, next))

@@ -29,10 +29,7 @@ defmodule Alambique.CellHelpers do
       lease_ttl_ms: 3_000,
       skew_margin_ms: 500,
       idle_timeout_ms: 60_000,
-      op_timeout_ms: 2_000,
-      # Faults injected in tests last longer than a breaker would let requests
-      # reach the store; the breaker has its own tests.
-      breaker: [failures: 1_000_000]
+      op_timeout_ms: 2_000
     ]
 
     merged = Keyword.merge(defaults, opts)

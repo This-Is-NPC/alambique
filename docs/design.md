@@ -336,6 +336,18 @@ the panic tests abort the VM when `guard` does not catch.
     problem that another request would repeat, not an outage. A request killed
     at its deadline never answers, so `Retry` reports it; only a closed breaker
     counts it.
+  - **Lease renewals bypass it** (`Lease.renew/2`). A cell renews every third
+    of the TTL and its lease is valid for `lease_ttl_ms - skew_margin_ms`, so
+    it has two tries after a failed renewal. A breaker that stayed open after
+    the store recovered (up to 1.2 × `cooldown_ms`, plus a probe that another
+    request may hold) would fail those tries and every cell would lose its
+    lease together, which is the avalanche the breaker is there to prevent. A
+    renewal is one request per cell per renewal interval, one attempt, and
+    bounded by the lease time, so it needs no protection, and it neither waits
+    for the breaker nor counts in it. Acquiring a lease at a wake goes through
+    the breaker like the rest of the wake. A store that fails for less than
+    the time a lease can be used, and recovers, costs no cell its lease
+    (`test/store_breaker_test.exs`).
   - Requests that started before it opened and end after do not change its
     state. The change feed reads its own guarded stores and has no breaker.
   Telemetry: `[:alambique, :store, :breaker, :open]` and `:close`

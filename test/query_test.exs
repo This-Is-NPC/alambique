@@ -175,7 +175,8 @@ defmodule Alambique.QueryTest do
     test "a raw store that raises, exits or throws is an error", ctx do
       owner = start_instance(ctx, migrations: @schema)
       insert(owner, "a", 1)
-      reader = reader(ctx)
+      # Every listing crashes, more often than a breaker would let it be asked.
+      reader = reader(ctx, breaker: [failures: 1_000_000])
       {_, config} = ctx.store
 
       for {kind, expected} <- [raise: :error, exit: :exit, throw: :throw] do

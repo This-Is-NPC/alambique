@@ -169,7 +169,8 @@ defmodule Alambique.LazyRestoreTest do
   test "a page that cannot be fetched fails the statement, not the cell", ctx do
     cell = seed(ctx, 300)
     release = hold_hydration(cell)
-    inst = lazy_instance(ctx)
+    # The store keeps failing for longer than a breaker would let it be asked.
+    inst = lazy_instance(ctx, breaker: [failures: 1_000_000])
     config = Alambique.Config.fetch!(inst)
 
     # Wake the cell with the store working, then take it away.

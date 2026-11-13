@@ -365,7 +365,8 @@ defmodule Alambique.QuarantineTest do
 
   describe "the counter object" do
     setup ctx do
-      inst = start_instance(ctx, migrations: @schema)
+      # Each operation fails against the unreadable store, which would open a breaker.
+      inst = start_instance(ctx, migrations: @schema, breaker: [failures: 1_000_000])
       cell = unique_cell()
       repl = %{repl_ctx(inst, cell) | timeout_ms: 150}
       {:ok, key: Alambique.Replication.Keys.crashes("cells-test", cell), cell: cell, repl: repl}

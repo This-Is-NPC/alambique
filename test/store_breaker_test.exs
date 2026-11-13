@@ -343,5 +343,47 @@ defmodule Alambique.StoreBreakerTest do
       answers = for _ <- 1..4, do: Alambique.execute(reader, cell, "INSERT INTO t VALUES (2)", [])
       assert List.last(answers) == {:error, :store_unavailable}
     end
+
+    test "no cell loses its lease to an outage that opens the breaker and ends in time", ctx do
+      capture([[:alambique, :cell, :stop], [:alambique, :store, :breaker, :open]])
+      schema = [{1, "CREATE TABLE t (n INTEGER)"}]
+
+      # TTL 3 s, renewals about every second, margin 0.5 s.
+      inst =
+        start_instance(ctx,
+          migrations: schema,
+          compaction: false,
+          breaker: [failures: 2, cooldown_ms: 8_000]
+        )
+
+      config = Alambique.Config.fetch!(inst)
+      cells = for _ <- 1..5, do: unique_cell()
+
+      for cell <- cells,
+          do: assert({:ok, _} = Alambique.execute(inst, cell, "INSERT INTO t VALUES (1)", []))
+
+      pids = for cell <- cells, do: Alambique.Cell.whereis(config, cell)
+
+      fault =
+        MemoryStore.inject(ctx.store_config,
+          kind: :error,
+          reason: {:http, 503, ""},
+          times: :infinity
+        )
+
+      # Wakes that fail open the breaker.
+      for _ <- 1..3, do: Alambique.execute(inst, unique_cell(), "INSERT INTO t VALUES (1)", [])
+      assert_receive {:telemetry, [:alambique, :store, :breaker, :open], _, %{instance: ^inst}}
+
+      Process.sleep(1_500)
+      MemoryStore.remove(ctx.store_config, fault)
+
+      # The breaker is still open; two more TTLs' worth of renewals must get through.
+      Process.sleep(4_000)
+
+      assert pids == for(cell <- cells, do: Alambique.Cell.whereis(config, cell))
+      assert Enum.all?(pids, &Process.alive?/1)
+      refute_received {:telemetry, [:alambique, :cell, :stop], _, _}
+    end
   end
 end
