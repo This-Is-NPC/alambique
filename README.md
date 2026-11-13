@@ -57,6 +57,9 @@ first release (0.1.0):
   takes a `session_token` or a `credentials` function that renews temporary
   credentials ([how-to](docs/how-to-configure-the-s3-store.md)); the ops tasks
   take `--session-token`. There is no breaking change.
+- 0.6.1: the README has a first try that runs against a local SeaweedFS, and
+  the Rust version the crate needs is declared (1.97.1 or later). The native
+  code builds with Rust 1.100.0 too. There is no breaking change.
 
 The full list is in [CHANGELOG.md](CHANGELOG.md).
 
