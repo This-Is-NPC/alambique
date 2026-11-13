@@ -40,11 +40,13 @@ export ALAMBIQUE_S3_SECRET_ACCESS_KEY=alambique-secret
 export ALAMBIQUE_PREFIX=demo
 ```
 
-Flags: `--endpoint`, `--bucket`, `--access-key-id`, `--secret-access-key`,
-`--region` (default `us-east-1`), `--no-path-style` and `--prefix`. The
+Flags: `--bucket`, `--access-key-id`, `--secret-access-key`, `--endpoint`
+(optional; without it the tasks use AWS, derived from the region),
+`--region` (default `us-east-1`), `--session-token` (environment variable
+`ALAMBIQUE_S3_SESSION_TOKEN`), `--no-path-style` and `--prefix`. The
 environment variable of `--no-path-style` is `ALAMBIQUE_S3_PATH_STYLE=false`.
 
-Prefer the environment variables for the secret key and the cookie. A flag
+Prefer the environment variables for the secret key, the session token and the cookie. A flag
 is visible to every local user in the process list (`ps`) and may stay in the
 shell history; a variable is not.
 

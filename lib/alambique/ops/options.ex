@@ -14,6 +14,7 @@ defmodule Alambique.Ops.Options do
     region: :string,
     access_key_id: :string,
     secret_access_key: :string,
+    session_token: :string,
     path_style: :boolean
   ]
 
@@ -24,10 +25,19 @@ defmodule Alambique.Ops.Options do
     region: "ALAMBIQUE_S3_REGION",
     access_key_id: "ALAMBIQUE_S3_ACCESS_KEY_ID",
     secret_access_key: "ALAMBIQUE_S3_SECRET_ACCESS_KEY",
+    session_token: "ALAMBIQUE_S3_SESSION_TOKEN",
     path_style: "ALAMBIQUE_S3_PATH_STYLE"
   }
 
-  @s3_keys [:endpoint, :bucket, :region, :access_key_id, :secret_access_key, :path_style]
+  @s3_keys [
+    :endpoint,
+    :bucket,
+    :region,
+    :access_key_id,
+    :secret_access_key,
+    :session_token,
+    :path_style
+  ]
 
   @doc "Switches for `OptionParser`, to be merged with a task's own."
   def switches, do: @store_switches
@@ -122,7 +132,7 @@ defmodule Alambique.Ops.Options do
 
   defp s3(settings) do
     missing =
-      Enum.reject([:endpoint, :bucket, :access_key_id, :secret_access_key], &settings[&1])
+      Enum.reject([:bucket, :access_key_id, :secret_access_key], &settings[&1])
 
     if missing != [],
       do: Mix.raise("missing store settings: " <> Enum.map_join(missing, ", ", &flag/1))
@@ -134,12 +144,13 @@ defmodule Alambique.Ops.Options do
 
   defp no_store do
     """
-    no store configured. Give the S3 settings as flags (--endpoint, --bucket,
-    --access-key-id, --secret-access-key, optional --region, --no-path-style,
-    --prefix), as environment variables (ALAMBIQUE_S3_ENDPOINT,
-    ALAMBIQUE_S3_BUCKET, ALAMBIQUE_S3_ACCESS_KEY_ID,
-    ALAMBIQUE_S3_SECRET_ACCESS_KEY, ALAMBIQUE_S3_REGION, ALAMBIQUE_S3_PATH_STYLE,
-    ALAMBIQUE_PREFIX), or in the config:
+    no store configured. Give the S3 settings as flags (--bucket,
+    --access-key-id, --secret-access-key, optional --endpoint, --region,
+    --session-token, --no-path-style, --prefix), as environment variables
+    (ALAMBIQUE_S3_BUCKET, ALAMBIQUE_S3_ACCESS_KEY_ID,
+    ALAMBIQUE_S3_SECRET_ACCESS_KEY, ALAMBIQUE_S3_ENDPOINT, ALAMBIQUE_S3_REGION,
+    ALAMBIQUE_S3_SESSION_TOKEN, ALAMBIQUE_S3_PATH_STYLE, ALAMBIQUE_PREFIX), or
+    in the config:
 
         config :alambique, :ops, store: {Alambique.Store.S3, %{...}}, prefix: "myapp"
         config :alambique, :ops, placement: {MyApp.Placement, opts}
