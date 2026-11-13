@@ -176,7 +176,7 @@ defmodule Alambique.WakeOverlapTest do
     {reader, _event, _trace} =
       cold_wake(ctx, cell,
         lazy_restore: false,
-        restore: [fetch_concurrency: 1, prefetch_bytes: 1]
+        restore: [fetch_concurrency: 1, max_inflight_bytes: 1]
       )
 
     assert {:ok, %{rows: [[@commits]]}} = Alambique.query(reader, cell, "SELECT count(*) FROM t")

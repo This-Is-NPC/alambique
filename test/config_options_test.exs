@@ -75,7 +75,7 @@ defmodule Alambique.ConfigOptionsTest do
     assert config.restore == %{
              edge_bytes: 65_536,
              fetch_concurrency: 16,
-             prefetch_bytes: 67_108_864
+             max_inflight_bytes: 67_108_864
            }
 
     assert config.hydrator == %{poll_ms: 100}
@@ -156,7 +156,7 @@ defmodule Alambique.ConfigOptionsTest do
           relocate: [fence_attempts: 2, timeout_ms: 30_000, poll_ms: 5],
           rewind: [fence_attempts: 3, timeout_ms: 20_000, poll_ms: 7, max_bytes: nil],
           schema: [check_page: 10],
-          restore: [edge_bytes: 1_024, fetch_concurrency: 3, prefetch_bytes: 5_000],
+          restore: [edge_bytes: 1_024, fetch_concurrency: 3, max_inflight_bytes: 5_000],
           hydrator: [poll_ms: 10],
           query: [page_size: 10, stale_tmp_seconds: 5, restore_attempts: 7],
           feed: [publish_retry_ms: 5],
@@ -195,7 +195,7 @@ defmodule Alambique.ConfigOptionsTest do
            }
 
     assert config.schema == %{check_page: 10, listing_timeout_ms: 5_000}
-    assert config.restore == %{edge_bytes: 1_024, fetch_concurrency: 3, prefetch_bytes: 5_000}
+    assert config.restore == %{edge_bytes: 1_024, fetch_concurrency: 3, max_inflight_bytes: 5_000}
     assert config.hydrator == %{poll_ms: 10}
     assert config.query.page_size == 10
     assert config.query.stale_tmp_seconds == 5
@@ -216,7 +216,7 @@ defmodule Alambique.ConfigOptionsTest do
       {[schema: [listing_timeout_ms: 0]], ~r/:schema :listing_timeout_ms/},
       {[restore: [edge_bytes: 0]], ~r/:restore :edge_bytes/},
       {[restore: [fetch_concurrency: 0]], ~r/:restore :fetch_concurrency/},
-      {[restore: [prefetch_bytes: 0]], ~r/:restore :prefetch_bytes/},
+      {[restore: [max_inflight_bytes: 0]], ~r/:restore :max_inflight_bytes/},
       {[hydrator: [poll_ms: 0]], ~r/:hydrator :poll_ms/},
       {[query: [page_size: 0]], ~r/:page_size/},
       {[query: [restore_attempts: 0]], ~r/:restore_attempts/},

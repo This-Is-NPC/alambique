@@ -28,8 +28,9 @@ defmodule Alambique.Replication do
       header, trailer and page index (default 65 536)
     * `:fetch_concurrency` - requests a restore makes at once to read ahead
       (default 16)
-    * `:prefetch_bytes` - bytes of whole files a full restore reads ahead of
-      its walk, at most (default 67 108 864)
+    * `:max_inflight_bytes` - most bytes of the store a restore, or the
+      hydration of a lazily restored cell, holds in memory at once (default
+      67 108 864); a single file larger than that is read alone
   """
   @type ctx :: %{
           store: {module, term},
@@ -41,7 +42,7 @@ defmodule Alambique.Replication do
           timeout_ms: pos_integer,
           edge_bytes: pos_integer,
           fetch_concurrency: pos_integer,
-          prefetch_bytes: pos_integer
+          max_inflight_bytes: pos_integer
         }
 
   @type target :: :latest | {:txid, non_neg_integer} | {:timestamp, integer}
@@ -57,7 +58,7 @@ defmodule Alambique.Replication do
         timeout_ms: 10_000,
         edge_bytes: 65_536,
         fetch_concurrency: 16,
-        prefetch_bytes: 67_108_864
+        max_inflight_bytes: 67_108_864
       }
       |> Map.merge(Map.new(opts))
       |> Map.take([
@@ -70,7 +71,7 @@ defmodule Alambique.Replication do
         :timeout_ms,
         :edge_bytes,
         :fetch_concurrency,
-        :prefetch_bytes
+        :max_inflight_bytes
       ])
 
     valid? =
@@ -85,7 +86,7 @@ defmodule Alambique.Replication do
           timeout_ms: t,
           edge_bytes: e,
           fetch_concurrency: c,
-          prefetch_bytes: pb
+          max_inflight_bytes: pb
         }
         when is_binary(p) and is_binary(n) and is_integer(b) and b > 0 and is_integer(m) and
                m >= b and is_integer(t) and t > 0 and is_integer(e) and e > 0 and is_integer(c) and

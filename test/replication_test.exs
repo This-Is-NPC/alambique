@@ -425,7 +425,7 @@ defmodule Alambique.ReplicationTest do
     } do
       {conn, state} = new_replicator(dir, "src.db")
       _ = commit_and_sync(conn, state, ctx, [{:put, 1, 100}])
-      MemoryStore.inject(elem(store, 1), kind: :error, ops: [:get])
+      MemoryStore.inject(elem(store, 1), kind: :error, ops: [:get, :get_range])
       dest = Path.join(dir, "dest.db")
       assert {:error, :injected} = Replication.restore(ctx, "cell", dest, :latest)
       refute File.exists?(dest)

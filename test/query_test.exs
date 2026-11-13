@@ -36,6 +36,9 @@ defmodule Alambique.QueryTest do
     {body, etag}
   end
 
+  # A file that fits the first range is read by it, a larger one by a `get`.
+  defp reads(cfg), do: CountingStore.count(cfg, :get) + CountingStore.count(cfg, :get_range)
+
   defp counts(result),
     do:
       Map.new(result.rows, fn %Row{cell: cell, txid: txid, values: [n]} -> {cell, {n, txid}} end)
@@ -308,14 +311,14 @@ defmodule Alambique.QueryTest do
       CountingStore.reset(cfg)
       first = Query.all(reader, cells, sql)
       assert first.errors == []
-      cold_gets = CountingStore.count(cfg, :get)
+      cold_gets = reads(cfg)
       assert cold_gets >= 3 * 4
 
       # Nothing changed: only listings, no reads.
       CountingStore.reset(cfg)
       again = Query.all(reader, cells, sql)
       assert counts(again) == counts(first)
-      assert CountingStore.count(cfg, :get) == 0
+      assert reads(cfg) == 0
       assert CountingStore.count(cfg, :put) == 0
       assert CountingStore.count(cfg, :list) == 2 * length(cells)
 
@@ -325,7 +328,7 @@ defmodule Alambique.QueryTest do
       assert %{"c1" => {3, t1}, "c2" => {5, t2}, "c3" => {3, t3}} = counts(third)
       assert {t1, t3} == {elem(counts(first)["c1"], 1), elem(counts(first)["c3"], 1)}
       assert t2 > elem(counts(first)["c2"], 1)
-      assert CountingStore.count(cfg, :get) == t2 - elem(counts(first)["c2"], 1)
+      assert reads(cfg) == t2 - elem(counts(first)["c2"], 1)
     end
 
     test "max_age_ms answers from the cache without asking the store", ctx do
@@ -624,7 +627,9 @@ defmodule Alambique.QueryTest do
       insert(owner, "a", 6)
       :ok = Alambique.hibernate(owner, "a")
       # Reading ahead would fetch the files before the pause, and then none is lost.
-      reader = reader(ctx, [restore: [prefetch_bytes: 1, fetch_concurrency: 1]] ++ reader_opts)
+      reader =
+        reader(ctx, [restore: [max_inflight_bytes: 1, fetch_concurrency: 1]] ++ reader_opts)
+
       parent = self()
 
       CrashPoints.arm(

@@ -217,8 +217,11 @@ defmodule Alambique do
     * `:restore` - `:edge_bytes` (bytes read from each end of an LTX file to
       find its header, trailer and page index, default 65 536),
       `:fetch_concurrency` (requests a restore makes at once to read ahead of
-      its walk, default 16) and `:prefetch_bytes` (most bytes of whole files a
-      full restore reads ahead of its walk, default 67 108 864).
+      its walk, default 16) and `:max_inflight_bytes` (most bytes of
+      the store that one restore, or the hydration of one lazily restored cell,
+      holds in memory at once, default 67 108 864, 64 MiB; one file larger than
+      that is read alone, and the memory of N wakes in progress is about N
+      times this, see `docs/how-to-size-a-node.md`).
     * `:hydrator` - `:poll_ms` (time between background hydration passes,
       default 100).
     * `:sql` - limits on the statements (design §7): `:statement_timeout_ms`

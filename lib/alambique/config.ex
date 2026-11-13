@@ -64,7 +64,7 @@ defmodule Alambique.Config do
   @relocate_defaults [fence_attempts: 5, timeout_ms: 60_000, poll_ms: 100]
   @rewind_defaults [fence_attempts: 5, timeout_ms: 60_000, poll_ms: 100, max_bytes: 268_435_456]
   @schema_defaults [check_page: 1_000, listing_timeout_ms: nil]
-  @restore_defaults [edge_bytes: 65_536, fetch_concurrency: 16, prefetch_bytes: 67_108_864]
+  @restore_defaults [edge_bytes: 65_536, fetch_concurrency: 16, max_inflight_bytes: 67_108_864]
   @hydrator_defaults [poll_ms: 100]
 
   @compaction_defaults [
@@ -281,7 +281,7 @@ defmodule Alambique.Config do
           restore: %{
             edge_bytes: pos_integer,
             fetch_concurrency: pos_integer,
-            prefetch_bytes: pos_integer
+            max_inflight_bytes: pos_integer
           },
           hydrator: %{poll_ms: pos_integer},
           supervisor: atom,
@@ -493,7 +493,7 @@ defmodule Alambique.Config do
       timeout_ms: config.op_timeout_ms,
       edge_bytes: config.restore.edge_bytes,
       fetch_concurrency: config.restore.fetch_concurrency,
-      prefetch_bytes: config.restore.prefetch_bytes
+      max_inflight_bytes: config.restore.max_inflight_bytes
     )
   end
 

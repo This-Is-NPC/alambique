@@ -39,7 +39,7 @@ defmodule Alambique.ConfigPropertiesTest do
     {:schema, :listing_timeout_ms},
     {:restore, :edge_bytes},
     {:restore, :fetch_concurrency},
-    {:restore, :prefetch_bytes},
+    {:restore, :max_inflight_bytes},
     {:hydrator, :poll_ms},
     {:sql, :statement_timeout_ms},
     {:sql, :script_timeout_ms},
