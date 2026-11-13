@@ -4,7 +4,7 @@ defmodule Alambique.StoreBreakerPropertiesTest do
   requests that start, finish and let the clock pass: while it is open no
   request reaches the store, once the cool-down has passed exactly one request
   (the probe) does until it finishes, and it closes only on the success of that
-  probe.
+  probe. `status/1` reports the same state and the failures that opened it.
   """
   use ExUnit.Case, async: true
   use ExUnitProperties
@@ -116,7 +116,7 @@ defmodule Alambique.StoreBreakerPropertiesTest do
   defp finish(%{state: :closed} = m, :closed, outcome) do
     if outcome in @failing do
       if m.fails + 1 >= @failures,
-        do: %{m | state: {:open, m.now + @cooldown}, fails: 0},
+        do: %{m | state: {:open, m.now + @cooldown}, fails: m.fails + 1},
         else: %{m | fails: m.fails + 1}
     else
       %{m | fails: 0}
@@ -130,6 +130,10 @@ defmodule Alambique.StoreBreakerPropertiesTest do
       do: %{m | state: {:open, m.now + @cooldown}, probe: nil},
       else: %{m | state: :closed, fails: 0, probe: nil}
   end
+
+  defp expected_state(%{state: :closed}), do: :closed
+  defp expected_state(%{state: {:open, until}, now: now}) when now >= until, do: :half_open
+  defp expected_state(_), do: :open
 
   property "requests reach the store as the model says, and the breaker closes only on a probe success" do
     check all(steps <- list_of(step(), max_length: 40), max_runs: 200) do
@@ -151,6 +155,10 @@ defmodule Alambique.StoreBreakerPropertiesTest do
 
           assert Breaker.open?(breaker) == (m.state != :closed),
                  "after #{inspect(step)}: #{inspect(m)}"
+
+          status = Breaker.status(breaker)
+          assert status.state == expected_state(m), "status after #{inspect(step)}: #{inspect(m)}"
+          assert status.failures == m.fails, "failures after #{inspect(step)}: #{inspect(m)}"
 
           m
         end)

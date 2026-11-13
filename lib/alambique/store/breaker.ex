@@ -7,6 +7,10 @@ defmodule Alambique.Store.Breaker do
   #   1. `open_until`: monotonic ms until which requests fail fast; 0 is closed.
   #   2. consecutive failures while closed.
   #   3. `probe_until`: when the probe in flight is given up; 0 is none.
+  #   4. wall-clock ms of the last change between closed and open, for `status/1`.
+  #
+  # The failures stay counted while it is open, until it closes, so `status/1`
+  # shows what opened it.
   #
   # Closed, `failures` failures in a row open it. Open, a request answers
   # `{:error, :store_unavailable}` without touching the store. When `open_until`
@@ -44,7 +48,7 @@ defmodule Alambique.Store.Breaker do
   @spec new(map, map, keyword) :: t
   def new(settings, meta, opts \\ []) do
     %{
-      ref: :atomics.new(3, signed: true),
+      ref: new_ref(),
       failures: settings.failures,
       cooldown_ms: settings.cooldown_ms,
       probe_timeout_ms: settings.probe_timeout_ms,
@@ -53,6 +57,14 @@ defmodule Alambique.Store.Breaker do
       meta: meta
     }
   end
+
+  defp new_ref do
+    ref = :atomics.new(4, signed: true)
+    :atomics.put(ref, 4, wall_ms())
+    ref
+  end
+
+  defp wall_ms, do: System.system_time(:millisecond)
 
   @doc """
   The guarded store of `location`, behind the breaker that every context of the
@@ -93,6 +105,55 @@ defmodule Alambique.Store.Breaker do
     do: {Alambique.Store.Metered, %{metered | store: bypass(store)}}
 
   def bypass(store), do: store
+
+  @doc """
+  The state of `breaker` from its atomics, without a message or a store
+  request: `:closed`, `:open` (in its cool-down) or `:half_open` (the cool-down
+  has passed and the next request is the probe, or it is in flight). `since_ms`
+  is wall-clock Unix ms; a half-open breaker has been so since its cool-down
+  ended. `failures` is the run that opened it, or the run so far while closed.
+  """
+  @spec status(t) :: %{
+          state: :closed | :open | :half_open,
+          since_ms: integer,
+          failures: non_neg_integer
+        }
+  def status(%{ref: ref} = breaker) do
+    open_until = :atomics.get(ref, 1)
+    failures = :atomics.get(ref, 2)
+    since = :atomics.get(ref, 4)
+    elapsed = breaker.now.() - open_until
+
+    cond do
+      open_until == 0 -> %{state: :closed, since_ms: since, failures: failures}
+      elapsed < 0 -> %{state: :open, since_ms: since, failures: failures}
+      true -> %{state: :half_open, since_ms: wall_ms() - elapsed, failures: failures}
+    end
+  end
+
+  @doc """
+  `status/1` of every location of the instance: those with a breaker, and the
+  locations of the placement that have none yet, which are closed.
+  """
+  @spec statuses(map) :: %{String.t() => map}
+  def statuses(config) do
+    known =
+      case :ets.whereis(config.breakers) do
+        :undefined -> []
+        _ -> :ets.tab2list(config.breakers)
+      end
+
+    unused =
+      case Alambique.Placement.locations(config) do
+        {:ok, locations} -> Enum.map(locations, & &1.id)
+        _ -> []
+      end
+
+    fresh = new(config.breaker, %{})
+
+    Map.new(unused, &{&1, status(fresh)})
+    |> Map.merge(Map.new(known, fn {id, breaker} -> {id, status(breaker)} end))
+  end
 
   @doc "Whether `breaker` is open or half-open."
   @spec open?(t) :: boolean
@@ -190,7 +251,7 @@ defmodule Alambique.Store.Breaker do
   # Anything but a closed breaker ignores the requests that started before it
   # opened.
   defp succeeded(%{ref: ref}, :closed) do
-    if :atomics.get(ref, 2) != 0, do: :atomics.put(ref, 2, 0)
+    if :atomics.get(ref, 2) != 0 and :atomics.get(ref, 1) == 0, do: :atomics.put(ref, 2, 0)
     :ok
   end
 
@@ -198,6 +259,7 @@ defmodule Alambique.Store.Breaker do
     if :atomics.compare_exchange(ref, 1, open_until, 0) == :ok do
       :atomics.put(ref, 2, 0)
       :atomics.put(ref, 3, 0)
+      :atomics.put(ref, 4, wall_ms())
       Telemetry.emit([:store, :breaker, :close], breaker.meta)
     end
 
@@ -215,8 +277,8 @@ defmodule Alambique.Store.Breaker do
 
   defp open(%{ref: ref} = breaker, from, reason) do
     if :atomics.compare_exchange(ref, 1, from, nonzero(breaker.now.() + cooldown(breaker))) == :ok do
-      :atomics.put(ref, 2, 0)
       :atomics.put(ref, 3, 0)
+      :atomics.put(ref, 4, wall_ms())
 
       Telemetry.emit(
         [:store, :breaker, :open],

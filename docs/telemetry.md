@@ -65,6 +65,9 @@ instance name and `location` the id of the location.
 | `[:alambique, :store, :breaker, :open]` | `cooldown_ms` (the configured cool-down; the wait is up to 20 % longer) | `instance`, `location`, `reason` (`:failures`: `breaker: [failures:]` failures in a row; `:probe_failed`: the probe after a cool-down failed) |
 | `[:alambique, :store, :breaker, :close]` | none | `instance`, `location` |
 
+`Alambique.breaker_status/1` gives the current state of each breaker without
+waiting for an event.
+
 While the breaker is open a store request answers `{:error, :store_unavailable}`
 without reaching the store, and emits nothing. A failed request that reached
 the store is in the events of its operation (`[:alambique, :lease, ...]`,

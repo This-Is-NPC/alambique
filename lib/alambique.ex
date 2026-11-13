@@ -983,6 +983,35 @@ defmodule Alambique do
   def peers(instance), do: Alambique.NodeRegistry.peers(Config.fetch!(instance))
 
   @doc """
+  The circuit breaker of each store location of the instance (design §3), read
+  from its state without a request to the store: a map from the location id
+  (`Alambique.Location.id`) to `%{state, since_ms, failures}`.
+
+    * `:state` - `:closed`, `:open` (requests fail with `:store_unavailable`)
+      or `:half_open` (the cool-down passed: the next request is the probe, or
+      the probe is in flight)
+    * `:since_ms` - when the state began, in Unix milliseconds of the wall
+      clock (`System.system_time/1`), so that it can be shown or compared with
+      other nodes; a half-open breaker has been so since its cool-down ended.
+      A breaker that never opened reports the time it was created.
+    * `:failures` - the failures in a row: the run so far while closed (it
+      opens at `breaker: [failures:]`), the run that opened it otherwise. A
+      success resets it.
+
+  A location that has not been used yet is closed with no failures. The
+  breaker cannot be disabled. The reason of the last failure is not kept. An
+  unknown instance raises `ArgumentError`.
+  """
+  @spec breaker_status(instance) :: %{
+          String.t() => %{
+            state: :closed | :open | :half_open,
+            since_ms: integer,
+            failures: non_neg_integer
+          }
+        }
+  def breaker_status(instance), do: Alambique.Store.Breaker.statuses(Config.fetch!(instance))
+
+  @doc """
   Makes this node a member of the instance (design §8): other nodes can choose
   it as an owner or a preferred node from now on. Use it after starting with
   `join: false`, once everything the node needs to serve calls is running, or
