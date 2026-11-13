@@ -396,8 +396,10 @@ the panic tests abort the VM when `guard` does not catch.
   `inspect/1` and `~p` alike, and resolves them only when it signs. A missing
   key raises an `ArgumentError` that names the key. A custom placement that
   builds its own store configs conceals them itself (`S3` accepts a function of
-  no arguments for both). `test/secret_redaction_test.exs` checks the crash
-  report, the state and the errors.
+  no arguments for both). The Mix ops tasks pass the keys and the session
+  token as given, without `conceal/1`, so a crash inside a task can print them.
+  `test/secret_redaction_test.exs` checks the crash report, the state and the
+  errors.
 - `AlambiqueTestkit.MemoryStore` implements it in memory, shared by every
   node of a test cluster, with the faults in §11.
 
