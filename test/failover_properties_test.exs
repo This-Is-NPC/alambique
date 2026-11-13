@@ -216,8 +216,8 @@ defmodule Alambique.FailoverPropertiesTest do
              "cell #{cell} reordered acknowledged writes"
 
       for node <- @names do
-        assert {:ok, {:ok, %{rows: seen}}} = query(cluster, node, inst, cell)
-        assert List.flatten(seen) == stored, "node #{node} reads a different #{cell}"
+        seen = read_on(cluster, node, inst, cell)
+        assert seen == stored, "node #{node} reads a different #{cell}"
       end
     end
 
@@ -237,16 +237,23 @@ defmodule Alambique.FailoverPropertiesTest do
 
   defp read_when_available(cluster, inst, cell) do
     eventually(
-      fn ->
-        Enum.find_value(@names, fn node ->
-          case query(cluster, node, inst, cell) do
-            {:ok, {:ok, %{rows: rows}}} -> List.flatten(rows)
-            _ -> nil
-          end
-        end)
-      end,
+      fn -> Enum.find_value(@names, &try_read(cluster, &1, inst, cell)) end,
       @available_within_ms
     )
+  end
+
+  # A node that woke the cell under a fault answers the failure it remembers
+  # until the wake backoff (design §7) passes, so a healed cluster is read
+  # again until the node serves. Only an error is retried; what a node reads is
+  # still compared with the acknowledged writes.
+  defp read_on(cluster, node, inst, cell),
+    do: eventually(fn -> try_read(cluster, node, inst, cell) end, @available_within_ms)
+
+  defp try_read(cluster, node, inst, cell) do
+    case query(cluster, node, inst, cell) do
+      {:ok, {:ok, %{rows: rows}}} -> List.flatten(rows)
+      _ -> nil
+    end
   end
 
   defp check_epochs(events) do
