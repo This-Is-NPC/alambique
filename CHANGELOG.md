@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.5.0](https://github.com/This-Is-NPC/alambique/compare/v0.4.0...v0.5.0) (2026-11-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* **restore:** the restore option prefetch_bytes is removed; use max_inflight_bytes.
+
+### Features
+
+* **cell:** retry a failed upload while leased ([72bb0f1](https://github.com/This-Is-NPC/alambique/commit/72bb0f13d4fc9bd315e75698456165fa18c720c6))
+* **restore:** cap the bytes a restore holds ([9be3b13](https://github.com/This-Is-NPC/alambique/commit/9be3b13d23e5bff65d5807416a1804cf2587f017))
+* **router:** add owner lookup from peer registries ([ba9baee](https://github.com/This-Is-NPC/alambique/commit/ba9baeeba1bd60dbc054bf0a81847c687387b0ca))
+* **router:** back off the lease read of a failing store ([801ec32](https://github.com/This-Is-NPC/alambique/commit/801ec323c682beedfb1f877fad393e767fbb71f0))
+* **store:** add a circuit breaker and max_attempts ([c27f96e](https://github.com/This-Is-NPC/alambique/commit/c27f96e9870d29e0d932f956b9e36428674b2490))
+* **wake:** back off wakes that fail on the store ([4cc09a9](https://github.com/This-Is-NPC/alambique/commit/4cc09a9b1108a51bbe5b036c569994b655783c76))
+
+
+### Bug Fixes
+
+* **lease:** renew through a breaker that is open ([233a5f0](https://github.com/This-Is-NPC/alambique/commit/233a5f0d3ef5581ec7b840c65bdaee7ea5c87497))
+* **router:** let take_over end the wake backoff ([7d9cd3f](https://github.com/This-Is-NPC/alambique/commit/7d9cd3f9c5919df5031d6d1d1c075c3d7c985fa2))
+* **wake:** read the store only after the lease ([dfc98fb](https://github.com/This-Is-NPC/alambique/commit/dfc98fb0d343167a88b19a54bae0d68548f7bd4a))
+
 ## [0.4.0](https://github.com/This-Is-NPC/alambique/compare/v0.3.1...v0.4.0) (2026-11-12)
 
 
