@@ -82,6 +82,27 @@ defmodule Alambique.WakeStoreBackoffTest do
     assert requests(env) == 2 * one
   end
 
+  test "an open circuit breaker is a store error that is remembered", env do
+    inst =
+      start_instance(env,
+        migrations: @schema,
+        compaction: false,
+        breaker: [failures: 1, cooldown_ms: 60_000],
+        wake: [backoff_ms: 400, backoff_max_ms: 400, backoff_jitter: 0.0]
+      )
+
+    cell = unique_cell()
+    MemoryStore.inject(env.store_config, kind: :error, reason: {:http, 500, ""}, ops: [:get])
+
+    # The first failure opens the breaker; the next request is its answer.
+    assert {:error, _} = Alambique.query(inst, cell, "SELECT 1")
+    Process.sleep(450)
+    assert {:error, :store_unavailable} = Alambique.query(inst, cell, "SELECT 1")
+
+    config = Alambique.Config.fetch!(inst)
+    assert {:error, :store_unavailable} = Alambique.Admission.store_failure(config, cell)
+  end
+
   test "another cell is not affected by the backoff of one", env do
     inst = start(env)
     broken = unique_cell()
