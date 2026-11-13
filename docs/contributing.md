@@ -7,6 +7,14 @@ are in [AGENTS.md](../AGENTS.md); the architecture is in [design.md](design.md).
 Development uses the versions pinned in `mise.toml`: Erlang 28.5, Elixir 1.20.4
 and Rust 1.97.1.
 
+The NIF is loaded through `rustler_precompiled`, which downloads a prebuilt
+library for released versions. Dev, test and load builds of this repository
+always compile the crate from source, so no setup is needed. To compile it in
+another build (a dependency, a `prod` release), set `ALAMBIQUE_BUILD=1` or
+`true`; `RUSTLER_PRECOMPILED_FORCE_BUILD_ALL=true` does the same. Without the
+checksum file (`checksum-Elixir.Alambique.Replication.Native.exs`, generated
+by the release flow) and without one of these, compilation stops and says so.
+
 ```sh
 mise run test            # default suite, no external services
 mise run test:native     # Rust unit tests of native/alambique_nif

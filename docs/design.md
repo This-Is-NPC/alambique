@@ -49,7 +49,7 @@ needs root, so the tests replace the lookup of the flipped name
 | Path | Package | Purpose |
 | --- | --- | --- |
 | `/` | `alambique` | The library. |
-| `native/alambique_nif` | Rust crate, loaded through Rustler | Bundled SQLite (connections, statements, the Alambique VFS of §16), WAL reading, LTX encoding and decoding, page application, checksums, compaction merge. |
+| `native/alambique_nif` | Rust crate, loaded through `rustler_precompiled` (built from source in dev and test) | Bundled SQLite (connections, statements, the Alambique VFS of §16), WAL reading, LTX encoding and decoding, page application, checksums, compaction merge. |
 | `testkit/` | `alambique_testkit` | Test-only helpers: in-memory store with fault injection, skewable clock, peer-node cluster helper, property generators. Depended on by path with `only: :test`. |
 
 Rust runs SQLite and does pure byte work on local files and binaries. All network I/O,
