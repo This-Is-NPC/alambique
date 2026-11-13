@@ -25,6 +25,18 @@ lease is unchanged in both cases.
 is no longer the caller's. The matching `:renew` or `:release` event also
 reports `result: :lost`.
 
+## Node registry events
+
+Emitted by `Alambique.Nodes`, the registry of nodes in the store (design §22).
+All have no measurements. `node_id` and `incarnation` are strings.
+
+| Event | Metadata |
+| --- | --- |
+| `[:alambique, :nodes, :registered]` | `node_id`, `incarnation`, `advertise`, `takeover` (`:new` for a key that did not exist, `:released` or `:expired` for an entry that was free, `:restart` for a live entry of the same node id that was taken over) |
+| `[:alambique, :nodes, :renewed]` | `node_id`, `incarnation`, `seq` |
+| `[:alambique, :nodes, :expired]` | `node_id`, `incarnation` and `expires_at_ms` of an entry that expired without being released, `by` (`:register`: a node took it over; `:sweep`: `Alambique.Nodes.sweep/2` deleted it) |
+| `[:alambique, :nodes, :lost]` | `node_id`, `incarnation`, `op` (`:renew` or `:deregister`): the stored entry is no longer the caller's |
+
 ## Store events
 
 Emitted by `Alambique.Store.Breaker`, the circuit breaker of a store (design
