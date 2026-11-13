@@ -5,7 +5,7 @@ defmodule Alambique.FeedTest do
   import Alambique.CellHelpers
 
   alias Alambique.{CountingStore, Feed, Tx}
-  alias AlambiqueTestkit.{CrashPoints, MemoryStore}
+  alias AlambiqueTestkit.{CrashPoints, GatedStore, MemoryStore}
 
   @schema [
     {1, "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)"},
@@ -136,18 +136,38 @@ defmodule Alambique.FeedTest do
     end
 
     test "a write that was not stored never reaches the feed", ctx do
-      inst = start_instance(ctx, migrations: @schema, op_timeout_ms: 300)
+      {:ok, gate} = GatedStore.start_link()
+      on_exit(fn -> if Process.alive?(gate), do: GenServer.stop(gate) end)
+
+      inst =
+        start_instance(%{ctx | store: GatedStore.wrap(gate, ctx.store)},
+          migrations: @schema,
+          op_timeout_ms: 300,
+          upload: [retry_backoff_ms: 10, retry_backoff_max_ms: 20]
+        )
+
+      taker = start_instance(ctx, migrations: @schema)
       cell = unique_cell()
-      {_, config} = ctx.store
       exec(inst, cell, "INSERT INTO notes VALUES (1, 'a')")
       [_] = records(ctx, 1)
+      capture([[:alambique, :cell, :upload_retry]])
 
-      fault = MemoryStore.inject(config, kind: :error, ops: [:put], key: ~r{/0000/})
-      assert {:error, _} = Alambique.execute(inst, cell, "INSERT INTO notes VALUES (2, 'lost')")
-      MemoryStore.remove(config, fault)
+      # Its puts never answer, so the upload fails by its deadline and is
+      # repeated while the cell holds its lease. Another instance takes the
+      # cell over, which stops it: the write never lands.
+      GatedStore.hold(gate, ~r{/0000/})
 
-      assert {:ok, %{rows: [[1]]}} = Alambique.query(inst, cell, "SELECT id FROM notes")
-      exec(inst, cell, "INSERT INTO notes VALUES (3, 'c')")
+      write =
+        Task.async(fn ->
+          Alambique.execute(inst, cell, "INSERT INTO notes VALUES (2, 'lost')")
+        end)
+
+      await_event([:alambique, :cell, :upload_retry], cell)
+      assert {:ok, _} = Alambique.take_over(taker, cell, :test, timeout: 5_000)
+      assert {:error, _} = Task.await(write)
+
+      assert {:ok, %{rows: [[1]]}} = Alambique.query(taker, cell, "SELECT id FROM notes")
+      exec(taker, cell, "INSERT INTO notes VALUES (3, 'c')")
       assert [1, 3] = ctx |> records(2) |> Enum.map(& &1.key["id"])
     end
 
