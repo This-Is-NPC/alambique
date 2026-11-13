@@ -103,6 +103,17 @@ defmodule Alambique.WakeStoreBackoffTest do
     assert {:error, :store_unavailable} = Alambique.Admission.store_failure(config, cell)
   end
 
+  test "take_over wakes the cell at once, whatever the backoff remembered", env do
+    inst = start(env)
+    cell = unique_cell()
+    fault = refuse_puts(env)
+    assert {:error, _} = Alambique.query(inst, cell, "SELECT 1")
+    MemoryStore.remove(env.store_config, fault)
+
+    assert {:ok, _} = Alambique.take_over(inst, cell, :heal)
+    assert {:ok, _} = Alambique.query(inst, cell, "SELECT 1")
+  end
+
   test "another cell is not affected by the backoff of one", env do
     inst = start(env)
     broken = unique_cell()

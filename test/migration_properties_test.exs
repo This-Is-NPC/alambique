@@ -126,7 +126,17 @@ defmodule Alambique.MigrationPropertiesTest do
 
       # The newest release sweeps; then everything is at N.
       sleep_all(insts, cells)
-      for _ <- 1..3, do: Alambique.sweep(insts.new)
+      # A wake that failed because of the store waits out its backoff.
+      config = Alambique.Config.fetch!(insts.new)
+
+      for _ <- 1..3 do
+        eventually(fn ->
+          Enum.all?(cells, &(Alambique.Admission.store_failure(config, &1) == nil))
+        end)
+
+        Alambique.sweep(insts.new)
+      end
+
       sleep_all(insts, cells)
 
       for cell <- cells, durable_version(ctx, cell) > 0 do
