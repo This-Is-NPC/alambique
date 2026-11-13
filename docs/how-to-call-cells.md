@@ -55,6 +55,11 @@ is full, a call returns `{:error, :disk_full}`: the write did not run, the cell
 keeps serving what it acknowledged, and the call can be repeated once space is
 free ([how-to-operate-a-cell.md](how-to-operate-a-cell.md), section 12).
 
+While the store fails, a call that needs it returns `{:error, :store_unavailable}`
+once the circuit breaker is open, and a write waits for the retry of its upload
+until its own timeout gives `{:error, :timeout}` (the write may still land)
+([how-to-operate-a-cell.md](how-to-operate-a-cell.md), Troubleshooting).
+
 Each statement is interrupted at the instance's `sql: [statement_timeout_ms:]`
 (default `op_timeout_ms`, 10 s) and returns `{:error, :statement_timeout}`. A
 call can lower that deadline with `statement_timeout_ms:` in its options, but
