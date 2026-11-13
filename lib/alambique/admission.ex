@@ -184,7 +184,7 @@ defmodule Alambique.Admission do
       do: :ets.match_delete(config.admission, {{:failed, :_}, :_, :_, :_})
   end
 
-  @doc "Ends the backoff of `cell`, which woke: the next failure starts from the first delay."
+  @doc "Ends the backoff of `cell`, which woke or is taken over: the next failure starts from the first delay."
   @spec recovered(Config.t(), String.t()) :: :ok
   def recovered(config, cell) do
     :ets.delete(config.admission, {:failed, cell})

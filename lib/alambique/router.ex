@@ -66,6 +66,10 @@ defmodule Alambique.Router do
           Logger.info("Alambique takes over cell #{cell}: #{inspect(reason)}")
           takeover = %{reason: reason, epoch: opts[:epoch]}
 
+          # An explicit takeover is the retry: it does not wait for the
+          # backoff that shields the callers.
+          Admission.recovered(config, cell)
+
           case start_cell(args, {config, cell, takeover: takeover}) do
             {_, :ok} ->
               # Whatever node the hint named, the cell is here now.
