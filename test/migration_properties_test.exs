@@ -127,13 +127,8 @@ defmodule Alambique.MigrationPropertiesTest do
       # The newest release sweeps; then everything is at N.
       sleep_all(insts, cells)
       # A wake that failed because of the store waits out its backoff.
-      config = Alambique.Config.fetch!(insts.new)
-
       for _ <- 1..3 do
-        eventually(fn ->
-          Enum.all?(cells, &(Alambique.Admission.store_failure(config, &1) == nil))
-        end)
-
+        await_wake_backoff(insts.new, cells)
         Alambique.sweep(insts.new)
       end
 
@@ -317,6 +312,8 @@ defmodule Alambique.MigrationPropertiesTest do
     end
 
     # Rows written by a crashed owner are published when the cell wakes again.
+    await_wake_backoff(insts.new, Map.keys(expected))
+
     for cell <- Map.keys(expected) do
       {:ok, _} = Alambique.query(insts.new, cell, "SELECT 1")
       :ok = Alambique.hibernate(insts.new, cell)

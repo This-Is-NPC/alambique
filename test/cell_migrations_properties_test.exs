@@ -166,7 +166,12 @@ defmodule Alambique.CellMigrationsPropertiesTest do
       # Faults are off: every cell sleeps, then the sweeper runs.
       MemoryStore.clear(ctx.store_config)
       for cell <- cells, do: safely(fn -> Alambique.hibernate(name, cell) end)
-      for _ <- 1..3, do: Alambique.sweep(name)
+      # A wake that failed because of the store waits out its backoff.
+      for _ <- 1..3 do
+        await_wake_backoff(name, cells)
+        Alambique.sweep(name)
+      end
+
       if state.restarted, do: settle(ctx, name, cells)
       for cell <- cells, do: safely(fn -> Alambique.hibernate(name, cell) end)
 
@@ -191,6 +196,7 @@ defmodule Alambique.CellMigrationsPropertiesTest do
 
     Stream.repeatedly(fn ->
       Process.sleep(200)
+      await_wake_backoff(name, cells)
       Alambique.sweep(name)
       for cell <- cells, do: safely(fn -> Alambique.hibernate(name, cell) end)
 

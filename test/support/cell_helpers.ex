@@ -140,6 +140,21 @@ defmodule Alambique.CellHelpers do
     poll(fun, deadline)
   end
 
+  @doc """
+  Waits until the wake backoff of the instance (design §7) remembers no store
+  failure for `cells`, so that the next call wakes them instead of getting the
+  remembered error. Bounded by `timeout`; the longest delay is
+  `wake.backoff_max_ms`.
+  """
+  def await_wake_backoff(inst, cells, timeout \\ 15_000) do
+    config = Alambique.Config.fetch!(inst)
+
+    eventually(
+      fn -> Enum.all?(cells, &(Alambique.Admission.store_failure(config, &1) == nil)) end,
+      timeout
+    )
+  end
+
   defp poll(fun, deadline) do
     case fun.() do
       falsy when falsy in [nil, false] ->
