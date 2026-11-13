@@ -49,6 +49,9 @@ first release (0.1.0):
   [backoff_ms:]`), and a cell keeps a failed upload and retries it while its
   lease is valid (`upload:`). `owner/3` takes `peers: true` to ask the nodes
   instead of the store.
+- Unreleased: nodes find each other through the store. The `registry:` option
+  writes an entry under `<prefix>/nodes/`, and `Alambique.peers/1` lists the
+  live peers ([how-to](docs/how-to-discover-nodes.md)).
 
 The full list is in [CHANGELOG.md](CHANGELOG.md).
 
