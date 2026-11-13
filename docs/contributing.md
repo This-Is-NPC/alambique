@@ -22,6 +22,7 @@ mise run bench:lazy      # lazy restore of a large cell against a full restore
 mise run bench:routing   # cluster-view reads of a forwarded call by group size
 mise run bench:router    # routing path and awake.max_pending check of a local call
 mise run bench:inflight  # cost of the in-flight marker per write
+mise run bench:restore-concurrency  # restore of a long chain by fetch_concurrency and budget
 mise run bench:lease     # cost of Alambique.lease/3, in memory and with store latency
 mise run bench:stall     # per-second latency, run queues, NIF calls and store requests under steady load
 mise run load:image      # build the image of the load test service

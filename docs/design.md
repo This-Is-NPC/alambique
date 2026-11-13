@@ -1124,7 +1124,9 @@ ceiling is `max(max_inflight_bytes, largest object)`.
   a `GET` after the range. The files the walk is expected to need are read in
   its order, `fetch_concurrency` ranges at a time; the files that fit the
   budget are read and kept, and the first that does not fit ends the read
-  ahead, because the files after it would be held while the walk reads it. The
+  ahead, because the files after it would be held while the walk reads it
+  (it does not resume: with a long chain and a small cap the rest is read one
+  file at a time, see how-to-speed-up-a-wake.md for the measurement). The
   walk takes a kept file from memory (its weight moves to the file it works
   on) and gives the weight of the previous file back before it reads the next.
   A file the read ahead did not take is read when the walk reaches it, after

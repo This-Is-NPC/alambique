@@ -151,6 +151,10 @@ run = "scripts/bench-routing"
 description = "Time a write with the in-flight marker on and off (argument: writes per repetition)"
 run = "scripts/bench-inflight"
 
+[tasks."bench:restore-concurrency"]
+description = "Time the full restore of a chain of 800 segments by fetch_concurrency and max_inflight_bytes against a store with 25 ms per request (argument: segments)"
+run = "scripts/bench-restore-concurrency"
+
 [tasks."bench:lease"]
 description = "Time Alambique.lease/3 on a lease held by a non-member, in memory and with added store latency (argument: calls per case; ALAMBIQUE_BENCH_LATENCIES)"
 run = "scripts/bench-lease"

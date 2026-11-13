@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Runs the restore concurrency benchmark. Argument: segments in the chain (default 800).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+MIX_ENV=test exec mix run bench/restore_concurrency.exs "$@"
