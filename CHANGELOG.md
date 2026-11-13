@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/This-Is-NPC/alambique/compare/v0.6.0...v0.6.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* **native:** use try_update, declare the Rust version ([bd7909b](https://github.com/This-Is-NPC/alambique/commit/bd7909b19d990a3a3fc87e1e9b23db9c462b63bb))
+
 ## [0.6.0](https://github.com/This-Is-NPC/alambique/compare/v0.5.0...v0.6.0) (2026-11-13)
 
 
