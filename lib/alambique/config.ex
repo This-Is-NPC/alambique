@@ -90,6 +90,7 @@ defmodule Alambique.Config do
     moved_scan_ms: 60_000,
     moved_scan_page: 100,
     batch_factor: 4,
+    max_chain_segments: 256,
     hold_bytes: 33_554_432,
     hold_object_bytes: 1_048_576
   ]
@@ -737,6 +738,9 @@ defmodule Alambique.Config do
     for key <- [:hold_bytes, :hold_object_bytes],
         not (is_integer(merged[key]) and merged[key] >= 0),
         do: bad!(":compaction #{inspect(key)} must be a non-negative integer")
+
+    if merged[:max_chain_segments] < merged[:fanout],
+      do: bad!(":compaction :max_chain_segments must be at least :fanout")
 
     if merged[:fanout] < 2, do: bad!(":compaction :fanout must be at least 2")
 

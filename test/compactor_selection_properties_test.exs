@@ -1,7 +1,7 @@
 defmodule Alambique.CompactorSelectionPropertiesTest do
   @moduledoc """
-  Which ready cells a compactor tick takes (design §9): the cells that waited longest
-  first, so that no ready cell waits more
+  Which ready cells a compactor tick takes (design §9): chains at the cap
+  first, then the cells that waited longest, so that no ready cell waits more
   than ceil(ready / batch) ticks however busy the others are.
   """
   use ExUnit.Case, async: true
@@ -10,6 +10,7 @@ defmodule Alambique.CompactorSelectionPropertiesTest do
   alias Alambique.Compaction.Compactor
 
   @fanout 2
+  @cap 10
 
   # Every taken cell commits again at once, as a busy cell does. Returns the
   # tick in which each of the `n` cells was first taken; a cell that is never
@@ -29,16 +30,17 @@ defmodule Alambique.CompactorSelectionPropertiesTest do
     if map_size(waits) == n, do: waits, else: serve(table, c, n, tick + 1, waits)
   end
 
-  property "a ready cell waits at most ceil(ready / batch) ticks" do
+  property "a ready cell waits at most ceil(ready / batch) ticks, and a chain at the cap goes first" do
     check all(
             n <- integer(1..60),
             concurrency <- integer(1..4),
             batch_factor <- integer(1..4),
             dues <- list_of(integer(1..1_000), length: n),
-            spans <- list_of(integer(2..20), length: n)
+            spans <- list_of(integer(2..(@cap * 2)), length: n)
           ) do
       c = %{
         fanout: @fanout,
+        max_chain_segments: @cap,
         concurrency: concurrency,
         batch_factor: batch_factor
       }
@@ -50,11 +52,16 @@ defmodule Alambique.CompactorSelectionPropertiesTest do
       for {cell, due, span} <- Enum.zip([cells, dues, spans]),
           do: :ets.insert(table, {cell, 10, 10 + span - 1, due})
 
+      forced = for {cell, span} <- Enum.zip(cells, spans), span >= @cap, do: cell
+      first = Compactor.ready(table, c, 0)
       waits = serve(table, c, n)
       :ets.delete(table)
 
       assert map_size(waits) == n
       assert Enum.max(Map.values(waits)) <= ceil(n / batch)
+
+      taken = Enum.map(first, &elem(&1, 0))
+      assert Enum.take(taken, min(length(forced), batch)) |> Enum.all?(&(&1 in forced))
     end
   end
 end

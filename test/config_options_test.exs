@@ -95,6 +95,7 @@ defmodule Alambique.ConfigOptionsTest do
     assert config.query.restore_attempts == 3
     assert config.feed.publish_retry_ms == 1_000
     assert config.compaction.batch_factor == 4
+    assert config.compaction.max_chain_segments == 256
     assert config.quarantine.concurrency == 8
   end
 
@@ -273,6 +274,9 @@ defmodule Alambique.ConfigOptionsTest do
       {[feed: [compression: 6]], ~r/compression/},
       {[feed: [max_object_bytes: 0]], ~r/max_object_bytes/},
       {[compaction: [batch_factor: 0]], ~r/:compaction :batch_factor/},
+      {[compaction: [max_chain_segments: 0]], ~r/:max_chain_segments/},
+      {[compaction: [fanout: 8, max_chain_segments: 7]],
+       ~r/:max_chain_segments must be at least/},
       {[compaction: [delete_superseded: 1]], ~r/:compaction :delete_superseded/},
       {[compaction: [snapshot_ratio: 0]], ~r/:snapshot_ratio/},
       {[compaction: [snapshot_ratio: "1"]], ~r/:snapshot_ratio/},
