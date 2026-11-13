@@ -22,8 +22,7 @@ defmodule Alambique.Lease do
   Telemetry: see `docs/telemetry.md`.
   """
 
-  alias Alambique.{Fault, Telemetry}
-  alias Alambique.Replication.Retry
+  alias Alambique.{Conditional, Fault, Telemetry}
 
   @enforce_keys [:cell, :epoch, :owner, :token, :seq, :expires_at_ms]
   defstruct [
@@ -89,11 +88,9 @@ defmodule Alambique.Lease do
       |> Map.put_new(:incarnation, nil)
 
     valid? =
-      match?(
-        %{store: {_, _}, clock: {_, _}, prefix: p, ttl_ms: t, skew_margin_ms: s}
-        when is_binary(p) and is_integer(t) and is_integer(s) and s >= 0 and t > 2 * s,
-        ctx
-      ) and (is_nil(ctx.incarnation) or is_binary(ctx.incarnation))
+      match?(%{store: {_, _}, clock: {_, _}, prefix: p} when is_binary(p), ctx) and
+        Conditional.timing?(ctx[:ttl_ms], ctx[:skew_margin_ms]) and
+        (is_nil(ctx.incarnation) or is_binary(ctx.incarnation))
 
     unless valid?, do: raise(ArgumentError, "invalid lease context: #{inspect(ctx)}")
     ctx
@@ -236,7 +233,7 @@ defmodule Alambique.Lease do
       epoch: epoch,
       owner: owner,
       incarnation: ctx.incarnation,
-      token: Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false),
+      token: Conditional.token(),
       seq: 1,
       expires_at_ms: 0,
       released: true,
@@ -439,7 +436,7 @@ defmodule Alambique.Lease do
       epoch: epoch,
       owner: owner,
       incarnation: ctx.incarnation,
-      token: Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false),
+      token: Conditional.token(),
       seq: seq,
       expires_at_ms: now(ctx) + ctx.ttl_ms
     }
@@ -533,26 +530,14 @@ defmodule Alambique.Lease do
 
   defp key(ctx, cell), do: "#{ctx.prefix}/cells/#{cell}/lease"
 
-  # A request that outlives the lease cannot help: it is killed after the
-  # time the lease can be used (`ttl - skew margin`) and
-  # answers `{:error, :timeout}`, which every caller already handles as a store
-  # error (a `put` may or may not have landed: `reconcile_renew/3` reads it back).
-  defp bound(ctx), do: ctx.ttl_ms - ctx.skew_margin_ms
+  defp put(ctx, lease, condition),
+    do: Conditional.put(ctx, key(ctx, lease.cell), encode(lease), condition)
 
-  defp put(%{store: {store, config}} = ctx, lease, condition) do
-    Retry.once(ctx.store, bound(ctx), fn ->
-      store.put(config, key(ctx, lease.cell), encode(lease), condition, %{})
-    end)
+  defp fetch(ctx, cell) do
+    with {:ok, body, etag} <- Conditional.get(ctx, key(ctx, cell)), do: decode(body, etag)
   end
 
-  defp fetch(%{store: {store, config}} = ctx, cell) do
-    case Retry.once(ctx.store, bound(ctx), fn -> store.get(config, key(ctx, cell)) end) do
-      {:ok, body, etag, _meta} -> decode(body, etag)
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp now(%{clock: {clock, config}}), do: clock.now_ms(config)
+  defp now(ctx), do: Conditional.now(ctx)
 
   defp encode(lease) do
     %{
