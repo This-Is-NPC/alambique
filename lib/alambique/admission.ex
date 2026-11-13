@@ -77,7 +77,7 @@ defmodule Alambique.Admission do
   @deterministic [:restore, :hydration, :local_file, :open, :migration, :schema_too_new]
 
   # What a wrapped reason says about its origin: the step that failed.
-  @wrappers [:restore, :hydration, :lease, :frozen_check, :placement, :lazy]
+  @wrappers [:restore, :hydration, :lease, :lease_unreadable, :frozen_check, :placement, :lazy]
 
   @transport [
     :timeout,
@@ -99,7 +99,7 @@ defmodule Alambique.Admission do
   Whether `reason` is a store that failed or did not answer: a timeout, an
   HTTP answer, a crashed request, a refused or dropped connection, an open
   circuit breaker (`:store_unavailable`), alone or inside the reason of the
-  step that met it (`{:lease, _}`, `{:restore, _}`, `{kind, key, _}`...).
+  step that met it (`{:lease_unreadable, _}`, `{:lease, _}`, `{:restore, _}`, `{kind, key, _}`...).
   Anything else is not: another node that owns the cell, a frozen or draining
   cell, a full disk, a damaged chain.
   """
@@ -189,6 +189,19 @@ defmodule Alambique.Admission do
   def recovered(config, cell) do
     :ets.delete(config.admission, {:failed, cell})
     :ok
+  end
+
+  @doc """
+  The remembered failure of `cell` if it is the store's, while its backoff
+  lasts: the router asks it before reading the lease, which a store that
+  failed would be asked for again by every call.
+  """
+  @spec store_failure(Config.t(), String.t()) :: {:error, term} | nil
+  def store_failure(config, cell) do
+    with {:error, reason} = error <- failure(config, cell),
+         true <- store_error?(reason),
+         do: error,
+         else: (_ -> nil)
   end
 
   @doc "The remembered failure of `cell`, while its backoff lasts."

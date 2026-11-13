@@ -1171,7 +1171,10 @@ restore, is remembered with an exponential backoff instead: the first delay is
 `wake.backoff_factor` (2) up to `wake.backoff_max_ms` (10 s), and a random
 share of up to `wake.backoff_jitter` (0.2) is taken from each delay so that the
 cells that failed together do not return together. Calls for the cell that
-arrive meanwhile get the remembered error at once and start no wake. The count
+arrive meanwhile get the remembered error at once and start no wake and
+read nothing from the store, not even the lease. The router's own lease read
+that fails with a store error (`{:lease_unreadable, _}`) is remembered the same
+way; a cell that another node owns (`{:owned, _}`, `:unavailable`) is not. The count
 starts over when a wake succeeds, or when the next failure comes more than
 `backoff_max_ms` after the backoff ended. The defaults give 200, 400, 800 ms,
 1.6, 3.2, 6.4 s and then 10 s at most (less the jitter). The cap is below the
