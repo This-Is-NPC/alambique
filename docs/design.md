@@ -308,7 +308,7 @@ the panic tests abort the VM when `guard` does not catch.
   (`Config.lease_ctx/2`, `Config.repl_ctx/2`) wraps the guarded store in
   `Alambique.Store.Breaker`, one breaker for each location of the instance,
   shared by all its cells, so a store that fails is seen once and not once per
-  cell. Its state is three `:atomics`, found once when the context is built and
+  cell. Its state is four `:atomics`, found once when the context is built and
   read without a message: a request costs one atomic read while it is closed.
   `breaker: [failures: 5, cooldown_ms: 5_000, probe_timeout_ms: 10_000]`:
   - Closed, `failures` failures in a row open it; any success resets the run.
@@ -350,6 +350,18 @@ the panic tests abort the VM when `guard` does not catch.
     (`test/store_breaker_test.exs`).
   - Requests that started before it opened and end after do not change its
     state. The change feed reads its own guarded stores and has no breaker.
+  - **Status.** `Alambique.breaker_status/1` reads the atomics (a fourth one
+    holds the wall-clock ms of the last change between closed and open) and
+    answers, for each location, `:closed`, `:open` or `:half_open`, since when
+    and the failures. It never asks the store and adds nothing to a request:
+    the extra atomic is written only when the breaker opens or closes. The
+    failures stay counted while it is open (and are the run that opened it),
+    and a success of a request that started before it opened does not reset
+    them. `since_ms` is wall-clock Unix time so that it means the same to the
+    caller and to other nodes, not a monotonic reading; a half-open breaker
+    reports when its cool-down ended, computed from the monotonic clock. A
+    location not used yet has no breaker and reads as closed. The reason of
+    the last failure is not kept: it is in the telemetry events and logs.
   Telemetry: `[:alambique, :store, :breaker, :open]` and `:close`
   ([telemetry.md](telemetry.md)).
 - `Alambique.Store.S3` implements it with Req and AWS SigV4, with a

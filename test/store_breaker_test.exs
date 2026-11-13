@@ -160,6 +160,39 @@ defmodule Alambique.StoreBreakerTest do
       assert Stub.count(b.stub) == 9
     end
 
+    test "reports its status: closed, open, half-open, closed again" do
+      {:ok, store_up} = Agent.start_link(fn -> false end)
+
+      b =
+        breaker(fn ->
+          if Agent.get(store_up, & &1), do: {:ok, "", "e", %{}}, else: @http_500
+        end)
+
+      assert %{state: :closed, failures: 0, since_ms: created} = Breaker.status(b.breaker)
+      assert_in_delta created, System.system_time(:millisecond), 1_000
+
+      get(b)
+      assert %{state: :closed, failures: 1, since_ms: ^created} = Breaker.status(b.breaker)
+
+      for _ <- 1..2, do: get(b)
+      before_open = System.system_time(:millisecond)
+      assert %{state: :open, failures: 3, since_ms: opened} = Breaker.status(b.breaker)
+      assert_in_delta opened, before_open, 1_000
+
+      # Requests refused while open do not count.
+      get(b)
+      assert %{state: :open, failures: 3} = Breaker.status(b.breaker)
+
+      b.advance.(1_000)
+      assert %{state: :half_open, failures: 3, since_ms: half_open} = Breaker.status(b.breaker)
+      assert half_open <= System.system_time(:millisecond)
+
+      Agent.update(store_up, fn _ -> true end)
+      assert {:ok, _, _, _} = get(b)
+      assert %{state: :closed, failures: 0, since_ms: closed} = Breaker.status(b.breaker)
+      assert closed >= opened
+    end
+
     test "a failed probe opens it again for another cool-down" do
       b = breaker(fn -> @http_500 end)
       for _ <- 1..3, do: get(b)
@@ -322,6 +355,26 @@ defmodule Alambique.StoreBreakerTest do
     setup do
       env = setup_store()
       {:ok, env}
+    end
+
+    test "Alambique.breaker_status/1 reports each location, without asking the store", ctx do
+      inst = start_instance(ctx, breaker: [failures: 1, cooldown_ms: 60_000])
+
+      assert [{location, %{state: :closed, failures: 0}}] =
+               Map.to_list(Alambique.breaker_status(inst))
+
+      assert is_binary(location)
+
+      MemoryStore.inject(ctx.store_config, kind: :error, reason: {:http, 503, ""})
+      assert {:error, _} = Alambique.execute(inst, unique_cell(), "SELECT 1", [])
+      eventually(fn -> Alambique.breaker_status(inst)[location].state == :open end)
+
+      assert %{state: :open, failures: 1, since_ms: since} =
+               Alambique.breaker_status(inst)[location]
+
+      assert since <= System.system_time(:millisecond)
+
+      assert_raise ArgumentError, fn -> Alambique.breaker_status(:no_such_instance) end
     end
 
     test "answers {:error, :store_unavailable} to a call that needs a failing store", ctx do

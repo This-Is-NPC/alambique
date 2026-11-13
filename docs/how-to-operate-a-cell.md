@@ -593,7 +593,10 @@ wake event shows `reason: :disk_full` (`[:alambique, :cell, :wake]`).
   lets one request through and closes if it succeeds. Look for
   `[:alambique, :store, :breaker, :open]` events (see
   [telemetry.md](telemetry.md#store-events)), whose `reason` says whether the
-  failures or the probe opened it, and check the store, not the node. Calls are
+  failures or the probe opened it. `Alambique.breaker_status(instance)` shows
+  the state of each location now (`:closed`, `:open`, `:half_open`), since
+  when and the failures in a row, without asking the store; use it for a
+  health check. Check the store, not the node. Calls are
   safe to repeat when the store answers again. Raise `failures` if a store
   that fails now and then opens the breaker too often. `retry:
   [max_attempts:]` (default 10) limits how often one request is repeated while

@@ -52,6 +52,8 @@ first release (0.1.0):
 - Unreleased: nodes find each other through the store. The `registry:` option
   writes an entry under `<prefix>/nodes/`, and `Alambique.peers/1` lists the
   live peers ([how-to](docs/how-to-discover-nodes.md)).
+  `Alambique.breaker_status/1` reports the state of the store circuit breaker
+  of each location.
 
 The full list is in [CHANGELOG.md](CHANGELOG.md).
 
