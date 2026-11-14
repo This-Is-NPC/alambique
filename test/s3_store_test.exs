@@ -69,4 +69,21 @@ defmodule Alambique.Store.S3Test do
     send(connection, :close)
     assert {:error, _} = Task.await(holder, 10_000)
   end
+
+  test "`:pool_size` bounds the connections, and `:finch` options add to it", %{config: c} do
+    c =
+      Map.merge(c, %{
+        pool_size: 1,
+        receive_timeout: 1_000,
+        req_options: [finch: [pool_timeout: 100]]
+      })
+
+    holder = Task.async(fn -> S3.get(c, "held") end)
+    assert_receive {:accepted, connection}, 5_000
+
+    assert {:error, {:request_crashed, _kind, _reason}} = S3.get(c, "k")
+
+    send(connection, :close)
+    assert {:error, _} = Task.await(holder, 10_000)
+  end
 end
