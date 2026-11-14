@@ -110,6 +110,10 @@ anything but `s3://bucket` or `s3://bucket/path`.
   expired: the answer has no body, so the store cannot tell the expired token
   and does not renew. The next request with a body does.
 - `{:error, {:credentials, reason}}`: the `:credentials` function failed.
+- Requests wait for a connection, or end with `{:error, {:request_crashed, ...}}`
+  when none frees up in time: the store holds at most `:pool_size`
+  connections (default 256). Raise it, or set `finch: [pool_timeout: ...]` in
+  `:req_options`, if many cells wake together (design §6.3).
 - The secrets never appear in an error or a crash report: the store keeps them
   in closures (design section 3). Keep them out of the code you commit; read
   them from the environment or from your secret store.
