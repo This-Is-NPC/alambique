@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.7.0](https://github.com/This-Is-NPC/alambique/compare/v0.6.1...v0.7.0) (2026-11-14)
+
+
+### Features
+
+* **compaction:** force a pass above a chain cap ([a31ea30](https://github.com/This-Is-NPC/alambique/commit/a31ea30325566bc6e7da56d4b08dbb5168f7dd1d))
+
+
+### Bug Fixes
+
+* **compaction:** pick the longest-waiting cells first ([1ec185f](https://github.com/This-Is-NPC/alambique/commit/1ec185fb52816c930b1245eaed85db46c99bd49d))
+
+
+### Performance Improvements
+
+* **bench:** measure restore by fetch concurrency ([addfbff](https://github.com/This-Is-NPC/alambique/commit/addfbffc4dec55673f6c8bce6976677bce46ccde))
+* **restore:** refill the read-ahead as budget frees ([e529b9e](https://github.com/This-Is-NPC/alambique/commit/e529b9eb8f1fc35af7a775113def863a62c0e0de))
+
 ## [0.6.1](https://github.com/This-Is-NPC/alambique/compare/v0.6.0...v0.6.1) (2026-11-13)
 
 
