@@ -185,6 +185,12 @@ the only errors were lease errors and `:draining`.
 - **Requests for a cell fail with `{:error, :draining}` on B.** B is draining
   itself, for example after its own stop. A node that started with `join:
   false` is not draining.
+- **The first calls on B take seconds.** B restores the chain each cell had
+  when A released it, and a chain of N files costs N GETs. A saturated A
+  compacts less, so its chains are longer; see
+  [a node swap with a saturated writer](how-to-speed-up-a-wake.md#a-node-swap-with-a-saturated-writer)
+  for how to measure it and `compaction: [concurrency:, urgent_concurrency:]`
+  for what to raise.
 - **A drain returns `hibernated: 0` and the cells are awake on another
   node.** `drain/2` acts on the cells with a process on this node only.
 
