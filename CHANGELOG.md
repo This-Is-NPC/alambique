@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0](https://github.com/This-Is-NPC/alambique/compare/v0.7.1...v0.8.0) (2026-11-14)
+
+
+### Features
+
+* **api:** tell whether a cell is waking in load ([aa87772](https://github.com/This-Is-NPC/alambique/commit/aa87772773f7f904131f94bf32120b6a39ae1885))
+
+
+### Bug Fixes
+
+* **compaction:** skip blocks a higher level holds ([e598ed9](https://github.com/This-Is-NPC/alambique/commit/e598ed994f4f89cb055cd1cd80db4e41ffd06939))
+
 ## [0.7.1](https://github.com/This-Is-NPC/alambique/compare/v0.7.0...v0.7.1) (2026-11-14)
 
 
