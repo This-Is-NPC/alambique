@@ -114,7 +114,7 @@ integers.
 
 | Event | Measurements | Metadata |
 | --- | --- | --- |
-| `[:alambique, :cell, :wake]` | `duration`, and the store requests of the wake: `trips` (all), `gets`, `heads`, `lists`, `puts`, `deletes` | `cell`, `result` (`:ok` or `:error`), `requests` (the same requests by `{operation, kind of object}`, see below), and `location` (the id of the location the cell was woken in), `epoch`, `txid` (the head after the fence and migrations) and `source` (`:empty` for a cell with nothing in the store, `:restore`, or `:local` for a reused file) for `:ok`, or `reason` for `:error` |
+| `[:alambique, :cell, :wake]` | `duration`, the store requests of the wake: `trips` (all), `gets`, `heads`, `lists`, `puts`, `deletes`, `store_time` (the time those requests took, summed, in native time units) and `reductions` (what the cell process ran during the wake) | `cell`, `result` (`:ok` or `:error`), `requests` (the same requests by `{operation, kind of object}`, see below), and `location` (the id of the location the cell was woken in), `epoch`, `txid` (the head after the fence and migrations) and `source` (`:empty` for a cell with nothing in the store, `:restore`, or `:local` for a reused file) for `:ok`, or `reason` for `:error` |
 | `[:alambique, :cell, :migrate]` | `duration` | `cell`, `version` |
 | `[:alambique, :cell, :commit]` | `duration`, `transactions` (callers in the batch), `inflight` (batches in flight when this one was sent, itself included), and `queued_ms` (from the encode to the acknowledgement) for `:ok` | `cell`, `location`, `epoch`, `txid`, `result` (`:ok`, `:fenced` or `:error`), and `reason` unless `:ok` |
 | `[:alambique, :wal, :budget]` | `duration`, `bytes` (sum of the WALs before), `cells` (checkpointed), `busy` | `instance` |
@@ -174,6 +174,19 @@ from the encode to then, so it includes the wait for earlier batches.
 `inflight` is always 1 at depth 1; a gauge of the pipeline is the latest
 `inflight` per cell. `:stop` is emitted when a serving cell ends without
 hibernating; a wake that fails is reported by `:wake` with `result: :error`.
+
+`store_time` of `[:alambique, :cell, :wake]` is the sum of the time of each
+store request of the wake, measured around the call to the store, so it
+includes the wait of the process for a scheduler once the answer is there.
+Requests that run together each add their own time, so it can exceed
+`duration`; a `store_time` far below `duration` says the wake waited for the
+CPU or for the disk, not for the store. A request killed at its deadline adds
+nothing. `reductions` is the difference of the reductions of the cell process
+between the start and the end of the wake: the work the BEAM ran for it, in
+the unit of `Process.info(pid, :reductions)`. It is not a CPU time: the work of
+the native code on dirty schedulers (applying the files, checksums) and of the
+tasks the wake starts to fetch files is not counted. Compare `duration` with
+`store_time` to tell a slow store from a starved node.
 
 The requests of `[:alambique, :cell, :wake]` are those of the wake, counted
 from the read of the lease that the call made before it until the cell serves,

@@ -82,6 +82,8 @@ the fence.
    stop) compacts its tail first when it has `compaction: [release_min_tail:]`
    (default 32) level-0 files or more, for at most `compaction: [release_deadline_ms:]`
    (default 3 000), so the next node reads a short chain.
+   `[:alambique, :cell, :wake]` reports `store_time` (the time of the store
+   requests, summed) and `reductions` to tell a slow store from a starved node.
 
 4. Keep a local file when you can. A node that hibernated the cell last reuses
    its file and reads only the head of the chain. `local_cache.max_bytes`
