@@ -32,7 +32,9 @@ defmodule Alambique.Compaction.Compactor do
   def notify(%{compaction: nil}, _cell, _txid), do: :ok
 
   def notify(%{compactor: table, compaction: c}, cell, txid) do
-    unless :ets.update_element(table, cell, {3, txid}) do
+    if :ets.update_element(table, cell, {3, txid}) do
+      if rem(txid, c.fanout) == 0, do: check_cap(table, c, cell, txid)
+    else
       if :ets.info(table, :size) < c.queue_limit do
         :ets.insert_new(table, {cell, txid, txid, now_ms() + c.max_age_ms})
       end
@@ -42,6 +44,16 @@ defmodule Alambique.Compaction.Compactor do
   rescue
     # The compactor is not running (yet): nothing to tell.
     ArgumentError -> :ok
+  end
+
+  # A row that reached the cap wakes the compactor, so its pass does not wait
+  # for the next tick. Checked every `fanout` TXIDs, to keep the commit path
+  # to one more read.
+  defp check_cap(table, c, cell, txid) do
+    first = :ets.lookup_element(table, cell, 2, 0)
+
+    if first > 0 and txid - first >= c.max_chain_segments - 1,
+      do: send(:ets.info(table, :owner), :urgent)
   end
 
   @doc """
@@ -87,7 +99,26 @@ defmodule Alambique.Compaction.Compactor do
     {:noreply, tick(state)}
   end
 
+  # A row reached the cap: one pass round for the rows over it, now, without
+  # moving the timer.
+  def handle_info(:urgent, %{config: config} = state) do
+    flush_urgent()
+    c = config.compaction
+    rows = config.compactor |> ready(c, now_ms()) |> Enum.filter(&over_cap?(&1, c))
+    slots = slots(c, rows)
+    run(config, Enum.take(rows, slots * c.batch_factor), slots)
+    {:noreply, state}
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
+
+  defp flush_urgent do
+    receive do
+      :urgent -> flush_urgent()
+    after
+      0 -> :ok
+    end
+  end
 
   defp schedule(config, state, delay \\ nil) do
     timer = Process.send_after(self(), :tick, delay || config.compaction.interval_ms)
@@ -96,34 +127,38 @@ defmodule Alambique.Compaction.Compactor do
 
   defp tick(%{config: config} = state) do
     c = config.compaction
-    started = System.monotonic_time()
-    batch = c.concurrency * c.batch_factor
     rows = ready(config.compactor, c, now_ms())
+    slots = slots(c, rows)
+    batch = slots * c.batch_factor
+    rows = Enum.take(rows, batch)
+    run(config, rows, slots)
+
+    cleanups(config, batch)
+    state = scan(state)
+
+    # A full batch means more rows may be waiting.
+    schedule(config, state, if(length(rows) == batch, do: 0))
+  end
+
+  defp run(_config, [], _slots), do: :ok
+
+  defp run(config, rows, slots) do
+    started = System.monotonic_time()
 
     rows
     |> Task.async_stream(&pass(config, &1),
-      max_concurrency: c.concurrency,
-      timeout: c.timeout_ms + 5_000,
+      max_concurrency: slots,
+      timeout: config.compaction.timeout_ms + 5_000,
       on_timeout: :kill_task,
       zip_input_on_exit: true
     )
     |> Enum.each(&settle(config, &1))
 
-    cleanups(config, batch)
-    state = scan(state)
-
-    if rows != [] do
-      Telemetry.emit(
-        [:compactor, :tick],
-        %{duration: System.monotonic_time() - started, cells: length(rows)},
-        %{
-          instance: config.name
-        }
-      )
-    end
-
-    # A full batch means more rows may be waiting.
-    schedule(config, state, if(length(rows) == batch, do: 0))
+    Telemetry.emit(
+      [:compactor, :tick],
+      %{duration: System.monotonic_time() - started, cells: length(rows)},
+      %{instance: config.name}
+    )
   end
 
   # One page of markers per tick; a scan starts when `scan_at` passed.
@@ -218,11 +253,22 @@ defmodule Alambique.Compaction.Compactor do
   end
 
   @doc false
-  # The rows a tick takes: at most `concurrency * batch_factor`, chains over
+  # The passes a tick runs at once: `concurrency`, plus `urgent_concurrency`
+  # while a row is over the cap (design §9, "Chain cap").
+  @spec slots(map, [tuple]) :: pos_integer
+  def slots(c, rows),
+    do: c.concurrency + if(Enum.any?(rows, &over_cap?(&1, c)), do: c.urgent_concurrency, else: 0)
+
+  defp over_cap?({_cell, first, last, _due}, c),
+    do: first > 0 and last - first >= c.max_chain_segments - 1
+
+  @doc false
+  # The ready rows, in the order a tick takes them: chains over
   # `max_chain_segments` first, then the rows that waited longest (smallest
   # `due`). Every ready row is read and sorted, so a tick costs O(ready log
   # ready), bounded by `queue_limit`; hash order would let the same cells
-  # take every batch while others never get one.
+  # take every batch while others never get one. The tick takes the first
+  # `slots * batch_factor` of them.
   @spec ready(atom, map, integer) :: [tuple]
   def ready(table, c, now) do
     spec = [
@@ -234,9 +280,8 @@ defmodule Alambique.Compaction.Compactor do
     table
     |> :ets.select(spec)
     |> Enum.sort_by(fn {cell, first, last, due} ->
-      {if(first > 0 and last - first >= c.max_chain_segments - 1, do: 0, else: 1), due, cell}
+      {if(over_cap?({cell, first, last, due}, c), do: 0, else: 1), due, cell}
     end)
-    |> Enum.take(c.concurrency * c.batch_factor)
   end
 
   # One pass for one row. The row is deleted first, but only if nothing was
@@ -305,21 +350,36 @@ defmodule Alambique.Compaction.Compactor do
       ]
   end
 
-  defp settle(config, {:ok, {{cell, _, _, _}, result}}), do: after_pass(config, cell, result)
+  defp settle(config, {:ok, {row, result}}), do: after_pass(config, row, result)
 
-  defp settle(config, {:exit, {{cell, _, _, _}, reason}}),
-    do: after_pass(config, cell, {:error, {:exit, reason}})
+  defp settle(config, {:exit, {row, reason}}),
+    do: after_pass(config, row, {:error, {:exit, reason}})
 
-  defp after_pass(config, cell, {:ok, %{more: true}}), do: requeue(config, cell, 0)
-  defp after_pass(_config, _cell, {:ok, _}), do: :ok
+  defp after_pass(config, row, {:ok, %{more: true}}), do: requeue(config, row, 0)
+  defp after_pass(_config, _row, {:ok, _}), do: :ok
 
-  defp after_pass(config, cell, {:error, reason}) do
+  defp after_pass(config, {cell, _, _, _} = row, {:error, reason}) do
     Logger.warning("Alambique compaction of #{cell} failed: #{inspect(reason)}")
-    requeue(config, cell, config.compaction.retry_ms)
+    requeue(config, row, config.compaction.retry_ms)
   end
 
-  defp requeue(config, cell, delay) do
-    :ets.insert_new(config.compactor, {cell, 0, 0, now_ms() + delay})
+  # The row keeps the TXIDs it counted, which are still uncompacted, so the
+  # cap sees the chain; a commit made meanwhile made a row of its own, which
+  # takes the older start.
+  defp requeue(config, {cell, first, last, _due}, delay) do
+    due = now_ms() + delay
+
+    unless :ets.insert_new(config.compactor, {cell, first, last, due}) do
+      case :ets.lookup(config.compactor, cell) do
+        [{_, f, _, d}] ->
+          start = for(n <- [f, first], n > 0, do: n) |> Enum.min(fn -> 0 end)
+          :ets.update_element(config.compactor, cell, [{2, start}, {4, min(d, due)}])
+
+        [] ->
+          :ok
+      end
+    end
+
     :ok
   end
 
