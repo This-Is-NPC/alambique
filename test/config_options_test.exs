@@ -94,7 +94,6 @@ defmodule Alambique.ConfigOptionsTest do
     assert config.query.stale_tmp_seconds == 600
     assert config.query.restore_attempts == 3
     assert config.feed.publish_retry_ms == 1_000
-    assert config.compaction.batch_factor == 4
     assert config.compaction.urgent_concurrency == 4
     assert config.compaction.max_chain_segments == 256
     assert config.quarantine.concurrency == 8
@@ -183,7 +182,7 @@ defmodule Alambique.ConfigOptionsTest do
           breaker: [failures: 2, cooldown_ms: 7, probe_timeout_ms: 9],
           query: [page_size: 10, stale_tmp_seconds: 5, restore_attempts: 7],
           feed: [publish_retry_ms: 5],
-          compaction: [batch_factor: 2],
+          compaction: [moved_scan_page: 2],
           quarantine: [concurrency: 2]
         )
       )
@@ -235,7 +234,7 @@ defmodule Alambique.ConfigOptionsTest do
     assert config.query.stale_tmp_seconds == 5
     assert config.query.restore_attempts == 7
     assert config.feed.publish_retry_ms == 5
-    assert config.compaction.batch_factor == 2
+    assert config.compaction.moved_scan_page == 2
     assert config.quarantine.concurrency == 2
   end
 
@@ -274,7 +273,6 @@ defmodule Alambique.ConfigOptionsTest do
       {[feed: [other_tables: :some]], ~r/other_tables/},
       {[feed: [compression: 6]], ~r/compression/},
       {[feed: [max_object_bytes: 0]], ~r/max_object_bytes/},
-      {[compaction: [batch_factor: 0]], ~r/:compaction :batch_factor/},
       {[compaction: [urgent_concurrency: -1]], ~r/:urgent_concurrency/},
       {[compaction: [max_chain_segments: 0]], ~r/:max_chain_segments/},
       {[compaction: [fanout: 8, max_chain_segments: 7]],

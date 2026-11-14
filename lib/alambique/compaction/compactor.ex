@@ -6,10 +6,14 @@ defmodule Alambique.Compaction.Compactor do
   # Cells tell it about commits through `notify/3`, which writes one row per
   # cell into a bounded public ETS table: `{cell, first_txid, last_txid,
   # due_ms}`. A row is ready when `fanout` TXIDs were committed since it
-  # appeared or when `max_age_ms` passed. A tick takes the ready rows with
-  # `max_chain_segments` TXIDs or more first, then those that waited longest,
-  # deletes them and runs one pass for each, `concurrency` at a time. A cell
-  # nobody writes has no row and costs nothing. Notifications for new cells
+  # appeared or when `max_age_ms` passed. A pass takes a ready row: the rows
+  # with `max_chain_segments` TXIDs or more first, then those that waited
+  # longest. At most `concurrency` passes run at once, and
+  # `concurrency + urgent_concurrency` while the row that starts one is at the
+  # cap. Passes are not rounds: a pass that ends starts the next one at once,
+  # and a row that reaches the cap starts its pass at once if a slot is free,
+  # whatever the passes running take. A cell nobody writes has no row and
+  # costs nothing. Notifications for new cells
   # are dropped while the table is full; the next commit makes a new one.
   #
   # The cleanups of moved cells (design §18) are jobs in a second table. The
@@ -24,6 +28,9 @@ defmodule Alambique.Compaction.Compactor do
   alias Alambique.{Compaction, Config, Inflight, Placement, Retention, Telemetry}
   alias Alambique.Compaction.Hold
   alias Alambique.Relocate.Cleanup
+
+  # Cleanup jobs a tick takes, per unit of `concurrency`.
+  @cleanup_batch 4
 
   def start_link(config), do: GenServer.start_link(__MODULE__, config)
 
@@ -110,23 +117,45 @@ defmodule Alambique.Compaction.Compactor do
     :ets.new(config.cleanups, [:named_table, :public, :set])
     Hold.create(config)
 
-    state = %{config: config, timer: nil, scan_at: now_ms(), scan: nil}
+    state = %{
+      config: config,
+      timer: nil,
+      scan_at: now_ms(),
+      scan: nil,
+      running: %{},
+      failed: MapSet.new(),
+      busy: nil
+    }
+
     {:ok, schedule(config, state)}
   end
 
   @impl true
-  def handle_info(:tick, state) do
-    {:noreply, tick(state)}
+  def handle_info(:tick, %{config: config} = state) do
+    state = dispatch(%{state | failed: MapSet.new()})
+    cleanups(config, config.compaction.concurrency * @cleanup_batch)
+    {:noreply, state |> scan() |> then(&schedule(config, &1))}
   end
 
-  # A row reached the cap: one pass round for the rows over it, now, without
+  # A row reached the cap: start its pass now if a slot is free, without
   # moving the timer.
-  def handle_info(:urgent, %{config: config} = state) do
+  def handle_info(:urgent, state) do
     flush_urgent()
-    c = config.compaction
-    rows = config.compactor |> ready(c, now_ms()) |> Enum.filter(&over_cap?(&1, c))
-    slots = slots(c, rows)
-    run(config, Enum.take(rows, slots * c.batch_factor), slots)
+    {:noreply, dispatch(state)}
+  end
+
+  def handle_info({:pass_result, pid, {row, result}}, state),
+    do: {:noreply, finish(state, pid, row, result)}
+
+  def handle_info({:DOWN, _ref, :process, pid, reason}, state) do
+    case state.running do
+      %{^pid => %{row: row}} -> {:noreply, finish(state, pid, row, {:error, {:exit, reason}})}
+      _ -> {:noreply, state}
+    end
+  end
+
+  def handle_info({:pass_timeout, pid}, state) do
+    Process.exit(pid, :kill)
     {:noreply, state}
   end
 
@@ -140,45 +169,71 @@ defmodule Alambique.Compaction.Compactor do
     end
   end
 
-  defp schedule(config, state, delay \\ nil) do
-    timer = Process.send_after(self(), :tick, delay || config.compaction.interval_ms)
+  defp schedule(config, state) do
+    timer = Process.send_after(self(), :tick, config.compaction.interval_ms)
     %{state | timer: timer}
   end
 
-  defp tick(%{config: config} = state) do
+  # Starts the passes the slots allow, for the ready rows of cells with no pass.
+  # A cell whose pass failed waits for the next tick, so that a failing store
+  # is not asked again at once.
+  defp dispatch(%{config: config, running: running} = state) do
     c = config.compaction
-    rows = ready(config.compactor, c, now_ms())
-    slots = slots(c, rows)
-    batch = slots * c.batch_factor
-    rows = Enum.take(rows, batch)
-    run(config, rows, slots)
 
-    cleanups(config, batch)
-    state = scan(state)
-
-    # A full batch means more rows may be waiting.
-    schedule(config, state, if(length(rows) == batch, do: 0))
+    if map_size(running) >= c.concurrency + c.urgent_concurrency do
+      state
+    else
+      busy = for {_pid, %{row: {cell, _, _, _}}} <- running, into: state.failed, do: cell
+      rows = pick(ready(config.compactor, c, now_ms()), busy, map_size(running), c)
+      Enum.reduce(rows, state, &start(&2, &1))
+    end
   end
 
-  defp run(_config, [], _slots), do: :ok
+  # One pass for one row. The row is deleted first, but only if nothing was
+  # committed meanwhile (the last TXID is unchanged), so that a commit during
+  # the pass leaves a row behind.
+  defp start(%{config: config, running: running} = state, {cell, first, last, _due} = row) do
+    :ets.select_delete(config.compactor, [{{cell, first, last, :_}, [], [true]}])
+    parent = self()
 
-  defp run(config, rows, slots) do
-    started = System.monotonic_time()
+    {pid, ref} =
+      Process.spawn(fn -> send(parent, {:pass_result, self(), pass(config, row)}) end, [
+        :link,
+        :monitor
+      ])
 
-    rows
-    |> Task.async_stream(&pass(config, &1),
-      max_concurrency: slots,
-      timeout: config.compaction.timeout_ms + 5_000,
-      on_timeout: :kill_task,
-      zip_input_on_exit: true
-    )
-    |> Enum.each(&settle(config, &1))
+    timer = Process.send_after(self(), {:pass_timeout, pid}, config.compaction.timeout_ms + 5_000)
+    period = state.busy || %{started: System.monotonic_time(), cells: 0}
 
+    %{
+      state
+      | running: Map.put(running, pid, %{row: row, ref: ref, timer: timer}),
+        busy: %{period | cells: period.cells + 1}
+    }
+  end
+
+  defp finish(%{config: config} = state, pid, row, result) do
+    {%{ref: ref, timer: timer}, running} = Map.pop!(state.running, pid)
+    Process.cancel_timer(timer)
+    Process.demonitor(ref, [:flush])
+    after_pass(config, row, result)
+    state = %{state | running: running, failed: failed(state.failed, row, result)}
+    state = dispatch(state)
+    if state.running == %{}, do: close_period(state), else: state
+  end
+
+  defp failed(failed, {cell, _, _, _}, {:error, _}), do: MapSet.put(failed, cell)
+  defp failed(failed, _row, _result), do: failed
+
+  # What the passes did from one idle compactor to the next.
+  defp close_period(%{config: config, busy: busy} = state) do
     Telemetry.emit(
       [:compactor, :tick],
-      %{duration: System.monotonic_time() - started, cells: length(rows)},
+      %{duration: System.monotonic_time() - busy.started, cells: busy.cells},
       %{instance: config.name}
     )
+
+    %{state | busy: nil}
   end
 
   # One page of markers per tick; a scan starts when `scan_at` passed.
@@ -273,22 +328,32 @@ defmodule Alambique.Compaction.Compactor do
   end
 
   @doc false
-  # The passes a tick runs at once: `concurrency`, plus `urgent_concurrency`
-  # while a row is over the cap (design §9, "Chain cap").
-  @spec slots(map, [tuple]) :: pos_integer
-  def slots(c, rows),
-    do: c.concurrency + if(Enum.any?(rows, &over_cap?(&1, c)), do: c.urgent_concurrency, else: 0)
+  # The rows to start now, from `rows` in the order of `ready/3`: the cells in
+  # `busy` have a pass and are skipped, and `running` passes already use slots.
+  # A row at the cap may use `concurrency + urgent_concurrency` slots, the
+  # others `concurrency`; as the rows at the cap come first, the first row
+  # that finds no slot ends the choice.
+  @spec pick([tuple], MapSet.t(), non_neg_integer, map) :: [tuple]
+  def pick(rows, busy, running, c) do
+    rows
+    |> Enum.reject(fn {cell, _, _, _} -> MapSet.member?(busy, cell) end)
+    |> Enum.reduce_while({[], running}, fn row, {picked, used} ->
+      limit = c.concurrency + if(over_cap?(row, c), do: c.urgent_concurrency, else: 0)
+      if used < limit, do: {:cont, {[row | picked], used + 1}}, else: {:halt, {picked, used}}
+    end)
+    |> elem(0)
+    |> Enum.reverse()
+  end
 
   defp over_cap?({_cell, first, last, _due}, c),
     do: first > 0 and last - first >= c.max_chain_segments - 1
 
   @doc false
-  # The ready rows, in the order a tick takes them: chains over
+  # The ready rows, in the order passes take them: chains over
   # `max_chain_segments` first, then the rows that waited longest (smallest
   # `due`). Every ready row is read and sorted, so a tick costs O(ready log
   # ready), bounded by `queue_limit`; hash order would let the same cells
-  # take every batch while others never get one. The tick takes the first
-  # `slots * batch_factor` of them.
+  # take every slot while others never get one.
   @spec ready(atom, map, integer) :: [tuple]
   def ready(table, c, now) do
     spec = [
@@ -304,14 +369,8 @@ defmodule Alambique.Compaction.Compactor do
     end)
   end
 
-  # One pass for one row. The row is deleted first, but only if nothing was
-  # committed meanwhile (the last TXID is unchanged), so that a commit during
-  # the pass leaves a row behind.
-  defp pass(config, {cell, first, last, due} = row) do
-    :ets.select_delete(config.compactor, [
-      {{cell, first, last, :_}, [], [true]}
-    ])
-
+  # The work of one pass, in a process of its own.
+  defp pass(config, {cell, _first, _last, due} = row) do
     aged? = due <= now_ms()
     c = config.compaction
 
@@ -369,11 +428,6 @@ defmodule Alambique.Compaction.Compactor do
         concurrency: trash.concurrency
       ]
   end
-
-  defp settle(config, {:ok, {row, result}}), do: after_pass(config, row, result)
-
-  defp settle(config, {:exit, {row, reason}}),
-    do: after_pass(config, row, {:error, {:exit, reason}})
 
   defp after_pass(config, row, {:ok, %{more: true}}), do: requeue(config, row, 0)
   defp after_pass(_config, _row, {:ok, _}), do: :ok

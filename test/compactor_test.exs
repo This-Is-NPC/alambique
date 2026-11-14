@@ -79,26 +79,36 @@ defmodule Alambique.CompactorTest do
       assert rows == Enum.map(1..12, &[&1])
     end
 
-    test "the batch factor bounds the cells of one tick", ctx do
+    test "no more passes run at once than the concurrency", ctx do
       inst =
         start_instance(ctx,
           migrations: @schema,
           retention: false,
-          compaction: [
-            interval_ms: 2_000,
-            max_age_ms: 1,
-            concurrency: 1,
-            batch_factor: 1
-          ]
+          compaction: [interval_ms: 600_000, max_age_ms: 1, fanout: 2, concurrency: 1]
         )
 
-      capture([[:alambique, :compactor, :tick]])
-      for i <- 1..5, do: assert({:ok, _} = put(inst, "batch-#{i}", 1))
+      test = self()
 
-      assert_receive {:telemetry, [:alambique, :compactor, :tick], %{cells: cells}, _meta},
-                     5_000
+      CrashPoints.arm(
+        :compact_between_merges,
+        fn _point, %{cell: cell} ->
+          unless Process.put(:gated, true) do
+            send(test, {:gated, cell, self()})
+            receive do: (:release -> :ok)
+          end
+        end,
+        times: :infinity
+      )
 
-      assert cells == 1
+      cells = for i <- 1..3, do: "slot-#{i}"
+      for cell <- cells, n <- 1..2, do: assert({:ok, _} = put(inst, cell, n))
+      send(:ets.info(Alambique.Config.fetch!(inst).compactor, :owner), :tick)
+
+      for _ <- cells do
+        assert_receive {:gated, _cell, pid}, 5_000
+        refute_receive {:gated, _, _}, 200
+        send(pid, :release)
+      end
     end
 
     test "every ready cell is compacted although commits never stop", ctx do
@@ -110,8 +120,7 @@ defmodule Alambique.CompactorTest do
             interval_ms: 600_000,
             max_age_ms: 600_000,
             fanout: 2,
-            concurrency: 2,
-            batch_factor: 4
+            concurrency: 2
           ]
         )
 
@@ -222,6 +231,27 @@ defmodule Alambique.CompactorTest do
     end
 
     @tag :capture_log
+    test "a pass that is killed is compacted again and holds no slot", ctx do
+      inst =
+        start_instance(ctx,
+          migrations: @schema,
+          compaction: Keyword.put(@fast, :concurrency, 1),
+          retention: false
+        )
+
+      cell = unique_cell()
+      CrashPoints.arm(:compact_between_merges, :kill, times: 1)
+      for n <- 1..6, do: assert({:ok, _} = put(inst, cell, n))
+
+      # The slot of the killed pass is free again: the retry (and a pass of
+      # another cell) runs, though `concurrency` is 1.
+      eventually(fn -> level_files(ctx, cell, 1) >= 2 end, 10_000)
+      other = unique_cell()
+      for n <- 1..4, do: assert({:ok, _} = put(inst, other, n))
+      eventually(fn -> level_files(ctx, other, 1) >= 1 end, 10_000)
+    end
+
+    @tag :capture_log
     test "a cleanup that fails is logged and asked again later", ctx do
       inst =
         start_instance(ctx,
@@ -294,7 +324,7 @@ defmodule Alambique.CompactorTest do
       assert :ok = Alambique.Compaction.Compactor.cleanup(config, "c", "loc", 0)
     end
 
-    test "emits a tick event per batch of cells", ctx do
+    test "emits a tick event when the passes of a busy period end", ctx do
       capture([[:alambique, :compactor, :tick]])
       inst = start_instance(ctx, migrations: @schema, compaction: @fast)
       for n <- 1..4, do: assert({:ok, _} = put(inst, unique_cell(), n))

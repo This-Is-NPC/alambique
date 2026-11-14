@@ -1934,23 +1934,28 @@ and one timer. Cells do not have either. A cell tells the compactor about every
 acknowledged batch and every wake fence with one `:ets.update_element` on a
 bounded public table: a row `{cell, first_txid, last_txid, due_ms}`.
 A row is ready when `fanout` TXIDs were committed since it appeared, or when
-`max_age_ms` passed. Every `interval_ms` the compactor takes up to
-`concurrency * batch_factor` ready rows, deletes them, and runs one pass for
-each, `concurrency` at a time (more while a cell is over the cap, see
-"Chain cap"), each with its own deadline. When more rows are
-ready than fit in a batch, the choice is not left to the hash order of the
-table: the rows with `max_chain_segments` (default 256) TXIDs or more go first,
-then the rows with the smallest `due`, the ones that waited longest. A row that
-is taken is deleted and a new commit makes a new row with a later `due`, so a
-ready row is overtaken only by the rows that were ready before it: with `R`
-ready rows and a batch of `B`, it is taken within `ceil(R / B)` ticks, however
-busy the other cells are. This reads every ready row each tick and sorts them,
-`O(R log R)` with `R` at most `queue_limit` (10 000 by default). A full batch
-makes the next tick follow at once. A cell nobody writes has no row. When the
-table holds `queue_limit` rows, notifications for new cells are dropped; the
-next commit of such a cell makes a row. A failed pass is logged and queued
-again after `retry_ms`; a pass that ran out of merge budget is queued at once.
-The compactor starts last in the instance tree, so its crash restarts nothing.
+`max_age_ms` passed. The compactor runs passes, one process each, and keeps at
+most `concurrency` of them running (more while a cell is over the cap, see
+"Chain cap"); a pass that ends starts the next at once, with no rounds, so one
+slow pass delays no other cell. It looks for ready rows when a pass ends, when
+a row reaches the cap, and every `interval_ms`. A pass deletes its row when it
+starts, but only if nothing was committed meanwhile, so a commit during the
+pass makes a new row with a later `due`. A cell has one pass at a time: its
+new row waits for the pass to end. The choice of rows is not left to the hash
+order of the table: the rows with `max_chain_segments` (default 256) TXIDs or
+more go first, then the rows with the smallest `due`, the ones that waited
+longest. A ready row is overtaken only by the rows that were ready before it:
+with `R` ready rows and `C` slots, it is taken within `ceil(R / C)` passes of
+the slots, however busy the other cells are. Each choice reads every ready row
+and sorts them, `O(R log R)` with `R` at most `queue_limit` (10 000 by
+default). A cell nobody writes has no row. When the table holds `queue_limit`
+rows, notifications for new cells are dropped; the next commit of such a cell
+makes a row. A failed pass is logged and its row is queued again with the
+TXIDs it counted; the cell waits for the next tick, so a failing store is not
+asked again at once. A pass that ran out of merge budget is queued at once. The
+telemetry event `[:alambique, :compactor, :tick]` ends a busy period, when no
+pass is left running. The compactor starts last in the instance tree, so its
+crash restarts nothing.
 
 **Chain cap.** A row counts the TXIDs from its first commit to its last, one
 per batch, so `last - first + 1` is the number of level-0 files the cell added
@@ -1963,29 +1968,48 @@ length says nothing about the walk. The 500 to 830 files that a node swap
 under load counted, with the cap at 256, were the listing.
 
 The cap works in two ways. Rows with `max_chain_segments` or more (at least
-`fanout`, so they are ready anyway) go ahead of all other rows, and a tick
-that has one runs `concurrency + urgent_concurrency` passes at once (default
-2 + 4), and takes batches for that many. And the commit that brings a row to
-the cap wakes the compactor with one message (`notify/3` looks at the row
-every `fanout` TXIDs, not at every commit): the compactor then runs the rows
-over the cap at once, without waiting for the timer. Without the wake a hot
-cell reached the cap, waited for the next tick, and committed
-`rate * interval_ms` more before its pass started. Measured with 12 cells that
-commit back to back (about 30 commits per second each) over a store with
-25 ms per request and `max_chain_segments: 48`, the largest chain a restore
-would walk was 214 files with the tick alone and 83 with the wake.
+`fanout`, so they are ready anyway) go ahead of all other rows, and they may
+use `concurrency + urgent_concurrency` slots (default 2 + 4) where the others
+use `concurrency`. And the commit that brings a row to the cap wakes the
+compactor with one message (`notify/3` looks at the row every `fanout` TXIDs,
+not at every commit): the compactor then starts the pass at once if a slot is
+free, without waiting for the timer. Without the wake a hot cell reached the
+cap, waited for the next tick, and committed `rate * interval_ms` more before
+its pass started.
 
-The chain of a cell is then the cap plus what it commits while its pass runs:
-about `rate * pass_time`, where a pass costs the listing (one request for every
-1 000 files of the cell), and for each merge about four round trips. It does
-not hold when the compactor is down, when more cells are over the cap than
-`concurrency + urgent_concurrency` can serve (the demand is about
-`commits_per_second * round_trip / fanout` passes at once, summed over the
-cells, so 100 commits per second at 25 ms needs two), or while a pass fails:
-a row taken for a failed pass or for a pass that ran out of merge budget is
-queued again, after `retry_ms` or at once, with the TXIDs it counted, so its
-chain is still measured; a commit made meanwhile makes a row that takes the
-older start.
+The bound is: while the cells over the cap do not outnumber the slots, the
+TXIDs a cell has committed since its oldest uncompacted one are at most
+`max(cap, d) + d`, where `d` is what the cell commits while one pass of it
+runs (`rate * pass_time`; a pass costs the listing, one request for every
+1 000 files of the cell, and for each merge about four round trips). A cell
+has one pass at a time, so the row that grew during a pass goes into the next
+pass, and a cell whose `d` is more than the cap is compacted back to back. The
+property `test/chain_cap_properties_test.exs` checks the bound in a model of
+the compactor's choice of rows. It does not hold when the compactor is down,
+when more cells are over the cap than `concurrency + urgent_concurrency` can
+serve (the demand is about `commits_per_second * round_trip / fanout` passes at
+once, summed over the cells, so 100 commits per second at 25 ms needs two), or
+while passes fail: a row taken for a failed pass or for a pass that ran out of
+merge budget is queued again with the TXIDs it counted, so its chain is still
+measured; a commit made meanwhile makes a row that takes the older start. A
+saturated CPU makes passes longer, so `d` grows with it; when it grows past the
+slots, a node that cannot compact as fast as its cells commit has no limit,
+and no commit is refused for it.
+
+Before the compactor started passes as slots freed, it ran them in rounds of
+the rows it had taken, and a round lasted as long as its slowest pass. A cell
+that reached the cap during a round waited for the end of it. On a node
+pinned to one CPU and saturated (`mise run bench:swap` at 30 commits per
+second per cell, with busy loops in the writing VM), 68 of the 70 samples
+that found a cell at the cap found fewer than 6 passes running (2.1 on
+average), and the longest tail of a row was 159 to 310 TXIDs against a cap of
+256. With passes started as slots free, the same run had no sample with a cell
+at the cap, and the longest tail of a row was 92 to 113. Without the busy
+loops, at 30 commits per second per cell, the longest tail went from 283-336
+to 141-228. Atanor's slow wakes (500 to 760 level-0 GETs) came from this on a
+node whose passes took longer still: a cell at the cap waited for the round
+that was running and then for its own pass, each as long as the slowest pass of
+the round.
 
 **Compaction on release.** A cell that gives its lease up on purpose
 (`Alambique.hibernate/3`, `Alambique.drain/2` and the stop of the instance:

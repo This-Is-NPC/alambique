@@ -90,7 +90,6 @@ defmodule Alambique.Config do
     retry_ms: 30_000,
     moved_scan_ms: 60_000,
     moved_scan_page: 100,
-    batch_factor: 4,
     max_chain_segments: 256,
     hold_bytes: 33_554_432,
     hold_object_bytes: 1_048_576,

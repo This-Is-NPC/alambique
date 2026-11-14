@@ -126,14 +126,12 @@ defmodule Alambique do
       `:retry_ms` (after a failed pass, default 30 000), `:moved_scan_ms`
       (time between the scans of the store for cleanups of moved cells that
       wait, default 60 000), `:moved_scan_page` (markers listed per request,
-      one request per tick, default 100), `:batch_factor`
-      (ready cells taken per tick as a multiple of `:concurrency`, default 4;
-      the cells over `:max_chain_segments` go first, then those that waited
-      longest), `:max_chain_segments` (TXIDs committed since the compactor
-      last took the cell, from which it goes first and wakes the compactor
-      without waiting for the next tick, default 256, at least `:fanout`),
-      `:urgent_concurrency` (passes at once added to `:concurrency` while a
-      cell is over the cap, default 4, 0 for none),
+      one request per tick, default 100), `:max_chain_segments` (TXIDs
+      committed since the compactor last took the cell, from which its pass
+      goes first and starts without waiting for the next tick, default 256, at
+      least `:fanout`), `:urgent_concurrency` (passes at once added to
+      `:concurrency` while a cell is over the cap, default 4, 0 for none; a
+      pass that ends starts the next at once),
       `:release_min_tail` (level-0 files in the chain a restore would walk
       from which a graceful release compacts the cell first, default 32)
       and `:release_deadline_ms` (time the release may spend compacting before
