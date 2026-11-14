@@ -181,6 +181,9 @@ Compaction (design §9) shortens the chain, and so the wake.
 
 ## A node swap under load
 
+The numbers of this section were measured before a node compacted its tail at
+the release of the lease (version 0.8.0).
+
 `mise run bench:swap` (after `mise run seaweedfs:up`) writes 12 cells at 8
 commits per second each for 90 s, with the compactor at its defaults, to
 SeaweedFS behind a 25 ms proxy, from a VM pinned to one CPU. It then restores
@@ -226,8 +229,9 @@ next to the `{:get, :segment}` and `{:get, :merged}` of the wake. They are
 equal in every wake measured: a chain of N files costs N GETs.
 
 Measured on a shared laptop, before the release compacted the tail (so the wake
-columns are the chain at the stop; `release_deadline_ms: 0` gives the same; load average 4 to 8; 36 s of writes, 12 cells,
-25 ms proxy, writer pinned to one CPU), one run of each, before and after the
+columns are the chain at the stop; `release_deadline_ms: 0` gives the same),
+at load average 4 to 8, with 36 s of writes, 12 cells, a 25 ms proxy and the
+writer pinned to one CPU, one run of each, before and after the
 compactor started passes as slots free. The tail is the longest `last - first +
 1` a cell's row had; the wake columns are those of the 12 wakes after the writer
 stopped, which depend on how long before the stop each cell's last pass
@@ -245,7 +249,14 @@ started, and so vary more than the tail does:
 The tails above the cap of 256 are gone, and they are bounded by what a cell
 commits while its pass runs (design §9). A wake after a swap still reads the
 commits since the last pass of each cell; shortening that is the job of
-compacting at the release of the lease.
+compacting at the release of the lease. With it (commit 96b4bb6, 30 commits/s,
+30 s, busy loops `BURN=2`, `BURN_DIRTY=4`, load average 5 to 12), four of 12
+cells reached the release with tails of 208 to 250 files and were cut by the
+3 s deadline; the worst wake read 66 level-0 and 29 merged files (95 walked)
+in 0.37 s, and every wake of 5 runs took 0.41 s at most. Without the busy
+loops (3 runs) a wake read 31 level-0 files at most and the stop took 1.2 to
+1.3 s. A saturated CPU can cut the release compaction: see design §9, "Limit:
+a saturated CPU", and raise `release_deadline_ms` if it matters.
 
 ## Troubleshooting
 

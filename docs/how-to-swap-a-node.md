@@ -191,6 +191,16 @@ the only errors were lease errors and `:draining`.
   [a node swap with a saturated writer](how-to-speed-up-a-wake.md#a-node-swap-with-a-saturated-writer)
   for how to measure it and `compaction: [concurrency:, urgent_concurrency:]`
   for what to raise.
+- **A cell's first wake on B reads more than 32 level-0 files.** On a
+  saturated CPU the compaction at the release can be cut by
+  `release_deadline_ms`, and B reads the tail that was left (design section 9,
+  "Limit: a saturated CPU"). The `[:alambique, :cell, :hibernate]` event of A
+  says `compaction: :deadline` and its `tail`. In the bench with the writer on
+  one busy CPU, four of 12 cells were cut with tails of 208 to 250 files; the
+  worst wake still took 0.37 s, and none took over 0.41 s in 5 runs. Raise
+  `compaction: [release_deadline_ms:]` for a shorter tail, at the cost of a
+  longer drain (0 turns the compaction off), and keep `drain: [deadline_ms:]`
+  above it.
 - **A drain returns `hibernated: 0` and the cells are awake on another
   node.** `drain/2` acts on the cells with a process on this node only.
 
