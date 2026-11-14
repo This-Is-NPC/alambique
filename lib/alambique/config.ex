@@ -93,7 +93,9 @@ defmodule Alambique.Config do
     batch_factor: 4,
     max_chain_segments: 256,
     hold_bytes: 33_554_432,
-    hold_object_bytes: 1_048_576
+    hold_object_bytes: 1_048_576,
+    release_deadline_ms: 3_000,
+    release_min_tail: 32
   ]
 
   @sweeper_defaults [
@@ -729,6 +731,7 @@ defmodule Alambique.Config do
           :hold_bytes,
           :hold_object_bytes,
           :urgent_concurrency,
+          :release_deadline_ms,
           :delete_superseded,
           :snapshot_ratio,
           :snapshot_keep_ms,
@@ -737,7 +740,7 @@ defmodule Alambique.Config do
         not (is_integer(value) and value > 0),
         do: bad!(":compaction #{inspect(key)} must be a positive integer")
 
-    for key <- [:hold_bytes, :hold_object_bytes, :urgent_concurrency],
+    for key <- [:hold_bytes, :hold_object_bytes, :urgent_concurrency, :release_deadline_ms],
         not (is_integer(merged[key]) and merged[key] >= 0),
         do: bad!(":compaction #{inspect(key)} must be a non-negative integer")
 

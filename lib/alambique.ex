@@ -134,6 +134,11 @@ defmodule Alambique do
       without waiting for the next tick, default 256, at least `:fanout`),
       `:urgent_concurrency` (passes at once added to `:concurrency` while a
       cell is over the cap, default 4, 0 for none),
+      `:release_min_tail` (level-0 files in the chain a restore would walk
+      from which a graceful release compacts the cell first, default 32)
+      and `:release_deadline_ms` (time the release may spend compacting before
+      it hands the lease over anyway, default 3 000, 0 for no compaction on
+      release; see `hibernate/3`),
       `:hold_bytes` (memory per instance for the files cells just replicated,
       so a pass of the owning node does not read them back from the store,
       default 33 554 432, 32 MiB; 0 turns holding off), `:hold_object_bytes`
@@ -799,6 +804,12 @@ defmodule Alambique do
   @doc """
   Puts the cell to sleep: uploads what is pending, checkpoints, releases the
   lease and stops its process. `:ok` also when the cell was not awake.
+
+  A cell with a long level-0 tail (`:release_min_tail`, under `:compaction`)
+  first compacts it for at most `:release_deadline_ms`, so the node that wakes
+  it next reads a short chain. Every release pays one listing of the cell's
+  files to find out. When the deadline passes, the release goes on
+  with what was compacted. Design §9.
 
   When the store refuses the release, the cell is asleep and its data is
   durable, but the lease stays until it expires: the answer is

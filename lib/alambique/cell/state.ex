@@ -73,10 +73,14 @@ defmodule Alambique.Cell.State do
   def lease_valid?(%__MODULE__{lease: lease} = state),
     do: Alambique.Lease.valid?(state.lease_ctx, lease)
 
+  @doc "Milliseconds until the lease may no longer be used, by this node's clock and the skew margin."
+  @spec lease_left_ms(t) :: integer
+  def lease_left_ms(%__MODULE__{config: config, lease: lease} = state),
+    do: lease.expires_at_ms - config.skew_margin_ms - now_ms(state)
+
   @doc "Monotonic deadline for one store operation: the call budget, capped by the lease."
   @spec deadline(t) :: integer
-  def deadline(%__MODULE__{config: config, lease: lease} = state) do
-    remaining = lease.expires_at_ms - config.skew_margin_ms - now_ms(state)
-    Retry.deadline_in(min(config.op_timeout_ms, max(remaining, 0)))
+  def deadline(%__MODULE__{config: config} = state) do
+    Retry.deadline_in(min(config.op_timeout_ms, max(lease_left_ms(state), 0)))
   end
 end

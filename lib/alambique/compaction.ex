@@ -51,6 +51,10 @@ defmodule Alambique.Compaction do
       highest level. Marked files go through `Alambique.Trash`, so
       `:deletion_grace_ms`, `:batch_keys` and `:concurrency` apply (defaults:
       its own).
+    * `:min_tail` - the pass does nothing, and `tail` in its summary says why,
+      when the chain a restore would walk holds fewer level-0 files than this
+      (default 0: always). A release of a cell uses it to compact only a long
+      tail.
     * `:hold` - the instance config whose held bytes (`Compaction.Hold`) the
       pass may use instead of reading the store; `nil` reads everything
       (default)
@@ -87,7 +91,8 @@ defmodule Alambique.Compaction do
           snapshot: pos_integer | nil,
           skipped: [{atom, term}],
           more: boolean,
-          head: non_neg_integer
+          head: non_neg_integer,
+          tail: non_neg_integer
         }
 
   @doc "The default options."
@@ -103,12 +108,10 @@ defmodule Alambique.Compaction do
     deadline = Retry.deadline_in(opts[:timeout_ms])
 
     result =
-      with {:ok, state} <- load(ctx, cell, opts, deadline),
-           {:ok, state} <- merge_levels(state),
-           {:ok, state} <- delete_superseded(state),
-           {:ok, state} <- count_bytes(state),
-           {:ok, state} <- snapshot(state) do
-        {:ok, summary(state)}
+      with {:ok, state} <- load(ctx, cell, opts, deadline) do
+        if state.tail < Keyword.get(opts, :min_tail, 0),
+          do: {:ok, summary(state)},
+          else: work(state)
       end
 
     Telemetry.span_stop(
@@ -119,6 +122,15 @@ defmodule Alambique.Compaction do
     )
 
     result
+  end
+
+  defp work(state) do
+    with {:ok, state} <- merge_levels(state),
+         {:ok, state} <- delete_superseded(state),
+         {:ok, state} <- count_bytes(state),
+         {:ok, state} <- snapshot(state) do
+      {:ok, summary(state)}
+    end
   end
 
   defp pass_measurements({:ok, s}), do: %{merges: s.merges, bytes: s.bytes}
@@ -143,7 +155,8 @@ defmodule Alambique.Compaction do
       snapshot: state.snapshot,
       skipped: Enum.reverse(state.skipped),
       more: state.more,
-      head: state.head
+      head: state.head,
+      tail: state.tail
     }
   end
 
@@ -152,6 +165,8 @@ defmodule Alambique.Compaction do
   defp load(ctx, cell, opts, deadline) do
     with {:ok, {segments, snapshots}} <- Objects.list_cell(ctx, cell, deadline) do
       newest = List.last(snapshots)
+      from = if(newest, do: newest.txid, else: 0)
+      index = Plan.index(segments)
 
       {:ok,
        %{
@@ -161,11 +176,12 @@ defmodule Alambique.Compaction do
          hold: opts[:hold],
          max_merges: opts[:max_merges],
          deadline: deadline,
-         index: Plan.index(segments),
+         index: index,
          snapshot_at: newest && newest.txid,
          snapshot_key: newest && newest.key,
-         from: if(newest, do: newest.txid, else: 0),
+         from: from,
          head: 0,
+         tail: tail(index, from, opts),
          merges: 0,
          bytes: 0,
          superseded: [],
@@ -177,6 +193,14 @@ defmodule Alambique.Compaction do
          more: false
        }}
     end
+  end
+
+  # The level-0 files of the chain: what a restore reads that no merge covers.
+  # Only counted when the pass may skip on it.
+  defp tail(index, from, opts) do
+    if Keyword.get(opts, :min_tail, 0) > 0,
+      do: index |> Plan.chain(from) |> Enum.count(&(&1.level == 0)),
+      else: 0
   end
 
   # Merging
@@ -198,7 +222,15 @@ defmodule Alambique.Compaction do
   defp merge_groups(%{merges: merges, max_merges: max} = state, _groups) when merges >= max,
     do: {:ok, %{state | more: true}}
 
-  defp merge_groups(state, [group | rest]) do
+  defp merge_groups(state, groups) do
+    if expired?(state), do: {:ok, %{state | more: true}}, else: merge_next(state, groups)
+  end
+
+  # A request past the deadline still gets one attempt (`Retry`), so the pass
+  # stops starting merges once it passed, and `more: true` says so.
+  defp expired?(state), do: System.monotonic_time(:millisecond) >= state.deadline
+
+  defp merge_next(state, [group | rest]) do
     case merge_group(state, group) do
       {:ok, state} -> merge_groups(state, rest)
       {:error, _} = error -> error
@@ -451,7 +483,7 @@ defmodule Alambique.Compaction do
     head = Plan.head(chain, state.from)
     state = %{state | head: head}
 
-    with true <- head > state.from,
+    with true <- head > state.from and not expired?(state),
          {:ok, true} <- due?(state, chain, head) do
       build_snapshot(state, chain, head)
     else

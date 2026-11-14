@@ -78,6 +78,10 @@ the fence.
    one is over it. Lower the cap if a busy node must wake cells quickly. A
    restore walks the merged files, not every file in the listing: the listing
    of a busy cell has hundreds, and the walk about the cap at most; design §9.
+   A node that hands a cell over on purpose (`hibernate/3`, `drain/2`, a
+   stop) compacts its tail first when it has `compaction: [release_min_tail:]`
+   (default 32) level-0 files or more, for at most `compaction: [release_deadline_ms:]`
+   (default 3 000), so the next node reads a short chain.
 
 4. Keep a local file when you can. A node that hibernated the cell last reuses
    its file and reads only the head of the chain. `local_cache.max_bytes`

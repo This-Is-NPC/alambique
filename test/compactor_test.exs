@@ -146,6 +146,8 @@ defmodule Alambique.CompactorTest do
 
       send(:ets.info(config.compactor, :owner), :tick)
       assert_receive :done, 30_000
+      # The stop of the instance compacts the cells it releases: not counted.
+      :telemetry.detach(id)
       assert for(cell <- cells, :ets.lookup(passes, cell) == [], do: cell) == []
     end
 
