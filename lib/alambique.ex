@@ -130,8 +130,10 @@ defmodule Alambique do
       (ready cells taken per tick as a multiple of `:concurrency`, default 4;
       the cells over `:max_chain_segments` go first, then those that waited
       longest), `:max_chain_segments` (TXIDs committed since the compactor
-      last took the cell, from which it goes first in the next tick, default
-      256, at least `:fanout`),
+      last took the cell, from which it goes first and wakes the compactor
+      without waiting for the next tick, default 256, at least `:fanout`),
+      `:urgent_concurrency` (passes at once added to `:concurrency` while a
+      cell is over the cap, default 4, 0 for none),
       `:hold_bytes` (memory per instance for the files cells just replicated,
       so a pass of the owning node does not read them back from the store,
       default 33 554 432, 32 MiB; 0 turns holding off), `:hold_object_bytes`

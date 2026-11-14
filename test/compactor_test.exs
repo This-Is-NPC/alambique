@@ -23,6 +23,8 @@ defmodule Alambique.CompactorTest do
     setup_store()
   end
 
+  defp now_ms, do: System.monotonic_time(:millisecond)
+
   defp put(inst, cell, n),
     do: Alambique.execute(inst, cell, "INSERT INTO t (n, v) VALUES (?, 'x')", [n])
 
@@ -241,6 +243,30 @@ defmodule Alambique.CompactorTest do
 
       assert log =~ "cleanup of #{cell} at nowhere failed"
       assert log =~ "unknown_location"
+    end
+
+    @tag :capture_log
+    test "a failed pass keeps the count of the TXIDs it did not compact", ctx do
+      inst =
+        start_instance(ctx,
+          migrations: @schema,
+          compaction: Keyword.put(@fast, :retry_ms, 600_000),
+          retention: false
+        )
+
+      table = Alambique.Config.fetch!(inst).compactor
+      cell = unique_cell()
+      CrashPoints.arm(:compact_before_put, :raise, times: 1)
+      for n <- 1..6, do: assert({:ok, _} = put(inst, cell, n))
+
+      # The row comes back after `retry_ms`, still counting from the first TXID.
+      later = now_ms() + 300_000
+
+      eventually(fn ->
+        match?([{_, _, _, due}] when due > later, :ets.lookup(table, cell))
+      end)
+
+      assert [{_, 1, _last, _}] = :ets.lookup(table, cell)
     end
 
     test "a message it does not know changes nothing", ctx do

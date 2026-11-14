@@ -84,6 +84,7 @@ defmodule Alambique.Config do
   @compaction_defaults [
     interval_ms: 5_000,
     concurrency: 2,
+    urgent_concurrency: 4,
     queue_limit: 10_000,
     max_age_ms: 300_000,
     retry_ms: 30_000,
@@ -727,6 +728,7 @@ defmodule Alambique.Config do
         key not in [
           :hold_bytes,
           :hold_object_bytes,
+          :urgent_concurrency,
           :delete_superseded,
           :snapshot_ratio,
           :snapshot_keep_ms,
@@ -735,7 +737,7 @@ defmodule Alambique.Config do
         not (is_integer(value) and value > 0),
         do: bad!(":compaction #{inspect(key)} must be a positive integer")
 
-    for key <- [:hold_bytes, :hold_object_bytes],
+    for key <- [:hold_bytes, :hold_object_bytes, :urgent_concurrency],
         not (is_integer(merged[key]) and merged[key] >= 0),
         do: bad!(":compaction #{inspect(key)} must be a non-negative integer")
 
