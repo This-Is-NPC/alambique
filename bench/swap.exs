@@ -123,8 +123,9 @@ defmodule Swap do
 
     id = {__MODULE__, make_ref()}
     :telemetry.attach(id, [:alambique, :cell, :hibernate], &__MODULE__.print_release/4, nil)
-    Supervisor.stop(sup)
+    {stop_us, :ok} = :timer.tc(fn -> Supervisor.stop(sup) end)
     :telemetry.detach(id)
+    IO.puts("stop: #{div(stop_us, 1000)} ms for #{length(cells())} cells")
     File.rm_rf(dir)
   end
 
