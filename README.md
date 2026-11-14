@@ -60,6 +60,16 @@ first release (0.1.0):
 - 0.6.1: the README has a first try that runs against a local SeaweedFS, and
   the Rust version the crate needs is declared (1.97.1 or later). The native
   code builds with Rust 1.100.0 too. There is no breaking change.
+- 0.7.0: the compactor takes the cells that waited longest first, so no cell
+  is passed over while others are busy. A new option
+  `compaction: [max_chain_segments:]` (default 256) puts a cell with that many
+  uncompacted commits first, which keeps the chain a wake reads short. A
+  restore of a chain larger than `restore: [max_inflight_bytes:]` keeps
+  reading ahead as the budget frees, so it is as fast as one that fits (the
+  table is in the [how-to](docs/how-to-speed-up-a-wake.md)).
+  `mise run bench:restore-concurrency` measures it. There is no breaking
+  change, except that a `compaction: [fanout:]` above 256 is now refused
+  unless `max_chain_segments` is at least as large.
 
 The full list is in [CHANGELOG.md](CHANGELOG.md).
 
