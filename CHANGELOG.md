@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.9.0](https://github.com/This-Is-NPC/alambique/compare/v0.8.0...v0.9.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* **compaction:** compaction: [batch_factor:] is no longer an option. [:alambique, :compactor, :tick] is emitted when the passes of a busy period end, with the passes started in it as cells. Para o Atanor: it does not set batch_factor, nothing to change there.
+
+### Features
+
+* **bench:** saturate the writer and audit the GETs ([55616c3](https://github.com/This-Is-NPC/alambique/commit/55616c30d0fbe82b9494c36e7f11cd3254c4baef))
+* **compaction:** compact the tail on graceful release ([db90efd](https://github.com/This-Is-NPC/alambique/commit/db90efd21b18492d0cd1584817fea3baa16f0688))
+* **telemetry:** add store time and reductions to wake ([b5f61c9](https://github.com/This-Is-NPC/alambique/commit/b5f61c9b3ab380d895ea1b1f8152988ec0016f27))
+
+
+### Bug Fixes
+
+* **compaction:** start passes as slots free ([8a1d514](https://github.com/This-Is-NPC/alambique/commit/8a1d514c9e352844e8f3867f4f942943c11e554e))
+* **drain:** bound release compaction by the call ([016e5b8](https://github.com/This-Is-NPC/alambique/commit/016e5b836cf6d62d70a2b15be822d7a0c6d1822c))
+
 ## [0.8.0](https://github.com/This-Is-NPC/alambique/compare/v0.7.1...v0.8.0) (2026-11-14)
 
 
