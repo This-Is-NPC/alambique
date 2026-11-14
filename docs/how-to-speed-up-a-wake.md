@@ -115,7 +115,7 @@ seconds, before and after the read ahead refilled as the walk gave budget back
 |                   8 |           2.93 |          2.76 |           12.57 |           2.77 |
 |                  16 |           1.59 |          1.45 |           11.92 |           1.45 |
 
-Time falls with the concurrency, about 15 times from 1 to 16, and a budget
+Time falls with the concurrency, about 14 times from 1 to 16, and a budget
 smaller than the chain costs nothing more: the read ahead takes the weight the
 walk gives back for the next files. Before, it stopped at the first file that
 did not fit and the walk read the rest one at a time. Keep the default of 16 on
