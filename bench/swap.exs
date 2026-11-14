@@ -28,6 +28,12 @@
 #   ALAMBIQUE_BENCH_SWAP_BUCKET   bucket to write to or restore from     (default: a new one)
 #   ALAMBIQUE_BENCH_SWAP_READER_CPU  CPU of the restoring VM             (default "0")
 #   ALAMBIQUE_BENCH_SWAP_WRITER_CPUS CPUs of the writing VM              (default "1")
+#   ALAMBIQUE_BENCH_SWAP_OPEN     "1": a commit starts every 1/RATE s whatever the
+#                                 earlier ones did, like clients' requests (default: one
+#                                 commit at a time per cell)
+#   ALAMBIQUE_BENCH_SWAP_WRITER_BURN  busy loops in the writing VM, to
+#                                 saturate its CPU like an app that works      (default "0")
+#   ALAMBIQUE_BENCH_SWAP_WRITER_BURN_DIRTY  loops of a dirty CPU NIF in it (default "0")
 #   ALAMBIQUE_BENCH_SWAP_WRITER_OPTS  extra Alambique options of the writing
 #                                 node, an Elixir keyword list, e.g.
 #                                 "[compaction: [interval_ms: 3_600_000]]"
@@ -37,6 +43,102 @@
 #   ALAMBIQUE_BENCH_POOL_SIZE     `pool_size` of the S3 store            (default: its own)
 
 Code.require_file("seaweedfs_store.exs", __DIR__)
+
+# The compactor of the writing node as seen from outside: per cell, the passes
+# it ran and the longest tail its row held.
+defmodule Watch do
+  @moduledoc false
+
+  def start(config) do
+    me = self()
+    cap = config.compaction.max_chain_segments
+    table = :ets.new(:watch, [:public, :bag])
+    id = {__MODULE__, make_ref()}
+
+    :telemetry.attach(
+      id,
+      [:alambique, :compaction, :pass],
+      fn _, %{duration: d}, %{cell: cell} = meta, _ ->
+        ms = System.convert_time_unit(d, :native, :millisecond)
+        :ets.insert(table, {:pass, cell, ms, meta[:more], System.monotonic_time(:millisecond)})
+      end,
+      nil
+    )
+
+    sampler = spawn_link(fn -> sample(config.compactor, table, me, cap) end)
+    {id, table, sampler}
+  end
+
+  defp sample(compactor, table, parent, cap) do
+    receive do
+      :stop -> send(parent, :sampled)
+    after
+      100 ->
+        for {cell, first, last, _} <- :ets.tab2list(compactor), first > 0 do
+          :ets.insert(table, {:tail, cell, last - first + 1, System.monotonic_time(:millisecond)})
+        end
+
+        sample(compactor, table, parent, cap)
+    end
+  end
+
+  # Samples that found a cell at the cap while fewer passes ran than the
+  # compactor may run at once (concurrency + urgent_concurrency), which is
+  # the compactor leaving work waiting.
+  defp idle_while_over(all, cap) do
+    intervals = for {:pass, _, ms, _, stop} <- all, do: {stop - ms, stop}
+    samples = for {:tail, _, n, t} <- all, do: {t, n}
+
+    over =
+      samples
+      |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+      |> Enum.filter(fn {_, ns} -> Enum.any?(ns, &(&1 >= cap)) end)
+
+    running = fn t -> Enum.count(intervals, fn {a, b} -> a <= t and t <= b end) end
+    idle = Enum.count(over, fn {t, _} -> running.(t) < 6 end)
+
+    IO.puts(
+      "samples with a cell at the cap: #{length(over)}, with fewer than 6 passes running: #{idle}, " <>
+        "mean passes running then: #{Float.round(Enum.sum(for {t, _} <- over, do: running.(t)) / max(length(over), 1), 2)}"
+    )
+  end
+
+  def report({id, table, sampler}, cap) do
+    send(sampler, :stop)
+    receive do: (:sampled -> :ok)
+    :telemetry.detach(id)
+    IO.puts("cell  passes  pass ms (sum / max)  more  tail row max  wait for a pass ms (max)")
+    all = :ets.tab2list(table)
+    cells = for {:pass, cell, _, _, _} <- all, uniq: true, do: cell
+    idle_while_over(all, cap)
+
+    for cell <- Enum.sort(cells) do
+      passes =
+        for {:pass, ^cell, ms, more, stop} <- all, do: {stop - ms, ms, more}
+
+      passes = Enum.sort(passes)
+      samples = for {:tail, ^cell, n, t} <- all, do: {t, n}
+      ms = Enum.map(passes, &elem(&1, 1))
+      more = Enum.count(passes, &elem(&1, 2))
+
+      # From the first sample at the cap to the start of the pass that took the row.
+      waits =
+        passes
+        |> Enum.map(&elem(&1, 0))
+        |> Enum.chunk_every(2, 1, [0])
+        |> Enum.flat_map(fn [start, _] ->
+          over = for {t, n} <- samples, n >= cap, t <= start, t > start - 30_000, do: t
+          if over == [], do: [], else: [start - Enum.min(over)]
+        end)
+
+      IO.puts(
+        "#{cell}  #{length(passes)}  #{Enum.sum(ms)} / #{Enum.max(ms)}  #{more}  " <>
+          "#{samples |> Enum.map(&elem(&1, 1)) |> Enum.max(fn -> 0 end)}  " <>
+          "#{Enum.max(waits, fn -> 0 end)}"
+      )
+    end
+  end
+end
 
 defmodule Swap do
   @moduledoc false
@@ -101,6 +203,16 @@ defmodule Swap do
     name = :bench_swap_writer
     {sup, dir} = start(name, port, opts("WRITER_OPTS"))
     row = String.duplicate("x", 100)
+
+    burners =
+      for _ <- 1..int("ALAMBIQUE_BENCH_SWAP_WRITER_BURN", "0")//1, do: spawn(&burn/0)
+
+    burners =
+      burners ++
+        for _ <- 1..int("ALAMBIQUE_BENCH_SWAP_WRITER_BURN_DIRTY", "0")//1,
+            do: spawn(&burn_dirty/0)
+
+    watch = Watch.start(Alambique.Config.fetch!(name))
     t0 = System.monotonic_time(:millisecond)
     stop = t0 + seconds * 1000
 
@@ -114,6 +226,8 @@ defmodule Swap do
 
     counts = Task.await_many(writers, :infinity)
     IO.puts("write: #{Enum.sum(counts)} commits in #{seconds} s")
+    for pid <- burners, do: Process.exit(pid, :kill)
+    Watch.report(watch, Alambique.Config.fetch!(name).compaction.max_chain_segments)
     IO.puts("cell  level-0  merged  listed  walked")
 
     for cell <- cells() do
@@ -140,7 +254,37 @@ defmodule Swap do
     )
   end
 
+  defp burn, do: burn()
+
+  # A dirty CPU NIF in a loop: the pool a node shares with the work of its app.
+  defp burn_dirty do
+    :crypto.pbkdf2_hmac(:sha256, "p", "s", 100_000, 32)
+    burn_dirty()
+  end
+
+  # Open loop: a commit starts every `interval` ms whatever the commits before
+  # it have done, like requests that arrive from clients.
   defp commits(name, cell, row, stop, interval, n) do
+    if System.get_env("ALAMBIQUE_BENCH_SWAP_OPEN") == "1",
+      do: open(name, cell, row, stop, interval, n, [], System.monotonic_time(:millisecond)),
+      else: closed(name, cell, row, stop, interval, n)
+  end
+
+  defp open(name, cell, row, stop, interval, n, tasks, due) do
+    if due >= stop do
+      for task <- tasks, do: {:ok, _} = Task.await(task, :infinity)
+      n
+    else
+      task =
+        Task.async(fn -> Alambique.execute(name, cell, "INSERT INTO t (v) VALUES (?)", [row]) end)
+
+      wait = due + interval - System.monotonic_time(:millisecond)
+      if wait > 0, do: Process.sleep(wait)
+      open(name, cell, row, stop, interval, n + 1, [task | tasks], due + interval)
+    end
+  end
+
+  defp closed(name, cell, row, stop, interval, n) do
     now = System.monotonic_time(:millisecond)
 
     if now >= stop do
@@ -149,7 +293,7 @@ defmodule Swap do
       {:ok, _} = Alambique.execute(name, cell, "INSERT INTO t (v) VALUES (?)", [row])
       wait = interval - (System.monotonic_time(:millisecond) - now)
       if wait > 0, do: Process.sleep(wait)
-      commits(name, cell, row, stop, interval, n + 1)
+      closed(name, cell, row, stop, interval, n + 1)
     end
   end
 
@@ -161,6 +305,18 @@ defmodule Swap do
     from = snapshots |> Enum.map(& &1.txid) |> Enum.max(fn -> 0 end)
     walked = segments |> Plan.index() |> Plan.chain(from) |> length()
     {Enum.count(segments, &(&1.level == 0)), Enum.count(segments, &(&1.level > 0)), walked}
+  end
+
+  # Level-0 files listed, and the level-0 and merged files of the chain a restore walks.
+  defp chain_files(name, cell) do
+    ctx = Alambique.CellHelpers.repl_ctx(name, cell)
+    deadline = System.monotonic_time(:millisecond) + 60_000
+    {:ok, {segments, snapshots}} = Objects.list_cell(ctx, cell, deadline)
+    from = snapshots |> Enum.map(& &1.txid) |> Enum.max(fn -> 0 end)
+    files = segments |> Plan.index() |> Plan.chain(from)
+
+    {Enum.count(segments, &(&1.level == 0)), Enum.count(files, &(&1.level == 0)),
+     Enum.count(files, &(&1.level > 0))}
   end
 
   def restore(port) do
@@ -186,6 +342,8 @@ defmodule Swap do
     ids = cells()
     # Start from a quiet node: nothing else runs while the wakes do.
     Process.sleep(500)
+    # What the chain of each cell holds before the wake reads it, for the audit below.
+    expected = Map.new(ids, &{&1, chain_files(name, &1)})
 
     ids
     |> Enum.map(&Task.async(fn -> {:ok, _} = Alambique.touch(name, &1, timeout: 120_000) end))
@@ -199,6 +357,17 @@ defmodule Swap do
       segment = Map.get(wake.requests, {:get, :segment}, 0)
       merged = Map.get(wake.requests, {:get, :merged}, 0)
       IO.puts("WAKE #{cell} #{ms} #{segment} #{merged} #{wake.walked}")
+    end
+
+    # Every file of the chain is read once: a wake makes as many level-0 and
+    # merged GETs as its chain has files of each kind.
+    IO.puts("AUDIT cell  listed level-0  chain level-0  level-0 GETs  chain merged  merged GETs")
+
+    for {cell, wake} <- Enum.sort(wakes) do
+      {listed, l0, merged} = expected[cell]
+      got_l0 = Map.get(wake.requests, {:get, :segment}, 0)
+      got_merged = Map.get(wake.requests, {:get, :merged}, 0)
+      IO.puts("AUDIT #{cell}  #{listed}  #{l0}  #{got_l0}  #{merged}  #{got_merged}")
     end
 
     Supervisor.stop(sup)
