@@ -10,7 +10,11 @@ defmodule Alambique.Cell do
   # encoded while earlier ones upload; callers are answered only in TXID order,
   # when a batch and every batch before it have landed (`Cell.Pipe`).
 
-  use GenServer, restart: :temporary, shutdown: 30_000
+  # What the supervisor waits for a cell to stop; the release compaction of a
+  # stop fits in it.
+  @shutdown_ms 30_000
+
+  use GenServer, restart: :temporary, shutdown: @shutdown_ms
 
   require Logger
 
@@ -306,7 +310,7 @@ defmodule Alambique.Cell do
   def handle_call(request, from, %State{mode: :serving} = state) do
     answer = state.inflight |> Inflight.busy(fn -> call(request, from, state) end) |> tracked()
     # Taken back once the call is parked or answered, so it counts all along.
-    if request != :hibernate, do: :atomics.sub(state.load, 2, 1)
+    unless match?({:hibernate, _}, request), do: :atomics.sub(state.load, 2, 1)
     answer
   end
 
@@ -402,8 +406,9 @@ defmodule Alambique.Cell do
     end
   end
 
-  defp serve_call(:hibernate, _from, state) do
-    case hibernate(state, :request) do
+  # `at` is the time the caller stops waiting (`:infinity` for none).
+  defp serve_call({:hibernate, at}, _from, state) do
+    case hibernate(state, :request, at) do
       {:ok, state, released} -> {:stop, :normal, released, %{state | mode: :stopped}}
       {:stop, reason, state} -> stop_serving(state, reason, {:error, reason})
     end
@@ -538,7 +543,7 @@ defmodule Alambique.Cell do
   # A frozen cell (design §10) hibernates at its next renewal.
   defp info(:renew, %State{mode: :serving} = state) do
     if frozen?(state) do
-      case hibernate(state, :frozen) do
+      case hibernate(state, :frozen, :infinity) do
         {:ok, state, _released} -> {:stop, :normal, %{state | mode: :stopped}}
         {:stop, reason, state} -> stop_serving(state, reason)
       end
@@ -592,7 +597,7 @@ defmodule Alambique.Cell do
         {:noreply, state}
 
       true ->
-        case hibernate(state, :idle) do
+        case hibernate(state, :idle, :infinity) do
           {:ok, state, _released} -> {:stop, :normal, %{state | mode: :stopped}}
           {:stop, reason, state} -> stop_serving(state, reason)
         end
@@ -1018,12 +1023,12 @@ defmodule Alambique.Cell do
   # Hibernation (design §7): upload what is pending, checkpoint, release. The
   # third element is `:ok`, or the error of a release that failed: the cell
   # is asleep and its lease expires as after a crash.
-  defp hibernate(state, why) do
+  defp hibernate(state, why, deadline) do
     started = System.monotonic_time()
 
     with {:ok, state} <- drain(state) do
       state = state |> Publisher.flush() |> finish_local()
-      {compacted, tail, spent} = compact_tail(state, why)
+      {compacted, tail, spent} = compact_tail(state, why, deadline)
       released = release(state)
 
       Telemetry.span_stop([:cell, :hibernate], started, %{tail: tail, compact_duration: spent}, %{
@@ -1041,12 +1046,17 @@ defmodule Alambique.Cell do
   # A graceful release (`Alambique.hibernate/3`, a drain, a stop) compacts a
   # long level-0 tail before it gives the lease away, so the next node wakes on
   # a short chain (design §9). It stops at `release_deadline_ms`, or earlier at
-  # the end of the lease, and hands over with what it merged. Returns the
-  # outcome (`:none`, `:done`, `:deadline` or `:error`), the tail it found and
-  # the time spent.
-  defp compact_tail(%State{config: %{compaction: c} = config} = state, why)
+  # the end of the lease, and `release_reserve_ms` before the time the caller
+  # stops waiting (`deadline`, monotonic; the stop of the instance has its
+  # shutdown time), and hands over with what it merged. Returns the outcome
+  # (`:none`, `:done`, `:deadline` or `:error`), the tail it found and the
+  # time spent.
+  defp compact_tail(%State{config: %{compaction: c} = config} = state, why, deadline)
        when why in [:request, :shutdown] and c != nil do
-    budget = min(c.release_deadline_ms, max(State.lease_left_ms(state), 0))
+    budget =
+      [c.release_deadline_ms, State.lease_left_ms(state), call_left(deadline, c)]
+      |> Enum.min()
+      |> max(0)
 
     if budget == 0 do
       {:none, 0, 0}
@@ -1060,7 +1070,12 @@ defmodule Alambique.Cell do
     end
   end
 
-  defp compact_tail(_state, _why), do: {:none, 0, 0}
+  defp compact_tail(_state, _why, _deadline), do: {:none, 0, 0}
+
+  defp call_left(:infinity, _c), do: :infinity
+
+  defp call_left(deadline, c),
+    do: deadline - System.monotonic_time(:millisecond) - c.release_reserve_ms
 
   defp release_compaction({:ok, %{tail: tail}}, _deadline, _cell, min) when tail < min,
     do: {:none, tail}
@@ -1176,7 +1191,7 @@ defmodule Alambique.Cell do
   end
 
   defp finish(:shutdown, %State{mode: :serving} = state) do
-    case hibernate(state, :shutdown) do
+    case hibernate(state, :shutdown, System.monotonic_time(:millisecond) + @shutdown_ms) do
       {:ok, _state, _released} -> :ok
       {:stop, _reason, state} -> abandon(state)
     end

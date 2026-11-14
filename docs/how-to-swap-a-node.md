@@ -102,6 +102,16 @@ B serves its cell on the next request. A call that reaches A now gets
 `{:error, {:unavailable, owner, expires}}` for a cell B holds and
 `{:error, :draining}` for one nobody holds.
 
+The drain has a bound. Each compaction stops after `release_deadline_ms`, or
+`compaction: [release_reserve_ms:]` (default 2 000 ms) before the end of the
+time the drain has left, whichever comes first; a cell with less than that left does not compact
+(`compaction: :none`). The drain ends within `drain: [deadline_ms:]` (default
+60 000 ms). Up to `drain: [concurrency:]` cells (default 64) are released at
+once, so their compactions run in parallel and the drain takes about the
+longest one, at most `release_deadline_ms` plus the release; more cells go in
+waves. On one CPU the parallel compactions share it, but stay under the same
+deadlines. Twelve cells on one CPU (four with a tail of 200 files) took 5.2 s.
+
 If the node ends by a signal, `SIGTERM` is enough. The library installs no
 handler: the BEAM's default handling of `SIGTERM` calls `:init.stop/0`, which
 stops the applications (unless your release overrides it), and stopping the

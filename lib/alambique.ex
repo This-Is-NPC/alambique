@@ -138,7 +138,10 @@ defmodule Alambique do
       from which a graceful release compacts the cell first, default 32)
       and `:release_deadline_ms` (time the release may spend compacting before
       it hands the lease over anyway, default 3 000, 0 for no compaction on
-      release; see `hibernate/3`),
+      release), `:release_reserve_ms` (time before the end of the call, or of
+      the drain, that the release keeps for handing the lease over, default
+      2 000; with less left the release does not compact; see
+      `hibernate/3`),
       `:hold_bytes` (memory per instance for the files cells just replicated,
       so a pass of the owning node does not read them back from the store,
       default 33 554 432, 32 MiB; 0 turns holding off), `:hold_object_bytes`
@@ -809,7 +812,9 @@ defmodule Alambique do
   first compacts it for at most `:release_deadline_ms`, so the node that wakes
   it next reads a short chain. Every release pays one listing of the cell's
   files to find out. When the deadline passes, the release goes on
-  with what was compacted. Design §9.
+  with what was compacted. The compaction also stops `:release_reserve_ms`
+  before `:timeout` runs out, and does not start with less left, so the call
+  answers in time. Design §9.
 
   When the store refuses the release, the cell is asleep and its data is
   durable, but the lease stays until it expires: the answer is

@@ -2022,6 +2022,31 @@ used the whole deadline and were cut, and the eight others released in
 `:timeout_ms` and `:deadline_ms` of the drain when tails are longer or the
 store slower.
 
+*The bound of a release.* The compaction never outlasts the call that asked
+for the release. The caller's time reaches the cell as the monotonic time at
+which it stops waiting (`{:hibernate, at}`, from `Router`), and the pass
+budget is the least of `release_deadline_ms`, what is left of the lease and
+what is left of the call minus `release_reserve_ms` (default 2 000), which is
+kept for the rest of the release: the merge in flight when the pass is cut
+(it ends, see above) and the request that frees the lease. With nothing left after the reserve the cell does not compact
+(`compaction: :none`, `tail: 0`, no listing) and releases at once. The stop of
+the instance is bounded by the cell's child shutdown, 30 000 ms, the same way.
+Idle and frozen releases do not compact. A drain therefore ends within
+`drain.deadline_ms` (default 60 000): each cell in flight gets what is left
+of it as its call time, so the compaction is cut by `release_deadline_ms` and
+by the drain's remaining time, and a cell that starts later than the
+deadline is not touched. The cells hibernate `drain.concurrency` (default 64)
+at a time, so with that many cells or fewer the compactions run in parallel
+and the drain takes about the longest cell, at most `release_deadline_ms`
+plus the release; with more cells they run in waves of `concurrency`, and
+the waves that start too late for the deadline are skipped or cut. On a
+single CPU parallel compactions share it, so each runs slower, but the
+deadlines still bound them. In `mise run bench:swap` with the defaults
+(rate 30, 30 s, one CPU, 25 ms per request, load average 3.7 to 4.4,
+2026-11-14), stopping the instance with 12 cells, four of them with a tail of
+about 200 files, took 5.2 s: the four cut cells released in 3.2 s at most
+and the others in 0.2 s.
+
 **Levels.** A pass merges level-0 files, one per batch, `fanout` (default 8)
 at a time into level 1, level 1 into level 2, up to `max_level` (default 2).
 Merged files cover *aligned blocks*: level `L` covers blocks of `fanout^L`
