@@ -485,6 +485,7 @@ defmodule Alambique.Replication.Restore do
   # guess costs requests, not correctness: the walk reads what is missing.
   defp prefetch(env, start) do
     keys = guess(env, start)
+    env = lean(env)
 
     if env.lazy do
       with :ok <- prefetch_edges(env, keys), do: {:ok, nil}
@@ -492,6 +493,11 @@ defmodule Alambique.Replication.Restore do
       {:ok, prefetch_bodies(env, keys)}
     end
   end
+
+  # The read ahead hands `env` to a task for every request. Without the
+  # listing, which only the walk reads, that is a few words to copy instead of
+  # the whole chain: it made a restore quadratic in the length of the chain.
+  defp lean(env), do: %{env | segments: [], by_min: %{}, snapshots: []}
 
   defp guess(env, start) do
     first =

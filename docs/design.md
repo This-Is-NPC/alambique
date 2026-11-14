@@ -1167,6 +1167,25 @@ and the memory of N wakes in progress is N times that, N being at most
 (`@round_bytes`, 32 MiB, plus the files of a round), compaction, retention,
 rewind and the scrub, which have their own bounds.
 
+#### Many restores on one small node
+
+The budget, the read ahead and the request limit are per restore, not shared:
+N wakes in progress take N times each of them. Two costs add up. The time a
+restore waits for the store is at least `segments × latency /
+fetch_concurrency`: 830 segments at 25 ms and 16 ranges at a time is 1.3 s,
+whatever the CPU. The CPU of the walk (decoding and applying the files, about
+0.08 ms per file at 3.8 KB) is shared by the restores in progress. With the
+BEAM on one CPU (`+S 1:1 +SDcpu 1:1 +SDio 1`), 12 wakes of 112 to 830
+segments (4 150 files in all) took 0.3 s of CPU in all and 1.5 s by the wall,
+the time of the longest chain, so the CPU is a small part of a wake there; the
+latency is the rest (table in how-to-speed-up-a-wake.md).
+
+The CPU of a restore was not linear in the chain: each file looked its
+successor up in the whole listing, and every task of the read ahead was given
+a copy of that listing. A chain of 3 200 segments took 1.5 s of CPU, now 0.3 s
+(830 segments: 0.18 s, now 0.09 s). The listing now stays with the walk and is
+indexed by first TXID.
+
 ## 7. Cells
 
 Each awake cell is one process (`Alambique.Cell`) under a
