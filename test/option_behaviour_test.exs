@@ -49,7 +49,7 @@ defmodule Alambique.OptionBehaviourTest do
         hydrator: [poll_ms: 10],
         query: [page_size: 10, stale_tmp_seconds: 5],
         feed: [publish_retry_ms: 5],
-        compaction: [batch_factor: 2],
+        compaction: [moved_scan_page: 2],
         quarantine: [concurrency: 2]
       )
 
@@ -71,7 +71,7 @@ defmodule Alambique.OptionBehaviourTest do
     assert config.query.page_size == 10
     assert config.query.stale_tmp_seconds == 5
     assert config.feed.publish_retry_ms == 5
-    assert config.compaction.batch_factor == 2
+    assert config.compaction.moved_scan_page == 2
     assert config.quarantine.concurrency == 2
   end
 

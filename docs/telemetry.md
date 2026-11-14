@@ -315,12 +315,13 @@ Emitted by the background compactor of an instance.
 
 | Event | Measurements | Metadata |
 | --- | --- | --- |
-| `[:alambique, :compactor, :tick]` | `duration`, `cells` (rows taken from the queue) | `instance` |
+| `[:alambique, :compactor, :tick]` | `duration` (from the first pass started to the last one ended), `cells` (passes started in that time) | `instance` |
 
-A tick with nothing ready emits nothing. The round the compactor runs at once
-for the cells over `:max_chain_segments` emits the same event. A failed pass is
-logged as a warning and tried again after `:retry_ms`; its `:pass` event
-carries the reason.
+The event ends a busy period: the compactor starts passes as rows become ready
+and as slots free, and emits the event when none is left running. A tick with
+nothing ready emits nothing. A failed pass is logged as a warning, and its
+cell waits for the next tick (the row keeps the TXIDs it counted); its `:pass`
+event carries the reason.
 
 ## Freeze events
 
