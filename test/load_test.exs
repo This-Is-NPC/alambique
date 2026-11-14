@@ -149,4 +149,18 @@ defmodule Alambique.LoadTest do
     await_event([:alambique, :cell, :wake], cell)
     assert Alambique.load(inst, cell) == {:ok, %{pending: 0, waking: false}}
   end
+
+  test "a cell that woke without a call is serving, not waking", env do
+    inst = start_instance(env, migrations: @schema, compaction: false)
+    config = Alambique.Config.fetch!(inst)
+    capture([[:alambique, :cell, :wake]])
+
+    # No call is routed to it: only the end of the wake can clear `waking`.
+    {:ok, _} =
+      DynamicSupervisor.start_child(config.supervisor, {Alambique.Cell, {config, env.cell, []}})
+
+    await_event([:alambique, :cell, :wake], env.cell)
+
+    eventually(fn -> Alambique.load(inst, env.cell) == {:ok, %{pending: 0, waking: false}} end)
+  end
 end
