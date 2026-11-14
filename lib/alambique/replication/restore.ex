@@ -39,6 +39,7 @@ defmodule Alambique.Replication.Restore do
           deadline: deadline,
           limits: limits,
           segments: segments,
+          by_min: Enum.group_by(segments, & &1.min),
           snapshots: snapshots,
           dest: dest,
           tmp: "#{dest}.restore-#{System.unique_integer([:positive])}",
@@ -187,10 +188,7 @@ defmodule Alambique.Replication.Restore do
   end
 
   defp walk(env, state) do
-    candidates =
-      env.segments
-      |> Enum.filter(&(&1.min == state.txid + 1 and within_txid?(&1.max, env.limits)))
-      |> Enum.sort_by(&{-&1.max, &1.level})
+    candidates = candidates(env, state.txid)
 
     case try_candidates(env, state, candidates, [], nil) do
       :end when candidates == [] ->
@@ -206,6 +204,16 @@ defmodule Alambique.Replication.Restore do
       {:error, _} = error ->
         error
     end
+  end
+
+  # The files that start right after `txid` and end inside the target, the one
+  # that reaches furthest first. Looked up by start, so that planning a chain
+  # takes time linear in its length.
+  defp candidates(env, txid) do
+    env.by_min
+    |> Map.get(txid + 1, [])
+    |> Enum.filter(&within_txid?(&1.max, env.limits))
+    |> Enum.sort_by(&{-&1.max, &1.level})
   end
 
   # The files left past the chain inside the target are a tail (design §6,
@@ -496,12 +504,9 @@ defmodule Alambique.Replication.Restore do
 
     chain =
       Stream.unfold(txid, fn txid ->
-        env.segments
-        |> Enum.filter(&(&1.min == txid + 1 and within_txid?(&1.max, env.limits)))
-        |> Enum.min_by(&{-&1.max, &1.level}, fn -> nil end)
-        |> case do
-          nil -> nil
-          seg -> {seg.key, seg.max}
+        case candidates(env, txid) do
+          [] -> nil
+          [seg | _] -> {seg.key, seg.max}
         end
       end)
 
