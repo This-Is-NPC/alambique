@@ -1154,8 +1154,9 @@ ceiling is `max(max_inflight_bytes, largest object)`.
 
 What is outside the budget is fixed: the first ranges of one read-ahead round
 (`fetch_concurrency × edge_bytes`, 1 MiB by default) that wait for room, and
-the edges of the file the walk reads of a lazy restore (`2 × edge_bytes`). A restore and a hydration of one cell do not
-overlap, so the memory of one wake is
+the edges of the file the walk reads of a lazy restore (`2 × edge_bytes`). A
+restore and a hydration of one cell do not overlap, so the memory of one wake
+is
 
 ```
 max(max_inflight_bytes, largest file) + (fetch_concurrency + 2) × edge_bytes
