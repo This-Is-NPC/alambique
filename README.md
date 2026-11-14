@@ -70,6 +70,17 @@ first release (0.1.0):
   `mise run bench:restore-concurrency` measures it. There is no breaking
   change, except that a `compaction: [fanout:]` above 256 is now refused
   unless `max_chain_segments` is at least as large.
+- 0.7.1: the compactor is woken when a cell reaches `max_chain_segments`
+  instead of waiting for its next tick, and a new option
+  `compaction: [urgent_concurrency:]` (default 4, 0 for none) adds passes
+  while a cell is over the cap. A restore takes CPU linear in the length of
+  the chain, a lazy restore that finds the chain small reuses the files it
+  already read instead of asking the store again, and the S3 store has a
+  connection pool of its own, `pool_size` (default 256). The how-to has a
+  [node swap under load](docs/how-to-speed-up-a-wake.md#a-node-swap-under-load)
+  (`mise run bench:swap`). There is no breaking change: a `req_options:
+  [finch: ...]` still applies, and with a pool named there, `pool_size` does
+  not.
 
 The full list is in [CHANGELOG.md](CHANGELOG.md).
 
