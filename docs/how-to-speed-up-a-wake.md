@@ -183,3 +183,30 @@ If a wake on a small node takes seconds, look at the requests first: a store
 that answers in 100 ms makes that chain 5 s. Keep `fetch_concurrency` at 16,
 and size `pool_size` (design §6.3) for the wakes you expect at once.
 Compaction (design §9) shortens the chain, and so the wake.
+
+### A node swap under load
+
+`mise run bench:swap` (after `mise run seaweedfs:up`) writes 12 cells at 8
+commits per second each for 90 s, with the compactor at its defaults, to
+SeaweedFS behind a 25 ms proxy, from a VM pinned to one CPU. It then restores
+all 12 cells at once on a new VM pinned to another CPU, with
+`fetch_concurrency: 16` and `max_inflight_bytes: 2516582`, the way a runtime
+swaps nodes. The cells end with about 790-815 files in the listing. The table
+gives, over three interleaved runs of each variant on one dataset, the range of
+the longest wake and of the median wake of the 12 cells, and of the median
+count of GETs per wake. "Before" is the restore without
+the reuse of the heads of a lazy attempt (design §6.3).
+
+| Dataset (chain a restore walks) | Restore | longest wake | median wake | `{:get, :segment}` | `{:get, :merged}` |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Compactor at its defaults (14-27 files) | before | 0.35-0.37 s | 0.34-0.37 s | 8-16 | 24 |
+| | after | 0.32-0.36 s | 0.32-0.36 s | 5-9 | 12 |
+| Compactor lagging, `interval_ms` 1 h (176-196 files) | before | 1.53-1.63 s | 1.51-1.60 s | 344-352 | 24 |
+| | after | 1.02-1.05 s | 1.01-1.03 s | 173-177 | 12 |
+
+Before, a lazy restore read the head of every file to size the chain, found it
+smaller than `lazy_restore: [min_bytes:]`, and read every file again: two GETs
+per file. The wake of a chain of 190 files made 370 requests. The restore now
+makes about one per file (one more for each file larger than `edge_bytes`). `{:get, :segment}` and
+`{:get, :merged}` in the wake event (telemetry.md) show it: they are the requests of the wake, and a chain
+of N small files costs about N of them.

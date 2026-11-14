@@ -177,7 +177,11 @@ hibernating; a wake that fails is reported by `:wake` with `result: :error`.
 
 The requests of `[:alambique, :cell, :wake]` are those of the wake, counted
 from the read of the lease that the call made before it until the cell serves,
-the ones that ran at the same time included. A `get_range` counts as a `get`.
+the ones that ran at the same time included. A `get_range` counts as a `get`,
+so a file read in two ranges counts twice. A restore reads each file of the
+chain it walks once, and a file larger than `edge_bytes` once more (design
+§6.3); a lazy attempt that finds the chain too small to be worth it reuses
+the heads it read, so it does not double the `:segment` and `:merged` counts.
 `requests` is a map from `{operation, kind}` to a count, without the zeros;
 `operation` is `:get`, `:head`, `:list`, `:put` or `:delete`; `kind` is
 `:lease`, `:frozen` (the freeze marker), `:schema` (the schema index),
