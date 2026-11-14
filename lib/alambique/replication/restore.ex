@@ -51,6 +51,7 @@ defmodule Alambique.Replication.Restore do
           current: :atomics.new(1, []),
           lazy: opts[:lazy],
           prefetched: :ets.new(:restore_prefetched, [:set, :public]),
+          heads: :ets.new(:restore_heads, [:set, :public]),
           # The read ahead process and the messages it and the walk exchange:
           # `{tag, :changed}` to the walk, `:room` and `:stop` to the read ahead.
           owner: self(),
@@ -61,12 +62,13 @@ defmodule Alambique.Replication.Restore do
         try do
           case attempt_all(env, starts(env), nil) do
             # Too little to be worth a lazy restore: read everything, from the
-            # same listing.
+            # same listing and the heads already read.
             :small -> attempt_all(%{reset(env) | lazy: nil}, starts(env), nil)
             result -> result
           end
         after
           :ets.delete(env.prefetched)
+          :ets.delete(env.heads)
         end
       end
 
@@ -528,11 +530,25 @@ defmodule Alambique.Replication.Restore do
 
     if keys != [] and length(found) == length(keys) and
          Enum.sum(for {_, total} <- found, do: total) < env.lazy.min_bytes do
+      keep_heads(env, found)
       :small
     else
       parallel(env, found, fn {key, total} -> prefetch_tail(env, key, total) end)
       :ok
     end
+  end
+
+  # A full restore starts from the heads this one read: the first range of a
+  # file is the whole file when it is small. They stay until the probes take
+  # them, at most `min_bytes` of them.
+  defp keep_heads(env, found) do
+    for {key, _total} <- found do
+      [{_, head, total, meta, weight}] = :ets.take(env.prefetched, {:head, key})
+      :ets.insert(env.heads, {key, head, total, meta})
+      Budget.release(env.budget, weight)
+    end
+
+    :ok
   end
 
   defp prefetch_head(env, key) do
@@ -622,9 +638,22 @@ defmodule Alambique.Replication.Restore do
     end
   end
 
-  # A missing file is not worth waiting for: the walk will say so.
+  # A missing file is not worth waiting for: the walk will say so. A head a
+  # lazy attempt read is the probe.
   defp probe_body(env, key) do
-    Objects.fetch_range(Map.put(env.ctx, :missing_final, true), key, 0, env.window, env.deadline)
+    case :ets.take(env.heads, key) do
+      [{_, head, total, meta}] ->
+        {:ok, head, total, meta}
+
+      [] ->
+        Objects.fetch_range(
+          Map.put(env.ctx, :missing_final, true),
+          key,
+          0,
+          env.window,
+          env.deadline
+        )
+    end
   end
 
   # The probes that fit the budget, in order, with their weight taken.
