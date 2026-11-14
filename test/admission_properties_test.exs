@@ -336,7 +336,7 @@ defmodule Alambique.AdmissionPropertiesTest do
         writer =
           Task.async(fn -> Alambique.execute(inst, cell, "INSERT INTO t (n) VALUES (1)", []) end)
 
-        eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 1}} end)
+        eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 1, waking: false}} end)
 
         replies = burst_queries(inst, cell, callers, 50)
 

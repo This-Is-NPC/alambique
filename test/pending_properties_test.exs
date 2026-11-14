@@ -55,7 +55,10 @@ defmodule Alambique.PendingPropertiesTest do
           task = Task.async(fn -> Alambique.execute(inst, cell, @insert, [n]) end)
 
           if pending < max_pending do
-            eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: pending + 1}} end)
+            eventually(fn ->
+              Alambique.load(inst, cell) == {:ok, %{pending: pending + 1, waking: false}}
+            end)
+
             # Past this call the cell has run the write that it counts.
             :sys.get_state(pid)
             {[task | tasks], pending + 1}

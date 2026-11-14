@@ -70,7 +70,7 @@ defmodule Alambique.CheckpointTest do
 
     GatedStore.hold(gate, ~r{/0000/})
     writer = Task.async(fn -> Alambique.execute(inst, cell, @insert, [1]) end)
-    eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 1}} end)
+    eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 1, waking: false}} end)
 
     checkpointer = Task.async(fn -> Alambique.checkpoint(inst, cell, deadline_ms: 8_000) end)
     refute Task.yield(checkpointer, 200)
@@ -91,7 +91,7 @@ defmodule Alambique.CheckpointTest do
 
     GatedStore.hold(gate, ~r{/0000/})
     writer = Task.async(fn -> Alambique.execute(inst, cell, @insert, [1]) end)
-    eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 1}} end)
+    eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 1, waking: false}} end)
 
     assert {:error, :busy} = Alambique.checkpoint(inst, cell, deadline_ms: 100)
     assert wal_size(inst, cell) > 0

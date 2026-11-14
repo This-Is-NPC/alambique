@@ -38,10 +38,10 @@ defmodule Alambique.PendingTest do
     # The cell cannot drain its mailbox: it holds six messages and no call.
     :sys.suspend(pid)
     stray(pid, 3)
-    assert Alambique.load(inst, cell) == {:ok, %{pending: 0}}
+    assert Alambique.load(inst, cell) == {:ok, %{pending: 0, waking: false}}
 
     call = Task.async(fn -> Alambique.execute(inst, cell, @insert, [1]) end)
-    eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 1}} end)
+    eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 1, waking: false}} end)
     :sys.resume(pid)
 
     assert {:ok, _} = Task.await(call, 5_000)
