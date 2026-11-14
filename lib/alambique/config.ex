@@ -95,6 +95,7 @@ defmodule Alambique.Config do
     hold_bytes: 33_554_432,
     hold_object_bytes: 1_048_576,
     release_deadline_ms: 3_000,
+    release_reserve_ms: 2_000,
     release_min_tail: 32
   ]
 
@@ -732,6 +733,7 @@ defmodule Alambique.Config do
           :hold_object_bytes,
           :urgent_concurrency,
           :release_deadline_ms,
+          :release_reserve_ms,
           :delete_superseded,
           :snapshot_ratio,
           :snapshot_keep_ms,
@@ -740,7 +742,13 @@ defmodule Alambique.Config do
         not (is_integer(value) and value > 0),
         do: bad!(":compaction #{inspect(key)} must be a positive integer")
 
-    for key <- [:hold_bytes, :hold_object_bytes, :urgent_concurrency, :release_deadline_ms],
+    for key <- [
+          :hold_bytes,
+          :hold_object_bytes,
+          :urgent_concurrency,
+          :release_deadline_ms,
+          :release_reserve_ms
+        ],
         not (is_integer(merged[key]) and merged[key] >= 0),
         do: bad!(":compaction #{inspect(key)} must be a non-negative integer")
 

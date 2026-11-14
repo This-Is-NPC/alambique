@@ -144,4 +144,57 @@ defmodule Alambique.ReleaseCompactionTest do
                []
              )
   end
+
+  describe "when the caller gives less time than the compaction may take" do
+    setup ctx do
+      slow = SlowStore.wrap(ctx.store, 40)
+
+      inst =
+        writer(%{ctx | store: slow},
+          compaction: [release_deadline_ms: 5_000, release_min_tail: 30, release_reserve_ms: 450]
+        )
+
+      cell = unique_cell()
+      insert(inst, cell, 1..120)
+      {:ok, inst: inst, cell: cell}
+    end
+
+    # The lease is free: another instance wakes the cell at once, not after
+    # the lease expires.
+    defp assert_taken_over(ctx, cell) do
+      other = start_instance(ctx, migrations: @schema, retention: false)
+
+      assert {:ok, %{rows: [[120]]}} =
+               Alambique.query(other, cell, "SELECT count(*) FROM t", [], timeout: 2_000)
+    end
+
+    test "hibernate/3 answers :ok within its timeout and releases the lease", ctx do
+      capture([[:alambique, :cell, :hibernate]])
+
+      assert :ok = Alambique.hibernate(ctx.inst, ctx.cell, timeout: 700)
+
+      assert {_, %{compaction: :deadline}} =
+               await_event([:alambique, :cell, :hibernate], ctx.cell)
+
+      assert_taken_over(ctx, ctx.cell)
+    end
+
+    test "a drain near its deadline releases the cell instead of timing out", ctx do
+      assert {:ok, %{hibernated: 1, errors: []}} =
+               Alambique.drain(ctx.inst, deadline: 700, timeout: 30_000)
+
+      assert_taken_over(ctx, ctx.cell)
+    end
+
+    test "a call with less time than the reserve skips the compaction", ctx do
+      capture([[:alambique, :cell, :hibernate]])
+
+      assert :ok = Alambique.hibernate(ctx.inst, ctx.cell, timeout: 300)
+
+      assert {%{tail: 0}, %{compaction: :none}} =
+               await_event([:alambique, :cell, :hibernate], ctx.cell)
+
+      assert_taken_over(ctx, ctx.cell)
+    end
+  end
 end

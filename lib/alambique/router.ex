@@ -543,7 +543,7 @@ defmodule Alambique.Router do
     ref = Process.monitor(pid)
 
     try do
-      with :ok <- GenServer.call(pid, :hibernate, timeout) do
+      with :ok <- GenServer.call(pid, {:hibernate, stop_waiting(timeout)}, timeout) do
         receive do
           {:DOWN, ^ref, :process, ^pid, _} -> :ok
         after
@@ -562,6 +562,10 @@ defmodule Alambique.Router do
     at = System.monotonic_time(:millisecond) + timeout
     GenServer.call(pid, {:deadline, at, request}, timeout)
   end
+
+  # The time the caller stops waiting, for the compaction of a release to fit.
+  defp stop_waiting(:infinity), do: :infinity
+  defp stop_waiting(timeout), do: System.monotonic_time(:millisecond) + timeout
 
   defp again({config, cell, request, timeout, hops, attempts}, {:error, _} = last) do
     if attempts > 1,
