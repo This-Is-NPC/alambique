@@ -84,6 +84,16 @@ defmodule Alambique.CompactionTest do
       assert manifests(env) == []
     end
 
+    test "a deleted superseded file is not merged again", env do
+      history(env, new_owner(env, "a.db"), 8)
+      assert {:ok, %{merges: 7}} = compact(env, deletion_grace_ms: 0)
+      Alambique.Trash.reap_ctx(env.ctx, Map.new(Alambique.Trash.defaults()))
+      assert segments(env, 1) == []
+
+      assert {:ok, %{merges: 0}} = compact(env, deletion_grace_ms: 0)
+      assert segments(env, 1) == []
+    end
+
     test "delete_superseded: false keeps every merged file", env do
       history(env, new_owner(env, "a.db"), 20)
       assert {:ok, _} = compact(env, deletion_grace_ms: 0, delete_superseded: false)
