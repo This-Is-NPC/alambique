@@ -275,8 +275,9 @@ the panic tests abort the VM when `guard` does not catch.
   while its lease is valid and stops with `:lease_expired` after, as for any
   error; a lost lease is still `{:error, :lost}`. `Alambique.Store.S3` does
   the same for its HTTP client with `{:error, {:request_crashed, kind, reason}}`,
-  for example when the connection pool of Finch is exhausted; the pool settings
-  go in its `:req_options` (`finch: [pool_timeout: ...]`).
+  for example when the connection pool of Finch is exhausted. The pool has
+  `:pool_size` connections (default 256); the wait for one is set in
+  `:req_options` (`finch: [pool_timeout: ...]`).
 - **Hard deadline.** Every store request of the library runs in its own
   process, linked to the caller and killed when its time passes, and then
   answers `{:error, :timeout}`; a store that never returns cannot hold a
@@ -1170,15 +1171,25 @@ rewind and the scrub, which have their own bounds.
 #### Many restores on one small node
 
 The budget, the read ahead and the request limit are per restore, not shared:
-N wakes in progress take N times each of them. Two costs add up. The time a
-restore waits for the store is at least `segments × latency /
-fetch_concurrency`: 830 segments at 25 ms and 16 ranges at a time is 1.3 s,
-whatever the CPU. The CPU of the walk (decoding and applying the files, about
-0.08 ms per file at 3.8 KB) is shared by the restores in progress. With the
-BEAM on one CPU (`+S 1:1 +SDcpu 1:1 +SDio 1`), 12 wakes of 112 to 830
-segments (4 150 files in all) took 0.3 s of CPU in all and 1.5 s by the wall,
-the time of the longest chain, so the CPU is a small part of a wake there; the
-latency is the rest (table in how-to-speed-up-a-wake.md).
+N wakes in progress take N times each of them. Three costs add up.
+
+- **Latency.** A restore waits for the store for at least `segments × latency
+  / fetch_concurrency`: 830 segments at 25 ms and 16 ranges at a time is 1.3 s,
+  whatever the CPU. With `fetch_concurrency: 1` it is 830 round trips, 21 s.
+- **CPU of the walk.** Decoding and applying a file takes about 0.08 ms at 3.8
+  KB, shared by the restores in progress. With the BEAM on one CPU (`+S 1:1
+  +SDcpu 1:1 +SDio 1`), 12 wakes of 112 to 830 segments (4 150 files in all)
+  took 0.3 s of CPU against the in-memory store.
+- **CPU and connections of the S3 client.** Every file is an HTTP request that
+  is signed, sent and parsed. Against SeaweedFS through a proxy adding 25 ms,
+  the same 12 wakes took 1.75 s of CPU with no added latency, and 12 wakes
+  read ahead 192 requests at once. Finch's default pool of 50 connections
+  queued them; the S3 store now has a pool of its own, `:pool_size` (default
+  256), and the 12 wakes went from 3.5 s to 2.2 s (table in
+  how-to-speed-up-a-wake.md). Connections are opened when a request needs one,
+  so the size costs nothing until it is used. Size it for `awake:
+  [max_wakes:]` times `restore: [fetch_concurrency:]` if that many wakes can
+  run at once.
 
 The CPU of a restore was not linear in the chain: each file looked its
 successor up in the whole listing, and every task of the read ahead was given

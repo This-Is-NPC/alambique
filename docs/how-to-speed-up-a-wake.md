@@ -147,11 +147,13 @@ and a file smaller than `edge_bytes` weighs its own size). A file larger than
 ### Many wakes at once on a small node
 
 `mise run bench:restore-concurrency` with `ALAMBIQUE_BENCH_CELLS="112 164 300
-500 830"` restores that many cells, cycled over `ALAMBIQUE_BENCH_RESTORES`
-restores at once (1, 4, 12 and 14 by default). The run below pins the VM to
-one CPU (`ELIXIR_ERL_OPTIONS="+S 1:1 +SDcpu 1:1 +SDio 1" taskset -c 3`), uses
-25 ms per request, `fetch_concurrency: 16` and 2.4 MiB of budget, and shows
-the median and the longest restore of three runs, in seconds:
+500 830"` restores those cells, cycled over `ALAMBIQUE_BENCH_RESTORES` restores
+at once (1, 4, 12 and 14 by default). The runs below pin the VM to one CPU
+(`ELIXIR_ERL_OPTIONS="+S 1:1 +SDcpu 1:1 +SDio 1" taskset -c 3`) and add 25 ms
+to every request. Seconds, median of three runs; the longest restore is the
+830-segment chain.
+
+In-memory store, `fetch_concurrency: 16`, 2.4 MiB of budget:
 
 | restores at once | median | longest |
 | ---------------: | -----: | ------: |
@@ -160,9 +162,24 @@ the median and the longest restore of three runs, in seconds:
 |               12 |   0.58 |    1.46 |
 |               14 |   0.59 |    1.47 |
 
-The longest is the 830-segment chain: 830 requests, 16 at a time, 25 ms each,
-is 1.3 s however many restores run beside it. The same 12 restores without
-latency (`ALAMBIQUE_BENCH_LATENCY=0`) need 0.3 s of CPU in all. If a wake on a
-small node takes seconds, look at the requests first: a store that answers in
-100 ms makes that chain 5 s, and `fetch_concurrency: 1` makes it 830 round
-trips. Compaction (design §9) shortens the chain, and so the wake.
+SeaweedFS (`ALAMBIQUE_BENCH_STORE=seaweedfs`, after `mise run seaweedfs:up`;
+`bench/delay_proxy.exs` adds the 25 ms on another CPU). The S3 store with
+Finch's pool of 50 connections (`ALAMBIQUE_BENCH_POOL_SIZE=50`), and with its
+default of 256:
+
+| `fetch_concurrency` | restores | pool 50, longest | pool 256, longest | pool 256, median |
+| ------------------: | -------: | ---------------: | ----------------: | ---------------: |
+|                  16 |        1 |             0.36 |              0.36 |             0.36 |
+|                  16 |       12 |             3.5  |              2.2  |              1.1 |
+|                  16 |       14 |             3.8  |              2.4  |              1.3 |
+|                   1 |        1 |                - |              3.3  |              3.3 |
+|                   1 |       12 |                - |             24    |              9.1 |
+
+The longest is bounded by its latency: 830 requests, 16 at a time, 25 ms each
+is 1.3 s however many restores run beside it, and 21 s with
+`fetch_concurrency: 1`. The 12 restores need 1.75 s of CPU in all against
+SeaweedFS and 0.3 s against memory: the S3 client costs more than the walk.
+If a wake on a small node takes seconds, look at the requests first: a store
+that answers in 100 ms makes that chain 5 s. Keep `fetch_concurrency` at 16,
+and size `pool_size` (design §6.3) for the wakes you expect at once.
+Compaction (design §9) shortens the chain, and so the wake.
