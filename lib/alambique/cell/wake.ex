@@ -133,10 +133,10 @@ defmodule Alambique.Cell.Wake do
 
   @doc """
   Ends the counting of the wake: the contexts go back to the plain store, and
-  the counts so far are returned.
+  the counts and the summed request time so far are returned.
   """
-  @spec unmeter(State.t()) :: {State.t(), map}
-  def unmeter(%State{location: nil} = state), do: {state, %{}}
+  @spec unmeter(State.t()) :: {State.t(), map, non_neg_integer}
+  def unmeter(%State{location: nil} = state), do: {state, %{}, 0}
 
   def unmeter(%State{trips: trips} = state) do
     state = %{
@@ -145,7 +145,7 @@ defmodule Alambique.Cell.Wake do
         repl_ctx: Config.repl_ctx(state.config, state.location)
     }
 
-    {state, Metered.counts(trips)}
+    {state, Metered.counts(trips), Metered.time(trips)}
   end
 
   defp moved_to(state, id) do

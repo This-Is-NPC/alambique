@@ -2,18 +2,27 @@ defmodule Alambique.Store.Metered do
   @moduledoc false
   # Counts the requests that go through a store by operation and by kind of
   # object, in a `:counters` array shared by every process that uses the
-  # wrapped store. A wake wraps the stores of its contexts with it, so the
-  # tasks it starts are counted too, and reports the counts in its telemetry
-  # event.
+  # wrapped store, and sums the time the requests took (the last counter). A
+  # wake wraps the stores of its contexts with it, so the tasks it starts are
+  # counted too, and reports both in its telemetry event.
 
   @behaviour Alambique.Store
 
   @ops [:get, :head, :list, :put, :delete]
   @kinds [:lease, :frozen, :schema, :feed, :snapshot, :segment, :merged, :listing, :other]
 
+  @time_index length(@ops) * length(@kinds) + 1
+
   @doc "A new array of counters."
   @spec new() :: :counters.counters_ref()
-  def new, do: :counters.new(length(@ops) * length(@kinds), [:write_concurrency])
+  def new, do: :counters.new(@time_index, [:write_concurrency])
+
+  @doc """
+  The time the requests counted took, summed, in native time units. Requests
+  that overlap each add their own time, so it can exceed the wall time.
+  """
+  @spec time(:counters.counters_ref()) :: non_neg_integer
+  def time(counters), do: :counters.get(counters, @time_index)
 
   @doc "`store` counting into `counters`."
   @spec wrap({module, term}, :counters.counters_ref()) :: {module, map}
@@ -46,6 +55,13 @@ defmodule Alambique.Store.Metered do
       puts: per_op.put,
       deletes: per_op.delete
     }
+  end
+
+  defp timed(%{counters: counters}, fun) do
+    started = System.monotonic_time()
+    result = fun.()
+    :counters.add(counters, @time_index, System.monotonic_time() - started)
+    result
   end
 
   defp bump(%{counters: counters}, op, key) do
@@ -83,36 +99,36 @@ defmodule Alambique.Store.Metered do
   @impl true
   def put(%{store: {m, c}} = s, key, body, condition, meta) do
     bump(s, :put, key)
-    m.put(c, key, body, condition, meta)
+    timed(s, fn -> m.put(c, key, body, condition, meta) end)
   end
 
   @impl true
   def get(%{store: {m, c}} = s, key) do
     bump(s, :get, key)
-    m.get(c, key)
+    timed(s, fn -> m.get(c, key) end)
   end
 
   @impl true
   def get_range(%{store: {m, c}} = s, key, offset, length) do
     bump(s, :get, key)
-    m.get_range(c, key, offset, length)
+    timed(s, fn -> m.get_range(c, key, offset, length) end)
   end
 
   @impl true
   def head(%{store: {m, c}} = s, key) do
     bump(s, :head, key)
-    m.head(c, key)
+    timed(s, fn -> m.head(c, key) end)
   end
 
   @impl true
   def list(%{store: {m, c}} = s, prefix, start_after, limit) do
     bump(s, :list, prefix)
-    m.list(c, prefix, start_after, limit)
+    timed(s, fn -> m.list(c, prefix, start_after, limit) end)
   end
 
   @impl true
   def delete(%{store: {m, c}} = s, key) do
     bump(s, :delete, key)
-    m.delete(c, key)
+    timed(s, fn -> m.delete(c, key) end)
   end
 end

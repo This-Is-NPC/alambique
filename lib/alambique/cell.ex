@@ -177,22 +177,28 @@ defmodule Alambique.Cell do
 
   defp run_wake(state) do
     started = System.monotonic_time()
+    {:reductions, reductions} = Process.info(self(), :reductions)
 
     case Wake.run(state) do
       {:ok, state} ->
         Admission.end_wake(state.config, self())
         Admission.recovered(state.config, state.id)
-        {state, requests} = Wake.unmeter(state)
+        {state, requests, store_time} = Wake.unmeter(state)
 
-        Telemetry.span_stop([:cell, :wake], started, Metered.measurements(requests), %{
-          cell: state.id,
-          location: state.location.id,
-          result: :ok,
-          epoch: state.lease.epoch,
-          txid: state.repl.txid,
-          source: state.source,
-          requests: requests
-        })
+        Telemetry.span_stop(
+          [:cell, :wake],
+          started,
+          wake_measurements(requests, store_time, reductions),
+          %{
+            cell: state.id,
+            location: state.location.id,
+            result: :ok,
+            epoch: state.lease.epoch,
+            txid: state.repl.txid,
+            source: state.source,
+            requests: requests
+          }
+        )
 
         notify_previous(state)
         {:noreply, serve(state)}
@@ -200,18 +206,33 @@ defmodule Alambique.Cell do
       {:error, reason, state} ->
         reason = reason |> DiskFull.classify() |> Breaker.classify()
         Admission.end_wake(state.config, self())
-        {state, requests} = Wake.unmeter(state)
+        {state, requests, store_time} = Wake.unmeter(state)
 
-        Telemetry.span_stop([:cell, :wake], started, Metered.measurements(requests), %{
-          cell: state.id,
-          result: :error,
-          reason: reason,
-          requests: requests
-        })
+        Telemetry.span_stop(
+          [:cell, :wake],
+          started,
+          wake_measurements(requests, store_time, reductions),
+          %{
+            cell: state.id,
+            result: :error,
+            reason: reason,
+            requests: requests
+          }
+        )
 
         abandon(state)
         {:stop, {:shutdown, {:wake_failed, reason}}, %{state | mode: :stopped}}
     end
+  end
+
+  # The requests of the wake, the time they took summed, and the reductions the
+  # cell process ran since the wake began.
+  defp wake_measurements(requests, store_time, reductions) do
+    {:reductions, now} = Process.info(self(), :reductions)
+
+    requests
+    |> Metered.measurements()
+    |> Map.merge(%{store_time: store_time, reductions: now - reductions})
   end
 
   # Tells the node of the previous owner, if it is a member, that its cell
