@@ -81,6 +81,13 @@ first release (0.1.0):
   (`mise run bench:swap`). There is no breaking change: a `req_options:
   [finch: ...]` still applies, and with a pool named there, `pool_size` does
   not.
+- 0.8.0: a compaction pass no longer merges again a block that lies inside a
+  file of a higher level, so a superseded file that was deleted is not
+  rewritten and the writes it wasted are gone. `Alambique.load/2` answers
+  `{:ok, %{pending: n, waking: waking}}`: `waking` is `true` from the start of
+  the cell process until the cell starts serving, which tells a cell that is
+  loading its data from one that is saturated. There is no breaking change: a
+  match on `%{pending: n}` still works.
 
 The full list is in [CHANGELOG.md](CHANGELOG.md).
 
