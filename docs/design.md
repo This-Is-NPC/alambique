@@ -2046,6 +2046,22 @@ used the whole deadline and were cut, and the eight others released in
 `:timeout_ms` and `:deadline_ms` of the drain when tails are longer or the
 store slower.
 
+*Limit: a saturated CPU.* The deadline is wall-clock time, so a node whose CPU
+is saturated merges less within it: a cell that reaches the release with a
+long tail can be cut, and the next node then reads a longer tail than
+`release_min_tail`. This is a limit of the design, not a defect: a cut loses
+nothing, the chain is complete, and the wake only costs one GET per file.
+Measured on commit 96b4bb6 with `mise run bench:swap` (30 commits per second
+per cell, 30 s, 12 cells, 25 ms per request, the writer on one CPU with
+`ALAMBIQUE_BENCH_SWAP_WRITER_BURN=2` and `_BURN_DIRTY=4`, on a shared laptop
+at load average 5 to 12): in one run, four of the 12 cells reached the release
+with tails of 208 to 250 files and were cut at 3 s. The worst wake of the next
+node read 66 level-0 and 29 merged files (95 walked) in 0.37 s, and all the
+wakes of the 5 runs took 0.41 s at most. Without the busy loops (3 runs) a
+wake read 31 level-0 files at most and the stop took 1.2 to 1.3 s. Raise
+`release_deadline_ms` for a shorter tail, at the cost of a longer drain; `0`
+turns the compaction off.
+
 *The bound of a release.* The compaction never outlasts the call that asked
 for the release. The caller's time reaches the cell as the monotonic time at
 which it stops waiting (`{:hibernate, at}`, from `Router`), and the pass
