@@ -88,6 +88,16 @@ first release (0.1.0):
   the cell process until the cell starts serving, which tells a cell that is
   loading its data from one that is saturated. There is no breaking change: a
   match on `%{pending: n}` still works.
+- 0.9.0: a node that hands a cell over on purpose (`hibernate/3`, `drain/2`,
+  the stop of the instance) compacts the level-0 tail first, when it has
+  `compaction: [release_min_tail:]` files or more, for at most
+  `release_deadline_ms`, so the next node reads a short chain. On a saturated
+  CPU the compaction can be cut and the tail left is longer
+  ([how-to](docs/how-to-swap-a-node.md)). The compactor starts a pass as a
+  slot frees, with no rounds, and `[:compactor, :tick]` reports a busy
+  period. `[:cell, :wake]` reports `store_time` and `reductions`, and
+  `[:cell, :hibernate]` the `tail` and `compact_duration`. **breaking:**
+  `compaction: [batch_factor:]` is removed.
 
 The full list is in [CHANGELOG.md](CHANGELOG.md).
 
@@ -199,6 +209,9 @@ More calls, placement and the other features are in
   ([docs/design.md](docs/design.md), section 3.1).
 - A file system whose writes can stall stalls every write of every cell. See
   [docs/how-to-operate-a-cell.md](docs/how-to-operate-a-cell.md), step 10.
+- On a saturated CPU, the compaction at the release of a cell can be cut by
+  `compaction: [release_deadline_ms:]`, and the next node reads a longer tail
+  ([docs/design.md](docs/design.md), section 9).
 - Known defects and limits are listed in
   [docs/what-does-not-work.md](docs/what-does-not-work.md).
 
