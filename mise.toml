@@ -152,7 +152,7 @@ description = "Time a write with the in-flight marker on and off (argument: writ
 run = "scripts/bench-inflight"
 
 [tasks."bench:restore-concurrency"]
-description = "Time the full restore of a chain of 800 segments by fetch_concurrency and max_inflight_bytes against a store with 25 ms per request (argument: segments)"
+description = "Time the full restore of a chain of 800 segments by fetch_concurrency and max_inflight_bytes against a store with 25 ms per request (argument: segments), or several cells at once with ALAMBIQUE_BENCH_CELLS"
 run = "scripts/bench-restore-concurrency"
 
 [tasks."bench:lease"]
