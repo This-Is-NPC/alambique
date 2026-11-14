@@ -127,24 +127,7 @@ and a file smaller than `edge_bytes` weighs its own size). A file larger than
 `max_inflight_bytes` still ends the read ahead and is read alone; compaction
 (design §9) shortens the chain.
 
-## Troubleshooting
-
-- *`trips` is high but `duration` is low.* The requests ran together. Compare
-  `duration` with the latency of one request: a wake that takes four or five
-  times that is at the floor of its design (design §7.2).
-- *A lazy wake's first query is slower than a full one.* The query reads many
-  pages; see step 5.
-- *`requests` has `{:list, :listing}` more than once.* A restore lists once;
-  a second listing means the wake restored again after losing the fence to a
-  previous owner (`:txid_taken`), which is rare and correct.
-
-## Next steps
-
-- [telemetry.md](telemetry.md), cell events, for every field of the wake event.
-- Design §7.2 and §16 for the order of the requests and the lazy restore.
-- [how-to-size-a-node.md](how-to-size-a-node.md) for the memory of awake cells.
-
-### Many wakes at once on a small node
+## Many wakes at once on a small node
 
 `mise run bench:restore-concurrency` with `ALAMBIQUE_BENCH_CELLS="112 164 300
 500 830"` restores those cells, cycled over `ALAMBIQUE_BENCH_RESTORES` restores
@@ -184,7 +167,7 @@ that answers in 100 ms makes that chain 5 s. Keep `fetch_concurrency` at 16,
 and size `pool_size` (design §6.3) for the wakes you expect at once.
 Compaction (design §9) shortens the chain, and so the wake.
 
-### A node swap under load
+## A node swap under load
 
 `mise run bench:swap` (after `mise run seaweedfs:up`) writes 12 cells at 8
 commits per second each for 90 s, with the compactor at its defaults, to
@@ -207,6 +190,24 @@ the reuse of the heads of a lazy attempt (design §6.3).
 Before, a lazy restore read the head of every file to size the chain, found it
 smaller than `lazy_restore: [min_bytes:]`, and read every file again: two GETs
 per file. The wake of a chain of 190 files made 370 requests. The restore now
-makes about one per file (one more for each file larger than `edge_bytes`). `{:get, :segment}` and
-`{:get, :merged}` in the wake event (telemetry.md) show it: they are the requests of the wake, and a chain
-of N small files costs about N of them.
+makes about one per file (one more for each file larger than `edge_bytes`).
+`{:get, :segment}` and
+`{:get, :merged}` in the wake event (telemetry.md) show it: they are the
+requests of the wake, and a chain of N small files costs about N of them.
+
+## Troubleshooting
+
+- *`trips` is high but `duration` is low.* The requests ran together. Compare
+  `duration` with the latency of one request: a wake that takes four or five
+  times that is at the floor of its design (design §7.2).
+- *A lazy wake's first query is slower than a full one.* The query reads many
+  pages; see step 5.
+- *`requests` has `{:list, :listing}` more than once.* A restore lists once;
+  a second listing means the wake restored again after losing the fence to a
+  previous owner (`:txid_taken`), which is rare and correct.
+
+## Next steps
+
+- [telemetry.md](telemetry.md), cell events, for every field of the wake event.
+- Design §7.2 and §16 for the order of the requests and the lazy restore.
+- [how-to-size-a-node.md](how-to-size-a-node.md) for the memory of awake cells.
