@@ -155,6 +155,11 @@ run = "scripts/bench-inflight"
 description = "Time the full restore of a chain of 800 segments by fetch_concurrency and max_inflight_bytes against a store with 25 ms per request (argument: segments), or several cells at once with ALAMBIQUE_BENCH_CELLS"
 run = "scripts/bench-restore-concurrency"
 
+[tasks."bench:swap"]
+description = "Write 12 busy cells for 90 s on SeaweedFS behind a 25 ms proxy, then restore all of them at once on a node pinned to one CPU, 3 times, and print the wake times and GETs (argument: all, write or restore; ALAMBIQUE_BENCH_SWAP_*)"
+depends = ["seaweedfs:up"]
+run = "scripts/bench-swap"
+
 [tasks."bench:lease"]
 description = "Time Alambique.lease/3 on a lease held by a non-member, in memory and with added store latency (argument: calls per case; ALAMBIQUE_BENCH_LATENCIES)"
 run = "scripts/bench-lease"
