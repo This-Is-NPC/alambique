@@ -16,7 +16,8 @@ defmodule Alambique.CellMigrationsPropertiesTest do
     * the schema index lists every cell at version 1 or later at its durable
       version (perhaps also at an older one, never nowhere).
 
-  At the end the sweeper brings every listed cell to the version of its
+  At the end, once the breaker of the store lets requests through again, the
+  sweeper brings every listed cell to the version of its
   namespace and lists it only there. After a restart that takes until the
   leases that crashed cells left expire, and an entry left behind a migrated
   cell stays until then.
@@ -166,7 +167,11 @@ defmodule Alambique.CellMigrationsPropertiesTest do
       # Faults are off: every cell sleeps, then the sweeper runs.
       MemoryStore.clear(ctx.store_config)
       for cell <- cells, do: safely(fn -> Alambique.hibernate(name, cell) end)
-      # A wake that failed because of the store waits out its backoff.
+      # Failures in a row opened the breaker of the store (design §3): it
+      # refuses requests until its cool-down ends, and a wake that failed
+      # because of the store waits out its backoff.
+      await_breaker_probing(name)
+
       for _ <- 1..3 do
         await_wake_backoff(name, cells)
         Alambique.sweep(name)
@@ -206,6 +211,13 @@ defmodule Alambique.CellMigrationsPropertiesTest do
       end)
     end)
     |> Enum.find(&(&1 or System.monotonic_time(:millisecond) > deadline))
+  end
+
+  defp await_breaker_probing(name) do
+    eventually(
+      fn -> Enum.all?(Alambique.breaker_status(name), fn {_, %{state: s}} -> s != :open end) end,
+      15_000
+    )
   end
 
   defp start(ctx, name),
