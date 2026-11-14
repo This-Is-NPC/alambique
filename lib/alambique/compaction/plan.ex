@@ -64,7 +64,10 @@ defmodule Alambique.Compaction.Plan do
   blocks are fixed by the TXID, so two compactors that see the same files
   plan the same keys and a race is a conditional-write conflict, never two
   overlapping files. Only blocks that start after `from` and end by `head`
-  are planned, and a block whose output already exists is left alone.
+  are planned, and a block whose output already exists is left alone, and so
+  is a block inside a file of a higher level: that file superseded the output,
+  which may have been deleted (design §9), and merging it again would write a
+  file nothing marks.
   """
   @spec groups(index, non_neg_integer, non_neg_integer, pos_integer, non_neg_integer) :: [map]
   def groups(index, from, head, fanout, level) do
@@ -77,10 +80,21 @@ defmodule Alambique.Compaction.Plan do
         lo = j * span + 1,
         hi = (j + 1) * span,
         not MapSet.member?(index.keys, {level + 1, lo, hi}),
+        not superseded?(index, level + 2, lo, head, fanout),
         inputs = inputs(index, level, lo, span_in, fanout),
         inputs != nil do
       %{level: level + 1, min: lo, max: hi, inputs: inputs}
     end
+  end
+
+  # Whether a file of `level` or above holds the block that starts at `lo`.
+  defp superseded?(index, level, lo, head, fanout) do
+    span = pow(fanout, level)
+    first = div(lo - 1, span) * span + 1
+
+    first + span - 1 <= head and
+      (MapSet.member?(index.keys, {level, first, first + span - 1}) or
+         superseded?(index, level + 1, lo, head, fanout))
   end
 
   defp inputs(index, level, lo, span_in, fanout) do

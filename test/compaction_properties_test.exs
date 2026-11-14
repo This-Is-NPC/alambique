@@ -460,6 +460,36 @@ defmodule Alambique.CompactionPropertiesTest do
   end
 
   @tag :capture_log
+  test "a pass after the fault-free passes has nothing left to merge" do
+    run(
+      [
+        {:takeover, :local},
+        {:write, [fill: 1]},
+        {:write, [{:del, 8}, {:del, 10}, :vacuum]},
+        {:write, [{:put, 10, 5000}]},
+        {:takeover, :local},
+        {:write, [{:put, 9, 10}]},
+        :zombie,
+        :zombie,
+        {:write, [{:fill, 1}, :vacuum]},
+        {:write, [{:del, 11}, {:put, 11, 1500}, {:fill, 1}]},
+        {:write, [:vacuum, {:fill, 2}, :vacuum]},
+        {:write, [{:fill, 2}, :vacuum, :vacuum]},
+        {:write, [{:del, 2}, :vacuum]},
+        :zombie
+      ],
+      %{
+        fanout: 2,
+        window: 500,
+        grace: 0,
+        deletion: 0,
+        hold_bytes: 40_000,
+        hold_object_bytes: 1_000_000
+      }
+    )
+  end
+
+  @tag :capture_log
   property "restore is unchanged by compaction, retention, faults and crashes" do
     check all(
             commands <- list_of(command_gen(), min_length: 4, max_length: 35),

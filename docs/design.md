@@ -2004,7 +2004,10 @@ for deletion through the trash (§9.1), so they leave the store after
 `deletion_grace_ms` and a restore that listed them before still finds them.
 `compaction: [delete_superseded: false]` keeps them. Level-0 files are never
 marked this way: a rewind to any TXID of the window (§20) applies level-0 files
-up to the target, because a merged file cannot be applied halfway. A file that
+up to the target, because a merged file cannot be applied halfway. A block that
+lies inside a file of a higher level is never planned again, so a deleted
+superseded file is not rewritten by the next pass (it would be a file that
+nothing marks). A file that
 was already there (`:exists`, another compactor wrote it) is not marked by this
 pass. What the pass fails to mark, because it crashed between the put and the
 mark, is deleted with the rest when retention covers it. In steady state a cell
