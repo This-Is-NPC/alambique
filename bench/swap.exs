@@ -11,7 +11,8 @@
 # The write phase runs 12 cells at 8 commits per second each for 90 s, with the
 # compactor at its defaults, on SeaweedFS behind the delay proxy
 # (`bench/delay_proxy.exs`, 25 ms per request). It ends with a graceful stop,
-# which releases the leases. Each restore run is a new VM with a new data
+# which releases the leases (and, first, compacts the tails: it prints what each
+# cell did). Each restore run is a new VM with a new data
 # directory, which
 # touches the 12 cells at once and prints per wake: the time, the level-0 and
 # merged GETs of the wake (the `requests` of `[:alambique, :cell, :wake]`) and
@@ -120,8 +121,22 @@ defmodule Swap do
       IO.puts("#{cell}  #{level0}  #{merged}  #{level0 + merged}  #{walked}")
     end
 
+    id = {__MODULE__, make_ref()}
+    :telemetry.attach(id, [:alambique, :cell, :hibernate], &__MODULE__.print_release/4, nil)
     Supervisor.stop(sup)
+    :telemetry.detach(id)
     File.rm_rf(dir)
+  end
+
+  # What the graceful stop did to each cell: its tail, and the compaction
+  # before the release (`compaction: :deadline` means it was cut).
+  def print_release(_event, m, meta, _config) do
+    ms = &System.convert_time_unit(&1, :native, :millisecond)
+
+    IO.puts(
+      "release #{meta.cell} tail #{m.tail} compaction #{meta.compaction} " <>
+        "#{ms.(m.compact_duration)} ms of #{ms.(m.duration)} ms"
+    )
   end
 
   defp commits(name, cell, row, stop, interval, n) do

@@ -1987,6 +1987,41 @@ queued again, after `retry_ms` or at once, with the TXIDs it counted, so its
 chain is still measured; a commit made meanwhile makes a row that takes the
 older start.
 
+**Compaction on release.** A cell that gives its lease up on purpose
+(`Alambique.hibernate/3`, `Alambique.drain/2` and the stop of the instance:
+`reason: :request` or `:shutdown`, not the idle timer nor a freeze) first
+compacts its own tail, so the node that wakes it next reads a short chain.
+After the uploads are acknowledged and the local file is closed, and before
+the lease is released, the cell runs one pass of the same code the compactor
+runs (`Compactor.compact/4`, `Compaction.run/3` with no limit on the merges).
+The pass lists the files of the cell and counts the level-0 files of the chain
+a restore would walk (the tail); under `release_min_tail` (default 32) it does
+nothing else, so a release of a quiet cell costs one listing. The row of the
+compactor cannot say how long the tail is: the compactor deletes it when it
+takes the cell, and a pass that falls behind (see "Chain cap") leaves the
+tail it did not reach with no row. Counting the files is exact.
+
+The pass has a deadline, `release_deadline_ms` (default 3 000, capped by what
+is left of the lease; `0` turns the compaction off, with no listing either).
+It starts no merge after the deadline, and a merge already in flight ends;
+the lease is then released with what was merged, and the event says
+`compaction: :deadline`. The files already written stay valid, because each
+merge is a conditional write of a file the chain can do without, so a cut
+loses nothing. Calls that reach the cell meanwhile wait in its mailbox, as
+they do while it uploads, and are answered as for any hibernation. The row
+stays in the compactor, which finds nothing left to merge. The default of 32
+is four merges of level 1: a tail below it adds at most that many files to a
+wake, and merging more costs about four round trips per eight files (about
+0.1 s each at 25 ms per request). In `mise run bench:swap` (12 cells at 30
+commits per second, 30 s, one CPU, 25 ms per request, load average 7 to 13 on
+a shared machine, 2026-11-14) the four cells with tails of about 200 files
+used the whole deadline and were cut, and the eight others released in
+0.18 s at most. The wakes of the next node took 0.41 to 0.47 s at most and read
+26 level-0 files at most, against 0.81 s and 229 files with
+`release_deadline_ms: 0`. Raise `release_deadline_ms` together with
+`:timeout_ms` and `:deadline_ms` of the drain when tails are longer or the
+store slower.
+
 **Levels.** A pass merges level-0 files, one per batch, `fanout` (default 8)
 at a time into level 1, level 1 into level 2, up to `max_level` (default 2).
 Merged files cover *aligned blocks*: level `L` covers blocks of `fanout^L`

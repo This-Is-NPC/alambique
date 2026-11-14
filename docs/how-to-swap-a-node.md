@@ -91,8 +91,12 @@ On A, hand the cells over:
 {:ok, %{hibernated: 40, errors: []}} = Alambique.drain(MyApp.Cells)
 ```
 
-For each cell A writes what is pending, releases the lease explicitly and
-hibernates. First it leaves the members and refuses to wake any more cells.
+For each cell A writes what is pending, compacts a long level-0 tail
+(`compaction: [release_min_tail:]`, default 32 level-0 files, for at most
+`compaction: [release_deadline_ms:]`, default 3 000 ms), releases the lease
+explicitly and hibernates. B then wakes the cell on a short chain; a cell
+whose compaction hit the deadline is handed over anyway, and its
+`[:alambique, :cell, :hibernate]` event says `compaction: :deadline`. First it leaves the members and refuses to wake any more cells.
 Forty cells took 12 ms in the swap test. From the moment a lease is released,
 B serves its cell on the next request. A call that reaches A now gets
 `{:error, {:unavailable, owner, expires}}` for a cell B holds and

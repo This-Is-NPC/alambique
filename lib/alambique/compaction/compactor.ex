@@ -57,6 +57,26 @@ defmodule Alambique.Compaction.Compactor do
   end
 
   @doc """
+  One pass over `cell` for a cell that is about to hand its lease over: it
+  does nothing when the chain holds fewer than `min_tail` level-0 files, and
+  otherwise merges until the chain is compacted or `timeout_ms` passes
+  (`more: true` then). `ctx` is the replication context of the cell's location.
+  """
+  @spec compact(Alambique.Config.t(), Alambique.Replication.ctx(), String.t(), pos_integer) ::
+          {:ok, Compaction.summary()} | {:error, term}
+  def compact(config, ctx, cell, timeout_ms) do
+    # The deadline bounds the merges, not their number.
+    opts =
+      Keyword.merge(compaction_opts(config.compaction, config),
+        timeout_ms: timeout_ms,
+        max_merges: 1_000_000,
+        min_tail: config.compaction.release_min_tail
+      )
+
+    Compaction.run(%{ctx | timeout_ms: timeout_ms}, cell, opts)
+  end
+
+  @doc """
   Asks for the cleanup of what `cell` left at the location `location_id` after a
   move (design §18), in `delay_ms`. A cleanup that finds the grace period still
   running schedules itself again. The jobs live in memory; the periodic scan

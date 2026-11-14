@@ -1002,16 +1002,63 @@ defmodule Alambique.Cell do
 
     with {:ok, state} <- drain(state) do
       state = state |> Publisher.flush() |> finish_local()
+      {compacted, tail, spent} = compact_tail(state, why)
       released = release(state)
 
-      Telemetry.span_stop([:cell, :hibernate], started, %{}, %{
+      Telemetry.span_stop([:cell, :hibernate], started, %{tail: tail, compact_duration: spent}, %{
         cell: state.id,
         location: state.location.id,
         epoch: state.lease.epoch,
-        reason: why
+        reason: why,
+        compaction: compacted
       })
 
       {:ok, state, released}
+    end
+  end
+
+  # A graceful release (`Alambique.hibernate/3`, a drain, a stop) compacts a
+  # long level-0 tail before it gives the lease away, so the next node wakes on
+  # a short chain (design §9). It stops at `release_deadline_ms`, or earlier at
+  # the end of the lease, and hands over with what it merged. Returns the
+  # outcome (`:none`, `:done`, `:deadline` or `:error`), the tail it found and
+  # the time spent.
+  defp compact_tail(%State{config: %{compaction: c} = config} = state, why)
+       when why in [:request, :shutdown] and c != nil do
+    budget = min(c.release_deadline_ms, max(State.lease_left_ms(state), 0))
+
+    if budget == 0 do
+      {:none, 0, 0}
+    else
+      started = System.monotonic_time()
+      deadline = Retry.deadline_in(budget)
+      result = Compactor.compact(config, state.repl_ctx, state.id, budget)
+      spent = System.monotonic_time() - started
+      {outcome, tail} = release_compaction(result, deadline, state.id, c.release_min_tail)
+      {outcome, tail, spent}
+    end
+  end
+
+  defp compact_tail(_state, _why), do: {:none, 0, 0}
+
+  defp release_compaction({:ok, %{tail: tail}}, _deadline, _cell, min) when tail < min,
+    do: {:none, tail}
+
+  defp release_compaction({:ok, %{more: false, tail: tail}}, _deadline, _cell, _min),
+    do: {:done, tail}
+
+  defp release_compaction({:ok, %{more: true, tail: tail}}, _deadline, _cell, _min),
+    do: {:deadline, tail}
+
+  defp release_compaction({:error, reason}, deadline, cell, _min) do
+    if System.monotonic_time(:millisecond) >= deadline do
+      {:deadline, 0}
+    else
+      Logger.warning(
+        "Alambique could not compact #{cell} before releasing it: #{inspect(reason)}"
+      )
+
+      {:error, 0}
     end
   end
 
