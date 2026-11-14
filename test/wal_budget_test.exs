@@ -106,7 +106,7 @@ defmodule Alambique.WalBudgetTest do
 
     GatedStore.hold(gate, Regex.compile!(Regex.escape(stuck) <> ".*/0000/"))
     writer = Task.async(fn -> Alambique.execute(inst, stuck, @insert, [1]) end)
-    eventually(fn -> Alambique.load(inst, stuck) == {:ok, %{pending: 1}} end)
+    eventually(fn -> Alambique.load(inst, stuck) == {:ok, %{pending: 1, waking: false}} end)
 
     others = for _ <- 1..4, do: unique_cell()
     for cell <- others, do: write(inst, cell, 3)

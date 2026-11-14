@@ -59,7 +59,7 @@ defmodule Alambique.AdmissionTest do
 
     GatedStore.hold(gate, ~r{/0000/})
     writer = Task.async(fn -> Alambique.execute(inst, busy, @insert, [1]) end)
-    eventually(fn -> Alambique.load(inst, busy) == {:ok, %{pending: 1}} end)
+    eventually(fn -> Alambique.load(inst, busy) == {:ok, %{pending: 1, waking: false}} end)
 
     assert {:error, :overloaded} = Alambique.touch(inst, other)
     assert awake(inst) == 1
@@ -256,13 +256,13 @@ defmodule Alambique.AdmissionTest do
 
       GatedStore.hold(gate, ~r{/0000/})
       writer = Task.async(fn -> Alambique.execute(inst, cell, @insert, [1]) end)
-      eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 1}} end)
+      eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 1, waking: false}} end)
 
       replies = burst_queries(inst, cell, 100, 50)
 
       assert Enum.count(replies, &(&1 == {:error, :timeout})) == 2
       assert Enum.count(replies, &(&1 == {:error, :busy})) == 98
-      assert Alambique.load(inst, cell) == {:ok, %{pending: 3}}
+      assert Alambique.load(inst, cell) == {:ok, %{pending: 3, waking: false}}
 
       GatedStore.open(gate)
       assert {:ok, _} = Task.await(writer, 10_000)
@@ -279,13 +279,13 @@ defmodule Alambique.AdmissionTest do
       "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 5000000) SELECT count(*) FROM c"
 
     reader = Task.async(fn -> Alambique.query(inst, cell, slow, [], timeout: 10_000) end)
-    eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 1}} end)
+    eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 1, waking: false}} end)
 
     assert {:error, :timeout} = Alambique.execute(inst, cell, @insert, [1], timeout: 20)
     assert {:ok, _} = Task.await(reader, 10_000)
 
     assert {:ok, %{rows: [[1]]}} = Alambique.query(inst, cell, "SELECT count(*) FROM t")
-    eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 0}} end)
+    eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 0, waking: false}} end)
   end
 
   @doc false
@@ -379,10 +379,10 @@ defmodule Alambique.AdmissionTest do
 
       GatedStore.hold(gate, ~r{/0000/})
       writer = Task.async(fn -> Alambique.execute(inst, busy, @insert, [2]) end)
-      eventually(fn -> Alambique.load(inst, busy) == {:ok, %{pending: 1}} end)
+      eventually(fn -> Alambique.load(inst, busy) == {:ok, %{pending: 1, waking: false}} end)
 
       assert {:error, :overloaded} = Alambique.touch(inst, other)
-      assert Alambique.load(inst, busy) == {:ok, %{pending: 1}}
+      assert Alambique.load(inst, busy) == {:ok, %{pending: 1, waking: false}}
 
       GatedStore.open(gate)
       assert {:ok, _} = Task.await(writer, 10_000)

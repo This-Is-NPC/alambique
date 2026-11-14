@@ -1360,11 +1360,11 @@ defmodule Alambique do
   How much work waits on a cell that has a process on this node, to tell a
   saturated cell from one that is only called often.
 
-  Returns `{:ok, %{pending: n}}`, or `:none` when the cell has no process on
-  this node. It never wakes a cell, never asks another node and never calls
+  Returns `{:ok, %{pending: n, waking: waking}}`, or `:none` when the cell has
+  no process on this node. It never wakes a cell, never asks another node and never calls
   the cell process, so a cell stuck in a long transaction or with a long
   mailbox answers at once. It costs one registry lookup, one liveness
-  check and two counter reads.
+  check and three counter reads.
 
   `pending` is the number of calls and transactions the cell has not answered
   yet: the calls sent to it that it has not run, plus the callers it accepted
@@ -1373,11 +1373,18 @@ defmodule Alambique do
   mailbox (a queued flush, an upload that landed, a timer, the exit message of
   a task) do not count. A call that parks may count twice for an instant. A cell that is waking or hibernating has a
   process, so it answers with the calls queued behind that work.
+
+  `waking` is `true` from the moment the cell has a process until its wake
+  ends, and `false` from then on: when the cell starts serving, right after
+  the `[:alambique, :cell, :wake]` event. A cell whose wake failed stops and
+  is `:none`. A cell that is hibernating reports `waking: false`; waking it again is a new
+  process and starts at `true`.
   """
-  @spec load(instance, cell) :: {:ok, %{pending: non_neg_integer}} | :none
+  @spec load(instance, cell) ::
+          {:ok, %{pending: non_neg_integer, waking: boolean}} | :none
   def load(instance, cell) do
     case Alambique.Cell.load(Config.fetch!(instance), cell) do
-      {:ok, pending} -> {:ok, %{pending: pending}}
+      {:ok, pending, waking} -> {:ok, %{pending: pending, waking: waking}}
       :none -> :none
     end
   end

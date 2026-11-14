@@ -1906,8 +1906,8 @@ directories (`<data_dir>/work`, §20) are not part of the cache; `inflight`,
   landed upload for the checkpoint check (§6), at the end of its wake and
   after a checkpoint, so a call to `cells/2` costs no file access and the size
   can lag a write by the upload that is still in flight.
-- **Cell load.** `Alambique.load/2` answers `{:ok, %{pending: n}}` for a cell
-  with a process on this node and `:none` otherwise, without a call into the
+- **Cell load.** `Alambique.load/2` answers `{:ok, %{pending: n, waking: w}}` for a
+  cell with a process on this node and `:none` otherwise, without a call into the
   cell. Each cell registers a `:counters` reference as its registry value; the
   cell adds one when it accepts a write or a read that waits for a commit and
   subtracts the batch when it answers. A second slot counts the calls in
@@ -1916,7 +1916,12 @@ directories (`<data_dir>/work`, §20) are not part of the cache; `inflight`,
   slots, so callers parked in the pipeline (§6) count although they are no
   longer in the mailbox, and internal messages (`:flush`, `:landed`, timers,
   exit messages) do not count. A call that parks is briefly in both slots, so
-  the value can be one over for an instant.
+  the value can be one over for an instant. `waking` is `true` while the wake
+  runs: it reads slot 3 of the atomics (the last call, above), which the
+  cell sets when it starts serving, right after the `[:alambique, :cell,
+  :wake]` event, so it is `true` from the registration of the process until
+  then and never again for that process. It is the same slot `cells/2` reads
+  for `:last_used`, which is `nil` exactly while `waking` is `true`.
 
 ## 9. Compaction and retention
 

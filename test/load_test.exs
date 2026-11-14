@@ -56,7 +56,7 @@ defmodule Alambique.LoadTest do
 
   test "an idle awake cell has nothing pending", env do
     inst = start(env, 1)
-    assert Alambique.load(inst, env.cell) == {:ok, %{pending: 0}}
+    assert Alambique.load(inst, env.cell) == {:ok, %{pending: 0, waking: false}}
   end
 
   for depth <- [1, 4] do
@@ -116,5 +116,37 @@ defmodule Alambique.LoadTest do
     assert {:ok, _} = Task.await(blocker)
     assert Enum.all?(Task.await_many(queued), &match?({:ok, _}, &1))
     eventually(fn -> pending(inst, env.cell) == 0 end)
+  end
+
+  test "a cell is waking until its wake ends, then serving", env do
+    inst = start_instance(env, migrations: @schema, compaction: false)
+    {:ok, _} = Alambique.execute(inst, env.cell, @insert, [0])
+    :ok = Alambique.hibernate(inst, env.cell)
+    eventually(fn -> Alambique.load(inst, env.cell) == :none end)
+    capture([[:alambique, :cell, :wake]])
+
+    # The cell holds its wake here, with a process and before any restore.
+    test = self()
+    cell = env.cell
+
+    Alambique.Fault.install(fn
+      :cell_before_take_over, %{cell: ^cell} ->
+        send(test, {:waking, self()})
+        receive do: (:go -> :ok)
+
+      _, _ ->
+        :ok
+    end)
+
+    on_exit(&Alambique.Fault.uninstall/0)
+
+    call = Task.async(fn -> Alambique.query(inst, cell, "SELECT count(*) FROM t") end)
+    assert_receive {:waking, waker}, 5_000
+    assert {:ok, %{waking: true}} = Alambique.load(inst, cell)
+
+    send(waker, :go)
+    assert {:ok, %{rows: [[1]]}} = Task.await(call, 5_000)
+    await_event([:alambique, :cell, :wake], cell)
+    assert Alambique.load(inst, cell) == {:ok, %{pending: 0, waking: false}}
   end
 end

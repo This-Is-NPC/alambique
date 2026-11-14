@@ -69,13 +69,17 @@ defmodule Alambique.Cell do
   The calls waiting on the cell process of `id` on this node, without a call
   into it: the calls sent and not yet answered or parked plus the callers
   it accepted and has not answered (`State.load`). Other messages of the
-  mailbox do not count. `:none` when it has no process.
+  mailbox do not count. Also whether the wake is still running (`waking?/1`).
+  `:none` when it has no process.
   """
-  @spec load(Alambique.Config.t(), String.t()) :: {:ok, non_neg_integer} | :none
+  @spec load(Alambique.Config.t(), String.t()) ::
+          {:ok, non_neg_integer, boolean} | :none
   def load(config, id) do
-    case Registry.lookup(config.registry, id) do
-      [{pid, load}] -> pending(pid, load)
-      [] -> :none
+    with [{pid, load}] <- Registry.lookup(config.registry, id),
+         {:ok, pending} <- pending(pid, load) do
+      {:ok, pending, waking?(load)}
+    else
+      _ -> :none
     end
   end
 
@@ -104,6 +108,11 @@ defmodule Alambique.Cell do
       last -> last
     end
   end
+
+  @doc false
+  # The wake has not ended: slot 3 is set when the cell starts serving.
+  @spec waking?(:atomics.atomics_ref()) :: boolean
+  def waking?(load), do: :atomics.get(load, 3) == 0
 
   @doc false
   @spec wal_bytes(:atomics.atomics_ref()) :: non_neg_integer
