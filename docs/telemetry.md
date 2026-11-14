@@ -300,7 +300,7 @@ Emitted by the background compactor of an instance.
 | --- | --- | --- |
 | `[:alambique, :compactor, :tick]` | `duration`, `cells` (rows taken from the queue) | `instance` |
 
-A tick with nothing ready emits nothing. A failed pass is logged as a warning
+A tick with nothing ready emits nothing. A round the compactor runs at once for the cells over `:max_chain_segments` emits the same event. A failed pass is logged as a warning
 and tried again after `:retry_ms`; its `:pass` event carries the reason.
 
 ## Freeze events

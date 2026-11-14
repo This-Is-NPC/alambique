@@ -1893,7 +1893,8 @@ bounded public table: a row `{cell, first_txid, last_txid, due_ms}`.
 A row is ready when `fanout` TXIDs were committed since it appeared, or when
 `max_age_ms` passed. Every `interval_ms` the compactor takes up to
 `concurrency * batch_factor` ready rows, deletes them, and runs one pass for
-each, `concurrency` at a time, each with its own deadline. When more rows are
+each, `concurrency` at a time (more while a cell is over the cap, see
+"Chain cap"), each with its own deadline. When more rows are
 ready than fit in a batch, the choice is not left to the hash order of the
 table: the rows with `max_chain_segments` (default 256) TXIDs or more go first,
 then the rows with the smallest `due`, the ones that waited longest. A row that
@@ -1910,17 +1911,38 @@ The compactor starts last in the instance tree, so its crash restarts nothing.
 
 **Chain cap.** A row counts the TXIDs from its first commit to its last, one
 per batch, so `last - first + 1` is the number of level-0 files the cell added
-since the compactor last took its row. Rows with `max_chain_segments` or more
-(at least `fanout`, so they are ready anyway) go ahead of all other rows. A
-cell is therefore not left with a growing chain because other cells are busier:
-while fewer cells than a batch are over the cap, a cell waits one tick, and
-its chain is the cap plus what it commits during that tick and its pass. That
-bounds the level-0 files a restore reads to about the cap, on top of the
-merged files of "Levels" below. It does not hold when the compactor is down, when more
-cells are over the cap than a batch (they are served oldest first, in
-`ceil(over / batch)` ticks), or while a pass fails: a row taken for a failed
-pass is queued again after `retry_ms` with no TXID count, so its chain is not
-measured until it commits again after a pass that worked.
+since the compactor last took its row. A restore walks the merged files, so
+the chain it walks is at most that count plus the tail the merges leave
+(`fanout - 1` files for each level below the top one, 14 by default) and the
+top-level files since the newest snapshot. The listing of a cell is longer: it
+keeps every level-0 file for the window (see "Superseded files"), and its
+length says nothing about the walk. The 500 to 830 files that a node swap
+under load counted, with the cap at 256, were the listing.
+
+The cap works in two ways. Rows with `max_chain_segments` or more (at least
+`fanout`, so they are ready anyway) go ahead of all other rows, and a tick
+that has one runs `concurrency + urgent_concurrency` passes at once (default
+2 + 4), and takes batches for that many. And the commit that brings a row to
+the cap wakes the compactor with one message (`notify/3` looks at the row
+every `fanout` TXIDs, not at every commit): the compactor then runs the rows
+over the cap at once, without waiting for the timer. Without the wake a hot
+cell reached the cap, waited for the next tick, and committed
+`rate * interval_ms` more before its pass started. Measured with 12 cells that
+commit back to back (about 30 commits per second each) over a store with
+25 ms per request and `max_chain_segments: 48`, the largest chain a restore
+would walk was 214 files with the tick alone and 83 with the wake.
+
+The chain of a cell is then the cap plus what it commits while its pass runs:
+about `rate * pass_time`, where a pass costs the listing (one request for every
+1 000 files of the cell), and for each merge about four round trips. It does
+not hold when the compactor is down, when more cells are over the cap than
+`concurrency + urgent_concurrency` can serve (the demand is about
+`commits_per_second * round_trip / fanout` passes at once, summed over the
+cells, so 100 commits per second at 25 ms needs two), or while a pass fails:
+a row taken for a failed pass or for a pass that ran out of merge budget is
+queued again, after `retry_ms` or at once, with the TXIDs it counted, so its
+chain is still measured; a commit made meanwhile makes a row that takes the
+older start.
 
 **Levels.** A pass merges level-0 files, one per batch, `fanout` (default 8)
 at a time into level 1, level 1 into level 2, up to `max_level` (default 2).

@@ -72,9 +72,12 @@ the fence.
    eight files) do this; a lower `:snapshot_interval_txids` or `:snapshot_ratio`
    for cells that change all day makes the chain after the snapshot shorter.
    When many cells are written at once, the compactor takes the cells that
-   waited longest, and first any cell with `compaction: [max_chain_segments:]`
-   (default 256) uncompacted commits. Lower it if a busy node must wake cells
-   quickly; design §9.
+   waited longest, and first, at once, any cell with
+   `compaction: [max_chain_segments:]` (default 256) uncompacted commits, with
+   `compaction: [urgent_concurrency:]` (default 4) more passes at a time while
+   one is over it. Lower the cap if a busy node must wake cells quickly. A
+   restore walks the merged files, not every file in the listing: the listing
+   of a busy cell has hundreds, and the walk about the cap at most; design §9.
 
 4. Keep a local file when you can. A node that hibernated the cell last reuses
    its file and reads only the head of the chain. `local_cache.max_bytes`
