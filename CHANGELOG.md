@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.7.1](https://github.com/This-Is-NPC/alambique/compare/v0.7.0...v0.7.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **compaction:** wake the compactor at the chain cap ([8512107](https://github.com/This-Is-NPC/alambique/commit/85121077f54b6f275bd0e6587d80611da5ef4aa2))
+* **restore:** reuse the heads of a lazy attempt ([92f1d92](https://github.com/This-Is-NPC/alambique/commit/92f1d92da671704cfdab033f20669e3419aa102c))
+
+
+### Performance Improvements
+
+* **bench:** add a node swap under load ([a897b77](https://github.com/This-Is-NPC/alambique/commit/a897b77220b3c69eee53dd358d1ddf56dc729e20))
+* **bench:** restore many cells at once ([99090c6](https://github.com/This-Is-NPC/alambique/commit/99090c6a2e7b614d1900e8535ec88dd1ce346b00))
+* **bench:** restore through SeaweedFS and a delay proxy ([138c67a](https://github.com/This-Is-NPC/alambique/commit/138c67a72471417d35201a5ba751c35b19f1e1f5))
+* **restore:** index the chain by start TXID ([bcc701c](https://github.com/This-Is-NPC/alambique/commit/bcc701cd54a81558891831ac1ee75d0249645d7f))
+* **restore:** keep the listing out of read-ahead tasks ([d75d687](https://github.com/This-Is-NPC/alambique/commit/d75d6876a60603e8ee74d95c582d2994f513b73d))
+* **s3:** add pool_size, default 256 ([33ada8f](https://github.com/This-Is-NPC/alambique/commit/33ada8f7bc59b359a23bb970942a15fd88751738))
+
 ## [0.7.0](https://github.com/This-Is-NPC/alambique/compare/v0.6.1...v0.7.0) (2026-11-14)
 
 
