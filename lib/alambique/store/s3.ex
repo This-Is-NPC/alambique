@@ -37,8 +37,18 @@ defmodule Alambique.Store.S3 do
       virtual-hosted style (`bucket.s3.<region>.amazonaws.com` on AWS; a
       bucket name with dots does not match the AWS certificate)
     * `:receive_timeout` - milliseconds, default `8_000`, below the default `:op_timeout_ms` (10 000) so that the client gives up before the library does; raise it only together with `:op_timeout_ms`
+    * `:pool_size` - connections to the endpoint that the store may hold
+      open at once, default `256`. Connections are opened when a request needs
+      one and closed when idle. A request waits for a free connection
+      (`finch: [pool_timeout: ...]`), so a pool smaller than the requests in
+      flight queues them: 12 cells waking together read ahead 16 files each,
+      192 requests, and the default pool of Finch (50) made them 30% slower.
+      Size it for `awake: [max_wakes:]` times `restore: [fetch_concurrency:]`
+      if you wake that many at once.
     * `:req_options` - extra options merged into every `Req` request, for
-      example `finch: [pool_timeout: 5_000]` for the wait for a pooled connection
+      example `finch: [pool_timeout: 5_000]` for the wait for a pooled
+      connection. With `finch: [name: pool]` the store uses a pool of your own
+      and `:pool_size` does not apply.
 
   `from_url/2` builds the config from `"s3://bucket/prefix"`.
 
@@ -56,6 +66,7 @@ defmodule Alambique.Store.S3 do
   @behaviour Alambique.Store
 
   @default_timeout 8_000
+  @default_pool_size 256
   @credentials [:access_key_id, :secret_access_key, :session_token]
   @credentials_margin_ms 300_000
   @credentials_ttl_ms 300_000
@@ -203,11 +214,24 @@ defmodule Alambique.Store.S3 do
       receive_timeout: Map.get(config, :receive_timeout, @default_timeout)
     ]
 
+    extra = Map.get(config, :req_options, [])
+
     base
     |> Keyword.merge(opts)
-    |> Keyword.merge(Map.get(config, :req_options, []))
+    |> Keyword.merge(extra)
+    |> Keyword.put(:finch, finch_options(config, extra[:finch]))
     |> send_request()
   end
+
+  # The pool of `:pool_size`, with the `:finch` options of `:req_options` over
+  # it; a pool given by name is not sized here.
+  defp finch_options(config, extra) when is_list(extra) do
+    options = Keyword.merge([size: Map.get(config, :pool_size, @default_pool_size)], extra)
+    if options[:name], do: Keyword.delete(options, :size), else: options
+  end
+
+  defp finch_options(_config, name) when is_atom(name) and name != nil, do: [name: name]
+  defp finch_options(config, _extra), do: [size: Map.get(config, :pool_size, @default_pool_size)]
 
   # The client also raises or exits, for example when its connection pool is
   # exhausted; every operation reports those as errors.
