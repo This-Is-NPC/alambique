@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Runs the node swap benchmark. Argument: all (default), write or restore; see bench/swap.exs.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+MIX_ENV=test exec mix run bench/swap.exs "$@"

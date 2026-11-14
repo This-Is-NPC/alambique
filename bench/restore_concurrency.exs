@@ -34,6 +34,8 @@
 #   ELIXIR_ERL_OPTIONS="+S 1:1 +SDcpu 1:1 +SDio 1" taskset -c 0 \
 #     mise run bench:restore-concurrency
 
+Code.require_file("seaweedfs_store.exs", __DIR__)
+
 defmodule Slow do
   @moduledoc false
   @behaviour Alambique.Store
@@ -97,29 +99,8 @@ defmodule Bench do
   end
 
   defp backend("seaweedfs", ms) do
-    config = %{
-      endpoint: "http://127.0.0.1:18333",
-      bucket: "bench-" <> Base.encode16(:crypto.strong_rand_bytes(4), case: :lower),
-      access_key_id: "alambique",
-      secret_access_key: "alambique-secret",
-      path_style: true,
-      receive_timeout: 30_000
-    }
-
-    {:ok, %{status: status}} =
-      Req.put(
-        url: "#{config.endpoint}/#{config.bucket}",
-        aws_sigv4: [
-          access_key_id: config.access_key_id,
-          secret_access_key: config.secret_access_key,
-          service: "s3",
-          region: "us-east-1"
-        ],
-        retry: false
-      )
-
-    true = status in [200, 409]
-    port = start_proxy(18333, ms)
+    config = BenchSeaweedfs.bucket()
+    port = BenchSeaweedfs.start_proxy(ms)
     via = Map.merge(config, %{endpoint: "http://127.0.0.1:#{port}"})
 
     via =
@@ -129,33 +110,6 @@ defmodule Bench do
       end
 
     {{Alambique.Store.S3, config}, fn -> {Alambique.Store.S3, via} end}
-  end
-
-  # The proxy is a process of its own (`bench/delay_proxy.exs`), on another
-  # CPU, so that its work does not count in the one the bench pins the VM to.
-  # It stops when its stdin closes, which happens when this VM exits.
-  defp start_proxy(target, ms) do
-    [cpu] = env("ALAMBIQUE_BENCH_PROXY_CPU", "5")
-
-    port =
-      Port.open({:spawn_executable, System.find_executable("taskset")}, [
-        :binary,
-        :exit_status,
-        args: [
-          "-c",
-          "#{cpu}",
-          System.find_executable("elixir"),
-          "bench/delay_proxy.exs",
-          "#{target}",
-          "#{ms}"
-        ]
-      ])
-
-    receive do
-      {^port, {:data, line}} -> String.trim(line) |> String.to_integer()
-    after
-      20_000 -> raise "the delay proxy did not start"
-    end
   end
 
   def run_many(cells) do
