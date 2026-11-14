@@ -75,10 +75,16 @@ the fence.
    waited longest, and first, at once, any cell with
    `compaction: [max_chain_segments:]` (default 256) uncompacted commits, with
    `compaction: [urgent_concurrency:]` (default 4) more passes at a time while
-   one is over it. Lower the cap if a busy node must wake cells quickly. A
-   restore walks the merged files, not every file in the listing: the listing
-   of a busy cell has hundreds, and the walk about the cap at most; design §9.
-   A node that hands a cell over on purpose (`hibernate/3`, `drain/2`, a
+   one is over it. A pass that ends starts the next at once, and a cell that
+   reaches the cap starts its pass as soon as a slot is free. Lower the cap if
+   a busy node must wake cells quickly. A restore walks the merged files, not
+   every file in the listing: the listing of a busy cell has hundreds, and the
+   walk about the cap at most, plus what the cell commits while its pass runs
+   (design §9, "Chain cap"). Passes get longer when the node's CPU is
+   saturated, and the tail with them; if `[:alambique, :compaction, :pass]`
+   `duration` times the commits per second of a cell comes near the cap, raise
+   `compaction: [concurrency:]` or `urgent_concurrency:`, or lower the commit
+   rate of the node. A node that hands a cell over on purpose (`hibernate/3`, `drain/2`, a
    stop) compacts its tail first when it has `compaction: [release_min_tail:]`
    (default 32) level-0 files or more, for at most `compaction: [release_deadline_ms:]`
    (default 3 000), so the next node reads a short chain.
@@ -200,6 +206,46 @@ makes about one per file (one more for each file larger than `edge_bytes`).
 `{:get, :segment}` and
 `{:get, :merged}` in the wake event (telemetry.md) show it: they are the
 requests of the wake, and a chain of N small files costs about N of them.
+
+### A node swap with a saturated writer
+
+Two more variables of `mise run bench:swap` make the writing VM look like a
+node that also runs an app. `ALAMBIQUE_BENCH_SWAP_RATE=30` raises the commits
+per cell (the default 8 is lighter than a busy cell), and
+`ALAMBIQUE_BENCH_SWAP_WRITER_BURN=2 ALAMBIQUE_BENCH_SWAP_WRITER_BURN_DIRTY=4`
+start busy loops in the writing VM, on its normal and on its dirty CPU
+scheduler, so that it has no CPU to spare. `ALAMBIQUE_BENCH_SWAP_OPEN=1` starts
+a commit every `1 / RATE` seconds whatever the earlier ones did, as clients
+do; the cell then groups them, so its files are fewer and larger. The write
+phase prints, for each cell, its passes (count, total and longest time), the
+longest tail of its row in the compactor (sampled every 100 ms), and
+how many samples found a cell at the cap with fewer passes running than the
+slots allow. The restore phase prints an `AUDIT` line for each wake: the
+level-0 and merged files its chain had, read from the store before the wake,
+next to the `{:get, :segment}` and `{:get, :merged}` of the wake. They are
+equal in every wake measured: a chain of N files costs N GETs.
+
+Measured on a shared laptop, before the release compacted the tail (so the wake
+columns are the chain at the stop; `release_deadline_ms: 0` gives the same; load average 4 to 8; 36 s of writes, 12 cells,
+25 ms proxy, writer pinned to one CPU), one run of each, before and after the
+compactor started passes as slots free. The tail is the longest `last - first +
+1` a cell's row had; the wake columns are those of the 12 wakes after the writer
+stopped, which depend on how long before the stop each cell's last pass
+started, and so vary more than the tail does:
+
+| Writer | Compactor | Tail of a row | Samples at the cap with fewer than 6 passes | Longest wake | Level-0 GETs of a wake (median, most) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 30 commits/s, busy loops | before | 159-310 | 68 of 70 | 0.44 s | 18, 107 |
+| | after | 92-113 | none at the cap | 0.37 s | 39, 67 |
+| 30 commits/s | before | 283-336 | 97 of 109 | 0.53 s | 46, 49 |
+| | after | 141-228 | none at the cap | 0.64 s | 32, 68 |
+| 8 commits/s (default) | before | 41-61 | none at the cap | 0.27 s | 7, 8 |
+| | after | 42-50 | none at the cap | 0.25 s | 7, 15 |
+
+The tails above the cap of 256 are gone, and they are bounded by what a cell
+commits while its pass runs (design §9). A wake after a swap still reads the
+commits since the last pass of each cell; shortening that is the job of
+compacting at the release of the lease.
 
 ## Troubleshooting
 
