@@ -6,11 +6,12 @@ defmodule Alambique.RestoreScalingTest do
 
   alias Alambique.Replication
 
-  @short 150
-  @long 600
+  @short 300
+  @long 1200
 
-  # Reductions the walk spends restoring a chain of `segments` files.
-  defp walk_reductions(segments) do
+  # What restoring a chain of `segments` files costs: the reductions of the
+  # walk, and the wall time of the fastest of three restores.
+  defp cost(segments) do
     {_pid, store} = start_store()
     dir = tmp_dir()
     ctx = ctx(store, new_world(), timeout_ms: 600_000)
@@ -25,15 +26,31 @@ defmodule Alambique.RestoreScalingTest do
     Alambique.Sqlite.close(conn)
     dest = Path.join(dir, "dest.db")
     {:reductions, before} = Process.info(self(), :reductions)
-    assert {:ok, %{txid: ^segments}} = Replication.restore(ctx, "cell", dest, :latest)
+
+    times =
+      for _ <- 1..3 do
+        {us, {:ok, %{txid: ^segments}}} =
+          :timer.tc(fn -> Replication.restore(ctx, "cell", dest, :latest) end)
+
+        us
+      end
+
     {:reductions, after_} = Process.info(self(), :reductions)
-    after_ - before
+    %{reductions: div(after_ - before, 3), us: Enum.min(times)}
   end
 
-  test "the walk of a chain 4 times longer costs about 4 times the reductions" do
-    ratio = walk_reductions(@long) / walk_reductions(@short)
-
-    # Linear is 4; planning that rescans the listing for every file is 16.
+  # Linear is 4; rescanning or copying the listing for every file is 16.
+  test "planning a chain 4 times longer costs about 4 times the reductions" do
+    ratio = cost(@long).reductions / cost(@short).reductions
     assert ratio < 6, "reductions grew #{Float.round(ratio, 1)} times for 4 times the segments"
+  end
+
+  # The read ahead sends a request to a task per file: what a task is given
+  # must not grow with the chain.
+  test "restoring a chain 4 times longer takes about 4 times as long" do
+    ratio = cost(@long).us / cost(@short).us
+
+    assert ratio < 8,
+           "the restore took #{Float.round(ratio, 1)} times as long for 4 times the segments"
   end
 end
