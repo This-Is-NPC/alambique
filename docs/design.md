@@ -1145,7 +1145,14 @@ ceiling is `max(max_inflight_bytes, largest object)`.
   set.
 - **Lazy restore.** The edges of the files (the first range and the trailer,
   each `edge_bytes`) read ahead stay under the budget too; the walk reads the
-  rest as it reaches them. A page index larger than the trailer read is read
+  rest as it reaches them. When the heads of the whole chain add up to less
+  than `lazy_restore: [min_bytes:]` the restore is done in full instead, and
+  the heads already read are the first ranges of that full restore: a chain is
+  never read twice (at most `min_bytes` of heads wait for it outside the
+  budget). The requests of a restore are then at most the files it walks plus
+  the files larger than the first range, as long as the budget holds the heads
+  of the chain; with a budget of a few `edge_bytes`, files the read ahead
+  evicted are read again. A page index larger than the trailer read is read
   whole and counted past the budget (it is sized by the object, see §16).
 - **Hydration.** Every ranged read that installs pages (`Lazy.fetch_run/3`:
   background runs of `batch_bytes`, misses, the pages the replicator needs)
