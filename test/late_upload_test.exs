@@ -192,7 +192,7 @@ defmodule Alambique.LateUploadTest do
   end
 
   defp await_feed_put(w) do
-    eventually(fn -> GatedStore.held(w.gate) != [] end, 5_000)
+    eventually(fn -> GatedStore.held(w.gate) != [] end)
     GatedStore.held(w.gate)
   end
 

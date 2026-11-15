@@ -81,7 +81,7 @@ defmodule Alambique.AdmissionPropertiesTest do
         {pid, %{m | holders: MapSet.put(m.holders, pid)}}
 
       length(m.waiting) < cap ->
-        eventually(fn -> pid in elem(snapshot(config), 1) end, 500)
+        eventually(fn -> pid in elem(snapshot(config), 1) end)
         {pid, %{m | waiting: m.waiting ++ [pid]}}
 
       true ->
@@ -165,7 +165,7 @@ defmodule Alambique.AdmissionPropertiesTest do
           end)
           |> then(fn {m, procs} ->
             expected = {m.holders, m.waiting}
-            eventually(fn -> snapshot(config) == expected end, 500)
+            eventually(fn -> snapshot(config) == expected end)
             {m, procs}
           end)
 
@@ -178,7 +178,7 @@ defmodule Alambique.AdmissionPropertiesTest do
 
         # Whatever happens to the processes, every slot comes back.
         Enum.each(procs, &Process.exit(&1, :kill))
-        eventually(fn -> snapshot(config) == {MapSet.new(), []} end, 500)
+        eventually(fn -> snapshot(config) == {MapSet.new(), []} end)
       end)
     end
   end

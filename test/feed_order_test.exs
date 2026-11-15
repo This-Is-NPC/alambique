@@ -93,7 +93,7 @@ defmodule Alambique.FeedOrderTest do
     # B is 1 ms old: on time under its own key, which is before A's.
     [segment] = held(ctx, :segment)
     GatedStore.release(ctx.gate, segment)
-    Task.await(b)
+    await(b)
     eventually(fn -> length(held(ctx, :feed)) == 1 end)
     GatedStore.open(ctx.gate)
     eventually(fn -> length(feed_keys(ctx, prefix)) == 3 end)

@@ -134,7 +134,7 @@ defmodule Alambique.DrainTest do
     assert running.started_at_ms >= began
     assert running.finished_at_ms == nil
 
-    assert {:ok, %{hibernated: 3, errors: []}} = Task.await(drain)
+    assert {:ok, %{hibernated: 3, errors: []}} = await(drain)
 
     # `left` counts the registered cells; a hibernated cell leaves the registry
     # a moment after the drain returns.

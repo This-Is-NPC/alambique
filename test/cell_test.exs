@@ -442,8 +442,8 @@ defmodule Alambique.CellTest do
       assert Task.yield(read, 0) == nil
       MemoryStore.clear(ctx.store_config)
 
-      assert {:ok, _} = Task.await(write)
-      assert {:ok, %{rows: [[0], [1]]}} = Task.await(read)
+      assert {:ok, _} = await(write)
+      assert {:ok, %{rows: [[0], [1]]}} = await(read)
     end
   end
 
