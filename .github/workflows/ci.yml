@@ -1,0 +1,138 @@
+name: CI
+
+# The full gate on GitHub Actions. The check to require on master is `ci`: it
+# passes only when every job below passed, so it keeps its name when jobs are
+# added. Tool versions come from mise.toml; nothing here lists a version.
+#
+# Knobs: `timeout-minutes` of each job, with its default in the comment next to
+# it. A hung job is cancelled after it. Parallelism is not set: the runner has
+# 4 vCPUs, cargo uses all of them and ExUnit runs two cases per scheduler (its
+# default); the jobs themselves run side by side.
+#
+# Release pull requests are opened by release-please with the workflow token,
+# which starts no pull_request run. release.yml dispatches this workflow on the
+# release branch instead (workflow_dispatch below).
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels the run of the older commit. Runs on
+# master are kept, so each merged commit has its result.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+jobs:
+  # scripts/check: warnings-as-errors compile, mix format, cargo fmt, clippy,
+  # docs links and the default suite.
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30 # default 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          tools: erlang elixir rust
+          cache-name: gate
+      - run: mise run check
+
+  # Line coverage of the Elixir code and of the NIF, below
+  # ALAMBIQUE_COVERAGE_MIN (mise.toml) fails.
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30 # default 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          tools: erlang elixir rust aqua:taiki-e/cargo-llvm-cov
+          cache-name: coverage
+      - name: Measure coverage
+        run: |
+          set -o pipefail
+          mise run test:coverage 2>&1 | tee coverage.log
+      - name: Summarize coverage
+        if: always()
+        run: |
+          {
+            echo '### Coverage'
+            echo '```'
+            tail -n 40 coverage.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Rust unit tests of the NIF crate; scripts/check only lints it.
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15 # default 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          tools: rust
+          cache-name: native
+          mix: "false"
+      - run: mise run test:native
+
+  # The store contract tests against a SeaweedFS container, then the pinned
+  # Litestream restoring what Alambique replicated to it. Docker is on the
+  # runner image.
+  services:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30 # default 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          tools: erlang elixir rust aqua:benbjohnson/litestream
+          cache-name: services
+      - run: mise run test:seaweedfs
+      - run: mise run test:litestream
+      - name: Show the SeaweedFS log on failure
+        if: failure()
+        run: docker logs --tail 100 alambique-seaweedfs
+
+  # Failover properties on peer nodes.
+  cluster:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30 # default 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          tools: erlang elixir rust
+          cache-name: cluster
+      - run: mise run test:cluster
+
+  # The single check to require on master.
+  ci:
+    needs: [gate, coverage, native, services, cluster]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5 # default 5
+    steps:
+      - name: Require every job to pass
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          for r in $RESULTS; do
+            [ "$r" = success ] || { echo "a job did not succeed" >&2; exit 1; }
+          done
