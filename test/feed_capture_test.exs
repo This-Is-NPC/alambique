@@ -121,9 +121,11 @@ defmodule Alambique.FeedCaptureTest do
   test "a large row is in a segment once, not again when it is stamped" do
     ctx = setup_store()
 
+    # A long lease: the test does not depend on expiry, and a loaded host must not expire it.
     inst =
       start_instance(ctx,
-        migrations: [{1, "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)"}]
+        migrations: [{1, "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)"}],
+        lease_ttl_ms: 30_000
       )
 
     cell = unique_cell()

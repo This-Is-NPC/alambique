@@ -378,7 +378,10 @@ defmodule Alambique.StoreBreakerTest do
     end
 
     test "answers {:error, :store_unavailable} to a call that needs a failing store", ctx do
-      seeder = start_instance(ctx, migrations: [{1, "CREATE TABLE t (n INTEGER)"}])
+      # A long lease: a loaded host must not expire the seeder's before the insert.
+      seeder =
+        start_instance(ctx, migrations: [{1, "CREATE TABLE t (n INTEGER)"}], lease_ttl_ms: 30_000)
+
       cell = unique_cell()
       assert {:ok, _} = Alambique.execute(seeder, cell, "INSERT INTO t VALUES (1)", [])
       :ok = Alambique.hibernate(seeder, cell)
