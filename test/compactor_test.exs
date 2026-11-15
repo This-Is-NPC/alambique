@@ -282,7 +282,7 @@ defmodule Alambique.CompactorTest do
       inst =
         start_instance(ctx,
           migrations: @schema,
-          compaction: Keyword.put(@fast, :retry_ms, 600_000),
+          compaction: Keyword.merge(@fast, retry_ms: 600_000, interval_ms: 3_600_000),
           retention: false
         )
 
@@ -291,12 +291,17 @@ defmodule Alambique.CompactorTest do
       CrashPoints.arm(:compact_before_put, :raise, times: 1)
       for n <- 1..6, do: assert({:ok, _} = put(inst, cell, n))
 
+      # One tick, after the commits: a commit made while the pass runs makes a
+      # row of its own, which would take the earlier due time on the requeue.
+      send(:ets.info(table, :owner), :tick)
+
       # The row comes back after `retry_ms`, still counting from the first TXID.
       later = now_ms() + 300_000
 
-      eventually(fn ->
-        match?([{_, _, _, due}] when due > later, :ets.lookup(table, cell))
-      end)
+      eventually(
+        fn -> match?([{_, _, _, due}] when due > later, :ets.lookup(table, cell)) end,
+        30_000
+      )
 
       assert [{_, 1, _last, _}] = :ets.lookup(table, cell)
     end
