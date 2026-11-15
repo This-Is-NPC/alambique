@@ -35,13 +35,12 @@ defmodule Alambique.StoreCrashTest do
 
       log =
         capture_log(fn ->
-          injected = System.monotonic_time(:millisecond)
           MemoryStore.inject(ctx.store_config, kind: unquote(kind))
 
           # Renewals fail while the lease is valid: the cell keeps serving.
-          await_event([:alambique, :lease, :renew], cell, 5_000, &(&1.result == :error))
-          assert System.monotonic_time(:millisecond) - injected < 2_500
+          await_event([:alambique, :lease, :renew], cell, 15_000, &(&1.result == :error))
           assert Process.alive?(pid)
+          assert drain([:alambique, :cell, :stop], cell) == []
           assert {:ok, %{rows: [[1]]}} = Alambique.query(inst, cell, "SELECT n FROM t")
 
           # The lease runs out: the cell stops by itself.

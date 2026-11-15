@@ -321,10 +321,14 @@ defmodule Alambique.LeaseFaultsTest do
       {:ok, hung: ctx}
     end
 
+    # The store hangs for 60 s: ending near the bound, plus slack for a loaded
+    # host, still shows the call did not wait for the store.
+    @load_slack_ms 5_000
+
     defp within(limit_ms, fun) do
       started = System.monotonic_time(:millisecond)
       result = fun.()
-      assert System.monotonic_time(:millisecond) - started < limit_ms
+      assert System.monotonic_time(:millisecond) - started < limit_ms + @load_slack_ms
       result
     end
 

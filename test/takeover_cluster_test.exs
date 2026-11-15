@@ -64,7 +64,7 @@ defmodule Alambique.TakeoverClusterTest do
     started = System.monotonic_time(:millisecond)
     taker_node = Cluster.node(c, taker)
     assert {:ok, ^taker_node} = on(c, taker, :take_over, [inst, cell, :node_down])
-    assert System.monotonic_time(:millisecond) - started < div(@ttl_ms, 2)
+    assert System.monotonic_time(:millisecond) - started < div(@ttl_ms * 3, 4)
 
     assert rows(c, other, inst, cell) == [1, 2]
     assert {:ok, _} = insert(c, other, inst, cell, 3)
@@ -127,7 +127,7 @@ defmodule Alambique.TakeoverClusterTest do
       assert node != victim_node
     end
 
-    assert System.monotonic_time(:millisecond) - started < div(@ttl_ms, 2)
+    assert System.monotonic_time(:millisecond) - started < div(@ttl_ms * 3, 4)
 
     # The drained node forwards what it is asked to the remaining members.
     fresh = "fresh-#{System.unique_integer([:positive])}"

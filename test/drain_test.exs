@@ -9,14 +9,11 @@ defmodule Alambique.DrainTest do
 
   @schema [{1, "CREATE TABLE t (n INTEGER PRIMARY KEY)"}]
 
-  setup do
+  setup tags do
     ctx = setup_store()
+    opts = [migrations: @schema, lease_ttl_ms: Map.get(tags, :lease_ttl_ms, 3_000)]
 
-    %{
-      ctx: ctx,
-      a: start_instance(ctx, migrations: @schema),
-      b: start_instance(ctx, migrations: @schema)
-    }
+    %{ctx: ctx, a: start_instance(ctx, opts), b: start_instance(ctx, opts)}
   end
 
   defp insert(inst, cell, n), do: Alambique.execute(inst, cell, "INSERT INTO t VALUES (?)", [n])
@@ -28,6 +25,7 @@ defmodule Alambique.DrainTest do
     lease
   end
 
+  @tag lease_ttl_ms: 60_000
   test "hibernates every cell and releases its lease", %{a: a, b: b} = %{ctx: ctx} do
     cells = for n <- 1..5, do: "drain-#{n}"
     for cell <- cells, do: assert({:ok, _} = insert(a, cell, 1))
@@ -40,10 +38,11 @@ defmodule Alambique.DrainTest do
       assert durable_rows(ctx, cell, "SELECT n FROM t") == [[1]]
     end
 
-    # Another node serves the cells at once, without waiting for the leases to expire.
+    # Another node serves the cells at once, without waiting for the leases to
+    # expire (60 s here).
     started = System.monotonic_time(:millisecond)
     assert {:ok, %{rows: [[1]]}} = Alambique.query(b, hd(cells), "SELECT n FROM t")
-    assert System.monotonic_time(:millisecond) - started < 1_000
+    assert System.monotonic_time(:millisecond) - started < 30_000
     assert %{epoch: 2} = lease(b, hd(cells))
   end
 
