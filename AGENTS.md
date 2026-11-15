@@ -44,6 +44,11 @@ request.
 - Review experiments and design alternatives with the smallest working
   demonstration that makes them assessable. Apply production verification
   when integrating the chosen behavior.
+- The pre-push hook runs only the fast checks (`mise run check:quick`). The
+  full gate (`mise run check`, coverage, native, service and cluster suites)
+  runs in GitHub Actions on every pull request: the check `ci` must be green
+  on the head commit before a merge. Miri, sanitizers, fuzzing, TLA+,
+  benchmarks and the load test stay local. See `docs/contributing.md`.
 - Batch related edits before running checks. Repeat checks when new changes,
   failures, or unresolved concerns justify another run.
 - Tests wait for observable state, output, or signals. Timeouts bound failure.
