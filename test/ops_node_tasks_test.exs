@@ -13,10 +13,25 @@ defmodule Alambique.OpsNodeTasksTest do
   @grace_ms 5_000
   @cell "home-a"
 
+  # Node.start does not launch epmd, and a fresh machine runs none. Starts it
+  # and waits until it accepts connections.
+  defp ensure_epmd do
+    System.cmd("epmd", ["-daemon"])
+    port = String.to_integer(System.get_env("ERL_EPMD_PORT", "4369"))
+
+    eventually(fn ->
+      case :gen_tcp.connect(~c"127.0.0.1", port, [], 1_000) do
+        {:ok, socket} -> :gen_tcp.close(socket) == :ok
+        {:error, _} -> false
+      end
+    end)
+  end
+
   setup ctx do
     started? = not Node.alive?()
 
     if started? do
+      ensure_epmd()
       name = :"ops_node_tasks_#{System.unique_integer([:positive])}@127.0.0.1"
       {:ok, _} = Node.start(name, :longnames)
     end
