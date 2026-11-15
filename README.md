@@ -98,6 +98,17 @@ first release (0.1.0):
   period. `[:cell, :wake]` reports `store_time` and `reductions`, and
   `[:cell, :hibernate]` the `tail` and `compact_duration`. **breaking:**
   `compaction: [batch_factor:]` is removed.
+- 0.10.0: the store circuit breaker counts only the failures of the store. A
+  request that fails while it waits for a pool connection, or that is killed
+  before it sends, is `:local`: it neither counts nor resets the run of
+  failures, so a node that takes more than it can serve no longer opens the
+  breaker. `[:alambique, :store, :failure]` reports the `reason` and whether
+  it `counted`. The freeze-marker check of each renewal and the replica marker
+  read are no longer killed at 50 ms and counted as a timeout of the store:
+  `retry: [check_timeout_ms:]` (default 1 000) bounds them, and a cell with a
+  slow store can wait that long in a renewal. A request that left and whose
+  answer the node read late still counts. There is no breaking change: the
+  option and the event are new.
 
 The full list is in [CHANGELOG.md](CHANGELOG.md).
 
