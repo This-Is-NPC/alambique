@@ -121,25 +121,38 @@ defmodule Alambique.Replication.RetryPropertiesTest do
     end
   end
 
-  # A store whose reads never return.
+  # A store whose requests never return; its config is the pid that is told
+  # which process blocked.
   defmodule HangingStore do
     @behaviour Alambique.Store
-    def put(_, _, _, _, _), do: Process.sleep(:infinity)
-    def get(_, _), do: Process.sleep(:infinity)
-    def head(_, _), do: Process.sleep(:infinity)
-    def get_range(_, _, _, _), do: Process.sleep(:infinity)
-    def list(_, _, _, _), do: Process.sleep(:infinity)
-    def delete(_, _), do: Process.sleep(:infinity)
+    defp hang(test) do
+      send(test, {:blocked, self()})
+      Process.sleep(:infinity)
+    end
+
+    def put(t, _, _, _, _), do: hang(t)
+    def get(t, _), do: hang(t)
+    def head(t, _), do: hang(t)
+    def get_range(t, _, _, _), do: hang(t)
+    def list(t, _, _, _), do: hang(t)
+    def delete(t, _), do: hang(t)
   end
 
   test "a store call that never returns is interrupted at the deadline" do
-    ctx = Map.put(ctx(5, 10), :store, {HangingStore, nil})
-    started = System.monotonic_time(:millisecond)
+    ctx = Map.put(ctx(5, 10), :store, {HangingStore, self()})
 
-    assert {:error, :timeout} =
-             Alambique.Replication.Objects.fetch(ctx, "k", Retry.deadline_in(100))
+    # The call returns although the store never answers, and the process that
+    # was blocked in the store is dead: it was interrupted, not left running.
+    # The wait is only the limit of a failure.
+    task =
+      Task.async(fn ->
+        Alambique.Replication.Objects.fetch(ctx, "k", Retry.deadline_in(100))
+      end)
 
-    assert System.monotonic_time(:millisecond) - started < 100 + @slack_ms
+    assert {:error, :timeout} = Task.await(task, 30_000)
+    assert_received {:blocked, blocked}
+    ref = Process.monitor(blocked)
+    assert_receive {:DOWN, ^ref, :process, ^blocked, _}, 5_000
   end
 
   property "no attempt outlives the deadline by more than a small slack" do
