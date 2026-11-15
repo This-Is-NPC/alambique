@@ -596,7 +596,9 @@ wake event shows `reason: :disk_full` (`[:alambique, :cell, :wake]`).
   [telemetry.md](telemetry.md#store-events)), whose `reason` says whether the
   failures or the probe opened it, and for `[:alambique, :store, :failure]`,
   which gives the `reason` and the `operation` of each failure and whether it
-  `counted`. `Alambique.breaker_status(instance)` shows
+  `counted`, and for a crash of the store the `kind` and a short `detail`
+  (a crash is also logged, at most once every 10 s for a store).
+  `Alambique.breaker_status(instance)` shows
   the state of each location now (`:closed`, `:open`, `:half_open`), since
   when and the failures in a row, without asking the store; use it for a
   health check. Check the store, not the node. Calls are
