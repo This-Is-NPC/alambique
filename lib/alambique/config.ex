@@ -77,7 +77,8 @@ defmodule Alambique.Config do
   @schema_defaults [check_page: 1_000, listing_timeout_ms: nil]
   @restore_defaults [edge_bytes: 65_536, fetch_concurrency: 16, max_inflight_bytes: 67_108_864]
   @hydrator_defaults [poll_ms: 100]
-  @retry_defaults [max_attempts: 10, check_timeout_ms: 1_000]
+  @retry_defaults [max_attempts: 10]
+  @check_timeout_ms 1_000
   @upload_defaults [retry_backoff_ms: 500, retry_backoff_max_ms: 5_000]
   @breaker_defaults [failures: 5, cooldown_ms: 5_000, probe_timeout_ms: 10_000]
 
@@ -376,6 +377,8 @@ defmodule Alambique.Config do
 
     unless ttl > 2 * skew, do: bad!(":lease_ttl_ms must be greater than twice :skew_margin_ms")
 
+    jitter = jitter!(opts)
+
     node_id = Keyword.get_lazy(opts, :node_id, fn -> Atom.to_string(node()) end)
     unless is_binary(node_id) and node_id != "", do: bad!(":node_id must be a non-empty string")
 
@@ -398,7 +401,7 @@ defmodule Alambique.Config do
       data_dir: data_dir,
       clock: opts[:clock],
       ttl_ms: ttl,
-      renew_jitter: jitter!(opts),
+      renew_jitter: jitter,
       skew_margin_ms: skew,
       idle_timeout_ms: pos_int!(opts, :idle_timeout_ms),
       op_timeout_ms: op_timeout,
@@ -430,7 +433,7 @@ defmodule Alambique.Config do
       rewind: rewind!(opts[:rewind]),
       schema: schema!(opts[:schema], op_timeout),
       restore: options!(:restore, opts[:restore], @restore_defaults),
-      retry: options!(:retry, opts[:retry], @retry_defaults),
+      retry: retry!(opts[:retry], ttl, skew, jitter),
       upload: upload!(opts[:upload]),
       breaker: options!(:breaker, opts[:breaker], @breaker_defaults),
       hydrator: options!(:hydrator, opts[:hydrator], @hydrator_defaults),
@@ -1210,6 +1213,37 @@ defmodule Alambique.Config do
     join = opts[:join]
     unless is_boolean(join), do: bad!(":join must be true or false")
     join
+  end
+
+  # The freeze check blocks the cell before each renewal (design §3), so it
+  # gets at most half of what the shortest renewal interval (a third of the
+  # TTL, less the jitter) leaves before the lease stops being usable. Given
+  # nothing, it is that bound capped at 1 000 ms.
+  defp retry!(opts, ttl, skew, jitter) do
+    base = div(ttl, 3)
+    bound = div(base - trunc(base * jitter) - skew, 2)
+
+    if bound < 1,
+      do:
+        bad!(
+          ":lease_ttl_ms is too short for the freeze check: a third of it, less " <>
+            ":lease_renew_jitter and :skew_margin_ms, leaves no time to read the marker"
+        )
+
+    retry =
+      options!(:retry, opts, [
+        {:check_timeout_ms, min(@check_timeout_ms, bound)} | @retry_defaults
+      ])
+
+    if retry.check_timeout_ms > bound,
+      do:
+        bad!(
+          ":retry :check_timeout_ms must be at most #{bound} ms, half of what a renewal " <>
+            "every :lease_ttl_ms / 3 (less :lease_renew_jitter) leaves before " <>
+            ":skew_margin_ms; raise :lease_ttl_ms or lower it"
+        )
+
+    retry
   end
 
   defp jitter!(opts) do

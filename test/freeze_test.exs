@@ -86,11 +86,12 @@ defmodule Alambique.FreezeTest do
   end
 
   test "the renewal waits for a slow store to answer the marker check", ctx do
-    inst = start_instance(ctx, migrations: @schema, lease_ttl_ms: 600, skew_margin_ms: 100)
+    inst = start_instance(ctx, migrations: @schema, lease_ttl_ms: 4_500, skew_margin_ms: 500)
     cell = unique_cell()
     assert {:ok, _} = put(inst, cell, 1)
 
-    # A request that takes 200 ms is slow, not lost: it must not be killed.
+    # A request that takes 200 ms is slow, not lost: it must not be killed. The
+    # check limit derived for this lease is 425 ms (design §3).
     MemoryStore.inject(ctx.store_config,
       kind: :latency,
       ms: 200,
