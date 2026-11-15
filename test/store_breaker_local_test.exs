@@ -6,10 +6,10 @@ defmodule Alambique.StoreBreakerLocalTest do
   """
   use ExUnit.Case, async: false
 
-  import Alambique.CellHelpers, only: [capture: 1]
+  import Alambique.CellHelpers, only: [capture: 1, eventually: 1]
 
   alias Alambique.Replication.Retry
-  alias Alambique.Store.{Breaker, S3}
+  alias Alambique.Store.{Breaker, Phase, S3}
 
   @pool Alambique.BreakerLocalPool
   @settings %{failures: 3, cooldown_ms: 60_000, probe_timeout_ms: 60_000}
@@ -110,7 +110,16 @@ defmodule Alambique.StoreBreakerLocalTest do
         b
       )
 
-    for _ <- 1..3, do: assert({:error, :timeout} = Retry.once(silent, 100, fn -> get(silent) end))
+    for _ <- 1..3 do
+      pid = spawn(fn -> get(silent) end)
+      # Wait for the state, not for time: the kill comes after the request left.
+      eventually(fn -> Phase.of(pid) == {:get, :sent} end)
+
+      # What `Retry` does at the deadline.
+      Breaker.timed_out(silent, Phase.of(pid))
+      Process.exit(pid, :kill)
+    end
+
     assert Breaker.open?(b)
   end
 
