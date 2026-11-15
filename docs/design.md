@@ -291,8 +291,10 @@ the panic tests abort the VM when `guard` does not catch.
   the 50 ms above: on a store 25 ms away and a node on one CPU with a queue,
   the `HEAD` of the marker took longer, was killed, and counted as a
   `:timeout_recv` in the breaker (§3) although the store had answered; at 400
-  commits a second the bench `bench:breaker` showed 46 of those in 60 s. The
-  cell cannot serve while it waits, so the limit stays short: the check runs
+  commits a second with the default pool the bench `bench:breaker` counted 46
+  and 48 of those in two runs of 60 s, and none after the change, at the same
+  throughput (measured on a shared laptop). The cell cannot serve while it
+  waits, so the limit stays short: the check runs
   before `Lease.renew`, the old lease keeps running meanwhile, and a lease is
   usable until `expires_at - skew_margin_ms`, so a slow check makes the renewal
   late and can let the lease expire. Renewals are due every `lease_ttl_ms / 3`,
