@@ -13,10 +13,37 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    outputs:
+      prs_created: ${{ steps.release.outputs.prs_created }}
+      prs: ${{ steps.release.outputs.prs }}
     steps:
       - name: Run release-please
+        id: release
         uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
           target-branch: master
+
+  # The release pull request is opened with the workflow token, and events of
+  # that token start no pull_request run, so the pull request would never get
+  # the `ci` check. A workflow_dispatch run is the documented exception: it
+  # runs ci.yml on the release branch and the check lands on the head commit.
+  ci-on-release-pr:
+    needs: release-please
+    if: needs.release-please.outputs.prs_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch CI on the release branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PRS: ${{ needs.release-please.outputs.prs }}
+        run: |
+          branches="$(jq -r '.[].headBranchName' <<<"${PRS:-[]}")"
+          [ -n "$branches" ] || { echo "::error::no release branch in the release-please outputs"; exit 1; }
+          for branch in $branches; do
+            gh workflow run ci.yml --ref "$branch"
+          done
