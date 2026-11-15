@@ -125,6 +125,20 @@ defmodule Alambique.LazyRestorePropertiesTest do
     end
   end
 
+  # integrity_check reports a page it could not fetch as a row, not as an
+  # error: that read failed on the store like any other and is told as such.
+  defp read_lazy(conn, :integrity) do
+    case read(conn, :integrity) do
+      {:ok, [[text]]} = ok ->
+        if String.contains?(text, "failed to get page"), do: {:error, @io_error}, else: ok
+
+      other ->
+        other
+    end
+  end
+
+  defp read_lazy(conn, r), do: read(conn, r)
+
   # Run
 
   defp run(seed, compact?, latency, commands) do
@@ -249,7 +263,7 @@ defmodule Alambique.LazyRestorePropertiesTest do
   defp do_step({:read, r}, model) do
     expected = read(model.reference, r)
 
-    case retry_unfaulted(model, fn -> read(model.conn, r) end) do
+    case retry_unfaulted(model, fn -> read_lazy(model.conn, r) end) do
       {:error, @io_error} ->
         assert model.faulted?, "a read failed without a fault: #{inspect(r)}"
 
