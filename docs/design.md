@@ -386,8 +386,9 @@ the panic tests abort the VM when `guard` does not catch.
     (`{:timeout | :noproc, {NimblePool, :checkout, _}}`), and the error that
     Finch reraises for it. Their `detail` is `:pool_checkout_timeout` or
     `:pool_checkout_noproc`. Other exits before the send, such as a call to
-    the pool manager of Finch that times out while it starts the pool of a new
-    host, look like any crash of the store module and count. Every crash,
+    the supervisor that starts the Finch pool of a new host (Finch 0.24 uses
+    `DynamicSupervisor.start_child/2`, a call with a 5 000 ms default), look
+    like any crash of the store module and count. Every crash,
     counted or not, is also written to the log (`Logger.warning`), at most once
     every `breaker: [log_interval_ms: 10_000]` for a store, so a node that
     crashes in a loop does not flood it. Measured on one CPU with three busy
