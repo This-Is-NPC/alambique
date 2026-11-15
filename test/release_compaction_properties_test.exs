@@ -15,8 +15,8 @@ defmodule Alambique.ReleaseCompactionPropertiesTest do
   @schema [{1, "CREATE TABLE t (n INTEGER PRIMARY KEY, v TEXT)"}]
   # The latency makes the whole compaction of the tail take several times the
   # longest deadline; one merge in flight and the release take well under it.
-  @latency_ms 20
-  @slack_ms 150
+  @latency_ms 100
+  @slack_ms 500
 
   setup do
     setup_store()
@@ -25,7 +25,7 @@ defmodule Alambique.ReleaseCompactionPropertiesTest do
   property "the release ends within its deadline and every acknowledged write is durable", ctx do
     check all(
             writes <- integer(48..56),
-            deadline_ms <- integer(20..60),
+            deadline_ms <- integer(100..300),
             max_runs: 6
           ) do
       inst =

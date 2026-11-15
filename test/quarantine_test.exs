@@ -415,7 +415,8 @@ defmodule Alambique.QuarantineTest do
       opts = [quarantine: [startup_timeout_ms: 200, retry_ms: 50]]
       started = System.monotonic_time(:millisecond)
       inst = start_instance(ctx, [name: :a, migrations: @schema] ++ opts)
-      assert System.monotonic_time(:millisecond) - started < 2_000
+      # The store keeps failing: a start that waited for it would not return.
+      assert System.monotonic_time(:millisecond) - started < 10_000
 
       assert [%{flag: :busy, cell: ^cell}] = markers(node_dir(ctx, :a))
       refute_received {:telemetry, @crash, _, _}

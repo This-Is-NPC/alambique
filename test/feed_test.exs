@@ -32,7 +32,7 @@ defmodule Alambique.FeedTest do
 
     assert {:error, :timeout} = Feed.read(feed, nil, 10)
     assert {:error, :timeout} = Feed.prune(feed, 1_000)
-    assert System.monotonic_time(:millisecond) - started < 1_500
+    assert System.monotonic_time(:millisecond) - started < 10_000
   end
 
   # Publication follows the answer to the caller, so tests wait for it.

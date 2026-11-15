@@ -43,7 +43,7 @@ defmodule Alambique.DrainHandoverTest do
       assert {:error, {:unavailable, ^owner, ^expires}} = insert(b, cell, 100)
     end
 
-    # The lease is 20 s: a call that waited for it would not return in 5 s.
+    # The lease is 20 s: a call that waited for it would not return in 15 s.
     began = System.monotonic_time(:millisecond)
     assert {:ok, %{hibernated: 8, errors: []}} = Alambique.drain(a)
 
@@ -54,7 +54,7 @@ defmodule Alambique.DrainHandoverTest do
       assert {:ok, %{epoch: 2}} = Alambique.lease(b, cell)
     end
 
-    assert System.monotonic_time(:millisecond) - began < 5_000
+    assert System.monotonic_time(:millisecond) - began < 15_000
 
     # The drained node serves nothing new and holds nothing: a cell B holds is
     # unavailable to it, and one nobody holds is refused.

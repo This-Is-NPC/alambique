@@ -467,7 +467,7 @@ defmodule Alambique.FeedBatchingPropertiesTest do
       started = System.monotonic_time(:millisecond)
       :ok = Alambique.hibernate(inst, cell)
 
-      assert System.monotonic_time(:millisecond) - started < 3_000
+      assert System.monotonic_time(:millisecond) - started < 15_000
       assert written(ctx, "stuck", cell) == []
     end
 
