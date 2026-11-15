@@ -80,7 +80,13 @@ defmodule Alambique.Config do
   @retry_defaults [max_attempts: 10]
   @check_timeout_ms 1_000
   @upload_defaults [retry_backoff_ms: 500, retry_backoff_max_ms: 5_000]
-  @breaker_defaults [failures: 5, cooldown_ms: 5_000, probe_timeout_ms: 10_000]
+  @breaker_defaults [
+    failures: 5,
+    cooldown_ms: 5_000,
+    probe_timeout_ms: 10_000,
+    detail_limit: 200,
+    log_interval_ms: 10_000
+  ]
 
   @compaction_defaults [
     interval_ms: 5_000,
@@ -326,7 +332,9 @@ defmodule Alambique.Config do
           breaker: %{
             failures: pos_integer,
             cooldown_ms: pos_integer,
-            probe_timeout_ms: pos_integer
+            probe_timeout_ms: pos_integer,
+            detail_limit: pos_integer,
+            log_interval_ms: pos_integer
           },
           hydrator: %{poll_ms: pos_integer},
           supervisor: atom,

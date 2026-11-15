@@ -12,7 +12,13 @@ defmodule Alambique.StoreBreakerLocalTest do
   alias Alambique.Store.{Breaker, Phase, S3}
 
   @pool Alambique.BreakerLocalPool
-  @settings %{failures: 3, cooldown_ms: 60_000, probe_timeout_ms: 60_000}
+  @settings %{
+    failures: 3,
+    cooldown_ms: 60_000,
+    probe_timeout_ms: 60_000,
+    detail_limit: 200,
+    log_interval_ms: 10_000
+  }
 
   setup do
     {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])

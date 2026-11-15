@@ -5,11 +5,15 @@ defmodule Alambique.StoreBreakerPropertiesTest do
   request reaches the store, once the cool-down has passed exactly one request
   (the probe) does until it finishes, and it closes only on the success of that
   probe. `status/1` reports the same state and the failures that opened it. A request
-  that never left (it gave up waiting for a connection) is not a failure: it
-  does not count, and a probe that ends so is replaced by the next request.
+  that never left (it gave up waiting for a connection, or the store module
+  exited on the pool's checkout) is not a failure: it does not count, and a
+  probe that ends so is replaced by the next request. A crash of the store
+  module counts.
   """
   use ExUnit.Case, async: true
   use ExUnitProperties
+
+  @moduletag :capture_log
 
   alias Alambique.Store.Breaker
 
@@ -18,7 +22,9 @@ defmodule Alambique.StoreBreakerPropertiesTest do
   @settings %{
     failures: @failures,
     cooldown_ms: @cooldown,
-    probe_timeout_ms: 1_000_000_000
+    probe_timeout_ms: 1_000_000_000,
+    detail_limit: 200,
+    log_interval_ms: 10_000
   }
 
   defmodule Gate do
@@ -60,9 +66,13 @@ defmodule Alambique.StoreBreakerPropertiesTest do
     timeout: {:error, :timeout},
     not_found: {:error, :not_found},
     precondition: {:error, :precondition_failed},
-    local: {:queued, {:error, {:request_crashed, :error, :pool_timeout}}}
+    local: {:queued, {:error, {:request_crashed, :error, :pool_timeout}}},
+    crash: {:error, {:store_crashed, :error, %RuntimeError{message: "boom"}}},
+    # The store module's own wait for a connection of a pool, in no phase.
+    pool_crash: {:error, {:store_crashed, :exit, {:timeout, {NimblePool, :checkout, []}}}}
   }
-  @failing [:fail, :timeout]
+  @failing [:fail, :timeout, :crash]
+  @never_left [:local, :pool_crash]
 
   defp step do
     one_of([
@@ -131,8 +141,8 @@ defmodule Alambique.StoreBreakerPropertiesTest do
   # closed when it ends.
   # A request that never left says nothing about the store: it neither counts
   # nor resets the run, and a probe that ends so is given up.
-  defp finish(m, :closed, :local), do: m
-  defp finish(m, :probe, :local), do: %{m | probe: nil}
+  defp finish(m, :closed, outcome) when outcome in @never_left, do: m
+  defp finish(m, :probe, outcome) when outcome in @never_left, do: %{m | probe: nil}
 
   defp finish(%{state: :closed} = m, :closed, outcome) do
     if outcome in @failing do

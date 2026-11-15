@@ -43,7 +43,13 @@ defmodule Alambique.StoreBreakerTest do
   end
 
   @http_500 {:error, {:http, 500, ""}}
-  @settings %{failures: 3, cooldown_ms: 1_000, probe_timeout_ms: 5_000}
+  @settings %{
+    failures: 3,
+    cooldown_ms: 1_000,
+    probe_timeout_ms: 5_000,
+    detail_limit: 200,
+    log_interval_ms: 10_000
+  }
 
   # A breaker over a stub, with a clock the test moves.
   defp breaker(reply, settings \\ %{}) do
