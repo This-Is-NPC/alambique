@@ -2586,6 +2586,12 @@ covers a VM crash, where the page cache survives.
   crashed client would (`kind: :raise` and `kind: :exit`);
 - crash the calling cell at a named crash point.
 
+Its calls to the server that owns the objects have no timeout. With the default
+5 000 ms of `GenServer.call`, a node too loaded to schedule the server for 5 s
+made the request exit `{:timeout, {GenServer, :call, _}}`, which the breaker
+counts as a crash of the store (§3); the library's own deadline bounds a
+request instead.
+
 `AlambiqueTestkit.GatedStore` wraps another store and holds the puts whose key
 matches a pattern until the test answers each one: applied (`release`), failed
 without being applied (`fail`) or applied with an error returned

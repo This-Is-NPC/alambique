@@ -8,7 +8,8 @@ defmodule AlambiqueTestkit.MemoryStore do
   its caller's node, which faults can target.
 
   Faults are planned by the server but executed in the caller, so sleeping
-  never blocks other callers.
+  never blocks other callers. Calls to the server have no timeout, so a node
+  too loaded to schedule it is slow, not a crashed store.
   """
   @behaviour Alambique.Store
 
@@ -71,7 +72,7 @@ defmodule AlambiqueTestkit.MemoryStore do
       ms: Keyword.get(opts, :ms, 0)
     }
 
-    GenServer.call(server, {:inject, fault})
+    call(server, {:inject, fault})
   end
 
   @doc "All requests from `node` fail with `{:error, :partitioned}` until healed."
@@ -81,15 +82,15 @@ defmodule AlambiqueTestkit.MemoryStore do
 
   @doc "Removes one fault by id."
   @spec remove(config, reference) :: :ok
-  def remove(%{server: server}, id), do: GenServer.call(server, {:remove, id})
+  def remove(%{server: server}, id), do: call(server, {:remove, id})
 
   @doc "Removes every fault."
   @spec clear(config) :: :ok
-  def clear(%{server: server}), do: GenServer.call(server, :clear)
+  def clear(%{server: server}), do: call(server, :clear)
 
   @doc "Number of stored objects."
   @spec count(config) :: non_neg_integer
-  def count(%{server: server}), do: GenServer.call(server, :count)
+  def count(%{server: server}), do: call(server, :count)
 
   defp default_reason(:lost_ack), do: :lost_ack
   defp default_reason(_), do: :injected
@@ -117,8 +118,13 @@ defmodule AlambiqueTestkit.MemoryStore do
   @impl Alambique.Store
   def delete(config, key), do: run(config, :delete, key, {:delete, key})
 
+  # No call timeout: the server answers when it is scheduled, however loaded the
+  # node, and a request is bounded by the library's deadline (design §3), not by
+  # this double.
+  defp call(server, message), do: GenServer.call(server, message, :infinity)
+
   defp run(%{server: server}, op, key, request) do
-    effects = GenServer.call(server, {:plan, node(), op, key})
+    effects = call(server, {:plan, node(), op, key})
 
     Enum.reduce_while(effects, {:run, nil}, fn
       {:sleep, ms}, acc ->
@@ -145,14 +151,14 @@ defmodule AlambiqueTestkit.MemoryStore do
         throw({:memory_store_fault, reason})
     end)
     |> case do
-      {:run, _} -> GenServer.call(server, {:apply, request})
+      {:run, _} -> call(server, {:apply, request})
       {:done, result} -> result
       {:lost, reason} -> lose_ack(server, request, reason)
     end
   end
 
   defp lose_ack(server, request, reason) do
-    GenServer.call(server, {:apply, request})
+    call(server, {:apply, request})
     {:error, reason}
   end
 
