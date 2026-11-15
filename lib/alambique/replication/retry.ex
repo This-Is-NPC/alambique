@@ -18,8 +18,8 @@ defmodule Alambique.Replication.Retry do
   attempt would fail the same way) end with `{:error, reason}`. An
   attempt still running at `deadline` is killed and ends with the reason of
   the last failure, or `{:error, :timeout}` if there was none. An attempt that
-  starts at or past the deadline (`deadline_in(0)` asks for exactly one) gets
-  `ctx.backoff_ms`, the first backoff, before it is killed. An attempt that
+  starts at or past the deadline gets `ctx.backoff_ms`, the first backoff,
+  before it is killed. An attempt that
   raises, throws or exits does so in the caller.
   """
   @spec run(map, integer, (-> term)) :: term
@@ -45,8 +45,8 @@ defmodule Alambique.Replication.Retry do
   end
 
   defp loop(ctx, delay, deadline, fun, attempts, last) do
-    # An attempt that starts at or past the deadline (`deadline_in(0)` asks for
-    # exactly one) still gets `ctx.backoff_ms`, the first backoff.
+    # An attempt that starts at or past the deadline still gets
+    # `ctx.backoff_ms`, the first backoff.
     remaining = max(deadline - System.monotonic_time(:millisecond), ctx.backoff_ms)
 
     case attempt(remaining, fun) do

@@ -25,6 +25,9 @@ defmodule Alambique.Replication do
       (default 50 and 1000)
     * `:max_attempts` - attempts of one retried request, whatever time is
       left (default 10)
+    * `:check_timeout_ms` - time one attempt of a check that is not retried
+      may take before it is killed: the freeze marker at each renewal, the
+      replica marker (default 1000)
     * `:timeout_ms` - default time budget of one call (default 10000)
     * `:edge_bytes` - bytes read from each end of an LTX file to find its
       header, trailer and page index (default 65 536)
@@ -42,6 +45,7 @@ defmodule Alambique.Replication do
           backoff_ms: pos_integer,
           max_backoff_ms: pos_integer,
           max_attempts: pos_integer,
+          check_timeout_ms: pos_integer,
           timeout_ms: pos_integer,
           edge_bytes: pos_integer,
           fetch_concurrency: pos_integer,
@@ -59,6 +63,7 @@ defmodule Alambique.Replication do
         backoff_ms: 50,
         max_backoff_ms: 1000,
         max_attempts: 10,
+        check_timeout_ms: 1_000,
         timeout_ms: 10_000,
         edge_bytes: 65_536,
         fetch_concurrency: 16,
@@ -73,6 +78,7 @@ defmodule Alambique.Replication do
         :backoff_ms,
         :max_backoff_ms,
         :max_attempts,
+        :check_timeout_ms,
         :timeout_ms,
         :edge_bytes,
         :fetch_concurrency,
@@ -89,13 +95,15 @@ defmodule Alambique.Replication do
           backoff_ms: b,
           max_backoff_ms: m,
           max_attempts: a,
+          check_timeout_ms: k,
           timeout_ms: t,
           edge_bytes: e,
           fetch_concurrency: c,
           max_inflight_bytes: pb
         }
         when is_binary(p) and is_binary(n) and is_integer(b) and b > 0 and is_integer(m) and
-               m >= b and is_integer(a) and a > 0 and is_integer(t) and t > 0 and is_integer(e) and
+               m >= b and is_integer(a) and a > 0 and is_integer(k) and k > 0 and is_integer(t) and
+               t > 0 and is_integer(e) and
                e > 0 and is_integer(c) and
                c > 0 and
                is_integer(pb) and pb > 0,

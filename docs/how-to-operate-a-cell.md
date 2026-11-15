@@ -603,7 +603,9 @@ wake event shows `reason: :disk_full` (`[:alambique, :cell, :wake]`).
   safe to repeat when the store answers again. Raise `failures` if a store
   that fails now and then opens the breaker too often. `retry:
   [max_attempts:]` (default 10) limits how often one request is repeated while
-  the breaker is closed.
+  the breaker is closed. `retry: [check_timeout_ms:]` (default 1 000) is the
+  time the freeze check of each lease renewal may take; raise it if the store
+  is slow enough that the check is killed and the breaker counts a timeout.
 - **Writes wait or time out while the store fails.** A cell whose upload fails
   for a store reason (an error, a timeout, a 5xx, `:store_unavailable`) does
   not stop: it keeps the batch and uploads it again, waiting

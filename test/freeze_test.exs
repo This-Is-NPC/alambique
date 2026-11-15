@@ -85,6 +85,27 @@ defmodule Alambique.FreezeTest do
     assert durable_rows(ctx, cell, "SELECT n FROM t") == [[1]]
   end
 
+  test "the renewal waits for a slow store to answer the marker check", ctx do
+    inst = start_instance(ctx, migrations: @schema, lease_ttl_ms: 600, skew_margin_ms: 100)
+    cell = unique_cell()
+    assert {:ok, _} = put(inst, cell, 1)
+
+    # A request that takes 200 ms is slow, not lost: it must not be killed.
+    MemoryStore.inject(ctx.store_config,
+      kind: :latency,
+      ms: 200,
+      ops: [:head],
+      key: ~r{/frozen$},
+      times: :infinity
+    )
+
+    key = Keys.frozen("cells-test", cell)
+    {:ok, _} = MemoryStore.put(ctx.store_config, key, "{}", :none, %{})
+
+    eventually(fn -> Alambique.owner(inst, cell) == :none end)
+    assert {_, %{reason: :frozen}} = await_event([:alambique, :cell, :hibernate], cell)
+  end
+
   test "a cell frozen with writes in flight loses none of them", ctx do
     inst = start_instance(ctx, migrations: @schema)
     cell = unique_cell()

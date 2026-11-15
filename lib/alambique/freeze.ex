@@ -70,16 +70,32 @@ defmodule Alambique.Freeze do
   @spec frozen?(Alambique.Replication.ctx(), String.t(), keyword) ::
           {:ok, boolean} | {:error, term}
   def frozen?(ctx, cell, opts \\ []) do
-    {store, config} = ctx.store
-    key = Keys.frozen(ctx.prefix, cell)
+    Retry.run(ctx, deadline(ctx, opts), fn -> probe(ctx, cell) end)
+  end
 
-    Retry.run(ctx, deadline(ctx, opts), fn ->
-      case store.head(config, key) do
-        {:ok, _etag, _meta} -> {:ok, true}
-        {:error, :not_found} -> {:ok, false}
-        {:error, reason} -> {:retry, reason}
+  @doc """
+  Whether `cell` is frozen, from one attempt that is killed after
+  `ctx.check_timeout_ms` (`{:error, :timeout}`), for a caller that cannot wait
+  for retries.
+  """
+  @spec check(Alambique.Replication.ctx(), String.t()) :: {:ok, boolean} | {:error, term}
+  def check(ctx, cell) do
+    Retry.once(ctx.store, ctx.check_timeout_ms, fn ->
+      case probe(ctx, cell) do
+        {:retry, reason} -> {:error, reason}
+        result -> result
       end
     end)
+  end
+
+  defp probe(ctx, cell) do
+    {store, config} = ctx.store
+
+    case store.head(config, Keys.frozen(ctx.prefix, cell)) do
+      {:ok, _etag, _meta} -> {:ok, true}
+      {:error, :not_found} -> {:ok, false}
+      {:error, reason} -> {:retry, reason}
+    end
   end
 
   # `:deadline` is absolute (monotonic milliseconds), `:timeout_ms` relative.
