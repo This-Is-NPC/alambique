@@ -77,7 +77,7 @@ defmodule Alambique.Config do
   @schema_defaults [check_page: 1_000, listing_timeout_ms: nil]
   @restore_defaults [edge_bytes: 65_536, fetch_concurrency: 16, max_inflight_bytes: 67_108_864]
   @hydrator_defaults [poll_ms: 100]
-  @retry_defaults [max_attempts: 10]
+  @retry_defaults [max_attempts: 10, check_timeout_ms: 1_000]
   @upload_defaults [retry_backoff_ms: 500, retry_backoff_max_ms: 5_000]
   @breaker_defaults [failures: 5, cooldown_ms: 5_000, probe_timeout_ms: 10_000]
 
@@ -320,7 +320,7 @@ defmodule Alambique.Config do
             fetch_concurrency: pos_integer,
             max_inflight_bytes: pos_integer
           },
-          retry: %{max_attempts: pos_integer},
+          retry: %{max_attempts: pos_integer, check_timeout_ms: pos_integer},
           upload: %{retry_backoff_ms: pos_integer, retry_backoff_max_ms: pos_integer},
           breaker: %{
             failures: pos_integer,
@@ -557,6 +557,7 @@ defmodule Alambique.Config do
       clock: config.clock,
       timeout_ms: config.op_timeout_ms,
       max_attempts: config.retry.max_attempts,
+      check_timeout_ms: config.retry.check_timeout_ms,
       edge_bytes: config.restore.edge_bytes,
       fetch_concurrency: config.restore.fetch_concurrency,
       max_inflight_bytes: config.restore.max_inflight_bytes

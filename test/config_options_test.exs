@@ -87,7 +87,7 @@ defmodule Alambique.ConfigOptionsTest do
            }
 
     assert config.hydrator == %{poll_ms: 100}
-    assert config.retry == %{max_attempts: 10}
+    assert config.retry == %{max_attempts: 10, check_timeout_ms: 1_000}
     assert config.upload == %{retry_backoff_ms: 500, retry_backoff_max_ms: 5_000}
     assert config.breaker == %{failures: 5, cooldown_ms: 5_000, probe_timeout_ms: 10_000}
     assert config.query.page_size == 1_000
@@ -177,7 +177,7 @@ defmodule Alambique.ConfigOptionsTest do
           schema: [check_page: 10],
           restore: [edge_bytes: 1_024, fetch_concurrency: 3, max_inflight_bytes: 5_000],
           hydrator: [poll_ms: 10],
-          retry: [max_attempts: 3],
+          retry: [max_attempts: 3, check_timeout_ms: 700],
           upload: [retry_backoff_ms: 11, retry_backoff_max_ms: 12],
           breaker: [failures: 2, cooldown_ms: 7, probe_timeout_ms: 9],
           query: [page_size: 10, stale_tmp_seconds: 5, restore_attempts: 7],
@@ -227,7 +227,7 @@ defmodule Alambique.ConfigOptionsTest do
     assert config.schema == %{check_page: 10, listing_timeout_ms: 5_000}
     assert config.restore == %{edge_bytes: 1_024, fetch_concurrency: 3, max_inflight_bytes: 5_000}
     assert config.hydrator == %{poll_ms: 10}
-    assert config.retry == %{max_attempts: 3}
+    assert config.retry == %{max_attempts: 3, check_timeout_ms: 700}
     assert config.upload == %{retry_backoff_ms: 11, retry_backoff_max_ms: 12}
     assert config.breaker == %{failures: 2, cooldown_ms: 7, probe_timeout_ms: 9}
     assert config.query.page_size == 10
@@ -252,6 +252,7 @@ defmodule Alambique.ConfigOptionsTest do
       {[restore: [max_inflight_bytes: 0]], ~r/:restore :max_inflight_bytes/},
       {[hydrator: [poll_ms: 0]], ~r/:hydrator :poll_ms/},
       {[retry: [max_attempts: 0]], ~r/:retry :max_attempts/},
+      {[retry: [check_timeout_ms: 0]], ~r/:retry :check_timeout_ms/},
       {[upload: [retry_backoff_ms: 0]], ~r/:upload :retry_backoff_ms/},
       {[upload: [retry_backoff_ms: 9, retry_backoff_max_ms: 8]],
        ~r/retry_backoff_max_ms must be at least/},

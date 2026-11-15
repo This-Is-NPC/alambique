@@ -630,8 +630,7 @@ defmodule Alambique.Cell do
   # One attempt: the cell cannot serve while it waits, and a retry that ran to
   # the end of the lease would leave no time for the renewal. A failed check
   # counts as not frozen; the next renewal looks again.
-  defp frozen?(state),
-    do: Freeze.frozen?(state.repl_ctx, state.id, deadline: Retry.deadline_in(0)) == {:ok, true}
+  defp frozen?(state), do: Freeze.check(state.repl_ctx, state.id) == {:ok, true}
 
   # Commit
 

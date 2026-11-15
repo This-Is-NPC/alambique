@@ -39,16 +39,26 @@ defmodule Alambique.Replica.Marker do
   @doc "Whether the marker exists, retried until `deadline` (monotonic milliseconds)."
   @spec enabled?(Alambique.Replication.ctx(), String.t(), integer) ::
           {:ok, boolean} | {:error, term}
-  def enabled?(ctx, cell, deadline) do
-    {store, config} = ctx.store
+  def enabled?(ctx, cell, deadline), do: Retry.run(ctx, deadline, fn -> probe(ctx, cell) end)
 
-    Retry.run(ctx, deadline, fn ->
-      case store.head(config, Keys.replicas(ctx.prefix, cell)) do
-        {:ok, _etag, _meta} -> {:ok, true}
-        {:error, :not_found} -> {:ok, false}
-        {:error, reason} -> {:retry, reason}
+  # One attempt, killed after `ctx.check_timeout_ms`.
+  defp check(ctx, cell) do
+    Retry.once(ctx.store, ctx.check_timeout_ms, fn ->
+      case probe(ctx, cell) do
+        {:retry, reason} -> {:error, reason}
+        result -> result
       end
     end)
+  end
+
+  defp probe(ctx, cell) do
+    {store, config} = ctx.store
+
+    case store.head(config, Keys.replicas(ctx.prefix, cell)) do
+      {:ok, _etag, _meta} -> {:ok, true}
+      {:error, :not_found} -> {:ok, false}
+      {:error, reason} -> {:retry, reason}
+    end
   end
 
   @doc """
@@ -63,7 +73,7 @@ defmodule Alambique.Replica.Marker do
 
     case Manager.memo(config, key) do
       nil ->
-        case enabled?(ctx, cell, Retry.deadline_in(0)) do
+        case check(ctx, cell) do
           {:ok, enabled} ->
             remember(config, location, cell, enabled)
             enabled

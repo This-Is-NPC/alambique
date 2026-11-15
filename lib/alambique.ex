@@ -256,8 +256,12 @@ defmodule Alambique do
     * `:hydrator` - `:poll_ms` (time between background hydration passes,
       default 100).
     * `:retry` - `:max_attempts` (attempts of one store request that is
-      retried, whatever time is left before its deadline, default 10; design
-      §3).
+      retried, whatever time is left before its deadline, default 10) and
+      `:check_timeout_ms` (time the one attempt of a check that is not retried
+      may take before it is killed, default 1000: the freeze marker that a
+      cell reads at each lease renewal and the replica marker; it must cover
+      the latency of the store and the queueing of a loaded node, or the check
+      is killed and counts as a failure of the store; design §3).
     * `:upload` - what a cell does when the upload of a batch fails for a
       store reason (design §6): `:retry_backoff_ms` (wait before the first new
       upload, default 500) and `:retry_backoff_max_ms` (the wait doubles up to
