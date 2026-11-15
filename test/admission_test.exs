@@ -262,7 +262,9 @@ defmodule Alambique.AdmissionTest do
 
       assert Enum.count(replies, &(&1 == {:error, :timeout})) == 2
       assert Enum.count(replies, &(&1 == {:error, :busy})) == 98
-      assert Alambique.load(inst, cell) == {:ok, %{pending: 3, waking: false}}
+      # A read counts twice while the cell parks it (`Cell.load/2` never
+      # under-counts), so the settled count is awaited, not read once.
+      eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 3, waking: false}} end)
 
       GatedStore.open(gate)
       assert {:ok, _} = Task.await(writer, 10_000)
