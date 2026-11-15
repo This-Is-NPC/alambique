@@ -27,8 +27,12 @@ run = "scripts/seaweedfs-up"
 description = "Remove the disposable SeaweedFS container"
 run = "scripts/seaweedfs-down"
 
+[tasks."check:quick"]
+description = "Run the fast checks of the pre-push hook: incremental warnings-as-errors compile and the format checks (scripts/quick-check --force recompiles everything)"
+run = "scripts/quick-check"
+
 [tasks.check]
-description = "Run the local gate: warnings-as-errors compile, format, clippy, docs links, then the default suite (ALAMBIQUE_CHECK_CLUSTER=1 and ALAMBIQUE_CHECK_COVERAGE=1 add the heavy checks)"
+description = "Run the full gate, the one CI runs: quick checks, clippy, docs links, then the default suite (ALAMBIQUE_CHECK_CLUSTER=1 and ALAMBIQUE_CHECK_COVERAGE=1 add the heavy checks)"
 run = "scripts/check"
 
 [tasks."check:links"]
@@ -36,11 +40,11 @@ description = "Check the relative links and anchors of README.md, CHANGELOG.md, 
 run = "scripts/link-check"
 
 [tasks.local-check]
-description = "Run the gate on HEAD and post the local-check status master requires (--post-only --state=success for the release pull request; ALAMBIQUE_LOCAL_CHECK_DRY_RUN=1 posts nothing)"
+description = "Run the full gate on HEAD by hand and post a local-check commit status (not required by master; --post-only --state=... posts without running; ALAMBIQUE_LOCAL_CHECK_DRY_RUN=1 posts nothing)"
 run = "scripts/local-check"
 
 [tasks."hooks:install"]
-description = "Install the versioned git hooks: pre-commit checks formatting, pre-push runs local-check"
+description = "Install the versioned git hooks: pre-commit checks formatting, pre-push runs the quick checks"
 run = "scripts/install-hooks"
 
 [tasks.test]
