@@ -15,8 +15,15 @@ defmodule Alambique.ReleaseCompactionPropertiesTest do
   @schema [{1, "CREATE TABLE t (n INTEGER PRIMARY KEY, v TEXT)"}]
   # The latency makes the whole compaction of the tail take several times the
   # longest deadline; one merge in flight and the release take well under it.
+  # The slack is a few store round trips plus room for a loaded machine. A
+  # release with no deadline takes about 1.1 s here, so a larger slack would
+  # not catch it; 500 ms left only 120 to 280 ms over a bounded release.
   @latency_ms 100
-  @slack_ms 500
+  @slack_ms 800
+  # Six runs of up to 56 writes at 100 ms per store request take about 50 s.
+  # Shrinking is off: it reran the scenario until the timeout and hid the
+  # assertion that failed first.
+  @moduletag timeout: 300_000
 
   setup do
     setup_store()
@@ -26,7 +33,8 @@ defmodule Alambique.ReleaseCompactionPropertiesTest do
     check all(
             writes <- integer(48..56),
             deadline_ms <- integer(100..300),
-            max_runs: 6
+            max_runs: 6,
+            max_shrinking_steps: 0
           ) do
       inst =
         start_instance(%{ctx | store: SlowStore.wrap(ctx.store, @latency_ms)},
