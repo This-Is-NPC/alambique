@@ -10,6 +10,8 @@ and Rust 1.97.1.
 ```sh
 mise run test            # default suite, no external services
 mise run test:native     # Rust unit tests of native/alambique_nif
+mise run check           # the full gate CI runs: quick checks, clippy, links, default suite
+mise run check:quick     # the fast checks of the pre-push hook
 mise run test:coverage   # line coverage of Elixir and the NIF, fails below 90%
 mise run test:miri       # native tests under Miri (Rust undefined behavior; SQLite tests skipped)
 mise run test:asan       # native tests under AddressSanitizer, SQLite's C code included
@@ -56,11 +58,24 @@ a compiled module such as `test/support/cluster_funs.ex`, because peers cannot
 load modules that exist only in memory.
 
 
-## The local gate
+## The gate and CI
 
-`master` requires the status `local-check` on a pull request before it merges.
-Nothing on GitHub runs the tests: a local gate runs them and posts the status.
-Pull requests merge by rebase only.
+`master` requires the check `ci` of GitHub Actions on a pull request before it
+merges, and the check must be green on the head commit. Pull requests merge by
+rebase only. The workflow is `.github/workflows/ci.yml`; it runs on every pull
+request to `master` and on every push to `master`, and it takes its tool
+versions from `mise.toml`. A new push to a pull request cancels the run of the
+older commit.
+
+`ci` is the aggregate job: it passes when these jobs passed.
+
+| Job | What it runs |
+| --- | --- |
+| `gate` | `mise run check`, below |
+| `coverage` | `mise run test:coverage`: line coverage of Elixir and the NIF, fails below `ALAMBIQUE_COVERAGE_MIN` |
+| `native` | `mise run test:native`: the Rust unit tests of the NIF |
+| `services` | `mise run test:seaweedfs` and `mise run test:litestream` against a SeaweedFS container |
+| `cluster` | `mise run test:cluster`: failover properties on peer nodes |
 
 Install the hooks once per clone:
 
@@ -68,53 +83,51 @@ Install the hooks once per clone:
 mise run hooks:install   # sets core.hooksPath to .githooks
 ```
 
-`mise run check` is the gate. It stops at the first failure and runs, in order:
+The hooks run only what is fast:
 
-1. `MIX_ENV=test mix compile --warnings-as-errors --force`
-2. `mix format --check-formatted`
-3. `cargo fmt --check` for `native/alambique_nif` and its `fuzz` crate
-4. `cargo clippy --all-targets -- -D warnings` on the NIF
-5. the documentation link check (`mise run check:links`): relative links and
+- `pre-commit` runs the format checks, about a second.
+- `pre-push` runs `mise run check:quick` (`scripts/quick-check`): an
+  incremental compile with warnings as errors, `mix format
+  --check-formatted` and `cargo fmt --check`. Tags and branch deletions pass.
+  The compile is incremental, so a push with nothing new takes seconds.
+  `scripts/quick-check --force` recompiles everything; the full gate uses it.
+
+Skip them on purpose with `ALAMBIQUE_SKIP_HOOKS=1` for one command, or with
+`git commit --no-verify` and `git push --no-verify`. CI runs the full gate
+anyway.
+
+`mise run check` is the full gate, the one the `gate` job runs. It stops at the
+first failure and runs, in order:
+
+1. `scripts/quick-check --force`: `MIX_ENV=test mix compile
+   --warnings-as-errors --force` (forced, so a stale `_build` cannot hide a
+   warning), `mix format --check-formatted`, and `cargo fmt --check` for
+   `native/alambique_nif` and its `fuzz` crate
+2. `cargo clippy --all-targets -- -D warnings` on the NIF
+3. the documentation link check (`mise run check:links`): relative links and
    `#anchors` in `README.md`, `CHANGELOG.md`, `AGENTS.md` and `docs/*.md`
-6. `mise run test`, the default suite
+4. `mise run test`, the default suite
 
-The suite takes about four minutes on an idle machine and dominates the gate.
-The forced compile, the format checks, clippy and the link check add about a
-minute together once dependencies are built; clippy alone takes two seconds
-when warm and under two minutes the first time. A first run in a fresh
-checkout also compiles the dependencies, and a loaded machine makes timing
-tests in the suite fail, so rerun the failing file before suspecting your
-change. Two heavy checks are off by default:
+Run it by hand when you want the CI result on your machine; a loaded machine
+makes timing tests in the suite fail, so rerun the failing file before
+suspecting your change. `ALAMBIQUE_CHECK_CLUSTER=1` adds `mise run
+test:cluster` and `ALAMBIQUE_CHECK_COVERAGE=1` adds `mise run test:coverage`.
 
-```sh
-ALAMBIQUE_CHECK_CLUSTER=1 mise run check    # adds mise run test:cluster
-ALAMBIQUE_CHECK_COVERAGE=1 mise run check   # adds mise run test:coverage
-```
+These stay local, because they need nightly toolchains, clang, minutes to
+hours of CPU or measurements that a shared runner would distort: Miri,
+the sanitizers, fuzzing, the TLA+ model check, the benchmarks and the load
+test.
 
-The hooks:
+The release pull request is opened by release-please with the workflow token,
+and events of that token start no `pull_request` run. `release.yml` therefore
+dispatches `ci.yml` on the release branch (`workflow_dispatch`), so `ci` runs
+on the head commit of the release pull request.
 
-- `pre-commit` runs only the format checks, about a second. The full gate is
-  too slow to run on every commit.
-- `pre-push` runs `scripts/local-check --pre-push` for each commit pushed. A
-  red gate refuses the push. A green gate posts `local-check` on the commit
-  through `gh api` once the push lands. The gate vouches only for the tree it
-  ran on, so the pushed commit must be `HEAD` with a clean working tree. Tags
-  and branch deletions pass. It needs `gh` logged in; without it the gate
-  still runs but posts nothing.
-
-`mise run local-check` gates `HEAD` and posts the status by hand. For a commit
-you did not push from here, such as the release pull request release-please
-opens, check out its branch, run `mise run check`, then post the result:
-
-```sh
-scripts/local-check --post-only --state=success --sha=<commit>
-```
-
-To skip on purpose, set `ALAMBIQUE_SKIP_LOCAL_CHECK=1` for one command, or
-use `git commit --no-verify` or `git push --no-verify`. A skipped push posts no
-status, so `master` refuses the merge until an admin bypasses it or you post
-one with `--post-only`. `ALAMBIQUE_LOCAL_CHECK_DRY_RUN=1` (or `--dry-run`) runs
-the gate but prints the API calls instead of posting them.
+`mise run local-check` runs the full gate on `HEAD` by hand and posts a
+`local-check` commit status. `master` no longer requires it. `scripts/local-check
+--post-only --state=success --sha=<commit>` posts the status without running
+the gate, and `ALAMBIQUE_LOCAL_CHECK_DRY_RUN=1` (or `--dry-run`) prints the API
+calls instead of posting them.
 
 
 ## Releases
