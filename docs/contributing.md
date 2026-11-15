@@ -24,6 +24,7 @@ mise run bench:router    # routing path and awake.max_pending check of a local c
 mise run bench:inflight  # cost of the in-flight marker per write
 mise run bench:restore-concurrency  # restore of a long chain by fetch_concurrency and budget
 mise run bench:swap      # restore of 12 busy cells at once on SeaweedFS behind a delay proxy
+mise run bench:breaker   # commits above a 1-CPU node's capacity: throughput, breaker opens and store failures by reason
 mise run bench:lease     # cost of Alambique.lease/3, in memory and with store latency
 mise run bench:stall     # per-second latency, run queues, NIF calls and store requests under steady load
 mise run load:image      # build the image of the load test service

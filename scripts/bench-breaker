@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Runs the breaker-under-overload benchmark on one CPU; see bench/breaker_load.exs.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+cpu="${ALAMBIQUE_BENCH_BREAKER_CPU:-0}"
+export MIX_ENV=test ELIXIR_ERL_OPTIONS="+S 1:1 +SDcpu 1:1 +SDio 1"
+exec taskset -c "$cpu" mix run bench/breaker_load.exs
