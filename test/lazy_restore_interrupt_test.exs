@@ -11,6 +11,8 @@ defmodule Alambique.LazyRestoreInterruptTest do
 
   @moduletag :cluster
   @moduletag timeout: 180_000
+  # min_bytes: 0 makes every chain restore lazily; the default restores a chain
+  # under 4 MiB in full, which leaves no hydrator to interrupt.
   @schema [
     {1, "CREATE TABLE log (id INTEGER PRIMARY KEY AUTOINCREMENT, n INTEGER NOT NULL, v BLOB)"}
   ]
@@ -41,7 +43,7 @@ defmodule Alambique.LazyRestoreInterruptTest do
         peer_args: ["+SDio", "1"],
         instance_opts: [
           op_timeout_ms: 1_000,
-          lazy_restore: [concurrency: 2, batch_bytes: 1_024, miss_pages: 4]
+          lazy_restore: [min_bytes: 0, concurrency: 2, batch_bytes: 1_024, miss_pages: 4]
         ]
       )
 
@@ -99,7 +101,7 @@ defmodule Alambique.LazyRestoreInterruptTest do
         peer_args: ["+SDio", "1"],
         instance_opts: [
           op_timeout_ms: 1_000,
-          lazy_restore: [concurrency: 2, batch_bytes: 1_024, miss_pages: 4]
+          lazy_restore: [min_bytes: 0, concurrency: 2, batch_bytes: 1_024, miss_pages: 4]
         ]
       )
 
