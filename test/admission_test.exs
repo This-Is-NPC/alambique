@@ -270,7 +270,9 @@ defmodule Alambique.AdmissionTest do
   end
 
   test "a call whose caller gave up before the cell reached it does not run", env do
-    inst = start_instance(env, migrations: @schema)
+    # The long read only has to outlast the 20 ms of the write; its own limits are
+    # far above what a loaded machine needs, so it ends by finishing.
+    inst = start_instance(env, migrations: @schema, sql: [statement_timeout_ms: 300_000])
     cell = unique_cell()
     {:ok, _} = Alambique.execute(inst, cell, @insert, [0])
 
@@ -278,11 +280,11 @@ defmodule Alambique.AdmissionTest do
     slow =
       "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 5000000) SELECT count(*) FROM c"
 
-    reader = Task.async(fn -> Alambique.query(inst, cell, slow, [], timeout: 10_000) end)
+    reader = Task.async(fn -> Alambique.query(inst, cell, slow, [], timeout: 300_000) end)
     eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 1, waking: false}} end)
 
     assert {:error, :timeout} = Alambique.execute(inst, cell, @insert, [1], timeout: 20)
-    assert {:ok, _} = Task.await(reader, 10_000)
+    assert {:ok, _} = Task.await(reader, 300_000)
 
     assert {:ok, %{rows: [[1]]}} = Alambique.query(inst, cell, "SELECT count(*) FROM t")
     eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 0, waking: false}} end)
