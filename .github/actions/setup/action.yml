@@ -1,0 +1,55 @@
+name: Set up the toolchain
+description: >
+  Install the tools of mise.toml that a job needs through mise, restore the
+  caches and fetch the Mix dependencies. Versions live only in mise.toml.
+
+inputs:
+  tools:
+    description: Tools to install, as arguments of `mise install` (empty installs all).
+    required: true
+  cache-name:
+    description: Name of the job, part of the cache keys so jobs never save the same key.
+    required: true
+  mix:
+    description: Fetch the Mix dependencies and cache deps and _build.
+    default: "true"
+  cargo:
+    description: Cache the cargo registry and the target directory of the NIF.
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Install tools with mise
+      uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d # v5.2.9
+      with:
+        install_args: ${{ inputs.tools }}
+
+    # The key holds mix.lock and mise.toml (tool versions) and the OS. The gate
+    # compiles with --force, so a stale _build cannot hide a warning.
+    - name: Cache Mix dependencies and build
+      if: inputs.mix == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          deps
+          _build
+        key: mix-${{ runner.os }}-${{ inputs.cache-name }}-${{ hashFiles('mix.lock', 'mise.toml') }}
+
+    - name: Cache cargo registry and NIF target
+      if: inputs.cargo == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          native/alambique_nif/target
+        key: cargo-${{ runner.os }}-${{ inputs.cache-name }}-${{ hashFiles('native/alambique_nif/Cargo.lock', 'mise.toml') }}
+
+    - name: Fetch Mix dependencies
+      if: inputs.mix == 'true'
+      shell: bash
+      run: |
+        mise exec -- mix local.hex --force
+        mise exec -- mix local.rebar --force
+        mise exec -- mix deps.get
