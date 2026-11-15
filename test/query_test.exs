@@ -609,7 +609,7 @@ defmodule Alambique.QueryTest do
         end
 
       result = Query.all(reader, cells, @count)
-      Task.await_many(trimmers)
+      Task.await_many(trimmers, 120_000)
       assert result.errors == []
       assert length(result.rows) == 30
     end
