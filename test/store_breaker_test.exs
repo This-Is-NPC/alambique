@@ -251,7 +251,7 @@ defmodule Alambique.StoreBreakerTest do
         end)
 
       # Open it with three failures reported as the retry loop does.
-      for _ <- 1..3, do: Breaker.timed_out(b.store)
+      for _ <- 1..3, do: Breaker.timed_out(b.store, {:get, :unknown})
       assert Breaker.open?(b.breaker)
 
       b.advance.(1_000)

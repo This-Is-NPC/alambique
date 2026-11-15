@@ -4,7 +4,9 @@ defmodule Alambique.StoreBreakerPropertiesTest do
   requests that start, finish and let the clock pass: while it is open no
   request reaches the store, once the cool-down has passed exactly one request
   (the probe) does until it finishes, and it closes only on the success of that
-  probe. `status/1` reports the same state and the failures that opened it.
+  probe. `status/1` reports the same state and the failures that opened it. A request
+  that never left (it gave up waiting for a connection) is not a failure: it
+  does not count, and a probe that ends so is replaced by the next request.
   """
   use ExUnit.Case, async: true
   use ExUnitProperties
@@ -13,7 +15,11 @@ defmodule Alambique.StoreBreakerPropertiesTest do
 
   @failures 3
   @cooldown 100
-  @settings %{failures: @failures, cooldown_ms: @cooldown, probe_timeout_ms: 1_000_000_000}
+  @settings %{
+    failures: @failures,
+    cooldown_ms: @cooldown,
+    probe_timeout_ms: 1_000_000_000
+  }
 
   defmodule Gate do
     @moduledoc false
@@ -24,7 +30,13 @@ defmodule Alambique.StoreBreakerPropertiesTest do
       send(test, {:reached, self()})
 
       receive do
-        {:go, result} -> result
+        # A request that gave up while it waited for a connection of the pool.
+        {:go, {:queued, result}} ->
+          Alambique.Store.Phase.handle([:finch, :queue, :start], %{}, %{}, nil)
+          result
+
+        {:go, result} ->
+          result
       end
     end
 
@@ -47,7 +59,8 @@ defmodule Alambique.StoreBreakerPropertiesTest do
     fail: {:error, {:http, 500, ""}},
     timeout: {:error, :timeout},
     not_found: {:error, :not_found},
-    precondition: {:error, :precondition_failed}
+    precondition: {:error, :precondition_failed},
+    local: {:queued, {:error, {:request_crashed, :error, :pool_timeout}}}
   }
   @failing [:fail, :timeout]
 
@@ -102,9 +115,12 @@ defmodule Alambique.StoreBreakerPropertiesTest do
     {pid, ticket, outcome} = Enum.at(m.pending, rem(k, length(m.pending)))
     send(pid, {:go, @results[outcome]})
     assert_receive {:done, ^pid, result}, 2_000
-    assert result == @results[outcome]
+    assert result == answer(@results[outcome])
     finish(%{m | pending: List.keydelete(m.pending, pid, 0)}, ticket, outcome)
   end
+
+  defp answer({:queued, result}), do: result
+  defp answer(result), do: result
 
   defp add(m, {_pid, :probe, _} = request),
     do: %{m | pending: m.pending ++ [request], probe: request}
@@ -113,6 +129,11 @@ defmodule Alambique.StoreBreakerPropertiesTest do
 
   # A request admitted while closed counts only if the breaker is still
   # closed when it ends.
+  # A request that never left says nothing about the store: it neither counts
+  # nor resets the run, and a probe that ends so is given up.
+  defp finish(m, :closed, :local), do: m
+  defp finish(m, :probe, :local), do: %{m | probe: nil}
+
   defp finish(%{state: :closed} = m, :closed, outcome) do
     if outcome in @failing do
       if m.fails + 1 >= @failures,

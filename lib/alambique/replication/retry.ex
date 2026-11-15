@@ -4,9 +4,9 @@ defmodule Alambique.Replication.Retry do
   # `ctx.max_attempts`. Every attempt runs in its own process, killed at the
   # deadline, so a store call that never returns ends the operation in time
   # (design §3). A killed attempt is reported to the circuit breaker of the
-  # store, which cannot see it (`Store.Breaker`).
+  # store, which cannot see it (`Store.Breaker`), with how far its request got.
 
-  alias Alambique.Store.Breaker
+  alias Alambique.Store.{Breaker, Phase}
 
   @doc "Monotonic deadline `ms` from now."
   def deadline_in(ms), do: System.monotonic_time(:millisecond) + ms
@@ -35,8 +35,8 @@ defmodule Alambique.Replication.Retry do
   @spec once(term, pos_integer, (-> term)) :: term
   def once(store \\ nil, timeout_ms, fun) do
     case attempt(timeout_ms, fun) do
-      :killed ->
-        Breaker.timed_out(store)
+      {:killed, where} ->
+        Breaker.timed_out(store, where)
         {:error, :timeout}
 
       result ->
@@ -51,8 +51,8 @@ defmodule Alambique.Replication.Retry do
 
     case attempt(remaining, fun) do
       # Killed at the deadline: the reason of the last failure says more.
-      :killed ->
-        Breaker.timed_out(ctx.store)
+      {:killed, where} ->
+        Breaker.timed_out(ctx.store, where)
         {:error, last}
 
       {:retry, :store_unavailable} ->
@@ -96,13 +96,14 @@ defmodule Alambique.Replication.Retry do
         exit(reason)
     after
       timeout ->
+        where = Phase.of(pid)
         release(pid, mon)
         Process.exit(pid, :kill)
 
         receive do
           {^ref, result} -> unwrap(result)
         after
-          0 -> :killed
+          0 -> {:killed, where}
         end
     end
   end
