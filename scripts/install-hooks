@@ -12,4 +12,5 @@ git config core.hooksPath .githooks
 
 echo "Hooks installed: core.hooksPath=.githooks"
 echo "  pre-commit runs the format checks."
-echo "  pre-push runs scripts/local-check: red refuses the push, green posts local-check."
+echo "  pre-push runs scripts/quick-check: warnings-as-errors compile and the format checks."
+echo "  The full gate runs on GitHub Actions, on the pull request."

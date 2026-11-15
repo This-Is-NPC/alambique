@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# The fast checks behind the pre-push hook and the start of scripts/check:
+# warnings-as-errors compile and the format checks of Elixir and Rust.
+#
+#   scripts/quick-check          incremental compile: only what changed, so a
+#                                push with nothing new takes seconds
+#   scripts/quick-check --force  recompile everything, so a stale _build cannot
+#                                hide a warning (scripts/check and CI use it)
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$root"
+
+force=()
+case "${1:-}" in
+  "") ;;
+  --force) force=(--force) ;;
+  *)
+    printf 'quick-check: unknown arg: %s\n' "$1" >&2
+    exit 2
+    ;;
+esac
+
+step() { printf '\n==> %s\n' "$*"; }
+
+step "compile (warnings as errors)"
+MIX_ENV=test mix compile --warnings-as-errors "${force[@]}"
+
+step "mix format"
+mix format --check-formatted
+
+step "cargo fmt"
+cargo fmt --check --manifest-path native/alambique_nif/Cargo.toml
+cargo fmt --check --manifest-path native/alambique_nif/fuzz/Cargo.toml
