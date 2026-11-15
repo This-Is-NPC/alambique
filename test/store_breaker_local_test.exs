@@ -103,21 +103,29 @@ defmodule Alambique.StoreBreakerLocalTest do
   end
 
   test "a request killed at its deadline after it was sent counts", %{s3: s3, breaker: b} do
-    # The pool takes the connection of a killed request back before the next one.
+    # One connection per request: the next one does not wait for the pool to
+    # replace the connection of the one killed before it.
+    pool = Alambique.BreakerKilledPool
+    start_supervised!({Finch, name: pool, pools: %{default: [size: 3]}}, id: pool)
+
     silent =
       store(
-        %{s3 | receive_timeout: 60_000, req_options: [finch: [name: @pool, pool_timeout: 5_000]]},
+        %{s3 | receive_timeout: 60_000, req_options: [finch: [name: pool, pool_timeout: 5_000]]},
         b
       )
 
     for _ <- 1..3 do
-      pid = spawn(fn -> get(silent) end)
+      {pid, monitor} = spawn_monitor(fn -> get(silent) end)
       # Wait for the state, not for time: the kill comes after the request left.
-      eventually(fn -> Phase.of(pid) == {:get, :sent} end)
+      eventually(fn ->
+        refute_received {:DOWN, ^monitor, _, _, _}, "the request ended before it was sent"
+        Phase.of(pid) == {:get, :sent}
+      end)
 
       # What `Retry` does at the deadline.
       Breaker.timed_out(silent, Phase.of(pid))
       Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^monitor, _, _, :killed}, 5_000
     end
 
     assert Breaker.open?(b)
