@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.1](https://github.com/This-Is-NPC/alambique/compare/v0.10.0...v0.10.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **breaker:** say what a store crash was ([8b9525f](https://github.com/This-Is-NPC/alambique/commit/8b9525faa31a053a514178baf27bc7a03cf3f7fc))
+* **testkit:** do not time out calls to the store ([ab7e9d1](https://github.com/This-Is-NPC/alambique/commit/ab7e9d1981c31b082517fe0c2f8db413a16f1ee9))
+
 ## [0.10.0](https://github.com/This-Is-NPC/alambique/compare/v0.9.0...v0.10.0) (2026-11-15)
 
 
