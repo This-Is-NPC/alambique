@@ -105,10 +105,13 @@ first release (0.1.0):
   breaker. `[:alambique, :store, :failure]` reports the `reason` and whether
   it `counted`. The freeze-marker check of each renewal and the replica marker
   read are no longer killed at 50 ms and counted as a timeout of the store:
-  `retry: [check_timeout_ms:]` (default 1 000) bounds them, and a cell with a
-  slow store can wait that long in a renewal. A request that left and whose
-  answer the node read late still counts. There is no breaking change: the
-  option and the event are new.
+  `retry: [check_timeout_ms:]` bounds them: 1 000 ms by default, capped at half
+  of `lease_ttl_ms / 3` (less the renewal jitter) minus `skew_margin_ms`, so
+  lower on a short lease; a cell with a slow store can wait that long in a
+  renewal. A request that left and whose answer the node read late still
+  counts. **breaking:** start refuses an explicit `check_timeout_ms` above that
+  bound, and a `lease_ttl_ms` too close to twice `skew_margin_ms` to leave room
+  for the check.
 
 The full list is in [CHANGELOG.md](CHANGELOG.md).
 
