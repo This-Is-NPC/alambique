@@ -588,12 +588,15 @@ wake event shows `reason: :disk_full` (`[:alambique, :cell, :wake]`).
   runs with `join: false` and has not called `Alambique.join/1` (step 9).
 - **`{:error, :store_unavailable}` from calls.** The circuit breaker of the
   store is open: it saw `breaker: [failures:]` failures in a row (default 5:
-  5xx, timeouts, connection errors) and refuses requests without reaching the
+  5xx, answers that did not come, connection errors; not a request that gave
+  up waiting for a connection of the pool, which is the node's queue) and refuses requests without reaching the
   store for `breaker: [cooldown_ms:]` (default 5 000, plus up to 20 %). Then it
   lets one request through and closes if it succeeds. Look for
   `[:alambique, :store, :breaker, :open]` events (see
   [telemetry.md](telemetry.md#store-events)), whose `reason` says whether the
-  failures or the probe opened it. `Alambique.breaker_status(instance)` shows
+  failures or the probe opened it, and for `[:alambique, :store, :failure]`,
+  which gives the `reason` and the `operation` of each failure and whether it
+  `counted`. `Alambique.breaker_status(instance)` shows
   the state of each location now (`:closed`, `:open`, `:half_open`), since
   when and the failures in a row, without asking the store; use it for a
   health check. Check the store, not the node. Calls are

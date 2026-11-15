@@ -329,14 +329,44 @@ the panic tests abort the VM when `guard` does not catch.
     again for another cool-down. A probe that never answers (its process was
     killed) is given up after `probe_timeout_ms` and the next request is the
     probe.
-  - A failure is what says the store may be down: a timeout, including a
-    request killed at its deadline, a transport error, a crash of the store
-    module, and an HTTP 5xx. `:not_found` and `:precondition_failed` are
-    answers of a working store, normal for leases, fences and `if_none_match`
-    uploads, and an HTTP 4xx (a bad request, a refused credential) is a
-    problem that another request would repeat, not an outage. A request killed
-    at its deadline never answers, so `Retry` reports it; only a closed breaker
-    counts it.
+  - A failure is what the store did: a timeout of a request that left, a
+    transport error, a crash of the store module, and an HTTP 5xx. `:not_found`
+    and `:precondition_failed` are answers of a working store, normal for
+    leases, fences and `if_none_match` uploads, and an HTTP 4xx (a bad request,
+    a refused credential) is a problem that another request would repeat, not
+    an outage.
+  - **What the node did is not a failure.** A node that takes more than it can
+    serve queues work locally, and that queue times out whether or not the
+    store is healthy. If the breaker counted those timeouts it would open for
+    its cool-down, the node would idle while its queue grew, and the timeouts
+    after the cool-down would open it again: a metastable failure, with
+    throughput stuck below capacity. So a request that never left does not
+    count. The breaker marks the process that makes a store call
+    (`Alambique.Store.Phase`) and a handler of the Finch telemetry events moves
+    the mark: `[:finch, :queue, :start]` (waiting for a pooled connection),
+    `[:finch, :queue, :stop]` (holding one) and `[:finch, :send, :start]` (the
+    request is sent). These are emitted in the process that makes the request,
+    with no cost on the path of a request beyond a process-dictionary write. A
+    request that fails while still waiting for a connection, or that
+    `Retry` kills at its deadline in that state or in none (it was not yet
+    scheduled), is `:local`: it neither counts nor resets the run, and a probe
+    that ends so is given up so that the next request is the probe. A request
+    that failed after the connection was held, or that a kill found sent,
+    counts. A store that does not use Finch (the memory store, a test store, a
+    `Req` adapter) never moves the mark, which stays unknown, and every error
+    counts as before. The reason of each failure and whether it counted are in
+    `[:alambique, :store, :failure]` ([telemetry.md](telemetry.md)).
+    Measured on SeaweedFS behind a 25 ms proxy, with the S3 pool at 4
+    connections and 400 commits a second on one CPU: before, 6 openings and
+    90 commits a second over the run (4 in the first 13 s); after, none and
+    360 (342 in the first 13 s), with 2 400 `:local` failures
+    (`mise run bench:breaker`, [contributing.md](contributing.md)).
+    **Limit:** a request that left and got no answer counts, even when the
+    node was too slow to read it; the scheduler lag during the saturation of a
+    1-CPU node was at most 50 ms in those runs, so no run showed that case,
+    and a threshold of lag would be a guess.
+  - A request killed at its deadline never answers, so `Retry` reports it with
+    how far it got; only a closed breaker counts it.
   - **Lease renewals bypass it** (`Lease.renew/2`). A cell renews every third
     of the TTL and its lease is valid for `lease_ttl_ms - skew_margin_ms`, so
     it has two tries after a failed renewal. A breaker that stayed open after
@@ -363,8 +393,8 @@ the panic tests abort the VM when `guard` does not catch.
     reports when its cool-down ended, computed from the monotonic clock. A
     location not used yet has no breaker and reads as closed. The reason of
     the last failure is not kept: it is in the telemetry events and logs.
-  Telemetry: `[:alambique, :store, :breaker, :open]` and `:close`
-  ([telemetry.md](telemetry.md)).
+  Telemetry: `[:alambique, :store, :breaker, :open]` and `:close`, and
+  `[:alambique, :store, :failure]` ([telemetry.md](telemetry.md)).
 - `Alambique.Store.S3` implements it with Req and AWS SigV4, with a
   path-style option. SeaweedFS is the only store it is tested on
   ([storage-compatibility.md](storage-compatibility.md)); the AWS paths are

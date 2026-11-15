@@ -64,6 +64,24 @@ instance name and `location` the id of the location.
 | --- | --- | --- |
 | `[:alambique, :store, :breaker, :open]` | `cooldown_ms` (the configured cool-down; the wait is up to 20 % longer) | `instance`, `location`, `reason` (`:failures`: `breaker: [failures:]` failures in a row; `:probe_failed`: the probe after a cool-down failed) |
 | `[:alambique, :store, :breaker, :close]` | none | `instance`, `location` |
+| `[:alambique, :store, :failure]` | none | `instance`, `location`, `operation` (`:put`, `:get`, `:head`, `:get_range`, `:list`, `:delete`; `nil` for a killed request that was in none), `reason` (below), `counted` (`true` if it counted toward `breaker: [failures:]`) |
+
+`[:alambique, :store, :failure]` is emitted for each store request that fails
+while the breaker admits it, so a log can say why the breaker opened. `reason`
+is one of a closed set:
+
+| `reason` | Meaning | `counted` |
+| --- | --- | --- |
+| `{:http, status}` | The store answered with a 5xx. | `true` |
+| `:timeout_recv` | The request left and no answer came before `receive_timeout` or before the request was killed at `op_timeout_ms`. A store that does not report how far a request got is taken to be in this case. | `true` |
+| `:timeout_connect` | A connection was taken from the pool but the store did not accept it in time. | `true` |
+| `:transport` | Any other transport error: connection refused, reset, closed. | `true` |
+| `:crashed` | The store module raised, threw or exited (`{:store_crashed, ...}`). | `true` |
+| `:local` | The request never left: it waited for a connection of the pool (`finch: [pool_timeout:]`, `pool_size:`) and gave up, or its process was killed at its deadline before it sent anything. This is the node's overload, not the store's. | `false` |
+
+A request that fails with `:local` neither counts nor resets the run of
+failures. An answer of a working store (`:not_found`, `:precondition_failed`,
+a 4xx) is not a failure and emits nothing.
 
 `Alambique.breaker_status/1` gives the current state of each breaker without
 waiting for an event.

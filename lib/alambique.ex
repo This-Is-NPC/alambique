@@ -269,7 +269,9 @@ defmodule Alambique do
       to 20 % at random) and `:probe_timeout_ms` (how long a probe that never
       answers holds the place of the probe, default 10 000). While it is open a
       store request answers `{:error, :store_unavailable}` without reaching the
-      store.
+      store. Only what the store did counts as a failure: a request that never
+      left the node (it gave up waiting for a connection of the pool) does not,
+      and `[:alambique, :store, :failure]` gives the reason of each.
     * `:sql` - limits on the statements (design §7): `:statement_timeout_ms`
       (the statements of callers, `query/5`, `execute/5` and the statements of
       `transaction/4`; a statement that runs longer is interrupted, default

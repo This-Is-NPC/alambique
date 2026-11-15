@@ -20,13 +20,19 @@ defmodule Alambique.Store.Breaker do
   # never reports (its process was killed) is given up after `probe_timeout_ms`
   # and the next request becomes the probe.
   #
-  # A failure is an answer that says nothing about the request itself: a
-  # timeout, a transport error, a crash of the store module or an HTTP 5xx.
-  # `:not_found`, `:precondition_failed` (normal for leases and fences) and
-  # HTTP 4xx are answers of a store that works.
+  # A failure is what the store did: a timeout of a request that left, a
+  # transport error, a crash of the store module or an HTTP 5xx. `:not_found`,
+  # `:precondition_failed` (normal for leases and fences) and HTTP 4xx are
+  # answers of a store that works. A request that never left, because it waited
+  # for a connection of the pool when it gave up, or because its process was
+  # killed before it sent anything (`:local`, `Store.Phase`), is the node's
+  # overload and not a failure of the store: it neither counts nor resets the
+  # run, and a probe that ends so lets the next request be the probe. Every
+  # failure, counted or not, is reported in `[:store, :failure]`.
 
   @behaviour Alambique.Store
 
+  alias Alambique.Store.Phase
   alias Alambique.Telemetry
 
   @jitter 0.2
@@ -59,6 +65,7 @@ defmodule Alambique.Store.Breaker do
   end
 
   defp new_ref do
+    Phase.attach()
     ref = :atomics.new(4, signed: true)
     :atomics.put(ref, 4, wall_ms())
     ref
@@ -160,13 +167,27 @@ defmodule Alambique.Store.Breaker do
   def open?(%{ref: ref}), do: :atomics.get(ref, 1) != 0
 
   @doc """
-  Records a request killed at its deadline, which never reported. Only a
-  closed breaker counts it: a probe that hangs is given up by its own timeout.
+  Records a request killed at its deadline, which never reported; `where` is
+  the `{operation, phase}` its process was in (`Store.Phase.of/1`). It counts
+  unless the request had not left. Only a closed breaker counts it: a probe
+  that hangs is given up by its own timeout.
   """
-  @spec timed_out(term) :: :ok
-  def timed_out({__MODULE__, %{breaker: breaker}}), do: failed(breaker, :closed)
-  def timed_out({Alambique.Store.Metered, %{store: store}}), do: timed_out(store)
-  def timed_out(_store), do: :ok
+  @spec timed_out(term, {atom, Phase.phase()} | nil) :: :ok
+  def timed_out({__MODULE__, %{breaker: breaker}}, where) do
+    {operation, phase} = where || {nil, :queued}
+
+    if phase == :queued do
+      report(breaker, operation, :local, false)
+    else
+      report(breaker, operation, timeout_reason(phase), true)
+      failed(breaker, :closed)
+    end
+
+    :ok
+  end
+
+  def timed_out({Alambique.Store.Metered, %{store: store}}, where), do: timed_out(store, where)
+  def timed_out(_store, _where), do: :ok
 
   @doc "`:store_unavailable` for a reason that is, or ends in, the breaker's answer."
   @spec classify(term) :: term
@@ -186,33 +207,41 @@ defmodule Alambique.Store.Breaker do
 
   @impl true
   def put(s, key, body, condition, meta),
-    do: through(s, fn m, c -> m.put(c, key, body, condition, meta) end)
+    do: through(s, :put, fn m, c -> m.put(c, key, body, condition, meta) end)
 
   @impl true
-  def get(s, key), do: through(s, fn m, c -> m.get(c, key) end)
+  def get(s, key), do: through(s, :get, fn m, c -> m.get(c, key) end)
 
   @impl true
-  def head(s, key), do: through(s, fn m, c -> m.head(c, key) end)
+  def head(s, key), do: through(s, :head, fn m, c -> m.head(c, key) end)
 
   @impl true
   def get_range(s, key, offset, length),
-    do: through(s, fn m, c -> m.get_range(c, key, offset, length) end)
+    do: through(s, :get_range, fn m, c -> m.get_range(c, key, offset, length) end)
 
   @impl true
   def list(s, prefix, start_after, limit),
-    do: through(s, fn m, c -> m.list(c, prefix, start_after, limit) end)
+    do: through(s, :list, fn m, c -> m.list(c, prefix, start_after, limit) end)
 
   @impl true
-  def delete(s, key), do: through(s, fn m, c -> m.delete(c, key) end)
+  def delete(s, key), do: through(s, :delete, fn m, c -> m.delete(c, key) end)
 
-  defp through(%{store: {m, c}, breaker: breaker}, fun) do
+  defp through(%{store: {m, c}, breaker: breaker}, operation, fun) do
     case admit(breaker) do
       :reject ->
         {:error, :store_unavailable}
 
       ticket ->
-        result = fun.(m, c)
-        record(breaker, ticket, result)
+        Phase.begin(operation)
+
+        {result, phase} =
+          try do
+            {fun.(m, c), elem(Phase.current(), 1)}
+          after
+            Phase.finish()
+          end
+
+        record(breaker, ticket, result, operation, phase)
         result
     end
   end
@@ -244,9 +273,54 @@ defmodule Alambique.Store.Breaker do
     end
   end
 
-  defp record(breaker, ticket, result) do
-    if failure?(result), do: failed(breaker, ticket), else: succeeded(breaker, ticket)
+  defp record(breaker, ticket, result, operation, phase) do
+    case outcome(result, phase) do
+      :ok ->
+        succeeded(breaker, ticket)
+
+      {:failure, reason} ->
+        report(breaker, operation, reason, true)
+        failed(breaker, ticket)
+
+      :local ->
+        report(breaker, operation, :local, false)
+        abandoned(breaker, ticket)
+    end
   end
+
+  # What a result says about the store, given how far the request got.
+  defp outcome({:error, :not_found}, _phase), do: :ok
+  defp outcome({:error, :precondition_failed}, _phase), do: :ok
+
+  defp outcome({:error, {:http, status, _}}, _phase) when is_integer(status),
+    do: if(status >= 500, do: {:failure, {:http, status}}, else: :ok)
+
+  defp outcome({:error, _}, :queued), do: :local
+  defp outcome({:error, {:store_crashed, _, _}}, _phase), do: {:failure, :crashed}
+  defp outcome({:error, :timeout}, phase), do: {:failure, timeout_reason(phase)}
+  defp outcome({:error, _}, _phase), do: {:failure, :transport}
+  defp outcome(_ok, _phase), do: :ok
+
+  # A timeout with a connection still to open is the store not accepting it; a
+  # store that does not say how far it got is taken to have been sent the request.
+  defp timeout_reason(:checked_out), do: :timeout_connect
+  defp timeout_reason(_phase), do: :timeout_recv
+
+  defp report(breaker, operation, reason, counted) do
+    Telemetry.emit(
+      [:store, :failure],
+      Map.merge(breaker.meta, %{operation: operation, reason: reason, counted: counted})
+    )
+  end
+
+  # A local failure says nothing about the store: the run stays as it is, and a
+  # probe that ends so is given up, so that the next request is the probe.
+  defp abandoned(%{ref: ref}, {:probe, open_until}) do
+    if :atomics.get(ref, 1) == open_until, do: :atomics.put(ref, 3, 0)
+    :ok
+  end
+
+  defp abandoned(_breaker, :closed), do: :ok
 
   # Anything but a closed breaker ignores the requests that started before it
   # opened.
@@ -292,12 +366,6 @@ defmodule Alambique.Store.Breaker do
 
   # Jitter keeps the nodes of a cluster from probing the store together.
   defp cooldown(%{cooldown_ms: ms, jitter: jitter}), do: ms + round(ms * jitter * :rand.uniform())
-
-  defp failure?({:error, :not_found}), do: false
-  defp failure?({:error, :precondition_failed}), do: false
-  defp failure?({:error, {:http, status, _}}) when is_integer(status), do: status >= 500
-  defp failure?({:error, _}), do: true
-  defp failure?(_), do: false
 
   # 0 means none, and a monotonic time may be 0.
   defp nonzero(0), do: 1
