@@ -251,6 +251,30 @@ defmodule Alambique.ConfigPropertiesTest do
       end
     end
 
+    property "check_timeout_ms leaves the lease a margin over one shortened renewal" do
+      check all(
+              ttl <- integer(100..120_000),
+              skew <- integer(0..(div(ttl, 2) - 1)),
+              jitter <- member_of([0, 0.1, 0.25, 0.5]),
+              given <- one_of([constant(nil), integer(1..20_000)])
+            ) do
+        opts = base(lease_ttl_ms: ttl, skew_margin_ms: skew, lease_renew_jitter: jitter)
+        opts = if given, do: Keyword.put(opts, :retry, check_timeout_ms: given), else: opts
+        room = div(ttl, 3) - trunc(div(ttl, 3) * jitter) - skew
+
+        try do
+          check = Config.build(opts).retry.check_timeout_ms
+          assert 2 * check <= room
+          assert check == (given || min(check, 1_000))
+          if is_nil(given), do: assert(check == min(1_000, div(room, 2)))
+        rescue
+          error in ArgumentError ->
+            assert error.message =~ "check_timeout_ms" or error.message =~ "freeze check"
+            assert room < 2 or (given != nil and 2 * given > room)
+        end
+      end
+    end
+
     property "the wake backoff takes a first delay up to its cap, a factor of 1 or more, a jitter below 1" do
       check all(
               first <- integer(1..1_000),
@@ -287,10 +311,11 @@ defmodule Alambique.ConfigPropertiesTest do
         opts = base(lease_ttl_ms: ttl, skew_margin_ms: skew)
 
         if ttl > 2 * skew do
-          assert %{ttl_ms: ^ttl, skew_margin_ms: ^skew} = Config.build(opts)
+          roomy = base(lease_ttl_ms: 4 * skew + 30, skew_margin_ms: skew)
+          assert %{skew_margin_ms: ^skew} = Config.build(roomy)
         else
           error = assert_raise ArgumentError, fn -> Config.build(opts) end
-          assert error.message =~ "lease_ttl_ms"
+          assert error.message =~ "greater than twice"
         end
       end
     end

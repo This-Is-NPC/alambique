@@ -27,6 +27,43 @@ defmodule Alambique.ConfigOptionsTest do
     )
   end
 
+  describe "retry check_timeout_ms against the lease" do
+    # Renewals are due every ttl/3, spread down by the jitter, and the lease is
+    # usable until ttl - skew: the check gets half of what one interval leaves.
+    test "is derived from the lease and capped at 1 000", ctx do
+      # Test defaults: ttl 3 000, skew 500, jitter 0.1: (900 - 500) / 2.
+      assert Alambique.Config.build(base(ctx)).retry.check_timeout_ms == 200
+
+      # Production defaults: (9 000 - 2 000) / 2 = 3 500, capped at 1 000.
+      prod = base(ctx, lease_ttl_ms: 30_000, skew_margin_ms: 2_000)
+      assert Alambique.Config.build(prod).retry.check_timeout_ms == 1_000
+
+      no_jitter = base(ctx, lease_renew_jitter: 0)
+      assert Alambique.Config.build(no_jitter).retry.check_timeout_ms == 250
+    end
+
+    test "an explicit value up to the bound is kept and a larger one is refused", ctx do
+      ok = base(ctx, retry: [check_timeout_ms: 200])
+      assert Alambique.Config.build(ok).retry.check_timeout_ms == 200
+
+      assert_raise ArgumentError, ~r/:retry :check_timeout_ms must be at most 200/, fn ->
+        Alambique.Config.build(base(ctx, retry: [check_timeout_ms: 201]))
+      end
+
+      assert_raise ArgumentError, ~r/:retry :check_timeout_ms must be at most 200/, fn ->
+        Alambique.Config.build(base(ctx, retry: [check_timeout_ms: 1_000]))
+      end
+    end
+
+    test "a lease with no room for any check is refused", ctx do
+      opts = base(ctx, lease_ttl_ms: 1_001, skew_margin_ms: 500)
+
+      assert_raise ArgumentError, ~r/:lease_ttl_ms is too short for the freeze check/, fn ->
+        Alambique.Config.build(opts)
+      end
+    end
+  end
+
   test "awake.max_wake_queue is four times max_wakes unless given, and is a positive integer",
        ctx do
     assert Alambique.Config.build(base(ctx, awake: [max_wakes: 7])).awake.max_wake_queue == 28
@@ -87,7 +124,7 @@ defmodule Alambique.ConfigOptionsTest do
            }
 
     assert config.hydrator == %{poll_ms: 100}
-    assert config.retry == %{max_attempts: 10, check_timeout_ms: 1_000}
+    assert config.retry == %{max_attempts: 10, check_timeout_ms: 200}
     assert config.upload == %{retry_backoff_ms: 500, retry_backoff_max_ms: 5_000}
     assert config.breaker == %{failures: 5, cooldown_ms: 5_000, probe_timeout_ms: 10_000}
     assert config.query.page_size == 1_000
@@ -177,7 +214,7 @@ defmodule Alambique.ConfigOptionsTest do
           schema: [check_page: 10],
           restore: [edge_bytes: 1_024, fetch_concurrency: 3, max_inflight_bytes: 5_000],
           hydrator: [poll_ms: 10],
-          retry: [max_attempts: 3, check_timeout_ms: 700],
+          retry: [max_attempts: 3, check_timeout_ms: 150],
           upload: [retry_backoff_ms: 11, retry_backoff_max_ms: 12],
           breaker: [failures: 2, cooldown_ms: 7, probe_timeout_ms: 9],
           query: [page_size: 10, stale_tmp_seconds: 5, restore_attempts: 7],
@@ -227,7 +264,7 @@ defmodule Alambique.ConfigOptionsTest do
     assert config.schema == %{check_page: 10, listing_timeout_ms: 5_000}
     assert config.restore == %{edge_bytes: 1_024, fetch_concurrency: 3, max_inflight_bytes: 5_000}
     assert config.hydrator == %{poll_ms: 10}
-    assert config.retry == %{max_attempts: 3, check_timeout_ms: 700}
+    assert config.retry == %{max_attempts: 3, check_timeout_ms: 150}
     assert config.upload == %{retry_backoff_ms: 11, retry_backoff_max_ms: 12}
     assert config.breaker == %{failures: 2, cooldown_ms: 7, probe_timeout_ms: 9}
     assert config.query.page_size == 10

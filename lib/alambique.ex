@@ -258,10 +258,17 @@ defmodule Alambique do
     * `:retry` - `:max_attempts` (attempts of one store request that is
       retried, whatever time is left before its deadline, default 10) and
       `:check_timeout_ms` (time the one attempt of a check that is not retried
-      may take before it is killed, default 1000: the freeze marker that a
-      cell reads at each lease renewal and the replica marker; it must cover
-      the latency of the store and the queueing of a loaded node, or the check
-      is killed and counts as a failure of the store; design §3).
+      may take before it is killed: the freeze marker that a cell reads at
+      each lease renewal and the replica marker; it must cover the latency of
+      the store and the queueing of a loaded node, or the check is killed and
+      counts as a failure of the store; design §3). The cell cannot renew
+      while the check runs, so the value is at most
+      `(lease_ttl_ms / 3 - lease_renew_jitter share - skew_margin_ms) / 2`, the
+      half of what the shortest renewal interval leaves before the lease stops
+      being usable; a larger value is refused at start. Not given, it is that
+      bound capped at 1000: 1000 with the defaults (`lease_ttl_ms` 30 000,
+      `skew_margin_ms` 2 000), 200 with `lease_ttl_ms` 3 000 and
+      `skew_margin_ms` 500.
     * `:upload` - what a cell does when the upload of a batch fails for a
       store reason (design §6): `:retry_backoff_ms` (wait before the first new
       upload, default 500) and `:retry_backoff_max_ms` (the wait doubles up to

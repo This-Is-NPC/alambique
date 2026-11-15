@@ -286,12 +286,21 @@ the panic tests abort the VM when `guard` does not catch.
   gets `ctx.backoff_ms`, 50 ms by default, before it is killed.
   A check that must not be retried, the freeze marker that a cell reads at each
   renewal (§10) and the replica marker, is one attempt (`Retry.once/3`) killed
-  after `retry: [check_timeout_ms:]` (default 1 000 ms). It once got only
+  after `retry: [check_timeout_ms:]` (default 1 000 ms, or less on a short
+  lease, see below). It once got only
   the 50 ms above: on a store 25 ms away and a node on one CPU with a queue,
   the `HEAD` of the marker took longer, was killed, and counted as a
   `:timeout_recv` in the breaker (§3) although the store had answered; at 400
   commits a second the bench `bench:breaker` showed 46 of those in 60 s. The
-  cell cannot serve while it waits, so the limit stays short.
+  cell cannot serve while it waits, so the limit stays short: the check runs
+  before `Lease.renew`, the old lease keeps running meanwhile, and a lease is
+  usable until `expires_at - skew_margin_ms`, so a slow check makes the renewal
+  late and can let the lease expire. Renewals are due every `lease_ttl_ms / 3`,
+  shortened by up to `lease_renew_jitter`; `check_timeout_ms` may be at most
+  half of that interval minus `skew_margin_ms`, and start refuses a larger
+  explicit value. Not given, it is 1 000 ms capped by that bound: 1 000 with
+  the defaults (ttl 30 000, skew 2 000, bound 3 500), 200 with ttl 3 000 and
+  skew 500. A lease whose bound is below 1 ms is refused.
   The lease `GET` and `PUT` (`Retry.once/2`, one attempt, no loop) are bounded
   by `lease_ttl_ms - skew_margin_ms`, the time the lease can be used: a
   request that outlives it cannot help, and the answer is the store error that
