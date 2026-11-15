@@ -112,6 +112,34 @@ defmodule AlambiqueTestkit.MemoryStoreFaultsTest do
     assert Clock.now_ms(nil) - base >= 60_000
   end
 
+  test "a request waits for a server that is slow to answer, past the default call timeout",
+       %{c: c} do
+    pid = c.server
+    :ok = :sys.suspend(pid)
+    task = Task.async(fn -> MemoryStore.get(c, "k") end)
+
+    # Wait for the state: the request is blocked in the call to the server.
+    eventually(fn -> waiting?(task.pid) end)
+
+    # The 5 000 ms default of GenServer.call is what this has to outlast; the
+    # library's own deadline, not the double, bounds a request.
+    assert Task.yield(task, 5_500) == nil
+    :ok = :sys.resume(pid)
+    assert {:error, :not_found} = Task.await(task, 5_000)
+  end
+
+  defp waiting?(pid) do
+    match?({:current_function, {:gen, :do_call, _}}, Process.info(pid, :current_function))
+  end
+
+  defp eventually(fun, tries \\ 500) do
+    cond do
+      fun.() -> :ok
+      tries == 0 -> flunk("condition not reached")
+      true -> Process.sleep(10) && eventually(fun, tries - 1)
+    end
+  end
+
   defp unfaulted(_result, c, key) do
     MemoryStore.clear(c)
     MemoryStore.get(c, key)
