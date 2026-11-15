@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.10.0](https://github.com/This-Is-NPC/alambique/compare/v0.9.0...v0.10.0) (2026-11-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* **config:** an explicit check_timeout_ms above the bound, or a lease_ttl_ms close to twice skew_margin_ms, is refused at start.
+
+### Features
+
+* **bench:** add breaker under local overload ([cb9fb40](https://github.com/This-Is-NPC/alambique/commit/cb9fb40e764c4cde1d5ca40e0ceecea2c1ec6a27))
+
+
+### Bug Fixes
+
+* **breaker:** count only failures of the store ([3993cf1](https://github.com/This-Is-NPC/alambique/commit/3993cf14f35ab2bdf6f7c21a4bde31339c3a5ca4))
+* **cell:** do not kill marker checks at 50 ms ([b20ef5b](https://github.com/This-Is-NPC/alambique/commit/b20ef5b4bd25caee7097ba6749daf887739ce832))
+* **config:** bound check_timeout_ms by the lease ([0adbdd3](https://github.com/This-Is-NPC/alambique/commit/0adbdd3e10ae584cf6f79c324be9da29ec27b93e))
+
 ## [0.9.0](https://github.com/This-Is-NPC/alambique/compare/v0.8.0...v0.9.0) (2026-11-14)
 
 
