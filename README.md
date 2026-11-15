@@ -112,6 +112,16 @@ first release (0.1.0):
   counts. **breaking:** start refuses an explicit `check_timeout_ms` above that
   bound, and a `lease_ttl_ms` too close to twice `skew_margin_ms` to leave room
   for the check.
+- 0.10.1: `[:alambique, :store, :failure]` gains `kind` (`:error`, `:throw`
+  or `:exit`) and `detail`, which say what a crash of the store was (`nil`
+  when the failure is not a crash). The `detail` is cut to `breaker:
+  [detail_limit:]` characters (default 200), and a crash is logged at most
+  once per `breaker: [log_interval_ms:]` (default 10 000) for each store. A
+  crash that is the wait for a pool connection (the exit of
+  `NimblePool.checkout!/4`, or the error Finch raises for it) is `:local`, so
+  it does not count. The testkit `MemoryStore` no longer times out its calls
+  to its server, which a starved server turned into a counted crash. There is
+  no breaking change: only metadata keys and options are new.
 
 The full list is in [CHANGELOG.md](CHANGELOG.md).
 
