@@ -6,6 +6,7 @@ defmodule Alambique.TailTest do
   """
   use ExUnit.Case, async: false
 
+  import Alambique.CellHelpers, only: [await: 1]
   import Alambique.CompactionHelpers
   import Alambique.ReplicationHelpers, only: [safe_op: 2]
 
@@ -82,7 +83,7 @@ defmodule Alambique.TailTest do
       assert {:error, :not_found} = env.mod.get(env.cfg, zombie)
 
       :ok = GatedStore.release(gate, zombie)
-      assert {:ok, _} = Task.await(task)
+      assert {:ok, _} = await(task)
       assert {:ok, _, _, %{"epoch" => "1"}} = env.mod.get(env.cfg, zombie)
       assert {:ok, %{txid: 4}, dump} = restore(env, :latest)
       assert dump == b.dumps[4]
@@ -175,7 +176,7 @@ defmodule Alambique.TailTest do
       :ok = GatedStore.release(gate, target)
       :ok = GatedStore.release(gate, target)
 
-      assert {:error, :fenced} = Task.await(task)
+      assert {:error, :fenced} = await(task)
       assert {:ok, "newer", _, %{"epoch" => "3"}} = env.mod.get(env.cfg, target)
     end
   end
@@ -219,8 +220,8 @@ defmodule Alambique.TailTest do
 
     :ok = GatedStore.fail(gate, "k/held/1")
     :ok = GatedStore.lose_ack(gate, "k/held/2")
-    assert {:error, :gated} = Task.await(one)
-    assert {:error, :lost_ack} = Task.await(two)
+    assert {:error, :gated} = await(one)
+    assert {:error, :lost_ack} = await(two)
     assert {:ok, ["k/held/2"], nil} = mod.list(config, "k/", nil, 10)
   end
 end

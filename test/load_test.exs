@@ -67,7 +67,7 @@ defmodule Alambique.LoadTest do
       eventually(fn -> pending(inst, env.cell) == 6 end)
 
       GatedStore.open(env.gate)
-      assert Enum.all?(Task.await_many(tasks), &match?({:ok, _}, &1))
+      assert Enum.all?(await_all(tasks), &match?({:ok, _}, &1))
       eventually(fn -> pending(inst, env.cell) == 0 end)
     end
   end
@@ -87,7 +87,7 @@ defmodule Alambique.LoadTest do
     assert queued(pid) == 0
 
     GatedStore.open(env.gate)
-    Task.await_many(tasks)
+    await_all(tasks)
   end
 
   test "load answers while the cell is stuck in a transaction", env do
@@ -113,8 +113,8 @@ defmodule Alambique.LoadTest do
     # The transaction function runs in the cell process and waits for this.
     send(Alambique.Cell.whereis(Alambique.Config.fetch!(inst), env.cell), :go)
     GatedStore.open(env.gate)
-    assert {:ok, _} = Task.await(blocker)
-    assert Enum.all?(Task.await_many(queued), &match?({:ok, _}, &1))
+    assert {:ok, _} = await(blocker)
+    assert Enum.all?(await_all(queued), &match?({:ok, _}, &1))
     eventually(fn -> pending(inst, env.cell) == 0 end)
   end
 

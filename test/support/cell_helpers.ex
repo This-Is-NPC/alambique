@@ -134,11 +134,21 @@ defmodule Alambique.CellHelpers do
     end
   end
 
+  # Waits only bound a failure: a passing test returns as soon as its state
+  # holds, so the bound is generous for a host that is loaded by other work.
+  @wait_bound_ms 30_000
+
   @doc "Polls `fun` until it returns a truthy value, up to `timeout` milliseconds."
-  def eventually(fun, timeout \\ 5_000) do
+  def eventually(fun, timeout \\ @wait_bound_ms) do
     deadline = System.monotonic_time(:millisecond) + timeout
     poll(fun, deadline)
   end
+
+  @doc "Awaits one task, bounded by the generous failure bound of `eventually/2`."
+  def await(task), do: Task.await(task, @wait_bound_ms)
+
+  @doc "Awaits a list of tasks, bounded by the generous failure bound of `eventually/2`."
+  def await_all(tasks), do: Task.await_many(tasks, @wait_bound_ms)
 
   @doc """
   Waits until the wake backoff of the instance (design §7) remembers no store

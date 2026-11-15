@@ -84,8 +84,8 @@ defmodule Alambique.UploadRetryTest do
     second = write(w.inst, w.cell, 2)
     heal(w.env, fault)
 
-    assert {:ok, _} = Task.await(first)
-    assert {:ok, _} = Task.await(second)
+    assert {:ok, _} = await(first)
+    assert {:ok, _} = await(second)
     assert Cell.whereis(Config.fetch!(w.inst), w.cell) == pid
     refute_received {:telemetry, [:alambique, :cell, :stop], _, _}
 
@@ -100,7 +100,7 @@ defmodule Alambique.UploadRetryTest do
     await_event([:alambique, :cell, :upload_retry], w.cell)
 
     ManualClock.advance(w.world, @ttl + 1_000)
-    assert {:error, :outcome_unknown} = Task.await(first)
+    assert {:error, :outcome_unknown} = await(first)
 
     {_, meta} = await_event([:alambique, :cell, :stop], w.cell)
     assert {:sync_failed, _} = meta.reason
