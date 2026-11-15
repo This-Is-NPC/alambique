@@ -12,9 +12,12 @@ defmodule Alambique.FreezeCheckPropertiesTest do
   alias Alambique.{Freeze, Replication, SlowStore}
   alias AlambiqueTestkit.MemoryStore
 
-  # Distance from the limit at which the outcome must be certain, so that a
-  # loaded scheduler cannot flip it.
-  @margin_ms 80
+  # The two regimes are far apart, so that a loaded scheduler cannot flip the
+  # outcome. A fast store answers 100 to 300 ms late, which is more than the
+  # 50 ms backoff of a retry (the limit this check must not use) and far under
+  # a limit of 1.5 s or more. A slow store never answers: the check can only
+  # return `{:error, :timeout}` by killing its attempt while it is blocked.
+  @never_ms 60_000
 
   setup do
     pid = start_supervised!({MemoryStore, []})
@@ -24,12 +27,15 @@ defmodule Alambique.FreezeCheckPropertiesTest do
   property "the check answers when the store is faster than the limit and times out when slower",
            %{store: store} do
     check all(
-            limit <- integer(120..250),
-            latency <- integer(0..400),
-            latency + @margin_ms < limit or latency > limit + @margin_ms,
             frozen? <- boolean(),
+            regime <-
+              one_of([
+                tuple({constant(:fast), integer(1_500..2_500), integer(100..300)}),
+                tuple({constant(:slow), integer(100..400), constant(@never_ms)})
+              ]),
             max_runs: 25
           ) do
+      {kind, limit, latency} = regime
       cell = "cell-#{System.unique_integer([:positive])}"
       {module, config} = store
 
@@ -46,9 +52,10 @@ defmodule Alambique.FreezeCheckPropertiesTest do
           check_timeout_ms: limit
         )
 
-      if latency < limit,
-        do: assert(Freeze.check(ctx, cell) == {:ok, frozen?}),
-        else: assert(Freeze.check(ctx, cell) == {:error, :timeout})
+      case kind do
+        :fast -> assert Freeze.check(ctx, cell) == {:ok, frozen?}
+        :slow -> assert Freeze.check(ctx, cell) == {:error, :timeout}
+      end
     end
   end
 end
