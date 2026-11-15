@@ -282,7 +282,10 @@ defmodule Alambique do
       store request answers `{:error, :store_unavailable}` without reaching the
       store. Only what the store did counts as a failure: a request that never
       left the node (it gave up waiting for a connection of the pool) does not,
-      and `[:alambique, :store, :failure]` gives the reason of each.
+      and `[:alambique, :store, :failure]` gives the reason of each. A crash of
+      the store module is described in that event (`kind` and `detail`, cut to
+      `:detail_limit` characters, default 200) and written to the log, at most
+      once every `:log_interval_ms` for a store (default 10 000).
     * `:sql` - limits on the statements (design §7): `:statement_timeout_ms`
       (the statements of callers, `query/5`, `execute/5` and the statements of
       `transaction/4`; a statement that runs longer is interrupted, default

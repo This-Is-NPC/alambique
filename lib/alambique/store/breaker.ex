@@ -8,6 +8,7 @@ defmodule Alambique.Store.Breaker do
   #   2. consecutive failures while closed.
   #   3. `probe_until`: when the probe in flight is given up; 0 is none.
   #   4. wall-clock ms of the last change between closed and open, for `status/1`.
+  #   5. monotonic ms of the last crash written to the log; 0 is none.
   #
   # The failures stay counted while it is open, until it closes, so `status/1`
   # shows what opened it.
@@ -27,13 +28,18 @@ defmodule Alambique.Store.Breaker do
   # for a connection of the pool when it gave up, or because its process was
   # killed before it sent anything (`:local`, `Store.Phase`), is the node's
   # overload and not a failure of the store: it neither counts nor resets the
-  # run, and a probe that ends so lets the next request be the probe. Every
-  # failure, counted or not, is reported in `[:store, :failure]`.
+  # run, and a probe that ends so lets the next request be the probe. A crash of
+  # the store module that is the node's own wait for a pool connection is local
+  # too (`Store.Crash`). Every failure, counted or not, is reported in
+  # `[:store, :failure]`, a crash with its `kind` and a bounded `detail`, and
+  # written to the log at most once every `log_interval_ms`.
 
   @behaviour Alambique.Store
 
-  alias Alambique.Store.Phase
+  alias Alambique.Store.{Crash, Phase}
   alias Alambique.Telemetry
+
+  require Logger
 
   @jitter 0.2
 
@@ -42,6 +48,8 @@ defmodule Alambique.Store.Breaker do
           failures: pos_integer,
           cooldown_ms: pos_integer,
           probe_timeout_ms: pos_integer,
+          detail_limit: pos_integer,
+          log_interval_ms: pos_integer,
           jitter: float,
           now: (-> integer),
           meta: map
@@ -58,6 +66,8 @@ defmodule Alambique.Store.Breaker do
       failures: settings.failures,
       cooldown_ms: settings.cooldown_ms,
       probe_timeout_ms: settings.probe_timeout_ms,
+      detail_limit: settings.detail_limit,
+      log_interval_ms: settings.log_interval_ms,
       jitter: Keyword.get(opts, :jitter, @jitter),
       now: Keyword.get(opts, :now, &__MODULE__.monotonic_ms/0),
       meta: meta
@@ -66,7 +76,7 @@ defmodule Alambique.Store.Breaker do
 
   defp new_ref do
     Phase.attach()
-    ref = :atomics.new(4, signed: true)
+    ref = :atomics.new(5, signed: true)
     :atomics.put(ref, 4, wall_ms())
     ref
   end
@@ -177,9 +187,9 @@ defmodule Alambique.Store.Breaker do
     {operation, phase} = where || {nil, :queued}
 
     if phase == :queued do
-      report(breaker, operation, :local, false)
+      report(breaker, operation, :local, false, nil)
     else
-      report(breaker, operation, timeout_reason(phase), true)
+      report(breaker, operation, timeout_reason(phase), true, nil)
       failed(breaker, :closed)
     end
 
@@ -279,11 +289,11 @@ defmodule Alambique.Store.Breaker do
         succeeded(breaker, ticket)
 
       {:failure, reason} ->
-        report(breaker, operation, reason, true)
+        report(breaker, operation, reason, true, crash(result))
         failed(breaker, ticket)
 
       :local ->
-        report(breaker, operation, :local, false)
+        report(breaker, operation, :local, false, crash(result))
         abandoned(breaker, ticket)
     end
   end
@@ -296,7 +306,16 @@ defmodule Alambique.Store.Breaker do
     do: if(status >= 500, do: {:failure, {:http, status}}, else: :ok)
 
   defp outcome({:error, _}, :queued), do: :local
-  defp outcome({:error, {:store_crashed, _, _}}, _phase), do: {:failure, :crashed}
+
+  defp outcome({:error, {tag, kind, reason}}, _phase)
+       when tag in [:store_crashed, :request_crashed] do
+    cond do
+      Crash.local?(kind, reason) -> :local
+      tag == :store_crashed -> {:failure, :crashed}
+      true -> {:failure, :transport}
+    end
+  end
+
   defp outcome({:error, :timeout}, phase), do: {:failure, timeout_reason(phase)}
   defp outcome({:error, _}, _phase), do: {:failure, :transport}
   defp outcome(_ok, _phase), do: :ok
@@ -306,11 +325,45 @@ defmodule Alambique.Store.Breaker do
   defp timeout_reason(:checked_out), do: :timeout_connect
   defp timeout_reason(_phase), do: :timeout_recv
 
-  defp report(breaker, operation, reason, counted) do
-    Telemetry.emit(
-      [:store, :failure],
-      Map.merge(breaker.meta, %{operation: operation, reason: reason, counted: counted})
-    )
+  # The crash of the store call, if the result is one.
+  defp crash({:error, {tag, kind, reason}}) when tag in [:store_crashed, :request_crashed],
+    do: {kind, reason}
+
+  defp crash(_result), do: nil
+
+  defp report(breaker, operation, reason, counted, crash) do
+    {kind, detail} =
+      case crash do
+        {kind, reason} -> {kind, Crash.summary(kind, reason, breaker.detail_limit)}
+        nil -> {nil, nil}
+      end
+
+    metadata = %{
+      operation: operation,
+      reason: reason,
+      counted: counted,
+      kind: kind,
+      detail: detail
+    }
+
+    Telemetry.emit([:store, :failure], Map.merge(breaker.meta, metadata))
+    if kind, do: log_crash(breaker, metadata)
+  end
+
+  # At most one line every `log_interval_ms`, claimed with a compare-and-swap.
+  defp log_crash(%{ref: ref} = breaker, metadata) do
+    now = breaker.now.()
+    last = :atomics.get(ref, 5)
+
+    if (last == 0 or now - last >= breaker.log_interval_ms) and
+         :atomics.compare_exchange(ref, 5, last, nonzero(now)) == :ok do
+      Logger.warning(fn ->
+        "Alambique store #{inspect(breaker.meta[:location])} #{metadata.operation} crashed " <>
+          "(#{metadata.reason}, counted: #{metadata.counted}): #{metadata.kind} #{metadata.detail}"
+      end)
+    end
+
+    :ok
   end
 
   # A local failure says nothing about the store: the run stays as it is, and a

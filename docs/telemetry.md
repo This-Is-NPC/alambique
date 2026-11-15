@@ -64,7 +64,7 @@ instance name and `location` the id of the location.
 | --- | --- | --- |
 | `[:alambique, :store, :breaker, :open]` | `cooldown_ms` (the configured cool-down; the wait is up to 20 % longer) | `instance`, `location`, `reason` (`:failures`: `breaker: [failures:]` failures in a row; `:probe_failed`: the probe after a cool-down failed) |
 | `[:alambique, :store, :breaker, :close]` | none | `instance`, `location` |
-| `[:alambique, :store, :failure]` | none | `instance`, `location`, `operation` (`:put`, `:get`, `:head`, `:get_range`, `:list`, `:delete`; `nil` for a killed request that was in none), `reason` (below), `counted` (`true` if it counted toward `breaker: [failures:]`) |
+| `[:alambique, :store, :failure]` | none | `instance`, `location`, `operation` (`:put`, `:get`, `:head`, `:get_range`, `:list`, `:delete`; `nil` for a killed request that was in none), `reason` (below), `counted` (`true` if it counted toward `breaker: [failures:]`), `kind` and `detail` (the crash, below; `nil` when the failure is not a crash) |
 
 `[:alambique, :store, :failure]` is emitted for each store request that fails
 while the breaker admits it, so a log can say why the breaker opened. `reason`
@@ -75,9 +75,19 @@ is one of a closed set:
 | `{:http, status}` | The store answered with a 5xx. | `true` |
 | `:timeout_recv` | The request left and no answer came before `receive_timeout` or before the request was killed at `op_timeout_ms`. A store that does not report how far a request got is taken to be in this case. | `true` |
 | `:timeout_connect` | A connection was taken from the pool but the store did not accept it in time. | `true` |
-| `:transport` | Any other transport error: connection refused, reset, closed. | `true` |
-| `:crashed` | The store module raised, threw or exited (`{:store_crashed, ...}`). | `true` |
-| `:local` | The request never left: it waited for a connection of the pool (`finch: [pool_timeout:]`, `pool_size:`) and gave up, or its process was killed at its deadline before it sent anything. This is the node's overload, not the store's. | `false` |
+| `:transport` | Any other transport error: connection refused, reset, closed, or a crash of the HTTP client of `Store.S3` (`{:request_crashed, ...}`) after the request was sent. | `true` |
+| `:crashed` | The store module raised, threw or exited (`{:store_crashed, ...}`), other than the wait for a pool connection. | `true` |
+| `:local` | The request never left: it waited for a connection of the pool (`finch: [pool_timeout:]`, `pool_size:`) and gave up, or its process was killed at its deadline before it sent anything, or the store module crashed on that wait. This is the node's overload, not the store's. | `false` |
+
+`kind` and `detail` are set for a `:crashed` failure, for the `:transport` of
+a crashed client, and for a `:local` one that was a crash. `kind` is `:error`,
+`:throw` or `:exit`. `detail` is `:pool_checkout_timeout` or
+`:pool_checkout_noproc` when the crash was the wait for a pool connection (the
+exit of `NimblePool.checkout!/4`, or the error Finch raises for it), and
+otherwise a string: `inspect/2` of the exception or reason, cut to at most
+`breaker: [detail_limit:]` characters (default 200). Crashes are also logged as
+warnings, at most one line every `breaker: [log_interval_ms:]` (default
+10 000) for each store.
 
 A request that fails with `:local` neither counts nor resets the run of
 failures. An answer of a working store (`:not_found`, `:precondition_failed`,

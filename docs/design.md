@@ -327,9 +327,10 @@ the panic tests abort the VM when `guard` does not catch.
   (`Config.lease_ctx/2`, `Config.repl_ctx/2`) wraps the guarded store in
   `Alambique.Store.Breaker`, one breaker for each location of the instance,
   shared by all its cells, so a store that fails is seen once and not once per
-  cell. Its state is four `:atomics`, found once when the context is built and
+  cell. Its state is five `:atomics`, found once when the context is built and
   read without a message: a request costs one atomic read while it is closed.
-  `breaker: [failures: 5, cooldown_ms: 5_000, probe_timeout_ms: 10_000]`:
+  `breaker: [failures: 5, cooldown_ms: 5_000, probe_timeout_ms: 10_000,
+  detail_limit: 200, log_interval_ms: 10_000]`:
   - Closed, `failures` failures in a row open it; any success resets the run.
   - Open, a request answers `{:error, :store_unavailable}` at once and never
     reaches the store. `Retry.run/3` does not repeat that answer. A wake that
@@ -374,6 +375,29 @@ the panic tests abort the VM when `guard` does not catch.
     `Req` adapter) never moves the mark, which stays unknown, and every error
     counts as before. The reason of each failure and whether it counted are in
     `[:alambique, :store, :failure]` ([telemetry.md](telemetry.md)).
+  - **A crash says what it was.** A store module that raises, throws or exits
+    is `:crashed` and counts, and the event says what it was: `kind` (`:error`,
+    `:throw`, `:exit`) and `detail`, the `inspect/2` of the reason cut to
+    `breaker: [detail_limit: 200]` characters (`nil` for a failure that is not a
+    crash). The same holds for the client of `Store.S3` that crashed
+    (`{:request_crashed, kind, reason}`), which counts as `:transport`. A crash
+    that is the node's own wait for a pool connection never left, so it is
+    `:local` and does not count: the exit of `NimblePool.checkout!/4`
+    (`{:timeout | :noproc, {NimblePool, :checkout, _}}`), and the error that
+    Finch reraises for it. Their `detail` is `:pool_checkout_timeout` or
+    `:pool_checkout_noproc`. Other exits before the send, such as a call to
+    the pool manager of Finch that times out while it starts the pool of a new
+    host, look like any crash of the store module and count. Every crash,
+    counted or not, is also written to the log (`Logger.warning`), at most once
+    every `breaker: [log_interval_ms: 10_000]` for a store, so a node that
+    crashes in a loop does not flood it. Measured on one CPU with three busy
+    loops, 400 commits a second, a pool of 8 connections and a healthy
+    SeaweedFS: 1 626 crashes in 30 s, all of them the Finch checkout timeout
+    in `:queued`, so `:local` before and after; no crash counted, and no
+    opening. In that setup the S3 store caught every pool timeout itself, so
+    the suspicion that the exit of the pool counted as `:crashed` was
+    wrong for `Store.S3`; a `:crashed` that counts comes from a store module
+    that raised, a test store, or a call that failed in it.
     Measured on SeaweedFS behind a 25 ms proxy, with the S3 pool at 4
     connections and 400 commits a second on one CPU: before, 6 openings and
     90 commits a second over the run (4 in the first 13 s); after, none and
