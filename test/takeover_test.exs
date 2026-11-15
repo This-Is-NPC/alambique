@@ -123,19 +123,18 @@ defmodule Alambique.TakeoverTest do
       assert {:error, _} = Alambique.take_over(b, "bad/id", :x)
     end
 
-    test "a notification of a newer epoch makes the old owner check its lease at once", %{
-      a: a,
-      b: b,
-      cell: cell
-    } do
-      assert {:ok, _} = insert(a, cell, 1)
+    test "a notification of a newer epoch makes the old owner check its lease at once",
+         %{b: b, cell: cell} = ctx do
+      # A lease TTL so long that its renewal cannot fire during the test: only
+      # the notification can make the old owner check.
+      old = start_instance(ctx, migrations: @schema, lease_ttl_ms: 600_000)
+      assert {:ok, _} = insert(old, cell, 1)
       # The instances here are not members of each other's groups, so the
       # message is sent by hand, as the new owner's node does in a cluster.
       assert {:ok, _} = Alambique.take_over(b, cell, :x)
-      assert awake?(a, cell)
-      :ok = Cell.superseded(a, cell, 2)
-      # Well before its renewal, which is a third of the lease TTL (1 s) away.
-      eventually(fn -> not awake?(a, cell) end, 500)
+      assert awake?(old, cell)
+      :ok = Cell.superseded(old, cell, 2)
+      eventually(fn -> not awake?(old, cell) end)
     end
 
     test "a notification for the epoch the cell holds is ignored", %{a: a, cell: cell} do
@@ -203,9 +202,9 @@ defmodule Alambique.TakeoverTest do
       assert Task.yield(read, 0) == nil
 
       send(cell_pid, :go)
-      assert {:ok, _} = Task.await(first)
-      assert {:ok, _} = Task.await(second)
-      assert Task.await(read) == [1, 2, 3]
+      assert {:ok, _} = await(first)
+      assert {:ok, _} = await(second)
+      assert await(read) == [1, 2, 3]
     end
 
     test "waits behind a committed write before the flush", %{a: a, cell: cell} do
@@ -241,8 +240,8 @@ defmodule Alambique.TakeoverTest do
       assert Task.yield(read, 0) == nil
 
       send(cell_pid, :go)
-      assert {:ok, _} = Task.await(write)
-      assert Task.await(read) == [1, 2]
+      assert {:ok, _} = await(write)
+      assert await(read) == [1, 2]
     end
 
     test "an unreadable lease is an error and the cell keeps serving", %{
