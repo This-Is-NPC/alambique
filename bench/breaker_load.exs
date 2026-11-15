@@ -9,7 +9,8 @@
 #   mise run bench:breaker                    # RATE commits per second for SECONDS
 #
 # It prints the commits that completed in every second, the breaker's opens
-# with their reasons and the store failures by reason and whether they counted.
+# with their reasons, the store failures by reason and whether they counted, and the
+# crashes with their kind and detail.
 #
 #   ALAMBIQUE_BENCH_LATENCY          added latency per request in ms        (default "25")
 #   ALAMBIQUE_BENCH_BREAKER_CELLS    cells that take commits                 (default "12")
@@ -213,6 +214,14 @@ defmodule BreakerLoad do
       end
 
     IO.puts("store failures {operation, reason, counted}: #{inspect(by_reason)}")
+
+    crashes =
+      for {_, [:alambique, :store, :failure], %{kind: kind} = m} when kind != nil <- events,
+          reduce: %{} do
+        acc -> Map.update(acc, {m.reason, m.counted, kind, m.detail}, 1, &(&1 + 1))
+      end
+
+    IO.puts("store crashes {reason, counted, kind, detail}: #{inspect(crashes, limit: :infinity)}")
 
     times = for {at, [:alambique, :store, :failure], _} <- events, do: at - t0
     IO.puts("store failures at ms (first 10): #{inspect(times |> Enum.sort() |> Enum.take(10))}")
