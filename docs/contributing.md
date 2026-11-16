@@ -10,7 +10,8 @@ and Rust 1.97.1.
 ```sh
 mise run test            # default suite, no external services
 mise run test:native     # Rust unit tests of native/alambique_nif
-mise run check           # the full gate CI runs: quick checks, clippy, links, default suite
+mise run check           # the full gate: quick checks, clippy, links, default suite
+mise run check:static    # the same without the suite: what the CI gate job runs
 mise run check:quick     # the fast checks of the pre-push hook
 mise run test:coverage   # line coverage of Elixir and the NIF, fails below 90%
 mise run test:miri       # native tests under Miri (Rust undefined behavior; SQLite tests skipped)
@@ -71,7 +72,7 @@ older commit.
 
 | Job | What it runs |
 | --- | --- |
-| `gate` | `mise run check`, below |
+| `gate` | `mise run check:static`: the static part of the gate below, without the suite |
 | `coverage` | `mise run test:coverage`: line coverage of Elixir and the NIF, fails below `ALAMBIQUE_COVERAGE_MIN` |
 | `native` | `mise run test:native`: the Rust unit tests of the NIF |
 | `services` | `mise run test:seaweedfs` and `mise run test:litestream` against a SeaweedFS container |
@@ -93,11 +94,11 @@ The hooks run only what is fast:
   `scripts/quick-check --force` recompiles everything; the full gate uses it.
 
 Skip them on purpose with `ALAMBIQUE_SKIP_HOOKS=1` for one command, or with
-`git commit --no-verify` and `git push --no-verify`. CI runs the full gate
+`git commit --no-verify` and `git push --no-verify`. CI runs the checks
 anyway.
 
-`mise run check` is the full gate, the one the `gate` job runs. It stops at the
-first failure and runs, in order:
+`mise run check` is the full gate. It stops at the first failure and runs, in
+order:
 
 1. `scripts/quick-check --force`: `MIX_ENV=test mix compile
    --warnings-as-errors --force` (forced, so a stale `_build` cannot hide a
@@ -108,7 +109,9 @@ first failure and runs, in order:
    `#anchors` in `README.md`, `CHANGELOG.md`, `AGENTS.md` and `docs/*.md`
 4. `mise run test`, the default suite
 
-Run it by hand when you want the CI result on your machine; a loaded machine
+`mise run check:static` runs steps 1 to 3 only: it is the `gate` job, because
+CI runs the suite in the `coverage` job. Run `mise run check` by hand when you
+want the whole result on your machine; a loaded machine
 makes timing tests in the suite fail, so rerun the failing file before
 suspecting your change. `ALAMBIQUE_CHECK_CLUSTER=1` adds `mise run
 test:cluster` and `ALAMBIQUE_CHECK_COVERAGE=1` adds `mise run test:coverage`.
