@@ -29,7 +29,7 @@ defmodule Alambique.OpsNodeTasksTest do
     on_exit(fn ->
       Mix.shell(shell)
       Node.set_cookie(cookie)
-      if started?, do: Node.stop()
+      if started?, do: stop_distribution()
     end)
 
     old_ops = Application.get_env(:alambique, :ops)
