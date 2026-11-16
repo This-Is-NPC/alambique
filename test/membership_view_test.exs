@@ -112,4 +112,14 @@ defmodule Alambique.MembershipViewTest do
     [pid] = :pg.get_members(config.scope, {:node_id, config.node_id, config.incarnation})
     assert puts(pid, fn -> for _ <- 1..20, do: Membership.sync(config) end) == 0
   end
+
+  test "the public members/1 and preferred/2 read the view", %{inst: inst} do
+    config = Alambique.Config.fetch!(inst)
+    assert Alambique.members(inst) == Membership.nodes(config)
+    assert Alambique.members(inst) == [node()]
+    assert Alambique.preferred(inst, "any-cell") == node()
+    assert Alambique.preferred(inst, "any-cell") == Membership.preferred(config, "any-cell")
+    assert_raise ArgumentError, fn -> Alambique.members(:no_such_instance) end
+    assert_raise ArgumentError, fn -> Alambique.preferred(:no_such_instance, "c") end
+  end
 end

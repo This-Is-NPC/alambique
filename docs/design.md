@@ -1824,6 +1824,10 @@ directories (`<data_dir>/work`, §20) are not part of the cache; `inflight`,
   so a lease of another instance never resolves to this node.
   A node joins its store identity group before the group of members.
   `:pg` drops a member when its node goes down or disconnects.
+  `Alambique.members/1` and `Alambique.preferred/2` are the public reads of
+  the member list and of the ring (`Membership.nodes/1` and
+  `Membership.preferred/2`), so a caller can work out where a cell would go
+  before it moves it.
 - **Join.** With the instance option `join: false` the node starts without
   joining the group of members and joins it on `Alambique.join/1`. Until then
   every place where a node chooses a node (the ring and `Membership.preferred/2`,

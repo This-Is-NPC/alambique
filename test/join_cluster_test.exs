@@ -86,4 +86,30 @@ defmodule Alambique.JoinClusterTest do
     assert woken_on(c, :n3) != []
     assert Enum.all?(woken_on(c, :n3), &(&1 in cells))
   end
+
+  test "members/1 and preferred/2 follow join/1 on every node", ctx do
+    %{cluster: c, inst: inst} = ctx
+    [n1, n2, n3] = for name <- [:n1, :n2, :n3], do: Cluster.node(c, name)
+    cell = "pref-#{System.unique_integer([:positive])}"
+
+    # n3 started with join: false: no node lists it, itself included.
+    for from <- [:n1, :n2, :n3],
+        do: assert(on(c, from, :members, [inst]) == Enum.sort([n1, n2]))
+
+    preferred = on(c, :n1, :preferred, [inst, cell])
+    assert preferred in [n1, n2]
+    assert on(c, :n2, :preferred, [inst, cell]) == preferred
+
+    assert :ok = on(c, :n3, :join, [inst])
+
+    for from <- [:n1, :n2, :n3] do
+      eventually(fn -> on(c, from, :members, [inst]) == Enum.sort([n1, n2, n3]) end, 10_000)
+    end
+
+    preferred = on(c, :n1, :preferred, [inst, cell])
+    assert preferred in [n1, n2, n3]
+
+    for from <- [:n2, :n3],
+        do: eventually(fn -> on(c, from, :preferred, [inst, cell]) == preferred end, 10_000)
+  end
 end
