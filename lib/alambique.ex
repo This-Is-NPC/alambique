@@ -51,6 +51,15 @@ defmodule Alambique do
     * `:join` - whether the node joins the members at start (default `true`).
       With `false` it serves the calls made on it, but other nodes do not choose
       it as an owner or a preferred node until `join/1` (design §8).
+    * `:check_store` - whether the start checks that the store honours
+      `If-None-Match: *` and `If-Match` (default `true`). It writes one scratch
+      object under each prefix, tries a create twice and a replace with a wrong
+      etag, and deletes it: four puts and a delete per store. A store that
+      accepts any of them makes the start return `{:error, {:store_not_conformant,
+      location_id, [:if_none_match | :if_match]}}`, because leases and
+      create-only files would silently fail (design §3). A store that cannot be
+      reached for the check is logged and the start goes on. Set `false` once a
+      store version is known to pass (`docs/storage-compatibility.md`).
     * `:clock` - `{module, config}` implementing `Alambique.Clock`
       (default `{Alambique.Clock.System, nil}`).
     * `:lease_ttl_ms` - lease duration (default 30 000). The cell renews it at a

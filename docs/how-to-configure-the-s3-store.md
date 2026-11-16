@@ -112,6 +112,14 @@ anything but `s3://bucket` or `s3://bucket/path`.
   expired: the answer has no body, so the store cannot tell the expired token
   and does not renew. The next request with a body does.
 - `{:error, {:credentials, reason}}`: the `:credentials` function failed.
+- The instance does not start and returns `{:error, {:store_not_conformant,
+  location_id, failed}}`: the store accepted a repeated `If-None-Match: *`
+  create (`:if_none_match`) or a write with a wrong `If-Match` etag
+  (`:if_match`). Alambique cannot fence cells on that store. Use one that
+  honours conditional writes
+  ([storage-compatibility.md](storage-compatibility.md)). The check costs four
+  puts and a delete under `<prefix>/store-check/` per start; `check_store:
+  false` skips it.
 - Requests wait for a connection, or end with `{:error, {:request_crashed, ...}}`
   when none frees up in time: the store holds at most `:pool_size`
   connections (default 256). Raise it, or set `finch: [pool_timeout: ...]` in

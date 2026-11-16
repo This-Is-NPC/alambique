@@ -4,6 +4,9 @@ defmodule Alambique.AuditStore do
   `/trash/`, every put of another key and every delete of another key, so
   tests can check when objects were deleted against when they were marked, and
   that a reader never wrote.
+
+  The scratch objects of the start-up check (`/store-check/`, design section 3)
+  are not logged: they are neither cell data nor written by a reader.
   """
   @behaviour Alambique.Store
 
@@ -32,9 +35,16 @@ defmodule Alambique.AuditStore do
 
   @impl true
   def put(%{inner: {m, c}, now: now, log: log}, key, body, condition, meta) do
-    if String.contains?(key, "/trash/"),
-      do: :ets.insert(log, {:manifest, now.(), key, IO.iodata_to_binary(body)}),
-      else: :ets.insert(log, {:put, now.(), key})
+    cond do
+      String.contains?(key, "/trash/") ->
+        :ets.insert(log, {:manifest, now.(), key, IO.iodata_to_binary(body)})
+
+      not scratch?(key) ->
+        :ets.insert(log, {:put, now.(), key})
+
+      true ->
+        :ok
+    end
 
     m.put(c, key, body, condition, meta)
   end
@@ -54,7 +64,11 @@ defmodule Alambique.AuditStore do
 
   @impl true
   def delete(%{inner: {m, c}, now: now, log: log}, key) do
-    unless String.contains?(key, "/trash/"), do: :ets.insert(log, {:delete, now.(), key})
+    unless String.contains?(key, "/trash/") or scratch?(key),
+      do: :ets.insert(log, {:delete, now.(), key})
+
     m.delete(c, key)
   end
+
+  defp scratch?(key), do: String.contains?(key, "/store-check/")
 end

@@ -6,12 +6,15 @@ defmodule Alambique.Instance do
 
   use Supervisor
 
-  alias Alambique.{Config, Membership}
+  alias Alambique.{Config, Membership, Store}
 
-  # The data directory is locked before the tree starts, so a refused start
-  # touches no file (design §1).
+  require Logger
+
+  # The store is checked and the data directory locked before the tree
+  # starts, so a refused start touches no file (design §1).
   def start_link(config) do
-    with {:ok, lock} <- Alambique.DataDir.acquire(config.data_dir) do
+    with :ok <- check_stores(config),
+         {:ok, lock} <- Alambique.DataDir.acquire(config.data_dir) do
       case Supervisor.start_link(__MODULE__, {config, lock}, name: config.name) do
         {:ok, pid} ->
           {:ok, pid}
@@ -20,6 +23,37 @@ defmodule Alambique.Instance do
           Alambique.DataDir.release(lock)
           error
       end
+    end
+  end
+
+  # One check per distinct store: locations that share one store share its
+  # behaviour. Only a store that fails it refuses the start; one that cannot be
+  # reached is left to the breaker, as at any other time.
+  defp check_stores(%{check_store: false}), do: :ok
+
+  defp check_stores(%{placement: {placement, opts}} = config) do
+    {:ok, locations} = placement.locations(opts)
+
+    locations
+    |> Enum.uniq_by(&Alambique.Store.location(&1.store))
+    |> Enum.find_value(:ok, &check_store(config, &1))
+  end
+
+  defp check_store(config, location) do
+    case Store.Conformance.check(location.store, location.prefix, config.op_timeout_ms) do
+      :ok ->
+        nil
+
+      {:error, {:not_conformant, failed}} ->
+        {:error, {:store_not_conformant, location.id, failed}}
+
+      {:inconclusive, reason} ->
+        Logger.warning(
+          "Alambique #{inspect(config.name)}: could not check the conditional writes " <>
+            "of location #{location.id}: #{inspect(reason)}"
+        )
+
+        nil
     end
   end
 

@@ -36,6 +36,14 @@ The rest of the layout (`0002` to `0009`, `frozen`, `trashed`, `crashes`,
 `trash/`, `moved/`, `nodes/`) appears when the matching feature runs. The full
 table is design section 4.
 
+One more prefix is transient: `<prefix>/store-check/<random>`. Each start of an
+instance writes one small object there to check that the store honours
+conditional writes (5 requests per distinct store, design section 3) and
+deletes it. A crash of the VM during the check, or a store that fails the
+delete, can leave one such object behind. It holds one byte and nothing reads
+it, so it is safe to delete, and a lifecycle rule that expires
+`<prefix>/store-check/` after a day is safe.
+
 ## 2. What the library deletes by itself
 
 You do not need a script or a rule for any of these. Each runs on every node of
@@ -158,6 +166,7 @@ row says how.
 | A snapshot | 1 `HEAD`, 1 `GET` for every file of the chain and 1 `PUT` | design section 9 |
 | A retention run that marks files | 1 `GET` and 1 `PUT` of the marker, 1 `PUT` per manifest of up to 1 000 keys | design section 9.1 |
 | The reaper, per manifest | 1 `GET`, 1 `DELETE` per key, 1 `DELETE` | design section 9.1 |
+| An instance start | 5 per distinct store: 4 `PUT` and 1 `DELETE` of a scratch object under `<prefix>/store-check/` | design section 3; off with `check_store: false` |
 | A node, with no cell awake | 1 `LIST` of `moved/` per minute per location, 1 `LIST` of `trash/` every 5 minutes, and the feed prune, at least one `LIST` per shard (16 by default) per hour | The first measured in the same run as the renewals (2 in 95 s); the others from the defaults in `config.ex`, not measured |
 
 A listing of a bucket by prefix, which you may run to count files, is also a
