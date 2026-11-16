@@ -1398,7 +1398,10 @@ process creates its in-flight marker (§10). Wake order:
 5. Install the change-feed triggers and hand the feed rows that the
    previous owner left unpublished to the sender (§13). The wake does not wait
    for the puts, and a failing feed prefix does not fail it.
-6. Serving starts.
+6. Renew the lease again when less than half of its usable window is left,
+   as in step 2: the steps above can take longer than that on a slow host, and
+   a cell must not serve its first call on a lease it can no longer use (the
+   caller would get `{:error, :lease_expired}`). Then serving starts.
 
 A failed wake releases the lease if it holds one, closes the connection and
 stops the process; callers waiting on it get the reason, for example

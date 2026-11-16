@@ -24,7 +24,8 @@ defmodule Alambique.Cell.Wake do
            {:ok, state} <- choose_migrations(state),
            {:ok, state, found} <- overlap(state),
            {:ok, state} <- load(state, found),
-           {:ok, state} <- migrate(state) do
+           {:ok, state} <- migrate(state),
+           {:ok, state} <- ensure_lease(state) do
         {:ok, Publisher.start(state)}
       end
     end
@@ -198,7 +199,9 @@ defmodule Alambique.Cell.Wake do
     end
   end
 
-  # Renews when less than half of the usable window is left.
+  # Renews when less than half of the usable window is left. Also the last
+  # step of a wake: a slow one must not serve its first call on a lease that
+  # ran out meanwhile.
   defp ensure_lease(state) do
     config = state.config
     remaining = state.lease.expires_at_ms - config.skew_margin_ms - State.now_ms(state)
