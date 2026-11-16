@@ -68,15 +68,45 @@ request to `master` and on every push to `master`, and it takes its tool
 versions from `mise.toml`. A new push to a pull request cancels the run of the
 older commit.
 
-`ci` is the aggregate job: it passes when these jobs passed.
+`ci` is the aggregate job: it passes when these jobs passed. Every test runs
+once: the default suite runs with coverage, split into parts.
 
 | Job | What it runs |
 | --- | --- |
 | `gate` | `mise run check:static`: the static part of the gate below, without the suite |
-| `coverage` | `mise run test:coverage`: line coverage of Elixir and the NIF, fails below `ALAMBIQUE_COVERAGE_MIN` |
+| `coverage-build` | `mise run test:coverage:build`: the NIF built once with coverage instrumentation, shared with the parts as an artifact |
+| `coverage-run (i)` | one of N parts of the default suite: `mise run test:coverage:run -- --partitions N --export-coverage part-i` with `MIX_TEST_PARTITION=i` |
+| `coverage` | `mise run test:coverage:report`: sums the parts and fails below `ALAMBIQUE_COVERAGE_MIN` |
 | `native` | `mise run test:native`: the Rust unit tests of the NIF |
 | `services` | `mise run test:seaweedfs` and `mise run test:litestream` against a SeaweedFS container |
 | `cluster` | `mise run test:cluster`: failover properties on peer nodes |
+
+**The partitions.** N is the number of items of the `part` list of
+`coverage-run` in `ci.yml` (default 4). ExUnit deals the test files out to the
+partitions round-robin in sorted order, so every test runs in exactly one part.
+Each part runs on its own runner and prints its seed. The test counts of the
+parts add up to the count of a single run (1453 tests of the default suite when
+this was measured), and the `coverage` summary lists them.
+
+**How coverage is summed.** llvm-cov can merge profiles only of the same
+binary, so `coverage-build` builds the instrumented NIF once and the parts load
+that file (they never compile one: `ALAMBIQUE_NIF_PREBUILT=1`). A part with
+`--export-coverage` saves `cover/part-i.coverdata` and the NIF profiles
+(`.profraw`, tagged with the part), and fails only when a test fails, never on
+the threshold. `coverage` downloads all of them, runs `mix test.coverage` (it
+imports the `.coverdata` files and enforces the threshold of `mix.exs`) and
+`cargo llvm-cov report` over all profiles with `--fail-under-lines`, and
+prints both totals in its job summary.
+
+**Reproduce a failing part.** Take the seed from the log of the part and run
+the same partition:
+
+```sh
+MIX_TEST_PARTITION=2 mix test --partitions 4 --seed 123456
+```
+
+Add `--cover` or run `mise run test:coverage` for the coverage of a single
+local run (it builds, runs and reports in one process).
 
 Install the hooks once per clone:
 
@@ -110,7 +140,7 @@ order:
 4. `mise run test`, the default suite
 
 `mise run check:static` runs steps 1 to 3 only: it is the `gate` job, because
-CI runs the suite in the `coverage` job. Run `mise run check` by hand when you
+CI runs the suite in the coverage parts. Run `mise run check` by hand when you
 want the whole result on your machine; a loaded machine
 makes timing tests in the suite fail, so rerun the failing file before
 suspecting your change. `ALAMBIQUE_CHECK_CLUSTER=1` adds `mise run

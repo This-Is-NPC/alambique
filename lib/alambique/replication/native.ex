@@ -17,11 +17,16 @@ defmodule Alambique.Replication.Native do
   # §2.1); a release build of the library does not contain them.
   @test_build Mix.env() == :test
 
+  # scripts/test-coverage run loads the instrumented NIF that its build step
+  # made once, so Rustler must not compile another one.
+  @prebuilt System.get_env("ALAMBIQUE_NIF_PREBUILT") == "1"
+
   use Rustler,
     otp_app: :alambique,
     crate: "alambique_nif",
     path: "native/alambique_nif",
-    features: if(@test_build, do: ["test-panic"], else: [])
+    features: if(@test_build, do: ["test-panic"], else: []),
+    skip_compilation?: @prebuilt
 
   # Every Mix environment loads the same artifact through the linked
   # `priv/native` directory, so a build of another environment replaces this

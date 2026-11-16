@@ -32,7 +32,7 @@ description = "Run the fast checks of the pre-push hook: incremental warnings-as
 run = "scripts/quick-check"
 
 [tasks.check]
-description = "Run the full gate: quick checks, clippy, docs links, then the default suite (ALAMBIQUE_CHECK_CLUSTER=1 and ALAMBIQUE_CHECK_COVERAGE=1 add the heavy checks; the CI gate job runs check:static)"
+description = "Run the full gate: quick checks, clippy, docs links, then the default suite (ALAMBIQUE_CHECK_CLUSTER=1 and ALAMBIQUE_CHECK_COVERAGE=1 add the heavy checks; CI runs the suite in the coverage parts instead)"
 run = "scripts/check"
 
 [tasks."check:static"]
@@ -63,6 +63,18 @@ run = "scripts/test-native"
 [tasks."test:coverage"]
 description = "Measure line coverage of the Elixir code and of the NIF the BEAM loads over the default suite; fails below $ALAMBIQUE_COVERAGE_MIN percent (default 90) in either"
 run = "scripts/test-coverage"
+
+[tasks."test:coverage:build"]
+description = "Build the instrumented NIF once for the coverage runs (what CI shares with its parts)"
+run = "scripts/test-coverage build"
+
+[tasks."test:coverage:run"]
+description = "Run the default suite with coverage under the NIF of test:coverage:build; arguments go to mix test (CI: --partitions N --export-coverage NAME with MIX_TEST_PARTITION)"
+run = "scripts/test-coverage run"
+
+[tasks."test:coverage:report"]
+description = "Sum the exported coverage and the NIF profiles of all runs and fail below $ALAMBIQUE_COVERAGE_MIN percent in either"
+run = "scripts/test-coverage report"
 
 [tasks."test:miri"]
 description = "Run the native tests under Miri, which checks the Rust code for undefined behavior (FFI-bound tests are skipped)"

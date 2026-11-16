@@ -4,10 +4,18 @@ name: CI
 # passes only when every job below passed, so it keeps its name when jobs are
 # added. Tool versions come from mise.toml; nothing here lists a version.
 #
-# Knobs: `timeout-minutes` of each job, with its default in the comment next to
-# it. A hung job is cancelled after it. Parallelism is not set: the runner has
-# 4 vCPUs, cargo uses all of them and ExUnit runs two cases per scheduler (its
-# default); the jobs themselves run side by side.
+# Every test runs once. The default suite runs with coverage, split into
+# parts that run side by side; `gate` only checks statically.
+#
+# Knobs:
+# - `part` of `coverage-run`: the parts of the default suite, one runner each.
+#   Default 4, the list [1, 2, 3, 4]; the number of items is N of
+#   `mix test --partitions N`. Setup costs each part a minute or two, so more
+#   parts stop paying once the suite per part is that short.
+# - `timeout-minutes` of each job, with its default in the comment next to it.
+#   A hung job is cancelled after it.
+# Parallelism inside a job is not set: the runner has 4 vCPUs, cargo uses all
+# of them and ExUnit runs two cases per scheduler (its default).
 #
 # Release pull requests are opened by release-please with the workflow token,
 # which starts no pull_request run. release.yml dispatches this workflow on the
@@ -32,7 +40,7 @@ concurrency:
 jobs:
   # `mise run check:static` (scripts/check without the suite): warnings-as-errors
   # compile, mix format, cargo fmt, clippy and docs links. The suite runs in
-  # `coverage` and `cluster`.
+  # `coverage-run` and `cluster`.
   gate:
     runs-on: ubuntu-latest
     timeout-minutes: 30 # default 30
@@ -46,9 +54,78 @@ jobs:
           cache-name: gate
       - run: mise run check:static
 
-  # Line coverage of the Elixir code and of the NIF, below
-  # ALAMBIQUE_COVERAGE_MIN (mise.toml) fails.
+  # The NIF built with coverage instrumentation, once. llvm-cov sums profiles
+  # only of the same binary, so the parts load this one and never build their
+  # own, and `coverage` reads its objects.
+  coverage-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30 # default 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          tools: erlang elixir rust aqua:taiki-e/cargo-llvm-cov
+          cache-name: coverage-build
+      - run: mise run test:coverage:build
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-nif
+          path: |
+            priv/native/alambique_nif.so
+            native/alambique_nif/target/llvm-cov-target/release/deps/libalambique_nif.so
+          if-no-files-found: error
+          retention-days: 1
+
+  # One part of the default suite with Elixir coverage. It saves its
+  # cover/*.coverdata and the profiles of the NIF; only the tests fail it,
+  # `coverage` checks the threshold on the sum. Each part prints its seed and,
+  # on failure, the test: reproduce with
+  # `MIX_TEST_PARTITION=<part> mix test --partitions <N> --seed <seed>`.
+  coverage-run:
+    needs: coverage-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30 # default 30
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4] # default 4; N is the length of this list
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          tools: erlang elixir
+          cache-name: coverage-run
+          cargo: "false"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: coverage-nif
+      - name: Run the part
+        env:
+          MIX_TEST_PARTITION: ${{ matrix.part }}
+        run: |
+          set -o pipefail
+          mise run test:coverage:run -- \
+            --partitions ${{ strategy.job-total }} \
+            --slowest-modules 5 \
+            --export-coverage part-${{ matrix.part }} 2>&1 | tee part.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: coverage-part-${{ matrix.part }}
+          path: |
+            cover/*.coverdata
+            native/alambique_nif/target/llvm-cov-target/*.profraw
+            part.log
+          retention-days: 1
+
+  # Sums the parts: the .coverdata files of Elixir and the profiles of the NIF,
+  # and fails below ALAMBIQUE_COVERAGE_MIN (mise.toml) in either.
   coverage:
+    needs: [coverage-build, coverage-run]
     runs-on: ubuntu-latest
     timeout-minutes: 30 # default 30
     steps:
@@ -59,14 +136,27 @@ jobs:
         with:
           tools: erlang elixir rust aqua:taiki-e/cargo-llvm-cov
           cache-name: coverage
-      - name: Measure coverage
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: coverage-nif
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: coverage-part-*
+          merge-multiple: true
+      - name: Sum the coverage
         run: |
           set -o pipefail
-          mise run test:coverage 2>&1 | tee coverage.log
+          mise run test:coverage:report 2>&1 | tee coverage.log
       - name: Summarize coverage
         if: always()
         run: |
           {
+            echo '### Tests of the parts'
+            echo '```'
+            grep -H -E '^(Running ExUnit|Result:)' part-*.log || true
+            grep -h '^Result:' part-*.log | grep -oE '[0-9]+ passed' |
+              awk '{n += $1} END {print "all parts: " n " passed"}'
+            echo '```'
             echo '### Coverage'
             echo '```'
             tail -n 40 coverage.log
@@ -124,7 +214,7 @@ jobs:
 
   # The single check to require on master.
   ci:
-    needs: [gate, coverage, native, services, cluster]
+    needs: [gate, coverage-build, coverage-run, coverage, native, services, cluster]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5 # default 5
