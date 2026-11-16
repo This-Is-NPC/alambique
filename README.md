@@ -127,6 +127,21 @@ first release (0.1.0):
   (`:lease_lost`, `:fenced`) and is only closing its database. Before, right
   after a takeover, the old owner could answer itself for that moment. There
   is no breaking change and no new option.
+- 0.11.0: the S3 store keeps only the code and message of an error answer
+  (`:error_limit`), the start refuses a store without conditional writes
+  (`check_store: false` skips it), and no read of the bucket is unbounded
+  (`read_limits:`, `[:alambique, :store, :too_large]`). A lazy restore checks
+  the checksum of small files first and holds the first writes until the
+  hydration is verified (`lazy_restore: [verify_bytes:, verify_writes:]`,
+  `[:alambique, :cell, :writes_released]`). A slow wake renews the lease it
+  used up, and keys, leases, trash manifests and the ops tools refuse
+  malformed input. `Alambique.members/1`, `Alambique.preferred/2`,
+  `[:alambique, :membership, :changed]` and `move/4` with `only_if_idle: true`
+  are new. **breaking:** an instance refuses a `prefix` with a leading or
+  trailing slash, an empty segment, a `.` or `..` segment or a control
+  character. A deployment that used one must copy its objects to a valid
+  prefix with the store's own tools and point the instance at it
+  ([how-to](docs/how-to-manage-the-bucket.md#7-choose-the-prefix)).
 
 The full list is in [CHANGELOG.md](CHANGELOG.md).
 
@@ -235,7 +250,9 @@ More calls, placement and the other features are in
 - Write access to the bucket prefix is full control of its cells: checksums
   detect corruption, not forgery. Give each deployment its own prefix and
   readers a read-only credential
-  ([docs/design.md](docs/design.md), section 3.1).
+  ([docs/design.md](docs/design.md), section 3.1). No prefix may be a path
+  prefix of another instance's in the same store (`app` and `app/cells`
+  share keys).
 - A file system whose writes can stall stalls every write of every cell. See
   [docs/how-to-operate-a-cell.md](docs/how-to-operate-a-cell.md), step 10.
 - On a saturated CPU, the compaction at the release of a cell can be cut by

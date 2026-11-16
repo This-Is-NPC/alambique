@@ -227,6 +227,29 @@ The example says what to lower:
 - **The feed object** is one request a batch: `feed: false` took the example
   from 46 429 to 45 649 (456 492), which is little, because the leases dominate.
 
+## 7. Choose the prefix
+
+The prefix is a path of segments separated by `/`, such as `myapp/prod`. An
+instance refuses to start with a prefix that has a leading or trailing `/`, an
+empty segment (`a//b`), a `.` or `..` segment, or a control character. Give
+each instance a prefix that is not a path prefix of another's in the same
+store: `app` and `app/cells` would share keys.
+
+Before 0.11.0 any non-empty prefix started. A deployment that used one of the
+refused forms cannot open its data through the library, because the old
+location is refused too (the move and restore paths cannot read it either).
+To keep the data:
+
+1. Stop the instance.
+2. Copy every object under the old prefix to a valid prefix with the store's
+   own tools (for example `aws s3 sync` or `mc mirror`), keeping the keys
+   after the prefix.
+3. Point `:prefix` (or the `:placement` location) at the new prefix and start.
+4. Check a cell with `mix alambique.inspect` before you delete the old
+   objects.
+
+Or start on a fresh prefix and let the cells begin empty.
+
 ## Troubleshooting
 
 - **The bill is higher than the estimate.** Count the awake time first:
