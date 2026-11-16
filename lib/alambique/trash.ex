@@ -337,20 +337,31 @@ defmodule Alambique.Trash do
   # object, a damaged or foreign manifest never deletes outside the cell.
   defp fetch_manifest(ctx, manifest, deadline) do
     case Objects.fetch_optional(ctx, manifest, deadline, :control) do
-      {:ok, body, _meta} -> decode(ctx, body)
+      {:ok, body, _meta} -> decode(ctx, manifest, body)
       :none -> :gone
       {:error, _} = error -> error
     end
   end
 
-  defp decode(ctx, body) do
+  # The cell must be the segment the manifest key carries, and a plain id: no
+  # `/` or `..` can widen the prefix the keys are checked against.
+  defp decode(ctx, manifest, body) do
     with {:ok, %{"cell" => cell, "keys" => keys}} when is_binary(cell) and is_list(keys) <-
            Jason.decode(body),
+         true <- manifest_cell(ctx, manifest) == cell,
+         true <- cell not in ["", ".", ".."] and not String.contains?(cell, ["/", <<0>>]),
          files = Keys.files_prefix(ctx.prefix, cell),
          true <- Enum.all?(keys, &(is_binary(&1) and String.starts_with?(&1, files))) do
       {:ok, cell, keys}
     else
       _ -> {:error, :bad_manifest}
+    end
+  end
+
+  defp manifest_cell(ctx, manifest) do
+    case String.replace_prefix(manifest, prefix(ctx.prefix), "") |> String.split("/") do
+      [_due, cell, _id] -> cell
+      _ -> nil
     end
   end
 
