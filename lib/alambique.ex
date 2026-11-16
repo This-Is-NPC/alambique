@@ -258,6 +258,11 @@ defmodule Alambique do
       holds in memory at once, default 67 108 864, 64 MiB; one file larger than
       that is read alone, and the memory of N wakes in progress is about N
       times this, see `docs/how-to-size-a-node.md`).
+    * `:read_limits` - `:max_object_bytes` (largest segment, snapshot or feed
+      object read whole, default 1 073 741 824, 1 GiB) and `:max_control_bytes`
+      (largest lease, node entry, marker, manifest or crash counter, default
+      16 777 216, 16 MiB). A larger object is refused with
+      `{:too_large, size, max}` before it is read (design §3).
     * `:hydrator` - `:poll_ms` (time between background hydration passes,
       default 100).
     * `:retry` - `:max_attempts` (attempts of one store request that is

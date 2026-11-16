@@ -541,7 +541,7 @@ defmodule Alambique.Compaction do
     key = Keys.chain(state.ctx.prefix, state.cell)
     empty = %{snapshot_bytes: nil, bytes: 0}
 
-    case Objects.fetch_optional(state.ctx, key, state.deadline) do
+    case Objects.fetch_optional(state.ctx, key, state.deadline, :control) do
       {:ok, body, _meta} -> {:ok, parse_chain(body, state.snapshot_at || 0, empty)}
       :none -> {:ok, empty}
       {:error, _} = error -> error

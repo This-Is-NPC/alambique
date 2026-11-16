@@ -351,7 +351,11 @@ defmodule Alambique.Feed do
   defp load([], positions, _ctx, acc), do: done(acc, positions)
 
   defp load([item | rest], positions, ctx, acc) do
-    case Retry.once(ctx.timeout_ms, fn -> item.store.get(item.config, item.key) end) do
+    store = {item.store, item.config}
+
+    case Retry.once(ctx.timeout_ms, fn ->
+           Alambique.Store.get_capped(store, item.key, ctx.max_object_bytes)
+         end) do
       {:ok, body, _etag, _meta} ->
         records = Record.decode(item.key, body, item.parsed.time, ctx.max_object_bytes)
         reject_event(records)

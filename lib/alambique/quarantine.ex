@@ -47,7 +47,7 @@ defmodule Alambique.Quarantine do
   defp attempt(ctx, key, settings, id, kinds, deadline) do
     {store, config} = ctx.store
 
-    with {:ok, counter, condition} <- load(store, config, key) do
+    with {:ok, counter, condition} <- load(ctx, key) do
       # A write whose outcome was unknown is read again: if the entry is
       # there, it was applied.
       if Enum.any?(counter.recent, &(&1.id == id)) do
@@ -71,10 +71,11 @@ defmodule Alambique.Quarantine do
     end
   end
 
-  defp load(store, config, key) do
-    case store.get(config, key) do
+  defp load(ctx, key) do
+    case Alambique.Store.get_capped(ctx.store, key, ctx.max_control_bytes) do
       {:ok, body, etag, _meta} -> {:ok, decode(body), {:if_match, etag}}
       {:error, :not_found} -> {:ok, empty(), :if_none_match}
+      {:error, {:too_large, _, _}} = error -> error
       {:error, reason} -> {:retry, reason}
     end
   end
@@ -87,9 +88,10 @@ defmodule Alambique.Quarantine do
     key = Keys.crashes(ctx.prefix, cell)
 
     Retry.run(ctx, deadline(ctx, opts), fn ->
-      case store.get(config, key) do
+      case Alambique.Store.get_capped({store, config}, key, ctx.max_control_bytes) do
         {:ok, body, _etag, _meta} -> {:ok, decode(body)}
         {:error, :not_found} -> {:ok, nil}
+        {:error, {:too_large, _, _}} = error -> error
         {:error, reason} -> {:retry, reason}
       end
     end)

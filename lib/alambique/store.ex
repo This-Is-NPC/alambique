@@ -6,6 +6,12 @@ defmodule Alambique.Store do
   of the whole object and its metadata. The body is shorter at the end of the object and empty
   when `offset` is at or past it.
 
+  A store can implement `c:get/3`, a `get` that gives up on an object larger
+  than `max_bytes` with `{:error, {:too_large, size, max_bytes}}` before it
+  holds the body in memory (`Alambique.Store.S3` stops at the `Content-Length`).
+  The library reads every object of the bucket with a limit (design §3);
+  without `c:get/3` the whole object is read and its size checked after.
+
   A callback that raises, throws or exits is treated as a failed request: the
   library wraps the store and turns it into `{:error, reason}`.
 
@@ -41,13 +47,18 @@ defmodule Alambique.Store do
               {:ok, body :: binary, total_size :: non_neg_integer, meta}
               | {:error, :not_found}
               | {:error, term}
+  @callback get(config, key, max_bytes :: pos_integer) ::
+              {:ok, body :: binary, etag, meta}
+              | {:error, :not_found}
+              | {:error, {:too_large, size :: non_neg_integer, max_bytes :: pos_integer}}
+              | {:error, term}
   @callback list(config, prefix :: key, start_after :: key | nil, limit :: pos_integer) ::
               {:ok, [key], next_start_after :: key | nil} | {:error, term}
   @callback delete(config, key) :: :ok | {:error, term}
   @callback location(config) :: term
   @callback conceal(config) :: config
 
-  @optional_callbacks location: 1, conceal: 1
+  @optional_callbacks get: 3, location: 1, conceal: 1
 
   @doc "Where `store` keeps its data: its `c:location/1`, or its config without one."
   @spec location({module, config}) :: term
@@ -66,4 +77,52 @@ defmodule Alambique.Store do
   end
 
   def conceal(other), do: other
+
+  @doc """
+  `get` of an object of at most `max_bytes`; a larger one is
+  `{:error, {:too_large, size, max_bytes}}` (and a `[:alambique, :store,
+  :too_large]` event). Final: retrying cannot make the object smaller.
+  """
+  @spec get_capped({module, config}, key, pos_integer) ::
+          {:ok, binary, etag, meta} | {:error, term}
+  def get_capped(store, key, max_bytes) do
+    case call_get(store, key, max_bytes) do
+      {:error, {:too_large, size, _max}} = error ->
+        too_large(key, size, max_bytes)
+        error
+
+      other ->
+        other
+    end
+  end
+
+  @doc "Like `get_capped/3`, without the event: for a store that wraps another."
+  @spec call_get({module, config}, key, pos_integer) ::
+          {:ok, binary, etag, meta} | {:error, term}
+  def call_get({module, config}, key, max_bytes) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :get, 3) do
+      module.get(config, key, max_bytes)
+    else
+      case module.get(config, key) do
+        {:ok, body, _etag, _meta} when byte_size(body) > max_bytes ->
+          {:error, {:too_large, byte_size(body), max_bytes}}
+
+        other ->
+          other
+      end
+    end
+  end
+
+  @doc "Reports an object of `size` bytes, over its cap of `max_bytes`, that was not read."
+  @spec too_large(key, non_neg_integer, pos_integer) :: :ok
+  def too_large(key, size, max_bytes),
+    do: Alambique.Telemetry.emit([:store, :too_large], %{size: size, max: max_bytes}, %{key: key})
+
+  @doc "Default cap of the objects the library reads whole: segments, snapshots and feed objects."
+  @spec max_object_bytes :: pos_integer
+  def max_object_bytes, do: 1_073_741_824
+
+  @doc "Default cap of the small objects: leases, node entries, markers, manifests, crash counters."
+  @spec max_control_bytes :: pos_integer
+  def max_control_bytes, do: 16_777_216
 end

@@ -182,7 +182,12 @@ defmodule Alambique.Retention do
   defp marked_anchor(_env, _grace, []), do: {:ok, 0}
 
   defp marked_anchor(env, _grace, _keys) do
-    case Objects.fetch_optional(env.ctx, Keys.trashed(env.ctx.prefix, env.cell), env.deadline) do
+    case Objects.fetch_optional(
+           env.ctx,
+           Keys.trashed(env.ctx.prefix, env.cell),
+           env.deadline,
+           :control
+         ) do
       {:ok, body, _meta} ->
         case Integer.parse(body) do
           {txid, ""} -> {:ok, txid}

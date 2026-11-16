@@ -4,6 +4,7 @@ defmodule Alambique.Replication.Objects do
   # listing, and gets, heads, puts and deletes retried until a deadline.
 
   alias Alambique.Replication.{Keys, Retry}
+  alias Alambique.Store
 
   @doc "Keys under `prefix`, after `start_after` when given."
   @spec list(map, String.t(), integer, String.t() | nil) :: {:ok, [String.t()]} | {:error, term}
@@ -44,32 +45,42 @@ defmodule Alambique.Replication.Objects do
   case the listing was ahead of the read, unless `ctx.missing_final` is set:
   a reader that lists first (`Alambique.Query`) then knows the file was
   deleted and lists again.
+
+  An object over the cap of its `kind` (`:object`, `ctx.max_object_bytes`, or
+  `:control`, `ctx.max_control_bytes`) is `{:error, {:too_large, size, max}}`
+  at once.
   """
-  @spec fetch(map, String.t(), integer) :: {:ok, binary, map} | {:error, term}
-  def fetch(ctx, key, deadline) do
-    {store, config} = ctx.store
+  @spec fetch(map, String.t(), integer, :object | :control) ::
+          {:ok, binary, map} | {:error, term}
+  def fetch(ctx, key, deadline, kind \\ :object) do
+    max = cap(ctx, kind)
 
     Retry.run(ctx, deadline, fn ->
-      case store.get(config, key) do
+      case Store.get_capped(ctx.store, key, max) do
         {:ok, body, _etag, meta} -> {:ok, body, meta}
         {:error, reason} -> retry_or_final(ctx, reason)
       end
     end)
   end
 
+  defp cap(ctx, :object), do: ctx.max_object_bytes
+  defp cap(ctx, :control), do: ctx.max_control_bytes
+
   defp retry_or_final(%{missing_final: true}, :not_found), do: {:error, :not_found}
+  defp retry_or_final(_ctx, {:too_large, _, _} = reason), do: {:error, reason}
   defp retry_or_final(_ctx, reason), do: {:retry, reason}
 
-  @doc "Like `fetch/3`, but a missing object is `:none` at once instead of being retried."
-  @spec fetch_optional(map, String.t(), integer) :: {:ok, binary, map} | :none | {:error, term}
-  def fetch_optional(ctx, key, deadline) do
-    {store, config} = ctx.store
+  @doc "Like `fetch/4`, but a missing object is `:none` at once instead of being retried."
+  @spec fetch_optional(map, String.t(), integer, :object | :control) ::
+          {:ok, binary, map} | :none | {:error, term}
+  def fetch_optional(ctx, key, deadline, kind \\ :object) do
+    max = cap(ctx, kind)
 
     Retry.run(ctx, deadline, fn ->
-      case store.get(config, key) do
+      case Store.get_capped(ctx.store, key, max) do
         {:ok, body, _etag, meta} -> {:ok, body, meta}
         {:error, :not_found} -> :none
-        {:error, reason} -> {:retry, reason}
+        {:error, reason} -> retry_or_final(%{}, reason)
       end
     end)
   end

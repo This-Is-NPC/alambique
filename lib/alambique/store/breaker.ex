@@ -23,7 +23,8 @@ defmodule Alambique.Store.Breaker do
   #
   # A failure is what the store did: a timeout of a request that left, a
   # transport error, a crash of the store module or an HTTP 5xx. `:not_found`,
-  # `:precondition_failed` (normal for leases and fences) and HTTP 4xx are
+  # `:precondition_failed` (normal for leases and fences), `:too_large` (an
+  # object over its cap) and HTTP 4xx are
   # answers of a store that works. A request that never left, because it waited
   # for a connection of the pool when it gave up, or because its process was
   # killed before it sent anything (`:local`, `Store.Phase`), is the node's
@@ -223,6 +224,10 @@ defmodule Alambique.Store.Breaker do
   def get(s, key), do: through(s, :get, fn m, c -> m.get(c, key) end)
 
   @impl true
+  def get(s, key, max_bytes),
+    do: through(s, :get, fn m, c -> Alambique.Store.call_get({m, c}, key, max_bytes) end)
+
+  @impl true
   def head(s, key), do: through(s, :head, fn m, c -> m.head(c, key) end)
 
   @impl true
@@ -301,6 +306,7 @@ defmodule Alambique.Store.Breaker do
   # What a result says about the store, given how far the request got.
   defp outcome({:error, :not_found}, _phase), do: :ok
   defp outcome({:error, :precondition_failed}, _phase), do: :ok
+  defp outcome({:error, {:too_large, _size, _max}}, _phase), do: :ok
 
   defp outcome({:error, {:http, status, _}}, _phase) when is_integer(status),
     do: if(status >= 500, do: {:failure, {:http, status}}, else: :ok)

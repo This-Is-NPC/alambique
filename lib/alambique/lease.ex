@@ -66,6 +66,7 @@ defmodule Alambique.Lease do
     * `:incarnation` - random id of the instance that writes (default `nil`,
       for a reader or a tool that holds no cell). It is stored with every
       lease the context writes.
+    * `:max_control_bytes` - largest lease object read (default 16 777 216)
   """
   @type ctx :: %{
           store: {module, term},
@@ -73,7 +74,8 @@ defmodule Alambique.Lease do
           prefix: String.t(),
           ttl_ms: pos_integer,
           skew_margin_ms: non_neg_integer,
-          incarnation: String.t() | nil
+          incarnation: String.t() | nil,
+          max_control_bytes: pos_integer
         }
 
   @type error :: {:error, term}
@@ -84,13 +86,23 @@ defmodule Alambique.Lease do
     ctx =
       opts
       |> Map.new()
-      |> Map.take([:store, :clock, :prefix, :ttl_ms, :skew_margin_ms, :incarnation])
+      |> Map.take([
+        :store,
+        :clock,
+        :prefix,
+        :ttl_ms,
+        :skew_margin_ms,
+        :incarnation,
+        :max_control_bytes
+      ])
       |> Map.put_new(:incarnation, nil)
+      |> Map.put_new(:max_control_bytes, Alambique.Store.max_control_bytes())
 
     valid? =
       match?(%{store: {_, _}, clock: {_, _}, prefix: p} when is_binary(p), ctx) and
         Conditional.timing?(ctx[:ttl_ms], ctx[:skew_margin_ms]) and
-        (is_nil(ctx.incarnation) or is_binary(ctx.incarnation))
+        (is_nil(ctx.incarnation) or is_binary(ctx.incarnation)) and
+        is_integer(ctx.max_control_bytes) and ctx.max_control_bytes > 0
 
     unless valid?, do: raise(ArgumentError, "invalid lease context: #{inspect(ctx)}")
     ctx

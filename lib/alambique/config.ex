@@ -39,6 +39,7 @@ defmodule Alambique.Config do
     rewind: [],
     schema: [],
     restore: [],
+    read_limits: [],
     retry: [],
     upload: [],
     breaker: [],
@@ -76,6 +77,10 @@ defmodule Alambique.Config do
   @rewind_defaults [fence_attempts: 5, timeout_ms: 60_000, poll_ms: 100, max_bytes: 268_435_456]
   @schema_defaults [check_page: 1_000, listing_timeout_ms: nil]
   @restore_defaults [edge_bytes: 65_536, fetch_concurrency: 16, max_inflight_bytes: 67_108_864]
+  @read_limits_defaults [
+    max_object_bytes: Alambique.Store.max_object_bytes(),
+    max_control_bytes: Alambique.Store.max_control_bytes()
+  ]
   @hydrator_defaults [poll_ms: 100]
   @retry_defaults [max_attempts: 10]
   @check_timeout_ms 1_000
@@ -329,6 +334,7 @@ defmodule Alambique.Config do
             fetch_concurrency: pos_integer,
             max_inflight_bytes: pos_integer
           },
+          read_limits: %{max_object_bytes: pos_integer, max_control_bytes: pos_integer},
           retry: %{max_attempts: pos_integer, check_timeout_ms: pos_integer},
           upload: %{retry_backoff_ms: pos_integer, retry_backoff_max_ms: pos_integer},
           breaker: %{
@@ -443,6 +449,7 @@ defmodule Alambique.Config do
       rewind: rewind!(opts[:rewind]),
       schema: schema!(opts[:schema], op_timeout),
       restore: options!(:restore, opts[:restore], @restore_defaults),
+      read_limits: options!(:read_limits, opts[:read_limits], @read_limits_defaults),
       retry: retry!(opts[:retry], ttl, skew, jitter),
       upload: upload!(opts[:upload]),
       breaker: options!(:breaker, opts[:breaker], @breaker_defaults),
@@ -543,7 +550,8 @@ defmodule Alambique.Config do
       prefix: location.prefix,
       ttl_ms: config.ttl_ms,
       skew_margin_ms: config.skew_margin_ms,
-      incarnation: config.incarnation
+      incarnation: config.incarnation,
+      max_control_bytes: config.read_limits.max_control_bytes
     )
   end
 
@@ -556,7 +564,8 @@ defmodule Alambique.Config do
       prefix: location.prefix,
       ttl_ms: registry.ttl_ms,
       skew_margin_ms: config.skew_margin_ms,
-      page_size: registry.page_size
+      page_size: registry.page_size,
+      max_control_bytes: config.read_limits.max_control_bytes
     )
   end
 
@@ -573,7 +582,9 @@ defmodule Alambique.Config do
       check_timeout_ms: config.retry.check_timeout_ms,
       edge_bytes: config.restore.edge_bytes,
       fetch_concurrency: config.restore.fetch_concurrency,
-      max_inflight_bytes: config.restore.max_inflight_bytes
+      max_inflight_bytes: config.restore.max_inflight_bytes,
+      max_object_bytes: config.read_limits.max_object_bytes,
+      max_control_bytes: config.read_limits.max_control_bytes
     )
   end
 

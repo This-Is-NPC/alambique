@@ -82,7 +82,7 @@ defmodule Alambique.Relocate.Cleanup do
       key = Keys.moved(ctx.prefix, cell)
       deadline = Retry.deadline_in(config.op_timeout_ms)
 
-      case Objects.fetch_optional(ctx, key, deadline) do
+      case Objects.fetch_optional(ctx, key, deadline, :control) do
         {:ok, body, _meta} ->
           due = with {ms, ""} <- Integer.parse(body), do: ms + config.skew_margin_ms
 

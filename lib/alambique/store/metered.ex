@@ -109,6 +109,12 @@ defmodule Alambique.Store.Metered do
   end
 
   @impl true
+  def get(%{store: store} = s, key, max_bytes) do
+    bump(s, :get, key)
+    timed(s, fn -> Alambique.Store.call_get(store, key, max_bytes) end)
+  end
+
+  @impl true
   def get_range(%{store: {m, c}} = s, key, offset, length) do
     bump(s, :get, key)
     timed(s, fn -> m.get_range(c, key, offset, length) end)

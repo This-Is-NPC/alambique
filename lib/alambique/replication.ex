@@ -36,6 +36,11 @@ defmodule Alambique.Replication do
     * `:max_inflight_bytes` - most bytes of the store a restore, or the
       hydration of a lazily restored cell, holds in memory at once (default
       67 108 864); a single file larger than that is read alone
+    * `:max_object_bytes` - largest segment or snapshot read
+      whole (default 1 073 741 824); a larger one is refused with
+      `{:too_large, size, max}` before it is read
+    * `:max_control_bytes` - the same for the small objects: leases, node
+      entries, markers, manifests and crash counters (default 16 777 216)
   """
   @type ctx :: %{
           store: {module, term},
@@ -49,7 +54,9 @@ defmodule Alambique.Replication do
           timeout_ms: pos_integer,
           edge_bytes: pos_integer,
           fetch_concurrency: pos_integer,
-          max_inflight_bytes: pos_integer
+          max_inflight_bytes: pos_integer,
+          max_object_bytes: pos_integer,
+          max_control_bytes: pos_integer
         }
 
   @type target :: :latest | {:txid, non_neg_integer} | {:timestamp, integer}
@@ -67,7 +74,9 @@ defmodule Alambique.Replication do
         timeout_ms: 10_000,
         edge_bytes: 65_536,
         fetch_concurrency: 16,
-        max_inflight_bytes: 67_108_864
+        max_inflight_bytes: 67_108_864,
+        max_object_bytes: Alambique.Store.max_object_bytes(),
+        max_control_bytes: Alambique.Store.max_control_bytes()
       }
       |> Map.merge(Map.new(opts))
       |> Map.take([
@@ -82,7 +91,9 @@ defmodule Alambique.Replication do
         :timeout_ms,
         :edge_bytes,
         :fetch_concurrency,
-        :max_inflight_bytes
+        :max_inflight_bytes,
+        :max_object_bytes,
+        :max_control_bytes
       ])
 
     valid? =
@@ -99,14 +110,17 @@ defmodule Alambique.Replication do
           timeout_ms: t,
           edge_bytes: e,
           fetch_concurrency: c,
-          max_inflight_bytes: pb
+          max_inflight_bytes: pb,
+          max_object_bytes: ob,
+          max_control_bytes: cb
         }
         when is_binary(p) and is_binary(n) and is_integer(b) and b > 0 and is_integer(m) and
                m >= b and is_integer(a) and a > 0 and is_integer(k) and k > 0 and is_integer(t) and
                t > 0 and is_integer(e) and
                e > 0 and is_integer(c) and
                c > 0 and
-               is_integer(pb) and pb > 0,
+               is_integer(pb) and pb > 0 and is_integer(ob) and ob > 0 and is_integer(cb) and
+               cb > 0,
         ctx
       )
 
