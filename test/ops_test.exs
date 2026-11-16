@@ -3,7 +3,9 @@ defmodule Alambique.OpsTest do
   use ExUnit.Case, async: false
   use ExUnitProperties
 
-  import Alambique.CellHelpers, only: [start_instance: 2, setup_store: 0, eventually: 1]
+  import Alambique.CellHelpers,
+    only: [start_instance: 2, setup_store: 0, eventually: 1, stop_distribution: 0]
+
   import Alambique.CompactionHelpers
 
   alias Alambique.Compaction
@@ -343,7 +345,7 @@ defmodule Alambique.OpsTest do
           run("alambique.move", ["c1", "nobody@127.0.0.1", "--instance", "cells"])
         end
 
-        Node.stop()
+        stop_distribution()
       end
     end
   end

@@ -144,6 +144,17 @@ defmodule Alambique.CellHelpers do
     poll(fun, deadline)
   end
 
+  @doc """
+  Stops distribution and waits until the VM is not distributed. `Node.stop/0`
+  returns while `net_kernel` is still going down: `node/0` keeps the old name
+  and `Node.alive?/0` stays true, so the next test would see a node that
+  vanishes under it.
+  """
+  def stop_distribution do
+    Node.stop()
+    eventually(fn -> not Node.alive?() end)
+  end
+
   @doc "Awaits one task, bounded by the generous failure bound of `eventually/2`."
   def await(task), do: Task.await(task, @wait_bound_ms)
 
