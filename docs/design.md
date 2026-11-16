@@ -460,8 +460,13 @@ the panic tests abort the VM when `guard` does not catch.
   _}` error, and the next request that has a body renews the credentials.
   `from_url/2` builds the config from `s3://bucket/prefix`. It does not follow
   redirects: Req would sign the request again for the new host and send it the
-  body, so a 3xx is `{:error, {:http, status, body}}` and the endpoint must be
-  the region of the bucket.
+  body, so a 3xx is `{:error, {:http, status, summary}}` and the endpoint must be
+  the region of the bucket. An error answer never returns its body: stores
+  echo request details in it (`InvalidToken` carries the session token,
+  `SignatureDoesNotMatch` the canonical request), and the error reaches
+  callers, logs and telemetry. `summary` is `"Code: Message"` from the S3
+  error XML, `""` when the body is not one, cut to `:error_limit` bytes
+  (default 512, whole characters).
 - **Credentials.** The cell state, the contexts and the placement hold the
   store config, and OTP prints them in a crash report. A store can implement
   the optional `conceal/1`, which the library applies to the `:store` option;
