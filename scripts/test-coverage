@@ -9,8 +9,23 @@
 #           reported by cargo-llvm-cov. Fuzz targets and the panic test NIFs
 #           are left out.
 #
-# The instrumented NIF replaces priv/native/alambique_nif.so for the run; the
-# file is removed afterwards so the next build compiles the normal one.
+#   scripts/test-coverage          build, run and report in this process
+#   scripts/test-coverage build    build the instrumented NIF once: it stays
+#                                  in priv/native and its objects in the
+#                                  llvm-cov target directory
+#   scripts/test-coverage run ARGS the default suite with --cover under that
+#                                  NIF; ARGS go to `mix test`. With
+#                                  --export-coverage NAME the run only saves
+#                                  cover/NAME.coverdata and the profiles
+#                                  (.profraw) tagged by MIX_TEST_PARTITION,
+#                                  and fails only on test failures
+#   scripts/test-coverage report   sum the .coverdata files (when there are
+#                                  any) and the profiles of all runs and
+#                                  enforce the threshold, then remove the NIF
+#
+# CI builds once, runs the parts of a partitioned suite on other runners and
+# reports over all of them: llvm-cov sums only profiles of the same binary, so
+# the parts load the NIF of the build and never compile their own.
 set -euo pipefail
 : "${ALAMBIQUE_COVERAGE_MIN:?run through mise, which sets it}"
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -19,27 +34,90 @@ target=$crate/target/llvm-cov-target
 nif=$root/priv/native/alambique_nif.so
 cd "$root"
 
-cleanup() { rm -f "$nif"; }
-trap cleanup EXIT
-cleanup
-rm -rf "$target"
+mode=${1:-all}
+[[ $# -gt 0 ]] && shift
+case $mode in
+  all | build | run | report) ;;
+  *)
+    printf 'usage: %s [build | run ARGS | report]\n' "$0" >&2
+    exit 2
+    ;;
+esac
 
-status=0
-(
-  # The wrapper variables instrument only this crate, not its dependencies.
-  eval "$(cd "$crate" && cargo llvm-cov show-env --sh 2>/dev/null | grep '^export')"
-  export CARGO_TARGET_DIR=$target
-  export LLVM_PROFILE_FILE=$target/alambique_nif-%p-%12m.profraw
-  mix test --cover
-) || status=$?
+# Mix does not notice a deleted NIF: the compiled Native module has to go with
+# it, so the next compile runs Rustler again.
+forget_nif() {
+  rm -f "$nif" "$root/_build/test/lib/alambique/ebin/Elixir.Alambique.Replication.Native.beam"
+}
 
-echo
-echo "Rust (NIF loaded by the BEAM), minimum ${ALAMBIQUE_COVERAGE_MIN}% of lines:"
-(
-  cd "$crate"
-  CARGO_TARGET_DIR=$crate/target cargo llvm-cov report --release \
-    --ignore-filename-regex '(fuzzing|test_panic)\.rs' \
-    --fail-under-lines "$ALAMBIQUE_COVERAGE_MIN"
-) || status=$?
+build() {
+  forget_nif
+  rm -rf "$target"
+  (
+    # The wrapper variables instrument only this crate, not its dependencies.
+    eval "$(cd "$crate" && cargo llvm-cov show-env --sh 2>/dev/null | grep '^export')"
+    export CARGO_TARGET_DIR=$target
+    MIX_ENV=test mix compile
+  )
+  [[ -f $nif ]] || {
+    echo "build: $nif was not produced" >&2
+    return 1
+  }
+}
 
-exit "$status"
+run() {
+  [[ -f $nif ]] || {
+    echo "run: no instrumented NIF at $nif; run the build first" >&2
+    return 1
+  }
+  ALAMBIQUE_NIF_PREBUILT=1 \
+    LLVM_PROFILE_FILE=$target/alambique_nif-${MIX_TEST_PARTITION:-0}-%p-%12m.profraw \
+    mix test --cover "$@"
+}
+
+elixir_report() {
+  compgen -G "$root/cover/*.coverdata" >/dev/null || {
+    echo "report: no cover/*.coverdata; run the suite with --export-coverage first" >&2
+    return 1
+  }
+  echo "Elixir (all runs), minimum ${ALAMBIQUE_COVERAGE_MIN}% of lines:"
+  # It compiles the project; the NIF of the build is not built again.
+  ALAMBIQUE_NIF_PREBUILT=1 mix test.coverage
+}
+
+rust_report() {
+  echo "Rust (NIF loaded by the BEAM), minimum ${ALAMBIQUE_COVERAGE_MIN}% of lines:"
+  # llvm-cov takes only executable files as objects; an artifact download
+  # drops the mode.
+  chmod +x "$target"/release/deps/libalambique_nif.so
+  (
+    cd "$crate"
+    CARGO_TARGET_DIR=$crate/target cargo llvm-cov report --release \
+      --ignore-filename-regex '(fuzzing|test_panic)\.rs' \
+      --fail-under-lines "$ALAMBIQUE_COVERAGE_MIN"
+  )
+}
+
+# The NIF replaces priv/native/alambique_nif.so; remove it afterwards so the
+# next build compiles the normal one.
+case $mode in
+  build) build ;;
+  run) run "$@" ;;
+  report)
+    trap forget_nif EXIT
+    status=0
+    elixir_report || status=$?
+    echo
+    rust_report || status=$?
+    exit "$status"
+    ;;
+  all)
+    trap forget_nif EXIT
+    build
+    status=0
+    run || status=$?
+    echo
+    rust_report || status=$?
+    exit "$status"
+    ;;
+esac
