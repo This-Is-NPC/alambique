@@ -481,6 +481,22 @@ the panic tests abort the VM when `guard` does not catch.
   errors.
 - `AlambiqueTestkit.MemoryStore` implements it in memory, shared by every
   node of a test cluster, with the faults in §11.
+- **Read caps.** No read of the bucket is unbounded. `read_limits:
+  [max_object_bytes:]` (default 1 073 741 824, 1 GiB) caps what is read whole
+  from a cell's files: a segment or snapshot (restore, compaction, retention,
+  replicas, the ops tools) and a feed object. `read_limits: [max_control_bytes:]`
+  (default 16 777 216, 16 MiB) caps the small objects: leases, node entries,
+  the crash counter, and the trash, chain and moved markers. An object over its
+  cap is refused with `{:error, {:too_large, size, max}}` and a
+  `[:alambique, :store, :too_large]` event, before it is held in memory: the
+  optional callback `get/3` of the store behaviour gives up at the declared
+  size (`Store.S3` streams the body and halts at `Content-Length`); a store
+  without it is read whole and checked after. The error is final, never retried,
+  and does not count toward the circuit breaker. A restore also checks the size
+  that its first range reports before the `GET`, and the page index size that a
+  lazy file declares. A restore that meets such a file tries the next chain
+  start, as for any other unreadable file. Not covered: a store that ignores
+  `Range` and returns the whole object to a ranged read.
 
 ### 3.1 Trust model
 
@@ -1195,7 +1211,8 @@ A restore, and the hydration of a lazily restored cell, hold at most
 read from the store. `Replication.Budget` counts it: a read takes its weight
 before it is made and gives it back when the bytes are no longer needed. An
 object larger than the cap weighs the cap, so it is read alone and the
-ceiling is `max(max_inflight_bytes, largest object)`.
+ceiling is `max(max_inflight_bytes, largest object)`. No object larger than
+`read_limits: [max_object_bytes:]` is read at all (§3).
 
 - **Full restore.** The store gives no size before a read, so the first range
   of a file (`min(edge_bytes, max_inflight_bytes)` bytes) says it, and is the

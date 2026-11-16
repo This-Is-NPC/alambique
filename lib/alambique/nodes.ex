@@ -62,6 +62,7 @@ defmodule Alambique.Nodes do
     * `:skew_margin_ms` - tolerated clock skew between nodes; `:ttl_ms` must
       be greater than twice this
     * `:page_size` - keys per store listing request (default 100)
+    * `:max_control_bytes` - largest entry read (default 16 777 216)
   """
   @type ctx :: %{
           store: {module, term},
@@ -69,7 +70,8 @@ defmodule Alambique.Nodes do
           prefix: String.t(),
           ttl_ms: pos_integer,
           skew_margin_ms: non_neg_integer,
-          page_size: pos_integer
+          page_size: pos_integer,
+          max_control_bytes: pos_integer
         }
 
   @type error :: {:error, term}
@@ -82,13 +84,22 @@ defmodule Alambique.Nodes do
     ctx =
       opts
       |> Map.new()
-      |> Map.take([:store, :clock, :prefix, :ttl_ms, :skew_margin_ms, :page_size])
+      |> Map.take([
+        :store,
+        :clock,
+        :prefix,
+        :ttl_ms,
+        :skew_margin_ms,
+        :page_size,
+        :max_control_bytes
+      ])
       |> Map.put_new(:page_size, 100)
+      |> Map.put_new(:max_control_bytes, Alambique.Store.max_control_bytes())
 
     valid? =
       match?(
-        %{store: {_, _}, clock: {_, _}, prefix: p, page_size: n}
-        when is_binary(p) and is_integer(n) and n > 0,
+        %{store: {_, _}, clock: {_, _}, prefix: p, page_size: n, max_control_bytes: m}
+        when is_binary(p) and is_integer(n) and n > 0 and is_integer(m) and m > 0,
         ctx
       ) and
         Conditional.timing?(ctx[:ttl_ms], ctx[:skew_margin_ms])

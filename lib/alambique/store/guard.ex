@@ -15,6 +15,10 @@ defmodule Alambique.Store.Guard do
   def get({store, config}, key), do: guard(fn -> store.get(config, key) end)
 
   @impl true
+  def get({store, config}, key, max_bytes),
+    do: guard(fn -> Alambique.Store.call_get({store, config}, key, max_bytes) end)
+
+  @impl true
   def head({store, config}, key), do: guard(fn -> store.head(config, key) end)
 
   @impl true

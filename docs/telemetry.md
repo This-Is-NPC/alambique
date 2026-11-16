@@ -67,6 +67,7 @@ instance name and `location` the id of the location.
 | --- | --- | --- |
 | `[:alambique, :store, :breaker, :open]` | `cooldown_ms` (the configured cool-down; the wait is up to 20 % longer) | `instance`, `location`, `reason` (`:failures`: `breaker: [failures:]` failures in a row; `:probe_failed`: the probe after a cool-down failed) |
 | `[:alambique, :store, :breaker, :close]` | none | `instance`, `location` |
+| `[:alambique, :store, :too_large]` | `size` (bytes the object has, or declared), `max` (its cap, `read_limits:`) | `key`: an object over its cap was refused before it was held; not a store failure, not counted by the breaker |
 | `[:alambique, :store, :failure]` | none | `instance`, `location`, `operation` (`:put`, `:get`, `:head`, `:get_range`, `:list`, `:delete`; `nil` for a killed request that was in none), `reason` (below), `counted` (`true` if it counted toward `breaker: [failures:]`), `kind` and `detail` (the crash, below; `nil` when the failure is not a crash) |
 
 `[:alambique, :store, :failure]` is emitted for each store request that fails

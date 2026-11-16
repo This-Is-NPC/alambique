@@ -32,10 +32,12 @@ defmodule Alambique.Conditional do
     Retry.once(ctx.store, bound(ctx), fn -> store.put(config, key, body, condition, %{}) end)
   end
 
-  @doc "One `get`, bounded in time."
+  @doc "One `get` of at most `ctx.max_control_bytes`, bounded in time."
   @spec get(map, String.t()) :: {:ok, binary, Alambique.Store.etag()} | {:error, term}
-  def get(%{store: {store, config}} = ctx, key) do
-    case Retry.once(ctx.store, bound(ctx), fn -> store.get(config, key) end) do
+  def get(%{store: store} = ctx, key) do
+    case Retry.once(store, bound(ctx), fn ->
+           Alambique.Store.get_capped(store, key, ctx.max_control_bytes)
+         end) do
       {:ok, body, etag, _meta} -> {:ok, body, etag}
       {:error, reason} -> {:error, reason}
     end

@@ -390,12 +390,17 @@ defmodule Alambique.Replication.Restore do
           {:ok, state, {:staged, header, post, total}, header, post}
 
         {:need_tail, n} ->
-          # A page index larger than the edge is read whole, past the cap if it
-          # must be: the file itself says how large it is.
-          grow(env, n)
+          # A page index larger than the edge is read whole, past the memory
+          # budget if it must be, but not past `max_object_bytes`: the file
+          # says how large its index is, and it may lie.
+          if n > env.ctx.max_object_bytes do
+            {:error, {kind, key, too_large(key, n, env.ctx.max_object_bytes)}}
+          else
+            grow(env, n)
 
-          with {:ok, tail, _total, _meta} <- range(env, key, max(total - n, 0), n),
-               do: inspect_file(env, state, {:edges, head, tail, total}, kind, key)
+            with {:ok, tail, _total, _meta} <- range(env, key, max(total - n, 0), n),
+                 do: inspect_file(env, state, {:edges, head, tail, total}, kind, key)
+          end
 
         {:error, reason} ->
           {:error, {kind, key, reason}}
@@ -660,7 +665,7 @@ defmodule Alambique.Replication.Restore do
   defp admit(_env, [], admitted), do: {Enum.reverse(admitted), []}
 
   defp admit(env, [{key, {:ok, head, total, meta}} | rest] = probes, admitted) do
-    if total <= env.ctx.max_inflight_bytes and Budget.try_acquire(env.budget, total) == :ok do
+    if prefetchable?(env, total) and Budget.try_acquire(env.budget, total) == :ok do
       admit(env, rest, [{key, head, total, meta} | admitted])
     else
       {Enum.reverse(admitted), probes}
@@ -669,12 +674,17 @@ defmodule Alambique.Replication.Restore do
 
   defp admit(_env, probes, admitted), do: {Enum.reverse(admitted), probes}
 
+  # A file larger than the budget is read alone by the walk; one larger than
+  # the cap is refused there.
+  defp prefetchable?(env, total),
+    do: total <= env.ctx.max_inflight_bytes and total <= env.ctx.max_object_bytes
+
   # What waits at the head can never be admitted: it failed, or it is larger
   # than the budget and is read alone by the walk.
   defp blocked?(_env, []), do: false
 
   defp blocked?(env, [{_key, {:ok, _head, total, _meta}} | _]),
-    do: total > env.ctx.max_inflight_bytes
+    do: not prefetchable?(env, total)
 
   defp blocked?(_env, _left), do: true
 
@@ -801,6 +811,10 @@ defmodule Alambique.Replication.Restore do
         shrink(env, env.window - total)
         {:ok, body, meta}
 
+      {:ok, _head, total, _meta} when total > env.ctx.max_object_bytes ->
+        shrink(env, env.window)
+        {:error, too_large(key, total, env.ctx.max_object_bytes)}
+
       {:ok, _head, total, _meta} ->
         shrink(env, env.window)
         hold(env, total)
@@ -822,6 +836,12 @@ defmodule Alambique.Replication.Restore do
     Budget.release(env.budget, weight)
     if weight > 0, do: room(env)
     :ok
+  end
+
+  # Fails closed: a file over the cap is never read.
+  defp too_large(key, size, max) do
+    Alambique.Store.too_large(key, size, max)
+    {:too_large, size, max}
   end
 
   defp hold(env, bytes) do

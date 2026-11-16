@@ -563,7 +563,7 @@ defmodule Alambique.Replication.Replicator do
           :taken
 
         {:error, :precondition_failed} ->
-          collide(store, config, key, body, meta, meta["epoch"], mode)
+          collide(ctx, store, config, key, body, meta, meta["epoch"], mode)
 
         {:error, reason} ->
           {:retry, reason}
@@ -571,8 +571,8 @@ defmodule Alambique.Replication.Replicator do
     end)
   end
 
-  defp collide(store, config, key, body, meta, epoch, {:floor, floor}) do
-    case store.get(config, key) do
+  defp collide(ctx, store, config, key, body, meta, epoch, {:floor, floor}) do
+    case Alambique.Store.get_capped({store, config}, key, ctx.max_object_bytes) do
       {:ok, ^body, _etag, %{"epoch" => ^epoch}} ->
         :ok
 
@@ -580,6 +580,9 @@ defmodule Alambique.Replication.Replicator do
         if Objects.epoch_of(found) < floor,
           do: overwrite(store, config, key, body, meta, etag),
           else: :taken
+
+      {:error, {:too_large, _, _}} = error ->
+        error
 
       {:error, reason} ->
         {:retry, reason}

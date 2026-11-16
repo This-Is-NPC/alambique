@@ -336,7 +336,7 @@ defmodule Alambique.Trash do
   # Only keys of the cell the manifest names can go: whatever else is in the
   # object, a damaged or foreign manifest never deletes outside the cell.
   defp fetch_manifest(ctx, manifest, deadline) do
-    case Objects.fetch_optional(ctx, manifest, deadline) do
+    case Objects.fetch_optional(ctx, manifest, deadline, :control) do
       {:ok, body, _meta} -> decode(ctx, body)
       :none -> :gone
       {:error, _} = error -> error

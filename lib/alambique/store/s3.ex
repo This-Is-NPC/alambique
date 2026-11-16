@@ -133,6 +133,54 @@ defmodule Alambique.Store.S3 do
     end
   end
 
+  # Streams the body and halts at the declared size (or the bytes received)
+  # past `max_bytes`, so an object that is too large is never held.
+  @impl true
+  def get(config, key, max_bytes) do
+    case request(config, :get, key, into: capped_into(max_bytes)) do
+      {:ok, %{private: %{too_large: size}}} ->
+        {:error, {:too_large, size, max_bytes}}
+
+      {:ok, %{status: 200, body: body} = resp} when byte_size(body) <= max_bytes ->
+        {:ok, body, etag(resp), meta(resp)}
+
+      # A client that did not stream (a test adapter) returned the whole body.
+      {:ok, %{status: 200, body: body}} ->
+        {:error, {:too_large, byte_size(body), max_bytes}}
+
+      other ->
+        error(other)
+    end
+  end
+
+  defp capped_into(max_bytes) do
+    fn {:data, data}, {req, resp} ->
+      size = byte_size(resp.body) + byte_size(data)
+      declared = declared_size(resp)
+
+      cond do
+        resp.status == 200 and max(size, declared) > max_bytes ->
+          {:halt, {req, Req.Response.put_private(resp, :too_large, max(size, declared))}}
+
+        # An error body is read up to the cap too.
+        size > max_bytes ->
+          {:halt, {req, resp}}
+
+        true ->
+          {:cont, {req, %{resp | body: resp.body <> data}}}
+      end
+    end
+  end
+
+  defp declared_size(resp) do
+    with [value | _] <- Req.Response.get_header(resp, "content-length"),
+         {size, ""} <- Integer.parse(value) do
+      size
+    else
+      _ -> 0
+    end
+  end
+
   @impl true
   def get_range(config, key, offset, length) do
     range = "bytes=#{offset}-#{offset + length - 1}"

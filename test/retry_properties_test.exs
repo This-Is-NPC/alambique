@@ -31,7 +31,14 @@ defmodule Alambique.Replication.RetryPropertiesTest do
   end
 
   defp ctx(backoff, max),
-    do: %{backoff_ms: backoff, max_backoff_ms: max, max_attempts: 1_000_000, store: nil}
+    do: %{
+      backoff_ms: backoff,
+      max_backoff_ms: max,
+      max_attempts: 1_000_000,
+      store: nil,
+      max_object_bytes: Alambique.Store.max_object_bytes(),
+      max_control_bytes: Alambique.Store.max_control_bytes()
+    }
 
   property "the first result that is not {:retry, _} is returned as it is, after that many calls" do
     check all(
