@@ -1222,7 +1222,9 @@ defmodule Alambique do
   The node that owns the cell now, `:none` when it is asleep. An owner that
   is not a member (gone, or running the instance without a link to this node)
   and whose lease has not expired gives `{:error, {:unavailable, owner,
-  expires_at_ms}}`, as in `lease/3`.
+  expires_at_ms}}`, as in `lease/3`. A local process that stopped serving (its
+  `[:alambique, :cell, :stop]` event was emitted) is not the owner, even for
+  the moment it takes to exit.
 
   With `hint: true` the answer may come from the owner-hint cache: a local
   process answers `{:ok, node()}`, then a hint whose node still runs the

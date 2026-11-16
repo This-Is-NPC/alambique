@@ -91,7 +91,8 @@ defmodule Alambique.Cell do
   # Slot 1 counts the callers the cell accepted and has not answered; slot 2
   # the calls the router sent that the cell has not finished with (`admit/2`);
   # slot 3 is the monotonic ms of the last call, 0 until the wake ends; slot 4
-  # is the size of the WAL after the last landed batch or checkpoint.
+  # is the size of the WAL after the last landed batch or checkpoint; slot 5
+  # is 1 once the cell stopped serving (`serving/2`).
   @spec pending(pid, :atomics.atomics_ref()) :: {:ok, non_neg_integer} | :none
   def pending(pid, load) do
     if Process.alive?(pid),
@@ -101,7 +102,20 @@ defmodule Alambique.Cell do
 
   @doc false
   @spec new_load() :: :atomics.atomics_ref()
-  def new_load, do: :atomics.new(4, [])
+  def new_load, do: :atomics.new(5, [])
+
+  @doc false
+  # The process of `id` unless it already stopped serving and only has to
+  # exit: it is alive for the time it closes its database and releases the
+  # lease, and is no longer the owner then.
+  @spec serving(Alambique.Config.t(), String.t()) :: pid | nil
+  def serving(config, id) do
+    with {pid, load} <- find(config, id),
+         do: if(:atomics.get(load, 5) == 0, do: pid)
+  end
+
+  # Slot 5 is set when the cell stops serving, before its stop event.
+  defp mark_stopped(state), do: :atomics.put(state.load, 5, 1)
 
   @doc false
   # The monotonic ms of the last call, `nil` until the wake ends.
@@ -1148,6 +1162,7 @@ defmodule Alambique.Cell do
     end
 
     Pipe.kill(state.pipe)
+    mark_stopped(state)
 
     Telemetry.emit([:cell, :stop], %{}, %{
       cell: state.id,
@@ -1182,6 +1197,7 @@ defmodule Alambique.Cell do
 
   @impl true
   def terminate(reason, state) do
+    mark_stopped(state)
     result = Inflight.busy(state.inflight, fn -> finish(reason, state) end)
     # After the last acknowledgement of a clean stop.
     Hold.drop_cell(state.config, state.id)
