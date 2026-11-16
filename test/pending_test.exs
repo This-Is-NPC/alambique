@@ -71,4 +71,44 @@ defmodule Alambique.PendingTest do
     assert {_, %{reason: :idle}} = await_event([:alambique, :cell, :hibernate], cell)
     eventually(fn -> Alambique.load(inst, cell) == :none end)
   end
+
+  describe "hibernating only if idle" do
+    test "a cell with a call behind the request refuses and stays awake", env do
+      inst = start_instance(env, migrations: @schema)
+      cell = unique_cell()
+      {:ok, _} = Alambique.execute(inst, cell, @insert, [0])
+      pid = pid_of(inst, cell)
+
+      # The request comes first in the mailbox and a call right behind it, so
+      # the cell sees one pending call while it decides.
+      :sys.suspend(pid)
+
+      hibernate =
+        Task.async(fn -> Alambique.Router.call(inst, cell, :hibernate_if_idle, 5_000) end)
+
+      eventually(fn -> {:message_queue_len, 1} == Process.info(pid, :message_queue_len) end)
+      call = Task.async(fn -> Alambique.execute(inst, cell, @insert, [1]) end)
+      eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 1, waking: false}} end)
+      :sys.resume(pid)
+
+      assert Task.await(hibernate, 5_000) == {:error, :busy}
+      assert {:ok, _} = Task.await(call, 5_000)
+      assert pid_of(inst, cell) == pid
+      assert {:ok, %{rows: [[2]]}} = Alambique.query(inst, cell, "SELECT count(*) FROM t")
+    end
+
+    test "an idle cell hibernates", env do
+      inst = start_instance(env, migrations: @schema)
+      cell = unique_cell()
+      {:ok, _} = Alambique.execute(inst, cell, @insert, [0])
+
+      assert Alambique.Router.call(inst, cell, :hibernate_if_idle, 5_000) == :ok
+      eventually(fn -> Alambique.load(inst, cell) == :none end)
+    end
+
+    test "a cell that is asleep is already idle", env do
+      inst = start_instance(env, migrations: @schema)
+      assert Alambique.Router.call(inst, unique_cell(), :hibernate_if_idle, 5_000) == :ok
+    end
+  end
 end
