@@ -2,9 +2,11 @@ defmodule Alambique.KeyValidationTest do
   @moduledoc "Keys and prefixes that name another place are refused."
   use ExUnit.Case, async: false
 
-  alias Alambique.Trash
+  import Alambique.LeaseHelpers
+
+  alias Alambique.{Lease, Trash}
   alias Alambique.Replication.Keys
-  alias AlambiqueTestkit.MemoryStore
+  alias AlambiqueTestkit.{ManualClock, MemoryStore}
 
   defp new_store do
     pid = start_supervised!({MemoryStore, []})
@@ -45,6 +47,22 @@ defmodule Alambique.KeyValidationTest do
                Trash.reap_ctx(env.ctx, Map.new(Trash.defaults()))
 
       assert {:ok, _, _, _} = env.mod.get(env.cfg, other)
+    end
+  end
+
+  describe "lease bodies" do
+    test "a body that names another cell is corrupt" do
+      world = ManualClock.new(1_000_000_000)
+      store = new_store()
+      ctx = node_ctx(store, world, unique_prefix("lease"))
+      {:ok, _} = Lease.acquire(ctx, "a", "n@host")
+      {:ok, _} = Lease.acquire(ctx, "b", "n@host")
+
+      {mod, cfg} = store
+      {:ok, body, _, _} = mod.get(cfg, "#{ctx.prefix}/cells/a/lease")
+      {:ok, _} = mod.put(cfg, "#{ctx.prefix}/cells/b/lease", body, :none, %{})
+
+      assert {:error, :corrupt_lease} = Lease.read(ctx, "b")
     end
   end
 end
