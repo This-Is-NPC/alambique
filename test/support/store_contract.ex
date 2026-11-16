@@ -141,15 +141,8 @@ defmodule Alambique.StoreContract do
         for round <- 1..5 do
           key = p <> "race-none-#{round}"
 
-          results =
-            race(@racers, fn i -> @store.put(c, key, "writer-#{i}", :if_none_match, %{}) end)
-
-          assert [{:ok, etag}] = Enum.filter(results, &match?({:ok, _}, &1))
-
-          assert @racers - 1 == Enum.count(results, &(&1 == {:error, :precondition_failed})),
-                 lost_report(results)
-
-          assert {:ok, _, ^etag, _} = @store.get(c, key)
+          results = race(@racers, fn i -> put_retrying(c, key, i, :if_none_match) end)
+          assert_one_winner(c, key, results)
         end
       end
 
@@ -158,15 +151,48 @@ defmodule Alambique.StoreContract do
           key = p <> "race-match-#{round}"
           {:ok, etag} = @store.put(c, key, "base", :none, %{})
 
-          results =
-            race(@racers, fn i -> @store.put(c, key, "writer-#{i}", {:if_match, etag}, %{}) end)
+          results = race(@racers, fn i -> put_retrying(c, key, i, {:if_match, etag}) end)
+          assert_one_winner(c, key, results)
+        end
+      end
 
-          assert [{:ok, new_etag}] = Enum.filter(results, &match?({:ok, _}, &1))
+      # A put that timed out may have landed, so it is repeated a few times;
+      # a `:precondition_failed` after a timeout is then `{:maybe, i}`: racer
+      # `i` lost, or won on the first try and only the stored object tells.
+      defp put_retrying(c, key, i, condition, timed_out? \\ false, attempts \\ 3) do
+        case @store.put(c, key, "writer-#{i}", condition, %{}) do
+          {:error, :timeout} when attempts > 1 ->
+            put_retrying(c, key, i, condition, true, attempts - 1)
 
-          assert @racers - 1 == Enum.count(results, &(&1 == {:error, :precondition_failed})),
-                 lost_report(results)
+          {:error, :precondition_failed} when timed_out? ->
+            {:maybe, i}
 
-          assert {:ok, _, ^new_etag, _} = @store.get(c, key)
+          result ->
+            result
+        end
+      end
+
+      # Exactly one writer won: the one that got `{:ok, etag}`, and the object
+      # has that etag; or, when none did, a racer that timed out, and the
+      # object holds its body. Every other racer got `:precondition_failed`.
+      defp assert_one_winner(c, key, results) do
+        {oks, others} = Enum.split_with(results, &match?({:ok, _}, &1))
+        maybes = for {:maybe, i} <- others, do: i
+        lost = Enum.count(others, &(&1 == {:error, :precondition_failed}))
+        report = lost_report(results)
+
+        assert length(oks) <= 1, report
+        assert lost + length(maybes) == length(others), report
+
+        case oks do
+          [{:ok, etag}] ->
+            assert @racers - 1 == length(others), report
+            assert {:ok, _, ^etag, _} = @store.get(c, key)
+
+          [] ->
+            assert @racers == length(others) and maybes != [], report
+            assert {:ok, body, _, _} = @store.get(c, key)
+            assert body in Enum.map(maybes, &"writer-#{&1}"), report
         end
       end
 
