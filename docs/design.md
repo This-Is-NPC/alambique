@@ -2398,6 +2398,11 @@ reaper ignores a fixed key in a manifest and deletes the manifest; leaving the o
 of that location removes it. A pending manifest therefore can never delete the
 frozen marker, the retention marker or the crash counter of a returning cell.
 
+The cell a manifest names must be the `<cell>` segment of its own key and a
+plain id (not empty, `.` or `..`, no `/` or NUL); otherwise the reaper
+reports an error and leaves the manifest, so a forged cell such as `x/../y`
+cannot widen the prefix its keys are checked against.
+
 **Marking is idempotent.** A restore during the grace sees the marked files
 as before, and retention sees them in its listing too. Retention would mark
 them again at every run, so it writes `<cell>/trashed` with the TXID of the
