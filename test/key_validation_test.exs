@@ -1,11 +1,12 @@
 defmodule Alambique.KeyValidationTest do
-  @moduledoc "Keys and prefixes that name another place are refused."
+  @moduledoc "Keys and prefixes that name another place are refused: trash manifests, leases, prefixes and the mix tasks."
   use ExUnit.Case, async: false
   use ExUnitProperties
 
   import Alambique.LeaseHelpers
 
   alias Alambique.{Lease, Location, Trash}
+  alias Alambique.Ops.Options
   alias Alambique.Placement.Single
   alias Alambique.Replication.Keys
   alias AlambiqueTestkit.{ManualClock, MemoryStore}
@@ -113,6 +114,35 @@ defmodule Alambique.KeyValidationTest do
         prefix = Enum.join([head, dot, tail], "/")
         refute Location.valid?(%Location{id: "a", store: {MemoryStore, %{}}, prefix: prefix})
       end
+    end
+  end
+
+  describe "mix task options" do
+    setup do
+      old = Application.get_env(:alambique, :ops)
+      Application.put_env(:alambique, :ops, store: new_store(), prefix: "p")
+
+      on_exit(fn ->
+        if old,
+          do: Application.put_env(:alambique, :ops, old),
+          else: Application.delete_env(:alambique, :ops)
+      end)
+    end
+
+    test "a cell argument that is not an id is refused" do
+      for cell <- ["", "..", "a/b", "a\0b", "x/../y"] do
+        assert_raise Mix.Error, ~r/invalid cell/, fn -> Options.ctx([], cell) end
+      end
+
+      assert %{prefix: "p"} = Options.ctx([], "good-cell")
+    end
+
+    test "the store the tasks build hides its credentials" do
+      ctx = Options.ctx(bucket: "b", access_key_id: "k", secret_access_key: "very-secret")
+
+      refute inspect(ctx.store) =~ "very-secret"
+      assert {Alambique.Store.S3, %{secret_access_key: fun}} = ctx.store
+      assert is_function(fun, 0)
     end
   end
 end
