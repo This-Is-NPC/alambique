@@ -27,7 +27,7 @@ defmodule AlambiqueTestkit.Cluster do
 
   ## Telemetry
 
-  Every `[:alambique, :cell | :router | :lease | :replication | :feed, ...]` event of
+  Every `[:alambique, :cell | :router | :lease | :replication | :feed | :membership, ...]` event of
   every peer is forwarded to the cluster; `events/1` returns them as
   `%{node: name, event: [atom], measurements: map, meta: map, at: microseconds}`
   in arrival order. `at` is the operating system clock, which the peers share.
@@ -53,7 +53,8 @@ defmodule AlambiqueTestkit.Cluster do
     [:alambique, :lease, :renew],
     [:alambique, :lease, :lost],
     [:alambique, :replication, :fenced],
-    [:alambique, :feed, :publish]
+    [:alambique, :feed, :publish],
+    [:alambique, :membership, :changed]
   ]
 
   @partitioned_cookie :alambique_partitioned
@@ -364,7 +365,9 @@ defmodule AlambiqueTestkit.Cluster do
         ],
         Keyword.get(state.opts, :instance_opts, [])
       )
-      |> Keyword.merge(if name in Keyword.get(state.opts, :not_joined, []), do: [join: false], else: [])
+      |> Keyword.merge(
+        if name in Keyword.get(state.opts, :not_joined, []), do: [join: false], else: []
+      )
       |> Keyword.merge(state.placement)
 
     :ok = :erpc.call(node, __MODULE__.Boot, :start, [instance_opts, self(), name, @forwarded])

@@ -122,4 +122,24 @@ defmodule Alambique.MembershipViewTest do
     assert_raise ArgumentError, fn -> Alambique.members(:no_such_instance) end
     assert_raise ArgumentError, fn -> Alambique.preferred(:no_such_instance, "c") end
   end
+
+  test "a refresh that changes nothing emits no change", %{inst: inst} do
+    config = Alambique.Config.fetch!(inst)
+    ref = make_ref()
+    me = self()
+
+    :telemetry.attach(
+      ref,
+      [:alambique, :membership, :changed],
+      fn _, m, meta, _ -> send(me, {:changed, m, meta}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(ref) end)
+
+    for _ <- 1..5, do: Membership.sync(config)
+    Membership.leave(config)
+    Membership.join(config)
+    refute_receive {:changed, _, %{instance: ^inst}}, 300
+  end
 end

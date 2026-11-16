@@ -1936,6 +1936,9 @@ directories (`<data_dir>/work`, §20) are not part of the cache; `inflight`,
   per group), and a `:persistent_term` put scans every process, so a burst
   makes one refresh for the events that are waiting, and a view that did not
   change is not put.
+  When the stored member list changes, `Membership` emits
+  `[:alambique, :membership, :changed]` (`docs/telemetry.md`), once per stored
+  change, with the new and the previous list.
 - **Take over** (§5.1) runs on the calling node and starts the cell there
   with a hop budget of zero, whatever the hint or the ring say. It drops the
   hint for the cell on that node; other nodes keep a hint to the old owner

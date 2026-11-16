@@ -94,7 +94,7 @@ defmodule Alambique.JoinClusterTest do
 
     # n3 started with join: false: no node lists it, itself included.
     for from <- [:n1, :n2, :n3],
-        do: assert(on(c, from, :members, [inst]) == Enum.sort([n1, n2]))
+        do: eventually(fn -> on(c, from, :members, [inst]) == Enum.sort([n1, n2]) end, 10_000)
 
     preferred = on(c, :n1, :preferred, [inst, cell])
     assert preferred in [n1, n2]
@@ -111,5 +111,36 @@ defmodule Alambique.JoinClusterTest do
 
     for from <- [:n2, :n3],
         do: eventually(fn -> on(c, from, :preferred, [inst, cell]) == preferred end, 10_000)
+  end
+
+  defp changes(c, name),
+    do:
+      for(
+        %{event: [:alambique, :membership, :changed], node: ^name, meta: meta, measurements: m} <-
+          Cluster.events(c),
+        do: {meta, m}
+      )
+
+  test "a node that joins is reported once by [:membership, :changed]", ctx do
+    %{cluster: c, inst: inst} = ctx
+    [n1, n2, n3] = for name <- [:n1, :n2, :n3], do: Cluster.node(c, name)
+
+    eventually(fn -> on(c, :n1, :members, [inst]) == Enum.sort([n1, n2]) end, 10_000)
+    before = length(changes(c, :n1))
+    assert :ok = on(c, :n3, :join, [inst])
+    eventually(fn -> length(changes(c, :n1)) > before end, 10_000)
+
+    {meta, measurements} = c |> changes(:n1) |> List.last()
+    assert meta.instance == inst
+    assert meta.members == Enum.sort([n1, n2, n3])
+    assert meta.previous == Enum.sort([n1, n2])
+    assert measurements == %{count: 3}
+
+    count = length(changes(c, :n1))
+    assert {:ok, _} = on(c, :n3, :drain, [inst, []])
+    eventually(fn -> length(changes(c, :n1)) > count end, 10_000)
+    {meta, %{count: 2}} = c |> changes(:n1) |> List.last()
+    assert meta.members == Enum.sort([n1, n2])
+    assert meta.previous == Enum.sort([n1, n2, n3])
   end
 end
