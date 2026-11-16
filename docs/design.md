@@ -495,7 +495,19 @@ the panic tests abort the VM when `guard` does not catch.
   and does not count toward the circuit breaker. A restore also checks the size
   that its first range reports before the `GET`, and the page index size that a
   lazy file declares. A restore that meets such a file tries the next chain
-  start, as for any other unreadable file. Not covered: a store that ignores
+  start, as for any other unreadable file.
+
+  `max_object_bytes` is also the largest cell the library can keep. A full
+  restore applies each file from memory, and compaction holds its inputs and
+  its output as binaries (`Compaction.fetch_all`, `merge`), so a snapshot is as
+  large as the compressed database. Only a lazy restore reads ranges. The
+  library therefore never writes what it could not read back: a merged segment
+  or snapshot over the cap is skipped with reason `{:too_large, size, max}`
+  (`[:compaction, :merge | :snapshot]` with `result: :skipped`, and the
+  `too_large` event), and an upload of a segment, snapshot or rewind segment
+  over the cap fails with the same error, which stops the cell. A cell whose
+  database compresses to more than the cap keeps its level-0 chain and is not
+  snapshotted until the cap is raised. Not covered: a store that ignores
   `Range` and returns the whole object to a ranged read.
 
 ### 3.1 Trust model

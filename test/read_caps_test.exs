@@ -101,6 +101,20 @@ defmodule Alambique.ReadCapsTest do
     end
   end
 
+  describe "writes" do
+    test "a segment larger than the cap is not uploaded" do
+      {_pid, {_, cfg} = store} = start_store()
+      dir = tmp_dir()
+      ctx = %{ctx(store, new_world(), timeout_ms: 2_000) | max_object_bytes: 1_000}
+      {conn, state} = new_replicator(dir, "src.db")
+      run_op(conn, {:put, 1, 20_000})
+
+      assert {:error, reason} = Replication.Replicator.sync(state, ctx)
+      assert inspect(reason) =~ "too_large"
+      assert {:ok, [], nil} = MemoryStore.list(cfg, "repl-test/cells/", nil, 10)
+    end
+  end
+
   describe "control objects" do
     defp lease_ctx(store, cap) do
       {m, c} = store

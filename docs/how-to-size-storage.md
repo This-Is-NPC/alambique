@@ -28,6 +28,7 @@ written whole, compressed with LZ4, whatever part of it changed.
 | Empty segment | about 200 bytes | once per wake | like level 0 | on |
 | Merged segment (levels 1 to `max_level`) | the pages of `fanout^level` batches, each page once: close to their level-0 bytes when rows are large | every 8 batches (level 1), 64 (level 2) | `delete_superseded`: once the next level replaces it; the top level by retention | on; fanout 8, `max_level` 2 |
 | Snapshot (`0009/...`) | the whole database | when the level-0 bytes written since the last one reach `snapshot_ratio` (2.0) times its size; at most 7 days or 4096 TXIDs apart | retention; a new snapshot also marks the previous one unless it is 3 days after the one before it (`snapshot_keep_ms`) | on |
+| Cap on all of the above | no object larger than `read_limits: [max_object_bytes:]` (1 GiB) is written or read: a merge or snapshot over it is skipped, an upload over it fails | | | on |
 | Feed object (`feed/<shard>/...`) | every changed row of a batch as zlib-compressed JSON, with all its values | once per batch with row changes | the feed prune, after `retention_ms` | on; **seven days** |
 | Feed rows in the cell's file | not an object: a second copy of each changed row, in the table `_alambique_feed`, written into the segments of the batch once and deleted by the next write | with every row change | the next write | on; `feed: false` turns it off |
 | Lease | about 140 bytes, put again | every `lease_ttl_ms / 3` | overwritten | 10 s |
