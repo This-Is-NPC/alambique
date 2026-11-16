@@ -105,11 +105,29 @@ defmodule Alambique.Membership do
   # earlier could otherwise overwrite a newer view.
   defp store_view(config) do
     view = compute(config)
-    # An unchanged view is not put again: a put scans all processes.
-    if :persistent_term.get(view_key(config), nil) != view,
-      do: :persistent_term.put(view_key(config), view)
 
-    :ok
+    # An unchanged view is not put again: a put scans all processes.
+    case :persistent_term.get(view_key(config), nil) do
+      ^view ->
+        :ok
+
+      old ->
+        :persistent_term.put(view_key(config), view)
+        changed(config, old, view)
+    end
+  end
+
+  # The first view has no previous one to differ from; a change of the foreign
+  # nodes alone is not a change of the members.
+  defp changed(_config, nil, _view), do: :ok
+  defp changed(_config, %{members: members}, %{members: members}), do: :ok
+
+  defp changed(config, old, view) do
+    Alambique.Telemetry.emit([:membership, :changed], %{count: length(view.members)}, %{
+      instance: config.name,
+      members: view.members,
+      previous: old.members
+    })
   end
 
   defp compute(config) do

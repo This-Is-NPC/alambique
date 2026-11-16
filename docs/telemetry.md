@@ -105,6 +105,23 @@ without reaching the store, and emits nothing. A failed request that reached
 the store is in the events of its operation (`[:alambique, :lease, ...]`,
 `[:alambique, :replication, ...]`) with its own reason.
 
+## Membership events
+
+Emitted by the `Alambique.Membership` process of a node (design §8), when the
+list of nodes that run the instance, as `Alambique.members/1` reads it,
+changes: a node joined, left, went down or announced another store. A refresh
+that finds the same list emits nothing, nor does a change of the nodes of
+another store alone, nor the first view a starting instance computes.
+
+| Event | Measurements | Metadata |
+| --- | --- | --- |
+| `[:alambique, :membership, :changed]` | `count` (nodes in the new list) | `instance` (the instance name), `members` (the new list, sorted), `previous` (the list before, sorted) |
+
+A burst of changes can be reported as one event whose `previous` is the list
+before the burst, so `members` and `previous` are the facts, not the number of
+joins and leaves. The event runs on the node that saw the change: each node
+emits its own.
+
 ## Drain events
 
 Emitted by `Alambique.drain/2` and by the drain of a stop (design §8), once
