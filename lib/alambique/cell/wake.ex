@@ -416,18 +416,30 @@ defmodule Alambique.Cell.Wake do
          :ok <- check_window(state, current) do
       pending = Enum.filter(state.migrations, fn {version, _} -> version > current end)
 
-      case apply_all(state, pending) do
-        {:ok, state} ->
-          settle(state, current, pending)
+      with {:ok, state} <- verified(state, pending) do
+        case apply_all(state, pending) do
+          {:ok, state} ->
+            settle(state, current, pending)
 
-        {:error, reason, [], state} ->
-          {:error, reason, state}
+          {:error, reason, [], state} ->
+            {:error, reason, state}
 
-        {:error, reason, applied, state} ->
-          with {:ok, state} <- settle(state, current, applied), do: {:error, reason, state}
+          {:error, reason, applied, state} ->
+            with {:ok, state} <- settle(state, current, applied), do: {:error, reason, state}
+        end
       end
     end
   end
+
+  # A migration writes: it waits for the end of a hydration whose checksum
+  # covers the file (design §16).
+  defp verified(state, []), do: {:ok, state}
+
+  defp verified(%State{config: %{lazy_restore: %{verify_writes: true}}} = state, _pending) do
+    with {:error, reason} <- Hydration.await(state), do: {:error, reason, state}
+  end
+
+  defp verified(state, _pending), do: {:ok, state}
 
   defp settle(state, current, applied) do
     with {:ok, state, made?} <- feed_schema(state),
@@ -518,14 +530,19 @@ defmodule Alambique.Cell.Wake do
     if Capture.current?(state.conn, state.config.feed) do
       {:ok, state, false}
     else
-      txid = Replicator.next_txid(state.repl)
+      # Installing the feed rewrites schema pages and is uploaded with the
+      # migration batch, so it waits like a migration (design §16).
+      with {:ok, state} <- verified(state, [:feed]), do: install_feed(state)
+    end
+  end
 
-      install = &Capture.install(&1.conn, state.config.feed)
+  defp install_feed(state) do
+    txid = Replicator.next_txid(state.repl)
+    install = &Capture.install(&1.conn, state.config.feed)
 
-      case Db.transaction(state.conn, txid, install, capture: false) do
-        {:ok, _} -> {:ok, state, true}
-        {:error, reason} -> {:error, {:migration, :feed, reason}, state}
-      end
+    case Db.transaction(state.conn, txid, install, capture: false) do
+      {:ok, _} -> {:ok, state, true}
+      {:error, reason} -> {:error, {:migration, :feed, reason}, state}
     end
   end
 

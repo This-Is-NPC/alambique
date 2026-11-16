@@ -107,6 +107,17 @@ For example, the 2 GB row:
  awake: [cache_kib: 512, max_bytes: 805_306_368, max_cells: 4_000]}
 ```
 
+## Lazy wake and the first write
+
+A cell that wakes lazily answers reads at once, but its first write waits for
+the whole file to download and pass its checksum (`lazy_restore:
+[verify_writes:]`, default on). The download time of the largest cell must stay
+under `call_timeout_ms` (default 15 000 ms), or those writes time out. The
+bench measured about 217 MB/s from the in-memory store and 80 MB/s with 20 ms
+per request, so 15 s covers about 3.2 GB and 1.2 GB; measure your store with
+`mise run bench:lazy`. See
+[how-to-speed-up-a-wake.md](how-to-speed-up-a-wake.md) step 5.
+
 ## Dirty IO schedulers
 
 Every SQLite call runs on a dirty IO scheduler, and the VM has 10 by default

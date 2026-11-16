@@ -2960,6 +2960,13 @@ nodes.
   are within the noise except for the first query without latency, where a
   miss on one of the 20 small files reads the whole file.
 
+  The write gate (`:verify_writes`, §16) was measured on the same database,
+  one run each: the first write after the first query is acknowledged at
+  210 ms from the start of the wake without the gate and at 1.37 s with it
+  (the end of the hydration), and at 1.86 s and 3.71 s with 20 ms per request
+  (`bench:lazy` columns `write open` and `write gated`; SeaweedFS was not
+  running).
+
 - **Quarantine cost.** The in-flight markers (§10) add one file descriptor
   per awake cell, one file creation and one removal per wake, and two
   `pwrite` calls per callback of the cell process: two for a read, four for a
@@ -3944,7 +3951,33 @@ pages and decoding them once more, bounded by `:verify_bytes` per file
 (`mise run bench:lazy`, §12). Larger files, usually the snapshot, are read as
 runs of frames, which cannot be checked: see the limit below.
 
-**Writes during hydration.** A write goes to the WAL as usual. Before a
+**Write gate.** With `lazy_restore: [verify_writes:]` on (the default) a
+write is not run while the hydrator works: the cell keeps the call (the
+`parked` list of its state, oldest last, still counted in `load` so the cell is
+not idle) and runs the parked writes in arrival order when `{:hydrated, pid}`
+arrives, that is, after the database checksum of the finished file matched.
+`:transaction`, `:execute`, `:isolated` and `:migrate` calls are parked; reads
+and everything else are served as usual. A call that is past its deadline when
+it is released is dropped like any other. If the hydration fails, the cell
+stops with `{:hydration_failed, reason}` and every parked caller gets
+`{:error, {:hydration_failed, reason}}`: nothing is acknowledged. A wake that
+has migrations to run, or whose change feed schema must be rewritten (it
+changes schema pages, which the migration batch uploads), waits for the
+hydration before the first one (`Hydration.await/1`), because they write too.
+The feed rows the previous owner left unpublished are read from the file and
+uploaded as feed objects, so `Publisher.after_ack/1` hands them over only when
+the hydration ended. `Capture.current?` and the feed floor only read pages and
+upload nothing. The release emits `[:cell, :writes_released]` with the number
+of writes that waited and the wait of the oldest. The wait is for the
+start of the write, not for its acknowledgement: a write that ran would
+already derive its segment CRCs from pages that no checksum has covered
+(`prepare_sums`, below), and the segment would be uploaded before the check.
+The hydrator needs no call of the cell (it reads and installs pages through
+the store and the NIF), so the wait cannot deadlock. The cost is that the
+first write after a lazy wake takes as long as the rest of the download
+(§12). With the option off, writes run at once, as described next.
+
+**Writes during hydration.** (`verify_writes: false`.) A write goes to the WAL as usual. Before a
 checkpoint writes a whole page, the VFS marks it local, and a fetch that
 arrives later never replaces a local page (but still records the CRC of the
 page as the store holds it). A write to part of a page that is not local waits
@@ -4011,10 +4044,15 @@ hibernates or crashes before its file is fully downloaded discards the partial
 file, and the next wake starts the lazy restore again. Pages read from a file larger
 than `:verify_bytes` (the snapshot, as a rule) are verified only by the
 database checksum at the end of hydration: until then a frame that still
-decodes (bit rot, forgery) is served, and the cell can acknowledge writes
-whose segment CRCs derive from it (`prepare_sums`); the mismatch stops the
-cell afterwards. Pages of smaller files are checked before they are served.
-Raising `:verify_bytes` narrows the window at the price of larger reads. A page-1 range
+decodes (bit rot, forgery) is served to reads. The window is closed for
+writes by the write gate above: nothing is acknowledged or uploaded that
+derives from those pages before the checksum matched. It stays open for reads,
+which acknowledge nothing; the mismatch stops the cell with
+`{:hydration_failed, reason}`. Pages of smaller files are checked before they
+are served. Raising `:verify_bytes` narrows the window for reads at the price
+of larger reads. With `verify_writes: false` the window is also open for
+writes: the cell can acknowledge writes whose segment CRCs derive from the
+damaged page, and the mismatch stops it afterwards. A page-1 range
 read that fails falls back to a full restore; a wake still fails when the
 store is unreachable or an object of the chain is gone. Raise `idle_timeout_ms`
 for very large cells.

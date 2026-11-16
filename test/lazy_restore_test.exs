@@ -14,7 +14,8 @@ defmodule Alambique.LazyRestoreTest do
     capture([
       [:alambique, :replication, :hydrate],
       [:alambique, :cell, :wake],
-      [:alambique, :cell, :stop]
+      [:alambique, :cell, :stop],
+      [:alambique, :cell, :writes_released]
     ])
 
     on_exit(&CrashPoints.reset/0)
@@ -103,10 +104,123 @@ defmodule Alambique.LazyRestoreTest do
              Alambique.query(inst, cell, "SELECT count(*), sum(length(v)) FROM t")
   end
 
+  describe "writes while the file is filling (design 16)" do
+    test "a write waits for the end of the hydration and is then acknowledged", ctx do
+      cell = seed(ctx, 300)
+      release = hold_hydration(cell)
+      inst = lazy_instance(ctx)
+      config = Alambique.Config.fetch!(inst)
+
+      assert {:ok, %{rows: [[1]]}} = Alambique.query(inst, cell, "SELECT n FROM t WHERE n = 1")
+      pid = Alambique.Cell.whereis(config, cell)
+
+      write =
+        Task.async(fn ->
+          Alambique.execute(inst, cell, "UPDATE t SET v = zeroblob(10) WHERE n = 5")
+        end)
+
+      eventually(fn -> length(:sys.get_state(pid).parked) == 1 end)
+      refute hydrated?(cell)
+      # Reads are not held back.
+      assert {:ok, %{rows: [[5]]}} = Alambique.query(inst, cell, "SELECT n FROM t WHERE n = 5")
+
+      release.()
+      assert {:ok, _} = Task.await(write, 30_000)
+      assert hydrated?(cell)
+
+      assert {%{count: 1, wait_ms: wait}, _} =
+               await_event([:alambique, :cell, :writes_released], cell, 5_000)
+
+      assert wait >= 0
+      assert :sys.get_state(pid).parked == []
+
+      assert {:ok, %{rows: [[10]]}} =
+               Alambique.query(inst, cell, "SELECT length(v) FROM t WHERE n = 5")
+    end
+
+    test "a write is never acknowledged on a file that fails its checksum", ctx do
+      cell = seed(ctx, 300)
+      {:ok, keys, nil} = MemoryStore.list(ctx.store_config, "", nil, 10_000)
+
+      for key <- keys, String.ends_with?(key, ".ltx") do
+        {:ok, body, _etag, _meta} = MemoryStore.get(ctx.store_config, key)
+
+        {:ok, _} =
+          MemoryStore.put(
+            ctx.store_config,
+            key,
+            Alambique.LtxTamper.alter_frames(body, :last),
+            :none,
+            %{}
+          )
+      end
+
+      # Frames only, so that the file checksum does not see the damage first.
+      inst = lazy_instance(ctx, lazy_restore: @lazy ++ [verify_bytes: 0])
+
+      assert {:error, {:hydration_failed, _}} =
+               Alambique.execute(inst, cell, "UPDATE t SET v = zeroblob(10) WHERE n = 5")
+    end
+
+    test "calls that are not writes are answered while the file is filling", ctx do
+      cell = seed(ctx, 300)
+      release = hold_hydration(cell)
+      inst = lazy_instance(ctx)
+      config = Alambique.Config.fetch!(inst)
+
+      assert {:ok, %{rows: [[1]]}} = Alambique.query(inst, cell, "SELECT n FROM t WHERE n = 1")
+      pid = Alambique.Cell.whereis(config, cell)
+      refute hydrated?(cell)
+
+      at = System.monotonic_time(:millisecond) + 5_000
+      assert :ok = GenServer.call(pid, :touch)
+      assert :ok = GenServer.call(pid, {:deadline, at, :touch})
+      assert {:ok, %{awake: true}} = GenServer.call(pid, :position)
+      assert Alambique.Cell.whereis(config, cell) == pid
+      release.()
+    end
+
+    test "installing the change feed at a wake waits for the hydration", ctx do
+      # The feed now omits a column: the wake rewrites the capture triggers.
+      seeder = start_instance(ctx, migrations: @schema, lazy_restore: false)
+      cell = unique_cell()
+
+      {:ok, :ok} =
+        Alambique.transaction(seeder, cell, fn tx ->
+          for n <- 1..300 do
+            {:ok, _} = Tx.execute(tx, "INSERT INTO t VALUES (?, randomblob(1024))", [n])
+          end
+
+          :ok
+        end)
+
+      :ok = Alambique.hibernate(seeder, cell)
+      release = hold_hydration(cell)
+      inst = lazy_instance(ctx, feed: [tables: %{"t" => [omit: ["v"]]}])
+
+      read = Task.async(fn -> Alambique.query(inst, cell, "SELECT count(*) FROM t") end)
+      assert Task.yield(read, 300) == nil
+      refute hydrated?(cell)
+
+      release.()
+      assert {:ok, %{rows: [[300]]}} = Task.await(read, 30_000)
+      assert hydrated?(cell)
+    end
+
+    test "with verify_writes off the write is acknowledged at once", ctx do
+      cell = seed(ctx, 300)
+      hold_hydration(cell)
+      inst = lazy_instance(ctx, lazy_restore: @lazy ++ [verify_writes: false])
+
+      assert {:ok, _} = Alambique.execute(inst, cell, "UPDATE t SET v = zeroblob(10) WHERE n = 5")
+      refute hydrated?(cell)
+    end
+  end
+
   test "writes made while the file is filling are durable", ctx do
     cell = seed(ctx, 300)
     release = hold_hydration(cell)
-    inst = lazy_instance(ctx)
+    inst = lazy_instance(ctx, lazy_restore: @lazy ++ [verify_writes: false])
 
     assert {:ok, _} =
              Alambique.execute(
@@ -133,7 +247,7 @@ defmodule Alambique.LazyRestoreTest do
   test "a cell that hibernates while the file is filling restores again", ctx do
     cell = seed(ctx, 300)
     hold_hydration(cell)
-    inst = lazy_instance(ctx)
+    inst = lazy_instance(ctx, lazy_restore: @lazy ++ [verify_writes: false])
     path = Path.join([ctx.dir, Atom.to_string(inst), cell <> ".cell"])
 
     assert {:ok, _} = Alambique.execute(inst, cell, "DELETE FROM t WHERE n > 100")
@@ -152,7 +266,7 @@ defmodule Alambique.LazyRestoreTest do
   test "a cell that dies while the file is filling does not reuse it", ctx do
     cell = seed(ctx, 300)
     hold_hydration(cell)
-    inst = lazy_instance(ctx)
+    inst = lazy_instance(ctx, lazy_restore: @lazy ++ [verify_writes: false])
 
     assert {:ok, _} = Alambique.execute(inst, cell, "DELETE FROM t WHERE n > 100")
     refute hydrated?(cell)
@@ -229,6 +343,12 @@ defmodule Alambique.LazyRestoreTest do
 
     assert_raise ArgumentError, ~r/verify_bytes must be a positive integer/, fn ->
       Alambique.Config.build(base ++ [lazy_restore: [verify_bytes: -1]])
+    end
+
+    assert %{lazy_restore: %{verify_writes: true}} = Alambique.Config.build(base)
+
+    assert_raise ArgumentError, ~r/verify_writes must be a boolean/, fn ->
+      Alambique.Config.build(base ++ [lazy_restore: [verify_writes: 1]])
     end
 
     assert_raise ArgumentError, ~r/unknown :lazy_restore/, fn ->

@@ -28,7 +28,9 @@ defmodule Bench do
       {conn, path} = generate(dir, megabytes)
       IO.puts("")
 
-      IO.puts("store                  full restore  page map  first query  complete file  misses")
+      IO.puts(
+        "store                  full restore  page map  first query  complete file  write open  write gated  misses"
+      )
 
       for latency <- [0, 20] do
         {:ok, pid} = MemoryStore.start_link()
@@ -125,9 +127,15 @@ defmodule Bench do
     lazy = Lazy.new(result, ctx, verify_bytes: verify_bytes())
     {:ok, hydrator} = Hydrator.start_link(lazy, concurrency: 8, fetch_ms: 30_000)
     {:ok, db} = Db.open(lazy_path)
-    {:ok, %{rows: [[_]]}} = Db.run(db, "SELECT length(v) FROM t WHERE id = (SELECT max(id) / 2 FROM t)", [])
+
+    {:ok, %{rows: [[_]]}} =
+      Db.run(db, "SELECT length(v) FROM t WHERE id = (SELECT max(id) / 2 FROM t)", [])
+
     {:ok, %{rows: [[_]]}} = Db.run(db, "SELECT count(*) FROM t WHERE k = 7", [])
     first_ms = ms(t)
+    # The first write without the gate: it runs as soon as the file serves.
+    :ok = Sqlite.execute(db, "PRAGMA query_only = OFF; UPDATE t SET k = k WHERE id = 3")
+    open_write_ms = ms(t)
 
     receive do
       {:hydrated, ^hydrator} -> :ok
@@ -137,6 +145,9 @@ defmodule Bench do
     end
 
     complete_ms = ms(t)
+    # With the gate (`verify_writes`) the first write waits for the hydration.
+    :ok = Sqlite.execute(db, "PRAGMA query_only = OFF; UPDATE t SET k = k WHERE id = 4")
+    gated_write_ms = ms(t)
     :telemetry.detach(handler)
 
     misses =
@@ -155,6 +166,8 @@ defmodule Bench do
         String.pad_leading(fmt(plan_ms), 10) <>
         String.pad_leading(fmt(first_ms), 13) <>
         String.pad_leading(fmt(complete_ms), 15) <>
+        String.pad_leading(fmt(open_write_ms), 13) <>
+        String.pad_leading(fmt(gated_write_ms), 13) <>
         String.pad_leading(Integer.to_string(misses), 8)
     )
   end

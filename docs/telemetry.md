@@ -158,6 +158,7 @@ integers.
 | `[:alambique, :cell, :rewind]` | `duration` | `cell`, `target` (`{:txid, n}` or `{:timestamp, ms}`), `result` (`:ok` or `:error`), and `from` (the head that was replaced), `to` (the restored TXID) and `txid` (the TXID of the rewind) for `:ok`, or `reason` for `:error` |
 | `[:alambique, :cell, :cleanup]` | `duration`, `objects` (deleted, for `:ok`) | `cell`, `location` (id of the location cleaned), `result` (`:ok`, `:waiting` or `:error`), and `ready_at_ms` for `:waiting` or `reason` for `:error` |
 | `[:alambique, :cell, :upload_retry]` | `delay_ms` (the backoff before the new upload) | `cell`, `location`, `epoch`, `txid`, `attempt` (failed uploads of the batch so far), `reason` (the store error): a batch whose upload failed for a store reason is kept and uploaded again while the lease is valid (design §6); the cell does not stop |
+| `[:alambique, :cell, :writes_released]` | `count` (writes that waited), `wait_ms` (how long the oldest waited) | `cell` |
 | `[:alambique, :cell, :stop]` | none | `cell`, `epoch`, `reason` (`:lease_expired`, `:lease_lost`, `:fenced` or `{:sync_failed, reason}`) |
 
 A wake that fails because the local disk is full has `reason: :disk_full`

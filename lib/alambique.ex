@@ -164,7 +164,10 @@ defmodule Alambique do
       (size of one background read, default 4 194 304) and `:miss_pages` (pages
       read with a page a query is waiting for, default 16) and `:verify_bytes`
       (a file of at most this size is read whole and checked against its file
-      checksum before its pages are used, default 1 048 576; 0 turns it off).
+      checksum before its pages are used, default 1 048 576; 0 turns it off) and
+      `:verify_writes` (a write waits for the end of the hydration and its
+      checksum, default `true`; `false` runs it at once on a file that is still
+      being filled).
     * `:drain` - how `drain/2` and the stop of the instance hibernate the cells
       (design §8): a keyword list with `:concurrency` (cells hibernating at
       once, default 64), `:timeout_ms` (per cell, default 15 000), `:deadline_ms`

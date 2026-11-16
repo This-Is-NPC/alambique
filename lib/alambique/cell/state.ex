@@ -41,6 +41,9 @@ defmodule Alambique.Cell.State do
     # Counter of callers accepted and not answered yet, read by `Cell.load/2`.
     :load,
     mode: :waking,
+    # Writes that wait for the end of the hydration (design §16), oldest last:
+    # `{call, from}`.
+    parked: [],
     # The migrations of this wake: the instance's, or those chosen for the cell.
     migrations: [],
     # Versions whose schema index entry this process wrote (design §17).
