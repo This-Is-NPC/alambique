@@ -6,6 +6,9 @@
 | [how-to-call-cells.md](how-to-call-cells.md) | How do I start an instance and call cells from my application? |
 | [design.md](design.md) | How do cells, leases, replication, routing and the test kit work? |
 | [how-to-operate-a-cell.md](how-to-operate-a-cell.md) | How do I inspect, restore, freeze or move a cell, what do I do with one the instance froze for crashing the VM, how do I restart a node without failed calls, how do I check that the disk under the cells does not stall writes, and what do I do when the disk is full? |
+| [how-to-monitor-a-node.md](how-to-monitor-a-node.md) | Which events, calls and host metrics do I watch to know a node is healthy, and at what value does each need a person? |
+| [how-to-manage-the-bucket.md](how-to-manage-the-bucket.md) | What does Alambique delete from the bucket, which objects must no lifecycle rule touch, how do I change how long old data stays, and how many requests does a month cost? |
+| [how-to-recover-from-disaster.md](how-to-recover-from-disaster.md) | A node and its disk are lost and only the bucket is left: how do I bring its cells back on a new node, and what do I check? |
 | [how-to-configure-the-s3-store.md](how-to-configure-the-s3-store.md) | How do I point the S3 store at AWS or a compatible server, with static keys or with temporary credentials that renew? |
 | [how-to-swap-a-node.md](how-to-swap-a-node.md) | How do I replace one node by another that started beside it, with no cluster between them, and what do callers see meanwhile? |
 | [how-to-discover-nodes.md](how-to-discover-nodes.md) | How do nodes find each other through the store, so that my application can connect them? |
@@ -28,4 +31,6 @@
 Recommended path: read the project [README](../README.md), then
 `concepts.md` and `how-to-call-cells.md`, then `design.md` sections 1 to 6 and
 the storage compatibility page. Operators continue with
-`how-to-operate-a-cell.md`, `how-to-swap-a-node.md` and `how-to-size-a-node.md`.
+`how-to-operate-a-cell.md`, `how-to-swap-a-node.md` and `how-to-size-a-node.md`,
+then `how-to-monitor-a-node.md`, `how-to-manage-the-bucket.md` and
+`how-to-recover-from-disaster.md`.
