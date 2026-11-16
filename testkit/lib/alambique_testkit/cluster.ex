@@ -422,9 +422,35 @@ defmodule AlambiqueTestkit.Cluster do
   defp key(a, b), do: if(a < b, do: {a, b}, else: {b, a})
   defp alive_node?(node), do: Node.ping(node) == :pong
 
+  @doc """
+  Starts epmd, which `Node.start/2` does not launch and a fresh machine does
+  not run, and waits until it accepts connections.
+  """
+  @spec ensure_epmd!() :: :ok
+  def ensure_epmd! do
+    System.cmd("epmd", ["-daemon"])
+    port = String.to_integer(System.get_env("ERL_EPMD_PORT", "4369"))
+    await_epmd(port, System.monotonic_time(:millisecond) + 10_000)
+  end
+
+  defp await_epmd(port, deadline) do
+    case :gen_tcp.connect(~c"127.0.0.1", port, [], 1_000) do
+      {:ok, socket} ->
+        :gen_tcp.close(socket)
+        :ok
+
+      {:error, reason} ->
+        if System.monotonic_time(:millisecond) > deadline,
+          do: raise("epmd does not accept connections on port #{port}: #{inspect(reason)}")
+
+        Process.sleep(50)
+        await_epmd(port, deadline)
+    end
+  end
+
   defp ensure_distributed! do
     unless Node.alive?() do
-      System.cmd("epmd", ["-daemon"])
+      ensure_epmd!()
       {:ok, _} = Node.start(:"alambique_test_#{System.pid()}@127.0.0.1", :longnames)
     end
   end
