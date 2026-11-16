@@ -59,10 +59,12 @@ defmodule Alambique.Ops.Options do
     configured = Application.get_env(:alambique, :ops, [])
     flags = Keyword.take(parsed, Map.keys(@env))
     settings = Keyword.merge(env_settings(), flags)
-    location = location(placement(settings, configured), parsed[:location], cell)
+    placement = placement(settings, configured)
+    if cell, do: check_cell!(placement, cell)
+    location = location(placement, parsed[:location], cell)
 
     Alambique.Replication.ctx(
-      store: location.store,
+      store: Alambique.Store.conceal(location.store),
       prefix: location.prefix,
       node: "mix-" <> Atom.to_string(node()),
       timeout_ms: configured[:timeout_ms] || 30_000
@@ -94,6 +96,13 @@ defmodule Alambique.Ops.Options do
 
       true ->
         Mix.raise(no_store())
+    end
+  end
+
+  defp check_cell!(placement, cell) do
+    case Alambique.Placement.validate_id(%{placement: placement}, cell) do
+      :ok -> :ok
+      {:error, reason} -> Mix.raise("invalid cell #{inspect(cell)}: #{inspect(reason)}")
     end
   end
 

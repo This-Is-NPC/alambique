@@ -293,10 +293,19 @@ defmodule Alambique.OpsNodeTasksTest do
     end
 
     test "says so when the node could not hibernate the cell now", ctx do
-      out = run("alambique.freeze", ["a/b"] ++ via(ctx.inst))
+      out =
+        run("alambique.freeze", [
+          @cell,
+          "--instance",
+          "no_such_instance",
+          "--connect",
+          Atom.to_string(node())
+        ])
 
-      assert out ==
-               "Froze a/b\na/b will hibernate at its next lease renewal: {:error, :invalid_cell_id}"
+      assert out =~
+               ~r/\AFroze #{@cell}\n#{@cell} will hibernate at its next lease renewal: \{:error, /
+
+      assert {:ok, true} = Alambique.frozen?(ctx.inst, @cell)
     end
 
     test "--connect needs --instance before anything is written", ctx do

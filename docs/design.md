@@ -529,7 +529,9 @@ A location prefix is a slash-separated path whose segments are not empty, `.`
 or `..`, with no control characters; an instance refuses any other at start.
 Give each instance a prefix that is not a path prefix of another's in the same
 store (`app` and `app/cells` would share keys). A lease whose body names a
-cell other than the one in its key is `{:error, :corrupt_lease}`.
+cell other than the one in its key is `{:error, :corrupt_lease}`. The Mix tasks
+check the cell argument as an instance does and hide the store credentials the
+way an instance does.
 
 ## 4. Storage layout
 

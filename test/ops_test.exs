@@ -365,6 +365,10 @@ defmodule Alambique.OpsTest do
       Application.delete_env(:alambique, :ops)
     end
 
+    # The tasks conceal credentials as an instance does.
+    defp reveal(config),
+      do: Map.new(config, fn {k, v} -> {k, if(is_function(v, 0), do: v.(), else: v)} end)
+
     @flags ~w(--endpoint http://s3.test:9000 --bucket b --access-key-id k --secret-access-key s --prefix p1)
 
     test "flags build an S3 store" do
@@ -375,16 +379,16 @@ defmodule Alambique.OpsTest do
 
       ctx = Options.ctx(parsed)
 
-      assert ctx.store ==
-               {Alambique.Store.S3,
-                %{
-                  endpoint: "http://s3.test:9000",
-                  bucket: "b",
-                  access_key_id: "k",
-                  secret_access_key: "s",
-                  region: "auto",
-                  path_style: false
-                }}
+      assert {Alambique.Store.S3, config} = ctx.store
+
+      assert reveal(config) == %{
+               endpoint: "http://s3.test:9000",
+               bucket: "b",
+               access_key_id: "k",
+               secret_access_key: "s",
+               region: "auto",
+               path_style: false
+             }
 
       assert ctx.prefix == "p1"
     end
@@ -425,15 +429,18 @@ defmodule Alambique.OpsTest do
       {parsed, _} =
         OptionParser.parse!(flags ++ ~w(--session-token t), strict: Options.switches())
 
-      assert {Alambique.Store.S3, %{bucket: "b", region: "eu-west-1", session_token: "t"} = c} =
+      assert {Alambique.Store.S3, %{bucket: "b", region: "eu-west-1"} = c} =
                Options.ctx(parsed).store
 
+      assert %{session_token: "t"} = reveal(c)
       refute Map.has_key?(c, :endpoint)
 
       System.put_env("ALAMBIQUE_S3_SESSION_TOKEN", "env-token")
 
-      assert {_, %{session_token: "env-token"}} =
+      assert {_, config} =
                Options.ctx(bucket: "b", access_key_id: "k", secret_access_key: "s").store
+
+      assert %{session_token: "env-token"} = reveal(config)
     end
 
     test "a missing store or a missing S3 setting is explained" do
