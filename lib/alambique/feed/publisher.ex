@@ -72,6 +72,14 @@ defmodule Alambique.Feed.Publisher do
   @spec after_ack(State.t()) :: State.t()
   def after_ack(%State{config: %{feed_capture: false}} = state), do: state
 
+  # The rows come from pages that the checksum of a hydration has not covered
+  # yet (design §16): `Cell` hands them over when it ends.
+  def after_ack(
+        %State{hydrator: hydrator, config: %{lazy_restore: %{verify_writes: true}}} = state
+      )
+      when hydrator != nil,
+      do: state
+
   def after_ack(%State{feed_backlog: backlog} = state) do
     limit = state.config.feed.max_backlog_batches
 

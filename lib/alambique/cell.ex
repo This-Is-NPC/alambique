@@ -312,9 +312,11 @@ defmodule Alambique.Cell do
   # The router stamps a call with the time its caller stops waiting. A call
   # taken from the mailbox after that is dropped unrun: nobody can read its
   # answer (`GenServer.call` does not cancel it).
-  def handle_call({:deadline, at, request}, from, state) do
+  def handle_call({:deadline, at, request} = call, from, state) do
     if System.monotonic_time(:millisecond) < at do
-      handle_call(request, from, state)
+      if parkable?(state, request),
+        do: park(state, call, from),
+        else: handle_call(request, from, state)
     else
       :atomics.sub(state.load, 2, 1)
       {:noreply, state}
@@ -322,10 +324,71 @@ defmodule Alambique.Cell do
   end
 
   def handle_call(request, from, %State{mode: :serving} = state) do
-    answer = state.inflight |> Inflight.busy(fn -> call(request, from, state) end) |> tracked()
-    # Taken back once the call is parked or answered, so it counts all along.
-    unless match?({:hibernate, _}, request), do: :atomics.sub(state.load, 2, 1)
-    answer
+    if parkable?(state, request) do
+      park(state, request, from)
+    else
+      answer = state.inflight |> Inflight.busy(fn -> call(request, from, state) end) |> tracked()
+      # Taken back once the call is parked or answered, so it counts all along.
+      unless match?({:hibernate, _}, request), do: :atomics.sub(state.load, 2, 1)
+      answer
+    end
+  end
+
+  # A write that arrives while the file is still being filled waits for the
+  # end of the hydration (design §16): until then the pages the transaction
+  # reads, and the CRCs of its segment, may come from a file that no checksum
+  # has covered. The call keeps counting in `load`, so the cell is not idle.
+  defp parkable?(%State{mode: :serving, hydrator: hydrator} = state, request)
+       when hydrator != nil,
+       do: state.config.lazy_restore.verify_writes and write_call?(request)
+
+  defp parkable?(_state, _request), do: false
+
+  defp write_call?({:transaction, _fun, _ms}), do: true
+  defp write_call?({:execute, _sql, _params, _ms}), do: true
+  defp write_call?({:isolated, _request}), do: true
+  defp write_call?({:migrate, _wake}), do: true
+  defp write_call?(_request), do: false
+
+  defp park(state, call, from) do
+    parked = [{call, from, System.monotonic_time()} | state.parked]
+    {:noreply, %{state | parked: parked}}
+  end
+
+  # Runs the parked writes in arrival order once the file is complete.
+  defp release_parked(%State{parked: []} = state), do: {:noreply, Publisher.after_ack(state)}
+
+  defp release_parked(state) do
+    parked = Enum.reverse(state.parked)
+    {_call, _from, oldest} = hd(parked)
+
+    Telemetry.emit(
+      [:cell, :writes_released],
+      %{count: length(parked), wait_ms: ms(System.monotonic_time() - oldest)},
+      %{cell: state.id}
+    )
+
+    # What the previous owner left unpublished waited for the checksum too.
+    state = Publisher.after_ack(state)
+
+    Enum.reduce_while(parked, {:noreply, %{state | parked: []}}, fn {call, from, _at},
+                                                                    {:noreply, state} ->
+      case handle_call(call, from, state) do
+        {:noreply, state} ->
+          {:cont, {:noreply, state}}
+
+        {:reply, reply, state} ->
+          GenServer.reply(from, reply)
+          {:cont, {:noreply, state}}
+
+        {:stop, reason, reply, state} ->
+          GenServer.reply(from, reply)
+          {:halt, {:stop, reason, state}}
+
+        {:stop, _reason, _state} = stop ->
+          {:halt, stop}
+      end
+    end)
   end
 
   # Records the memory of the connection after a call or a message, which is
@@ -621,7 +684,7 @@ defmodule Alambique.Cell do
   # The lazy phase of the file (design §16) ended.
   defp info({:hydrated, pid}, %State{hydrator: pid} = state) do
     case Hydration.done(state) do
-      {:ok, state} -> {:noreply, state}
+      {:ok, state} -> release_parked(state)
       {:error, reason} -> stop_serving(state, {:hydration_failed, reason})
     end
   end
@@ -1156,6 +1219,7 @@ defmodule Alambique.Cell do
   defp stop_serving(state, reason, reply \\ nil) do
     error = {:error, reason}
     Enum.each(state.pending, fn {_kind, from, _} -> GenServer.reply(from, error) end)
+    Enum.each(state.parked, fn {_call, from, _at} -> GenServer.reply(from, error) end)
 
     for {kind, from, _} <- Pipe.items(state.pipe) do
       GenServer.reply(from, if(kind == :write, do: {:error, :outcome_unknown}, else: error))
@@ -1170,7 +1234,7 @@ defmodule Alambique.Cell do
       reason: reason
     })
 
-    state = %{state | pending: [], pipe: %{state.pipe | queue: []}}
+    state = %{state | pending: [], parked: [], pipe: %{state.pipe | queue: []}}
     # A fenced or lost lease belongs to someone else; any other lease is ours to give back.
     # An expired one no longer lets us publish. A file that failed to hydrate cannot be read.
     if reason not in [:fenced, :lease_lost, :lease_expired] and

@@ -5,6 +5,7 @@ defmodule Alambique.HydratorTest do
   import Alambique.CellHelpers, only: [eventually: 1]
   import Alambique.CompactionHelpers
 
+  alias Alambique.LtxTamper
   alias Alambique.Replication
   alias Alambique.Replication.{Hydrator, Lazy, Native, Retry}
   alias AlambiqueTestkit.MemoryStore
@@ -91,21 +92,6 @@ defmodule Alambique.HydratorTest do
   describe "Lazy reads" do
     defp deadline(ms), do: Retry.deadline_in(ms)
 
-    # Flips the last byte of every LZ4 payload (always a literal): each frame
-    # still decodes, to another page.
-    defp alter_frames(<<head::binary-size(100), frames::binary>>) do
-      <<head::binary, alter(frames)::binary>>
-    end
-
-    defp alter(<<0::48, _::binary>> = rest), do: rest
-
-    defp alter(<<pgno::32, flags::16, n::32, payload::binary-size(n), rest::binary>>) do
-      m = n - 1
-      <<init::binary-size(^m), last>> = payload
-
-      <<pgno::32, flags::16, n::32, init::binary, Bitwise.bxor(last, 1), alter(rest)::binary>>
-    end
-
     test "fetching a page makes it local", %{env: env} do
       lazy = lazy(env)
       {pages, before} = Native.lazy_progress(lazy.handle)
@@ -151,7 +137,7 @@ defmodule Alambique.HydratorTest do
       for idx <- 0..(tuple_size(lazy.files) - 1) do
         key = elem(lazy.files, idx)
         {:ok, body, _etag, _meta} = env.mod.get(env.cfg, key)
-        {:ok, _} = env.mod.put(env.cfg, key, alter_frames(body), :none, %{})
+        {:ok, _} = env.mod.put(env.cfg, key, LtxTamper.alter_frames(body), :none, %{})
       end
 
       {pages, left} = Native.lazy_progress(lazy.handle)

@@ -100,6 +100,7 @@ recovers before then costs none, because lease renewals bypass the breaker
 
 | Signal | Limit | Source |
 | --- | --- | --- |
+| `[:alambique, :cell, :writes_released]` `wait_ms`, p99 | The first writes after a lazy wake waited for the whole download (`lazy_restore: [verify_writes:]`). Page near `call_timeout_ms` (15 s): writes past it time out. Raise `call_timeout_ms`, or turn `verify_writes` off, or keep very large cells below the size that downloads in that time. | [how-to-speed-up-a-wake.md](how-to-speed-up-a-wake.md) step 5 |
 | `[:alambique, :cell, :wake]` `duration`, p99 | Page near 15 s: a caller gives up at `call_timeout_ms`. A wake that waits for the store has `store_time` near its `duration`. | `call_timeout_ms: 15_000` (config.ex) |
 | The same, p50, by `source` | Compare with rounds times the store's median latency. A reused file or a full restore takes 4 rounds after the lease read, a lazy restore 5 to 7 (design §7.2). With 25 ms per request the p50 measured 114 ms, 166 ms and 215 ms. | design §7.2 table, `mise run bench:wake` |
 | `store_time` far below `duration` | The wake waited for the CPU or the disk, not for the store. | [how-to-speed-up-a-wake.md](how-to-speed-up-a-wake.md) |

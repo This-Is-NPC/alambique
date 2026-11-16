@@ -102,6 +102,21 @@ defmodule Alambique.Cell.Hydration do
   end
 
   @doc """
+  Waits until the hydration has ended, for a step of the wake that writes and
+  must not derive from pages no checksum covered yet (design §16).
+  """
+  @spec await(State.t()) :: {:ok, State.t()} | {:error, term}
+  def await(%State{hydrator: nil} = state), do: {:ok, state}
+
+  def await(%State{hydrator: pid} = state) do
+    receive do
+      {:hydrated, ^pid} -> done(state)
+      {:hydration_failed, ^pid, reason} -> {:error, {:hydration_failed, reason}}
+      {:EXIT, ^pid, reason} when reason != :normal -> {:error, {:hydration_failed, reason}}
+    end
+  end
+
+  @doc """
   Whether the file is still being filled. A hydrator that just finished
   counts as done.
   """
