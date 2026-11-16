@@ -110,7 +110,7 @@ defmodule Alambique.Router do
     config = Config.fetch!(name)
 
     with :ok <- Placement.validate_id(config, cell) do
-      case Cell.whereis(config, cell) do
+      case Cell.serving(config, cell) do
         pid when is_pid(pid) -> {:ok, node()}
         nil when source == :hint -> hinted_owner(config, cell)
         nil when source == :peers -> peer_owner(config, cell)
@@ -140,7 +140,7 @@ defmodule Alambique.Router do
   @spec holds?(atom, String.t()) :: boolean
   def holds?(name, cell) do
     case Config.fetch(name) do
-      {:ok, config} -> Cell.whereis(config, cell) != nil
+      {:ok, config} -> Cell.serving(config, cell) != nil
       :error -> false
     end
   end

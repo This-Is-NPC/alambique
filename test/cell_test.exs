@@ -22,6 +22,20 @@ defmodule Alambique.CellTest do
     setup_store()
   end
 
+  @doc false
+  # Telemetry handler: runs in the stopping cell and holds it until `:go`.
+  def hold_stopping(_event, _measurements, %{cell: cell}, {test, cell}) do
+    send(test, {:stopping, self()})
+
+    receive do
+      :go -> :ok
+    after
+      5_000 -> :ok
+    end
+  end
+
+  def hold_stopping(_event, _measurements, _meta, _config), do: :ok
+
   defp put(inst, cell, n),
     do: Alambique.execute(inst, cell, "INSERT INTO t (n, v) VALUES (?, 'x')", [n])
 
@@ -483,6 +497,39 @@ defmodule Alambique.CellTest do
       assert_receive {:DOWN, ^ref, :process, ^pid, {:shutdown, :lease_lost}}
       assert {_, %{reason: :lease_lost}} = await_event([:alambique, :cell, :stop], cell)
       assert {:ok, %{rows: [[1], [2]]}} = numbers(b, cell)
+    end
+
+    test "a cell that stopped serving is no longer reported as the owner while it exits", ctx do
+      a = start_instance(ctx, migrations: @schema, clock: ctx.clock.(0))
+      b = start_instance(ctx, migrations: @schema, clock: ctx.clock.(0))
+      cell = unique_cell()
+      assert {:ok, _} = put(a, cell, 1)
+
+      ManualClock.advance(ctx.world, 10_000)
+      assert {:ok, _} = put(b, cell, 2)
+
+      # Hold the old cell right after its stop event: the process is alive,
+      # as it is for the time it closes its database and releases the lease.
+      id = {__MODULE__, make_ref()}
+
+      :telemetry.attach(
+        id,
+        [:alambique, :cell, :stop],
+        &__MODULE__.hold_stopping/4,
+        {self(), cell}
+      )
+
+      on_exit(fn -> :telemetry.detach(id) end)
+
+      pid = Alambique.Cell.whereis(Alambique.Config.fetch!(a), cell)
+      send(pid, :renew)
+      assert_receive {:stopping, ^pid}
+      assert Process.alive?(pid)
+
+      assert Alambique.owner(a, cell, peers: true) == :none
+      refute Alambique.owner(a, cell) == {:ok, node()}
+
+      send(pid, :go)
     end
 
     test "an owner that was fenced out stops and tells its writers", ctx do
