@@ -2951,6 +2951,15 @@ nodes.
   faster at +20 ms (96 against 238 ms). The default `:min_bytes` is
   therefore 4 MiB.
 
+  The file checksum check of small files (`:verify_bytes`, §16) was measured
+  with a 297 MB database (`ALAMBIQUE_BENCH_VERIFY=0` against the default,
+  single runs on a machine under heavy load, so the full restore itself
+  varied between 8 and 15 s): first query 192 ms to 282 ms (memory +0 ms),
+  1.21 s to 1.26 s (+20 ms) and 641 ms to 766 ms (SeaweedFS); complete file
+  1.69 s to 2.03 s, 2.88 s to 2.53 s and 2.8 s to 3.34 s. The differences
+  are within the noise except for the first query without latency, where a
+  miss on one of the 20 small files reads the whole file.
+
 - **Quarantine cost.** The in-flight markers (§10) add one file descriptor
   per awake cell, one file creation and one removal per wake, and two
   `pwrite` calls per callback of the cell process: two for a read, four for a
@@ -3879,9 +3888,9 @@ whole files of the chain it expects in parallel, `restore: [fetch_concurrency:]`
 (16) at a time, in the order of the walk and as many as fit the byte budget of
 the restore (§6.3); the walk then takes each from memory instead of waiting
 for it. A guess that is
-wrong costs requests, and the walk reads what is missing. The files themselves are not checksummed when they are
-read lazily (their file checksum covers all pages); every page is covered by
-the database checksum check at the end instead.
+wrong costs requests, and the walk reads what is missing. A file is
+checksummed when it is read whole (see Misses and Hydrator below); every page
+is also covered by the database checksum check at the end.
 
 **Misses.** A read of a page that is not local blocks the dirty I/O scheduler
 thread that runs the statement. The VFS asks a single global thread to send
@@ -3889,7 +3898,8 @@ thread that runs the statement. The VFS asks a single global thread to send
 thread cannot send messages itself), then waits on a condition variable.
 The hydrator reads the page with `get_range` through the store behaviour, so
 testkit faults apply, together with up to `:miss_pages` (default 16) pages
-that follow it in the same object, decodes the LZ4 frames in the NIF and
+that follow it in the same object (a file of at most `:verify_bytes`, default
+1 MiB, is read whole instead: see **File checksum** below), decodes the LZ4 frames in the NIF and
 installs them: a page is written to the file and marked local under one lock,
 so a reader never sees a partial page. Installing a page (`lazy_deliver`)
 runs on a dirty CPU scheduler, and the fetch tasks open no files. This is
@@ -3921,6 +3931,18 @@ file is a normal database. A mismatch or a permanent failure stops the cell
 for the whole lazy phase, so a crash in any fetch task is attributed to the
 cell and the tasks need no file of their own (design §10). Telemetry:
 `[:alambique, :replication, :hydrate]`.
+
+**File checksum.** The file checksum of an LTX file covers every frame, so
+it can be checked only by a reader that has all of them. A file of at most
+`lazy_restore: [verify_bytes:]` bytes (default 1 MiB; 0 turns the check off) is
+read whole by a miss or a background run, decoded and checked against its
+checksum before any of its pages is installed (`lazy_deliver`, `ltx::verify`);
+a mismatch fails the read with `{:invalid, "file checksum mismatch"}` and
+ends the hydration (`{:hydration_failed, reason}`), and nothing of that file
+reaches the database file. The cost is reading the frames of older versions of
+pages and decoding them once more, bounded by `:verify_bytes` per file
+(`mise run bench:lazy`, §12). Larger files, usually the snapshot, are read as
+runs of frames, which cannot be checked: see the limit below.
 
 **Writes during hydration.** A write goes to the WAL as usual. Before a
 checkpoint writes a whole page, the VFS marks it local, and a fetch that
@@ -3986,8 +4008,13 @@ store. 1 500 runs passed.
 
 **Limit: a cell idle during hydration starts over.** A large cell that
 hibernates or crashes before its file is fully downloaded discards the partial
-file, and the next wake starts the lazy restore again. Pages read on demand are
-verified only by the database checksum at the end of hydration. A page-1 range
+file, and the next wake starts the lazy restore again. Pages read from a file larger
+than `:verify_bytes` (the snapshot, as a rule) are verified only by the
+database checksum at the end of hydration: until then a frame that still
+decodes (bit rot, forgery) is served, and the cell can acknowledge writes
+whose segment CRCs derive from it (`prepare_sums`); the mismatch stops the
+cell afterwards. Pages of smaller files are checked before they are served.
+Raising `:verify_bytes` narrows the window at the price of larger reads. A page-1 range
 read that fails falls back to a full restore; a wake still fails when the
 store is unreachable or an object of the chain is gone. Raise `idle_timeout_ms`
 for very large cells.

@@ -127,17 +127,29 @@ fn lazy_attach(lazy: ResourceArc<LazyRes>, pid: LocalPid) -> Atom {
     atoms::ok()
 }
 
-/// Installs the pages of a fetched run. `data` starts at the run's offset;
-/// `pages` are `{pgno, offset in data, frame length}`. Returns `{:ok, done}`.
+/// Files of at most `bytes` are fetched whole and checked (design §16).
+#[rustler::nif]
+fn lazy_set_whole(lazy: ResourceArc<LazyRes>, bytes: u64) -> Atom {
+    lazy.0.set_whole_max(bytes);
+    atoms::ok()
+}
+
+/// Installs the pages of a fetched run of `file`. `data` starts at the run's
+/// offset; `pages` are `{pgno, offset in data, frame length}`. A run of the
+/// whole object must pass its file checksum first. Returns `{:ok, done}`.
 #[rustler::nif(schedule = "DirtyCpu")]
 fn lazy_deliver<'a>(
     env: Env<'a>,
     lazy: ResourceArc<LazyRes>,
+    file: u32,
     data: Binary,
     pages: Vec<(u32, u32, u32)>,
 ) -> Term<'a> {
     let _t = crate::stats::LAZY_CALLS.time();
     let l = &lazy.0;
+    if let Err(e) = l.verify_whole(file, data.as_slice()) {
+        return error_term(env, e);
+    }
     let mut done = false;
     for (pgno, rel, len) in pages {
         let frame = data

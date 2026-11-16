@@ -17,11 +17,11 @@ defmodule Alambique.HydratorTest do
   end
 
   # A lazy restore of the cell; small reads make the file take many requests.
-  defp lazy(env) do
+  defp lazy(env, verify_bytes \\ 1_048_576) do
     path = Path.join(env.dir, "lazy-#{System.unique_integer([:positive])}.db")
     lazy_opts = %{min_bytes: 0, wait_ms: 1_000}
     {:ok, result} = Replication.restore(env.ctx, cell(), path, :latest, lazy: lazy_opts)
-    Lazy.new(result, env.ctx, miss_pages: 2, batch_bytes: 256)
+    Lazy.new(result, env.ctx, miss_pages: 2, batch_bytes: 256, verify_bytes: verify_bytes)
   end
 
   defp start(lazy, fetch_ms \\ 1_000) do
@@ -91,6 +91,21 @@ defmodule Alambique.HydratorTest do
   describe "Lazy reads" do
     defp deadline(ms), do: Retry.deadline_in(ms)
 
+    # Flips the last byte of every LZ4 payload (always a literal): each frame
+    # still decodes, to another page.
+    defp alter_frames(<<head::binary-size(100), frames::binary>>) do
+      <<head::binary, alter(frames)::binary>>
+    end
+
+    defp alter(<<0::48, _::binary>> = rest), do: rest
+
+    defp alter(<<pgno::32, flags::16, n::32, payload::binary-size(n), rest::binary>>) do
+      m = n - 1
+      <<init::binary-size(^m), last>> = payload
+
+      <<pgno::32, flags::16, n::32, init::binary, Bitwise.bxor(last, 1), alter(rest)::binary>>
+    end
+
     test "fetching a page makes it local", %{env: env} do
       lazy = lazy(env)
       {pages, before} = Native.lazy_progress(lazy.handle)
@@ -128,6 +143,34 @@ defmodule Alambique.HydratorTest do
 
       assert {:error, {:exit, {:memory_store_fault, :gone}}} =
                Lazy.fetch_page(lazy, 1, deadline(1_000))
+    end
+
+    test "a page of a file that fails its checksum is not served", %{env: env} do
+      lazy = lazy(env)
+
+      for idx <- 0..(tuple_size(lazy.files) - 1) do
+        key = elem(lazy.files, idx)
+        {:ok, body, _etag, _meta} = env.mod.get(env.cfg, key)
+        {:ok, _} = env.mod.put(env.cfg, key, alter_frames(body), :none, %{})
+      end
+
+      {pages, left} = Native.lazy_progress(lazy.handle)
+      assert {:error, {:invalid, _}} = Lazy.fetch_page(lazy, 1, deadline(1_000))
+      # Nothing of the file was installed.
+      assert {^pages, ^left} = Native.lazy_progress(lazy.handle)
+    end
+
+    test "a file whose checksum fails ends the hydration", %{env: env} do
+      lazy = lazy(env)
+      key = elem(lazy.files, 0)
+      {:ok, body, _etag, _meta} = env.mod.get(env.cfg, key)
+      cut = byte_size(body) - 1
+      <<head::binary-size(^cut), last>> = body
+      {:ok, _} = env.mod.put(env.cfg, key, <<head::binary, Bitwise.bxor(last, 1)>>, :none, %{})
+      hydrator = start(lazy)
+
+      assert_receive {:hydration_failed, ^hydrator, {:invalid, _}}, 5_000
+      refute_received {:hydrated, ^hydrator}
     end
 
     test "fetching pages returns the first failure", %{env: env} do

@@ -101,6 +101,11 @@ the fence.
    than a full download of a few megabytes. `lazy_restore: [min_bytes:]`
    (default 4 MiB) is the size under which a cell is downloaded whole. Raise it
    to the size of a typical mailbox if the first query reads most of it.
+   `lazy_restore: [verify_bytes:]` (default 1 MiB) is the size under which a
+   file is read whole and checked against its file checksum before any page of
+   it is used; a miss on such a file reads the whole file, not 16 pages. Set it
+   to 0 to read frames only and rely on the database checksum at the end of the
+   download, or raise it to check larger files.
 
 6. Check `restore: [fetch_concurrency:]` (default 16) and
    `restore: [max_inflight_bytes:]` (default 64 MiB). A full restore reads the
