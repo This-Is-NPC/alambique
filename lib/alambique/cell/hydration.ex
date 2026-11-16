@@ -36,7 +36,8 @@ defmodule Alambique.Cell.Hydration do
     lazy =
       Lazy.new(result, state.repl_ctx,
         miss_pages: opts.miss_pages,
-        batch_bytes: opts.batch_bytes
+        batch_bytes: opts.batch_bytes,
+        verify_bytes: opts.verify_bytes
       )
 
     # Page 1 is fetched while no hydrator is running: the open reads it and

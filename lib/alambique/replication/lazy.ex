@@ -15,7 +15,8 @@ defmodule Alambique.Replication.Lazy do
     :checksum,
     :cell,
     miss_pages: 16,
-    batch_bytes: 4_194_304
+    batch_bytes: 4_194_304,
+    verify_bytes: 0
   ]
 
   @type t :: %__MODULE__{
@@ -26,23 +27,28 @@ defmodule Alambique.Replication.Lazy do
           checksum: integer | nil,
           cell: String.t() | nil,
           miss_pages: pos_integer,
-          batch_bytes: pos_integer
+          batch_bytes: pos_integer,
+          verify_bytes: non_neg_integer
         }
 
   @doc "The lazy part of a `Restore` result."
   @spec new(map, map, keyword) :: t
   def new(%{lazy: handle, files: files, checksum: checksum, cell: cell}, ctx, opts \\ []) do
-    struct!(
-      __MODULE__,
-      [
-        handle: handle,
-        files: List.to_tuple(files),
-        ctx: ctx,
-        budget: Budget.new(ctx.max_inflight_bytes),
-        checksum: checksum,
-        cell: cell
-      ] ++ opts
-    )
+    lazy =
+      struct!(
+        __MODULE__,
+        [
+          handle: handle,
+          files: List.to_tuple(files),
+          ctx: ctx,
+          budget: Budget.new(ctx.max_inflight_bytes),
+          checksum: checksum,
+          cell: cell
+        ] ++ opts
+      )
+
+    :ok = Native.lazy_set_whole(handle, lazy.verify_bytes)
+    lazy
   end
 
   @doc """
@@ -61,7 +67,7 @@ defmodule Alambique.Replication.Lazy do
       try do
         case fetch_range(lazy.ctx, key, offset, len, deadline) do
           {:ok, body, _total, _meta} when byte_size(body) == len ->
-            Native.lazy_deliver(lazy.handle, body, pages)
+            Native.lazy_deliver(lazy.handle, file, body, pages)
 
           {:ok, _short, _total, _meta} ->
             {:error, {:short_read, key}}

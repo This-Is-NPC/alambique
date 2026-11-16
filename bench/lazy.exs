@@ -54,6 +54,9 @@ defmodule Bench do
     end
   end
 
+  # ALAMBIQUE_BENCH_VERIFY=0 turns the file checksum check of small files off.
+  defp verify_bytes, do: String.to_integer(System.get_env("ALAMBIQUE_BENCH_VERIFY", "1048576"))
+
   defp machine do
     {:ok, cpu} = File.read("/proc/cpuinfo")
     [_, model] = Regex.run(~r/model name\s*:\s*(.*)/, cpu)
@@ -119,7 +122,7 @@ defmodule Bench do
       Replication.restore(ctx, "cell", lazy_path, :latest, lazy: %{min_bytes: 0, wait_ms: 30_000})
 
     plan_ms = ms(t)
-    lazy = Lazy.new(result, ctx)
+    lazy = Lazy.new(result, ctx, verify_bytes: verify_bytes())
     {:ok, hydrator} = Hydrator.start_link(lazy, concurrency: 8, fetch_ms: 30_000)
     {:ok, db} = Db.open(lazy_path)
     {:ok, %{rows: [[_]]}} = Db.run(db, "SELECT length(v) FROM t WHERE id = (SELECT max(id) / 2 FROM t)", [])

@@ -165,7 +165,8 @@ defmodule Alambique.Config do
     min_bytes: 4_194_304,
     concurrency: 4,
     batch_bytes: 4_194_304,
-    miss_pages: 16
+    miss_pages: 16,
+    verify_bytes: 1_048_576
   ]
 
   @query_defaults [
@@ -951,7 +952,8 @@ defmodule Alambique.Config do
     merged = Keyword.merge(@lazy_defaults, opts)
 
     for {key, value} <- merged,
-        not (is_integer(value) and (value > 0 or (key == :min_bytes and value == 0))),
+        not (is_integer(value) and
+               (value > 0 or (key in [:min_bytes, :verify_bytes] and value == 0))),
         do: bad!(":lazy_restore #{inspect(key)} must be a positive integer")
 
     Map.new(merged)

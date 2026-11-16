@@ -145,7 +145,8 @@ defmodule Alambique.Replication.Native do
   @doc false
   def lazy_attach(_lazy, _pid), do: nif_error()
   @doc false
-  def lazy_deliver(_lazy, _data, _pages), do: nif_error()
+  def lazy_set_whole(_lazy, _bytes), do: nif_error()
+  def lazy_deliver(_lazy, _file, _data, _pages), do: nif_error()
   @doc false
   def lazy_miss_run(_lazy, _pgno, _max_pages), do: nif_error()
   @doc false

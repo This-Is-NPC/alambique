@@ -47,7 +47,7 @@ defmodule Alambique.LazyRestoreFallbackTest do
     waker =
       start_instance(%{ctx | store: failing},
         migrations: @schema,
-        lazy_restore: [min_bytes: 0, batch_bytes: 1_024, miss_pages: 4],
+        lazy_restore: [min_bytes: 0, batch_bytes: 1_024, miss_pages: 4, verify_bytes: 0],
         op_timeout_ms: 300
       )
 

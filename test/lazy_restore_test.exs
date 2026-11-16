@@ -53,7 +53,7 @@ defmodule Alambique.LazyRestoreTest do
   end
 
   defp lazy_instance(ctx, opts \\ []) do
-    start_instance(ctx, [migrations: @schema, lazy_restore: @lazy] ++ opts)
+    start_instance(ctx, Keyword.merge([migrations: @schema, lazy_restore: @lazy], opts))
   end
 
   defp hydrated?(cell), do: drain([:alambique, :replication, :hydrate], cell) != []
@@ -170,7 +170,13 @@ defmodule Alambique.LazyRestoreTest do
     cell = seed(ctx, 300)
     release = hold_hydration(cell)
     # The store keeps failing for longer than a breaker would let it be asked.
-    inst = lazy_instance(ctx, breaker: [failures: 1_000_000])
+    # Frames only: a file read whole would leave no page to miss.
+    inst =
+      lazy_instance(ctx,
+        breaker: [failures: 1_000_000],
+        lazy_restore: @lazy ++ [verify_bytes: 0]
+      )
+
     config = Alambique.Config.fetch!(inst)
 
     # Wake the cell with the store working, then take it away.
@@ -215,6 +221,15 @@ defmodule Alambique.LazyRestoreTest do
 
     assert %{lazy_restore: %{min_bytes: 0}} =
              Alambique.Config.build(base ++ [lazy_restore: [min_bytes: 0]])
+
+    assert %{lazy_restore: %{verify_bytes: 1_048_576}} = Alambique.Config.build(base)
+
+    assert %{lazy_restore: %{verify_bytes: 0}} =
+             Alambique.Config.build(base ++ [lazy_restore: [verify_bytes: 0]])
+
+    assert_raise ArgumentError, ~r/verify_bytes must be a positive integer/, fn ->
+      Alambique.Config.build(base ++ [lazy_restore: [verify_bytes: -1]])
+    end
 
     assert_raise ArgumentError, ~r/unknown :lazy_restore/, fn ->
       Alambique.Config.build(base ++ [lazy_restore: [nope: 1]])

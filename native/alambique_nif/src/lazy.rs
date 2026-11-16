@@ -13,14 +13,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::dbsum::fold;
 use crate::error::{invalid, Result};
 use crate::ltx::{
-    get_uvarint, lock_pgno, page_crc, pages_added, trailer_post, valid_page_size, Header,
+    get_uvarint, lock_pgno, page_crc, pages_added, trailer_post, valid_page_size, verify, Header,
     HEADER_SIZE, PAGE_HEADER_SIZE, TRAILER_SIZE,
 };
 use crate::sums::Sums;
@@ -77,6 +77,7 @@ const MAX_INDEX_ENTRY: u64 = 25;
 pub struct Staged {
     pub header: Header,
     pub post_apply: u64,
+    total: u64,
     entries: Vec<(u32, u64, u32)>,
 }
 
@@ -135,6 +136,7 @@ pub fn stage_file(
     Ok(Ok(Staged {
         header,
         post_apply,
+        total,
         entries,
     }))
 }
@@ -163,6 +165,8 @@ pub fn decode_frame(frame: &[u8], pgno: u32, page_size: u32) -> Result<Vec<u8>> 
 
 struct Inner {
     map: Vec<Entry>,
+    /// Size of each file that contributes to the map.
+    sizes: HashMap<u32, u64>,
     staged: HashMap<u32, Staged>,
     /// Pages the plan started with (the size of the restored database).
     orig: u32,
@@ -208,6 +212,9 @@ pub struct Lazy {
     pub path: PathBuf,
     pub page_size: u32,
     wait: Duration,
+    /// Files of at most this many bytes are fetched whole and checked against
+    /// their file checksum before any of their pages is served (0: never).
+    whole_max: AtomicU64,
     complete: AtomicBool,
     inner: Mutex<Inner>,
     cond: Condvar,
@@ -231,9 +238,11 @@ impl Lazy {
             path: path.to_path_buf(),
             page_size,
             wait,
+            whole_max: AtomicU64::new(0),
             complete: AtomicBool::new(false),
             inner: Mutex::new(Inner {
                 map: Vec::new(),
+                sizes: HashMap::new(),
                 staged: HashMap::new(),
                 orig: 0,
                 pages: 0,
@@ -268,6 +277,21 @@ impl Lazy {
         *self.notify.lock().unwrap_or_else(|e| e.into_inner()) = Some(notify);
     }
 
+    /// Files of at most `bytes` are fetched whole and verified (design §16).
+    pub fn set_whole_max(&self, bytes: u64) {
+        self.whole_max.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Checks the file checksum of `data` when it is a whole file of the plan
+    /// (a run of the whole object). Other runs have nothing to check.
+    pub fn verify_whole(&self, file: u32, data: &[u8]) -> Result<()> {
+        let whole = self.inner().sizes.get(&file) == Some(&(data.len() as u64));
+        if whole {
+            verify(data)?;
+        }
+        Ok(())
+    }
+
     // Planning
 
     pub fn stage(&self, idx: u32, staged: Staged) {
@@ -300,6 +324,7 @@ impl Lazy {
         if s.header.is_snapshot() {
             g.map.clear();
         }
+        g.sizes.insert(idx, s.total);
         g.map.truncate(commit);
         g.map.resize(commit, EMPTY);
         for (pgno, offset, size) in s.entries {
@@ -504,6 +529,7 @@ impl Lazy {
 
     fn finish(&self, g: &mut Inner) {
         g.map = Vec::new();
+        g.sizes = HashMap::new();
         g.order = Vec::new();
         g.rank = Vec::new();
         g.retry = VecDeque::new();
@@ -539,7 +565,43 @@ impl Lazy {
             run.len = end - run.offset;
             next = end;
         }
-        run
+        match g.sizes.get(&run.file) {
+            Some(&size) if size <= self.whole_max.load(Ordering::Relaxed) => {
+                self.whole_run(g, from, size, bg)
+            }
+            _ => run,
+        }
+    }
+
+    /// The whole object of the page at `from`, with every page of it that is
+    /// still to fetch: its checksum can be checked before any page is served.
+    fn whole_run(&self, g: &Inner, from: usize, size: u64, bg: bool) -> Run {
+        let file = g.map[g.order[from] as usize - 1].file;
+        let in_file = |i: usize| g.map[g.order[i] as usize - 1].file == file;
+        let (mut lo, mut hi) = (from, from + 1);
+        while lo > 0 && in_file(lo - 1) {
+            lo -= 1;
+        }
+        while hi < g.order.len() && in_file(hi) {
+            hi += 1;
+        }
+        let pages = g.order[lo..hi]
+            .iter()
+            .filter(|&&p| {
+                let f = g.flag(p);
+                f & F_CRC == 0 && !(bg && f & F_INFLIGHT != 0)
+            })
+            .map(|&p| {
+                let e = g.map[p as usize - 1];
+                (p, e.offset as u32, e.size)
+            })
+            .collect();
+        Run {
+            file,
+            offset: 0,
+            len: size,
+            pages,
+        }
     }
 
     /// The run a missed page belongs to: the page and the pages after it in
@@ -951,6 +1013,30 @@ mod tests {
         );
         assert_eq!(lazy.verify(expected), Ok(true));
         assert!(lazy.verify(expected ^ 1).is_err());
+    }
+
+    #[test]
+    fn small_files_are_fetched_whole_and_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let lazy = Lazy::create(&dir.path().join("db"), PS, Duration::from_secs(1)).unwrap();
+        let (a, b) = files();
+        stage_all(&lazy, 0, &a);
+        stage_all(&lazy, 1, &b);
+        lazy.ready().unwrap();
+        lazy.set_whole_max(b.len() as u64);
+        // The newest file is small enough: its run is the whole object. The
+        // older, larger one stays a run of frames.
+        let run = lazy.miss_run(7, 1).unwrap();
+        assert_eq!((run.file, run.offset, run.len), (1, 0, b.len() as u64));
+        assert_eq!(run.pages.len(), 2);
+        assert!(lazy.verify_whole(1, &b).is_ok());
+        let mut bad = b.clone();
+        bad[HEADER_SIZE + 12] ^= 1;
+        assert!(lazy.verify_whole(1, &bad).is_err());
+        // A run of frames has nothing to check.
+        assert!(lazy.verify_whole(0, &bad[..40]).is_ok());
+        lazy.set_whole_max(0);
+        assert!(lazy.miss_run(7, 1).unwrap().len < b.len() as u64);
     }
 
     #[test]
