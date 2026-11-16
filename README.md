@@ -157,16 +157,34 @@ def deps do
 end
 ```
 
-The native crate is compiled with your project, so you need a C compiler and
-a Rust toolchain of 1.97.1 or later (tested with 1.97.1 and 1.100.0). With
-[mise](https://mise.jdx.dev), `mise use rust@1.97.1` installs it; `rustup`
-works too. The first `mix compile` downloads the crates and builds the
-native library: about 75 seconds on 2 vCPUs.
+The native crate is compiled with your project, so you need a C compiler,
+Elixir 1.17 or later and a Rust toolchain of 1.97.1 or later (tested with
+1.97.1 and 1.100.0). The project itself is developed with Erlang/OTP 28 and
+Elixir 1.20. With [mise](https://mise.jdx.dev) one command installs them:
+
+```sh
+mise use erlang elixir rust@1.97.1
+```
+
+The first install can take minutes: installing Rust with its components
+(`clippy`, `rust-docs`, `rustfmt`) took 12 minutes on 2 vCPUs. `rustup`
+works instead of mise for Rust.
+
+Then create a project and add the dependency above to its `mix.exs`:
+
+```sh
+mix new my_app
+cd my_app
+mix deps.get
+```
+
+The first `mix compile` downloads the crates and builds the native library:
+1 to 2 minutes on 2 vCPUs (1 min 52 s measured).
 
 ## Example
 
 Try it against a local SeaweedFS. This container is disposable and its data
-lives inside it:
+lives inside it. The first `docker run` pulls an image of about 725 MB:
 
 ```sh
 docker run -d --name alambique-first-try -p 127.0.0.1:18333:8333 \
@@ -176,8 +194,8 @@ docker run -d --name alambique-first-try -p 127.0.0.1:18333:8333 \
 ```
 
 Alambique does not create the bucket; SeaweedFS creates it on the first
-write. On AWS S3 create it first. Save this as `example.exs` in your project
-and run `mix run example.exs`:
+write. On AWS S3 create it first. Save this as `example.exs` in the root of
+your project (next to `mix.exs`) and run `mix run example.exs` there:
 
 ```elixir
 s3_config = %{
@@ -218,10 +236,15 @@ ends. Without it, a run within the next 30 s (`lease_ttl_ms`) gets
 `{:error, {:unavailable, "nonode@nohost", expires_at_ms}}`, because the stopped
 process still holds the lease. Wait until `expires_at_ms` (a Unix time in
 milliseconds) and call again. Remove the container with
-`docker rm -f alambique-first-try`.
+`docker rm -fv alambique-first-try`; `-v` also removes the anonymous volume
+the container creates.
 
 More calls, placement and the other features are in
 [docs/how-to-call-cells.md](docs/how-to-call-cells.md).
+
+If Elixir warns about a "native name encoding of latin1", the shell has no
+UTF-8 locale. Run with `LANG=C.UTF-8`, for example
+`LANG=C.UTF-8 mix run example.exs`.
 
 ## Requirements
 
