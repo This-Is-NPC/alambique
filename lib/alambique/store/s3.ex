@@ -37,6 +37,8 @@ defmodule Alambique.Store.S3 do
       virtual-hosted style (`bucket.s3.<region>.amazonaws.com` on AWS; a
       bucket name with dots does not match the AWS certificate)
     * `:receive_timeout` - milliseconds, default `8_000`, below the default `:op_timeout_ms` (10 000) so that the client gives up before the library does; raise it only together with `:op_timeout_ms`
+    * `:error_limit` - bytes kept of the code and message of an error answer,
+      default `512` (see below)
     * `:pool_size` - connections to the endpoint that the store may hold
       open at once, default `256`. Connections are opened when a request needs
       one and closed when idle. A request waits for a free connection
@@ -53,8 +55,13 @@ defmodule Alambique.Store.S3 do
   `from_url/2` builds the config from `"s3://bucket/prefix"`.
 
   A response with a redirect status is an error, `{:error, {:http, status,
-  body}}`: following it would send the body and a fresh signature to another
+  summary}}`: following it would send the body and a fresh signature to another
   host. Point `:endpoint` at the region of the bucket.
+
+  An error answer never returns its body, because stores echo request details
+  in it (the session token, the canonical request). `summary` is
+  `"Code: Message"` read from the S3 error XML, or `""` when the body is not
+  one, cut to `:error_limit` bytes (default `512`).
 
   A request that fails answers `{:error, reason}`, also when the HTTP client
   raises or exits (`{:request_crashed, kind, reason}`), for example when its
@@ -67,6 +74,7 @@ defmodule Alambique.Store.S3 do
 
   @default_timeout 8_000
   @default_pool_size 256
+  @default_error_limit 512
   @credentials [:access_key_id, :secret_access_key, :session_token]
   @credentials_margin_ms 300_000
   @credentials_ttl_ms 300_000
@@ -181,19 +189,57 @@ defmodule Alambique.Store.S3 do
 
   defp request(config, method, key, opts \\ []) do
     with {:ok, creds} <- credentials(config) do
-      case signed_request(config, creds, method, key, opts) do
-        {:ok, %{status: status, body: body}} = resp when status in [400, 403] ->
-          if expired_token?(body) and is_function(config[:credentials], 0) do
-            with {:ok, renewed} <- renew(config, creds),
-                 do: signed_request(config, renewed, method, key, opts)
-          else
-            resp
-          end
-
-        other ->
-          other
-      end
+      config |> send_request(creds, method, key, opts) |> summarize_error(config)
     end
+  end
+
+  defp send_request(config, creds, method, key, opts) do
+    case signed_request(config, creds, method, key, opts) do
+      {:ok, %{status: status, body: body}} = resp when status in [400, 403] ->
+        if expired_token?(body) and is_function(config[:credentials], 0) do
+          with {:ok, renewed} <- renew(config, creds),
+               do: signed_request(config, renewed, method, key, opts)
+        else
+          resp
+        end
+
+      other ->
+        other
+    end
+  end
+
+  # Error bodies echo request details (token, canonical request): keep the
+  # S3 code and message only.
+  defp summarize_error({:ok, %{status: status} = resp}, config) when status >= 300 do
+    {:ok, %{resp | body: error_summary(resp.body, config)}}
+  end
+
+  defp summarize_error(other, _config), do: other
+
+  defp error_summary(body, config) when is_binary(body) do
+    limit = Map.get(config, :error_limit, @default_error_limit)
+
+    [tag(body, "Code"), tag(body, "Message")]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(": ")
+    |> truncate(limit)
+  end
+
+  defp error_summary(_body, _config), do: ""
+
+  defp tag(body, name) do
+    case Regex.run(~r{<#{name}>(.*?)</#{name}>}s, body) do
+      [_, value] -> unescape(value)
+      _ -> nil
+    end
+  end
+
+  # At most `limit` bytes, never cutting a character.
+  defp truncate(text, limit) when byte_size(text) <= limit, do: text
+
+  defp truncate(text, limit) do
+    cut = binary_part(text, 0, limit)
+    if String.valid?(cut), do: cut, else: truncate(cut, byte_size(cut) - 1)
   end
 
   defp signed_request(config, {access_key_id, secret_access_key, token}, method, key, opts) do

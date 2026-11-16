@@ -200,7 +200,7 @@ defmodule Alambique.Store.S3CredentialsTest do
       {fun, counter} = source()
       c = config(credentials: fun, req_options: stub(fn _ -> {403, @expired} end))
 
-      assert {:error, {:http, 403, @expired}} = S3.get(c, "k")
+      assert {:error, {:http, 403, "ExpiredToken: x"}} = S3.get(c, "k")
       assert calls(counter) == 2
     end
 

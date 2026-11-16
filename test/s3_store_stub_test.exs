@@ -148,10 +148,50 @@ defmodule Alambique.Store.S3StubTest do
       assert {:error, :precondition_failed} = S3.put(config(reply(412)), "k", "x", :none, %{})
       assert {:error, :not_found} = S3.put(config(reply(404)), "k", "x", :none, %{})
 
-      assert {:error, {:http, 500, "oops"}} =
+      assert {:error, {:http, 500, ""}} =
                S3.put(config(reply(500, [], "oops")), "k", "x", :none, %{})
 
       assert {:error, {:http, 301, _}} = S3.put(config(reply(301)), "k", "x", :none, %{})
+    end
+  end
+
+  describe "error bodies" do
+    @echo "<Error><Code>InvalidToken</Code><Message>The token is bad.</Message>" <>
+            "<Token-0>SESSIONTOKEN123</Token-0>" <>
+            "<CanonicalRequest>x-amz-security-token:SESSIONTOKEN123</CanonicalRequest></Error>"
+
+    test "keep only the code and the message, never the raw body" do
+      c = config(reply(400, [], @echo), %{session_token: "SESSIONTOKEN123"})
+
+      for result <- [
+            S3.get(c, "k"),
+            S3.put(c, "k", "x", :none, %{}),
+            S3.list(c, "", nil, 1),
+            S3.delete(c, "k")
+          ] do
+        assert {:error, {:http, 400, "InvalidToken: The token is bad."}} = result
+        refute inspect(result) =~ "SESSIONTOKEN123"
+      end
+    end
+
+    test "unescape the entities and drop a body that is not an S3 error" do
+      xml = "<Error><Code>AccessDenied</Code><Message>a &amp; b</Message></Error>"
+
+      assert {:error, {:http, 403, "AccessDenied: a & b"}} =
+               S3.get(config(reply(403, [], xml)), "k")
+
+      assert {:error, {:http, 502, ""}} =
+               S3.get(config(reply(502, [], "<html>SECRET</html>")), "k")
+    end
+
+    test "are capped at :error_limit bytes, whole characters only" do
+      xml = "<Error><Code>E</Code><Message>#{String.duplicate("é", 600)}</Message></Error>"
+      assert {:error, {:http, 500, short}} = S3.get(config(reply(500, [], xml)), "k")
+      assert byte_size(short) in 511..512
+      assert String.valid?(short)
+
+      c = config(reply(500, [], xml), %{error_limit: 6})
+      assert {:error, {:http, 500, "E: é"}} = S3.get(c, "k")
     end
   end
 
@@ -239,7 +279,7 @@ defmodule Alambique.Store.S3StubTest do
     end
 
     test "errors keep their status" do
-      assert {:error, {:http, 403, "denied"}} =
+      assert {:error, {:http, 403, ""}} =
                S3.list(config(reply(403, [], "denied")), "", nil, 1)
     end
   end

@@ -104,8 +104,10 @@ anything but `s3://bucket` or `s3://bucket/path`.
 
 - `{:error, {:http, 301, _}}`: the bucket is in another region. Set `:region`
   (or `:endpoint`) to its region.
-- `{:error, {:http, 403, body}}` with `SignatureDoesNotMatch` or
-  `InvalidToken`: the token does not belong to the keys, or the region is wrong.
+- `{:error, {:http, 403, "SignatureDoesNotMatch: ..."}}` or `"InvalidToken: ..."`:
+  the third element is the S3 error code and message, never the response body
+  (it can echo the token), cut to `:error_limit` bytes (default `512`). Either
+  the token does not belong to the keys, or the region is wrong.
 - `{:error, {:http, 403, _}}` from a `HEAD` request, with credentials that
   expired: the answer has no body, so the store cannot tell the expired token
   and does not renew. The next request with a body does.
