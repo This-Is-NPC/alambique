@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# The cluster suite: the failover properties on peer nodes (tests tagged
+# :cluster). Arguments go to `mix test`.
+#
+# CI runs it in parts (`--partitions M` with MIX_TEST_PARTITION=i). ExUnit deals
+# the test files out round-robin in sorted order, and over every file of the
+# project that leaves the slowest cluster files in one part. So the files that
+# hold cluster tests are named, and only they are dealt out. A file counts when
+# it mentions the tag, so a new cluster test file joins by itself.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+
+mapfile -t files < <(grep -rlE ':cluster\b|\bcluster: true' test --include='*_test.exs' | sort)
+[[ ${#files[@]} -gt 0 ]] || {
+  echo "test-cluster: no test file mentions the :cluster tag" >&2
+  exit 1
+}
+
+exec mix test --only cluster "$@" "${files[@]}"

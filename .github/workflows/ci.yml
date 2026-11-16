@@ -5,13 +5,18 @@ name: CI
 # added. Tool versions come from mise.toml; nothing here lists a version.
 #
 # Every test runs once. The default suite runs with coverage, split into
-# parts that run side by side; `gate` only checks statically.
+# parts that run side by side; the cluster suite runs in parts without
+# coverage; `gate` only checks statically.
 #
 # Knobs:
 # - `part` of `coverage-run`: the parts of the default suite, one runner each.
 #   Default 4, the list [1, 2, 3, 4]; the number of items is N of
 #   `mix test --partitions N`. Setup costs each part a minute or two, so more
 #   parts stop paying once the suite per part is that short.
+# - `part` of `cluster`: the parts of the cluster suite. Default 3, the list
+#   [1, 2, 3], with the same rule. The two slowest files (placement and
+#   failover properties, about 6 of 12 minutes) cannot split further, so more
+#   parts stop paying early.
 # - `timeout-minutes` of each job, with its default in the comment next to it.
 #   A hung job is cancelled after it.
 # Parallelism inside a job is not set: the runner has 4 vCPUs, cargo uses all
@@ -198,10 +203,17 @@ jobs:
         if: failure()
         run: docker logs --tail 100 alambique-seaweedfs
 
-  # Failover properties on peer nodes.
+  # Failover properties on peer nodes, in parts that run side by side; a
+  # failing part prints its seed (reproduce with
+  # `MIX_TEST_PARTITION=<part> scripts/test-cluster --partitions <M> --seed
+  # <seed>`). No coverage: `coverage-run` does not run these tests.
   cluster:
     runs-on: ubuntu-latest
     timeout-minutes: 30 # default 30
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3] # default 3; M is the length of this list
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -210,7 +222,13 @@ jobs:
         with:
           tools: erlang elixir rust
           cache-name: cluster
-      - run: mise run test:cluster
+      - name: Run the part
+        env:
+          MIX_TEST_PARTITION: ${{ matrix.part }}
+        run: |
+          mise run test:cluster -- \
+            --partitions ${{ strategy.job-total }} \
+            --slowest-modules 5
 
   # The single check to require on master.
   ci:
