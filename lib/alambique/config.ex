@@ -8,6 +8,7 @@ defmodule Alambique.Config do
 
   @defaults [
     join: true,
+    check_store: true,
     clock: {Alambique.Clock.System, nil},
     lease_ttl_ms: 30_000,
     lease_renew_jitter: 0.1,
@@ -213,6 +214,7 @@ defmodule Alambique.Config do
           node_id: String.t(),
           incarnation: String.t(),
           join: boolean,
+          check_store: boolean,
           placement: {module, term},
           data_dir: Path.t(),
           clock: {module, term},
@@ -413,6 +415,7 @@ defmodule Alambique.Config do
       node_id: node_id,
       incarnation: Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false),
       join: join!(opts),
+      check_store: bool!(opts, :check_store),
       placement: placement,
       data_dir: data_dir,
       clock: opts[:clock],

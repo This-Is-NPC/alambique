@@ -81,6 +81,7 @@ means to chart it and look when something else fires.
 | `[:alambique, :store, :failure]` with `counted: false` (`reason: :local`) | Watch; any sustained rate is the node, not the store: its pool of connections is full. | `Store.S3` `pool_size` (default 256), [how-to-configure-the-s3-store.md](how-to-configure-the-s3-store.md) |
 | `[:alambique, :cell, :upload_retry]` | Page when a cell's `attempt` keeps growing. Each retry waits 500 ms, doubling up to 5 s. | `upload: [retry_backoff_ms: 500, retry_backoff_max_ms: 5_000]` |
 | `{:error, :store_unavailable}` returned to your callers | Count it at the call site: the library emits no event for a refused call. It means an open breaker. | design §3 |
+| Log line `Alambique :<name>: could not check the conditional writes of location <id>: <reason>` | Page on any. The store was unreachable at start, so the node started without the check that it honours `If-None-Match` and `If-Match`. Restart the node once the store answers. | design §3; [storage-compatibility.md](storage-compatibility.md) |
 
 A store that fails for longer than the lease deadline (the row below) costs
 the node its cells: the leases are lost and the cells stop. A store that

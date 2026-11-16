@@ -259,6 +259,18 @@ the panic tests abort the VM when `guard` does not catch.
   `If-Match`. A 412 maps to `{:error, :precondition_failed}`. A 409
   `ConditionalRequestConflict` is retried by the caller like any transient
   error, never treated as success.
+- A store that ignores either condition breaks fencing without any error: two
+  nodes could hold one epoch and create-only files could be overwritten. So
+  the start of an instance probes each distinct store (`Store.Conformance`):
+  under `<prefix>/store-check/<random>` it creates an object, repeats the
+  create (must give `:precondition_failed`), replaces it with a wrong etag
+  (must give `:precondition_failed`) and with the right one (must succeed),
+  then deletes it. That is four puts and a delete, before the data directory
+  is locked. A store that answers wrongly refuses the start with
+  `{:error, {:store_not_conformant, location_id, [:if_none_match | :if_match]}}`.
+  A request of the probe that fails for another reason (the store is down) is
+  logged and the start goes on: the breaker handles an unavailable store at
+  any other time. The option `check_store: false` skips it.
 - `meta` maps to `x-amz-meta-*` headers.
 - `get_range` returns up to `length` bytes from `offset` and the size of the
   whole object and its metadata (S3: a `Range` request, the total of

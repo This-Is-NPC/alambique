@@ -5,6 +5,16 @@ and `If-Match`, with HTTP 412 on failure. The shared contract suite
 (`Alambique.StoreContract`) checks this against the in-memory store and,
 under the `:seaweedfs` tag, against a real server.
 
+At every start the instance checks this on a scratch object under each
+store's prefix (`<prefix>/store-check/<random>`, four puts and a delete, then
+removed): a create repeated, and a replace with a wrong etag, must both give
+412, and a replace with the right etag must succeed. A store that fails refuses
+the start with `{:error, {:store_not_conformant, location_id, failed}}`, where
+`failed` lists `:if_none_match` and/or `:if_match`. If the store cannot be
+reached for the check, the start logs a warning and goes on. Once a store
+version is known to pass, `check_store: false` skips it (design section 3).
+Use the check on a store this page does not list before you trust it.
+
 ## SeaweedFS 4.48
 
 Status: **passes**. Observed on 2026-10-26 with image
