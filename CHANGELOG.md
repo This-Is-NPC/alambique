@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.2](https://github.com/This-Is-NPC/alambique/compare/v0.10.1...v0.10.2) (2026-11-16)
+
+
+### Bug Fixes
+
+* **cell:** stop reporting a stopped cell as the owner ([093a13b](https://github.com/This-Is-NPC/alambique/commit/093a13b173812e409deb3c4ade0b0c7e18a234f7))
+
 ## [0.10.1](https://github.com/This-Is-NPC/alambique/compare/v0.10.0...v0.10.1) (2026-11-15)
 
 
