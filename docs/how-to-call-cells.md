@@ -90,6 +90,16 @@ answer can be one message stale: a cell that is waking may still be reported
 not holding the cell. Use the default when `:none` must mean that the lease is
 free.
 
+`Alambique.members/1` lists the nodes that run the instance, this one
+included, from the view this node keeps (no store request). `Alambique.preferred/2`
+names the node that routing prefers for a cell among them, which is where a cell
+is woken when none is awake:
+
+```elixir
+nodes = Alambique.members(MyApp.Cells)
+node = Alambique.preferred(MyApp.Cells, "org-1")
+```
+
 `Alambique.cells/2` lists the cells awake on the local node in id order.
 With `details: true` each entry is a map, so a monitor can pick the cell to
 hibernate to free memory or disk without reading files:
