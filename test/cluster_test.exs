@@ -129,8 +129,10 @@ defmodule Alambique.ClusterTest do
       end)
 
     eventually(fn ->
-      Cluster.call(c, owner_name, Process, :info, [pid, :message_queue_len]) ==
-        {:ok, {:message_queue_len, 1}}
+      {:ok, {:messages, messages}} =
+        Cluster.call(c, owner_name, Process, :info, [pid, :messages])
+
+      Enum.any?(messages, &match?({:"$gen_call", _, {:hibernate_if_idle, _}}, &1))
     end)
 
     call =

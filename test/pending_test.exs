@@ -86,7 +86,11 @@ defmodule Alambique.PendingTest do
       hibernate =
         Task.async(fn -> Alambique.Router.call(inst, cell, :hibernate_if_idle, 5_000) end)
 
-      eventually(fn -> {:message_queue_len, 1} == Process.info(pid, :message_queue_len) end)
+      eventually(fn ->
+        {:messages, messages} = Process.info(pid, :messages)
+        Enum.any?(messages, &match?({:"$gen_call", _, {:hibernate_if_idle, _}}, &1))
+      end)
+
       call = Task.async(fn -> Alambique.execute(inst, cell, @insert, [1]) end)
       eventually(fn -> Alambique.load(inst, cell) == {:ok, %{pending: 1, waking: false}} end)
       :sys.resume(pid)
