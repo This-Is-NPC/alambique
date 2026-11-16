@@ -246,7 +246,10 @@ More calls, placement and the other features are in
 
 ## Documentation
 
-[docs/README.md](docs/README.md) maps the documentation. The history of
+[docs/README.md](docs/README.md) maps the documentation. To run a node, see
+how to [monitor it](docs/how-to-monitor-a-node.md), [manage the
+bucket](docs/how-to-manage-the-bucket.md) and [recover from the loss of a node
+and its disk](docs/how-to-recover-from-disaster.md). The history of
 releases is in [CHANGELOG.md](CHANGELOG.md). To work on the project, read
 [docs/contributing.md](docs/contributing.md).
 
