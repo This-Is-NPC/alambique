@@ -122,6 +122,11 @@ first release (0.1.0):
   it does not count. The testkit `MemoryStore` no longer times out its calls
   to its server, which a starved server turned into a counted crash. There is
   no breaking change: only metadata keys and options are new.
+- 0.10.2: `Alambique.owner/3`, and the peers check behind it, no longer name
+  a local cell that already emitted its `[:alambique, :cell, :stop]` event
+  (`:lease_lost`, `:fenced`) and is only closing its database. Before, right
+  after a takeover, the old owner could answer itself for that moment. There
+  is no breaking change and no new option.
 
 The full list is in [CHANGELOG.md](CHANGELOG.md).
 
