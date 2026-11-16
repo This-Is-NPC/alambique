@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.11.0](https://github.com/This-Is-NPC/alambique/compare/v0.10.2...v0.11.0) (2026-11-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* **placement:** an instance now refuses to start with a prefix that has a leading or trailing slash, an empty segment (a//b), a "." or ".." segment, or a control character. A deployment that used such a prefix cannot open its old data through the library, because the old location is itself refused, so the move and restore paths cannot read it either. It must copy the objects to a valid prefix with the store's own tools and point the instance at the new prefix, or start on a fresh prefix.
+
+### Features
+
+* **membership:** add members/1 and preferred/2 ([44090c8](https://github.com/This-Is-NPC/alambique/commit/44090c8aba38c77578649a8f22798fb6b81f8b70))
+* **membership:** emit a telemetry event on change ([4b3c78e](https://github.com/This-Is-NPC/alambique/commit/4b3c78ea02ff4df132c93197d487dccb356aea1a))
+* **move:** add only_if_idle to move/4 ([d702be9](https://github.com/This-Is-NPC/alambique/commit/d702be92a87c9d6c7641a7e6f31d9f4c7305d93f))
+
+
+### Bug Fixes
+
+* **compaction:** never write an object over the read cap ([6337f77](https://github.com/This-Is-NPC/alambique/commit/6337f771a793e822017870c0699715c05f162ea8))
+* **lazy:** check the checksum of small files first ([6b3e95c](https://github.com/This-Is-NPC/alambique/commit/6b3e95c706f98ed808ef92a6d028ba1ecdf98445))
+* **lazy:** hold writes until the hydration is verified ([9237145](https://github.com/This-Is-NPC/alambique/commit/92371458b17d8d37f824cb416958566ebebfe4b7))
+* **lease:** refuse a lease of another cell ([0114925](https://github.com/This-Is-NPC/alambique/commit/0114925071af3d1116c80ba06091f99bcc9218b5))
+* **ops:** conceal the store and check the cell ([374f88b](https://github.com/This-Is-NPC/alambique/commit/374f88b78fe3fc1f6c737d4edaa48f6666500618))
+* **placement:** reject unsafe prefixes ([bdfb0b7](https://github.com/This-Is-NPC/alambique/commit/bdfb0b750776b3068fbc154d4577b6f0347c48e9))
+* **store:** cap the size of every bucket read ([1382ee3](https://github.com/This-Is-NPC/alambique/commit/1382ee3ad6cd0a837fbc73fd4eb7968f24cd9ea6))
+* **store:** redact S3 error bodies ([126d025](https://github.com/This-Is-NPC/alambique/commit/126d0253fad2a0b16ac8ef576e7f9f357e60e090))
+* **store:** refuse a store without conditional writes ([949d99a](https://github.com/This-Is-NPC/alambique/commit/949d99a7990956940bde53b32406688a163a541e))
+* **testkit:** start epmd before going distributed ([63f225d](https://github.com/This-Is-NPC/alambique/commit/63f225d29827c112927cc61b03fe9fb5f5c664cd))
+* **trash:** tie the manifest cell to its key ([a07f212](https://github.com/This-Is-NPC/alambique/commit/a07f2121b1aa640eee7f8ef44bd93f068729198a))
+* **wake:** renew a lease a slow wake used up ([6cdb4d3](https://github.com/This-Is-NPC/alambique/commit/6cdb4d3b265cb24de5b4831ca96c981a8104dd29))
+
 ## [0.10.2](https://github.com/This-Is-NPC/alambique/compare/v0.10.1...v0.10.2) (2026-11-16)
 
 
