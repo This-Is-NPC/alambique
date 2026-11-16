@@ -49,10 +49,13 @@ defmodule Alambique.AckDurabilityClusterTest do
   defp call(cluster, name, fun, args, timeout \\ @call_timeout_ms + 2_000),
     do: Cluster.call(cluster, name, Alambique, fun, args, timeout)
 
-  defp insert(cluster, name, inst, cell, n) do
+  defp insert_result(cluster, name, inst, cell, n) do
     args = [inst, cell, "INSERT INTO log (n) VALUES (?)", [n], [timeout: @call_timeout_ms]]
-    match?({:ok, {:ok, _}}, call(cluster, name, :execute, args))
+    call(cluster, name, :execute, args)
   end
+
+  defp insert(cluster, name, inst, cell, n),
+    do: match?({:ok, {:ok, _}}, insert_result(cluster, name, inst, cell, n))
 
   defp owner_name(cluster, inst, cell) do
     {:ok, {:ok, owner}} = call(cluster, :n1, :owner, [inst, cell])
@@ -99,7 +102,7 @@ defmodule Alambique.AckDurabilityClusterTest do
 
   defp round(cluster, inst, kind, index) do
     cell = "ack-#{kind}-#{index}"
-    assert insert(cluster, :n1, inst, cell, 0)
+    assert {:ok, {:ok, _}} = insert_result(cluster, :n1, inst, cell, 0)
     owner = owner_name(cluster, inst, cell)
     caller = Enum.find(Cluster.names(cluster), &(&1 != owner))
     survivor = Enum.find(Cluster.names(cluster), &(&1 not in [owner, caller]))
