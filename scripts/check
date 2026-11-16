@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# The full gate behind `mise run check`, scripts/local-check and the `gate` job
-# of CI. Runs, in order: scripts/quick-check --force (forced warnings-as-errors
-# compile, so a stale _build cannot hide a warning, and format checks), clippy,
-# the docs link check and the default suite. Stops at the first failure.
+# The full gate behind `mise run check` and scripts/local-check. Runs, in
+# order: scripts/quick-check --force (forced warnings-as-errors compile, so a
+# stale _build cannot hide a warning, and format checks), clippy, the docs link
+# check and the default suite. Stops at the first failure.
+#
+#   ALAMBIQUE_CHECK_TESTS=0     skip the default suite: the static checks that
+#                               the `gate` job of CI runs (`mise run
+#                               check:static`), since CI runs the suite in the
+#                               coverage parts
 #
 # Optional heavy checks, off by default:
 #   ALAMBIQUE_CHECK_CLUSTER=1   also run `mise run test:cluster`
@@ -22,8 +27,10 @@ cargo clippy --manifest-path native/alambique_nif/Cargo.toml --all-targets -- -D
 step "docs links"
 "$root/scripts/link-check"
 
-step "tests"
-mise run test
+if [[ "${ALAMBIQUE_CHECK_TESTS:-1}" != 0 ]]; then
+  step "tests"
+  mise run test
+fi
 
 if [[ "${ALAMBIQUE_CHECK_CLUSTER:-0}" == 1 ]]; then
   step "cluster tests"
