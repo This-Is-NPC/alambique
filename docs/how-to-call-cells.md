@@ -18,6 +18,9 @@ documentation of `Alambique`; the words are in [concepts.md](concepts.md).
 
 Use the same name, store and prefix on every node of the cluster. The store and
 prefix are the shorthand for a single location; step 5 shows a placement.
+The prefix is a path such as `myapp` or `myapp/prod`: no empty, `.` or `..`
+segments, no leading or trailing `/`, no control characters. Do not give one
+instance a prefix that is a path prefix of another's in the same store.
 
 ```elixir
 children = [

@@ -1,10 +1,12 @@
 defmodule Alambique.KeyValidationTest do
   @moduledoc "Keys and prefixes that name another place are refused."
   use ExUnit.Case, async: false
+  use ExUnitProperties
 
   import Alambique.LeaseHelpers
 
-  alias Alambique.{Lease, Trash}
+  alias Alambique.{Lease, Location, Trash}
+  alias Alambique.Placement.Single
   alias Alambique.Replication.Keys
   alias AlambiqueTestkit.{ManualClock, MemoryStore}
 
@@ -63,6 +65,54 @@ defmodule Alambique.KeyValidationTest do
       {:ok, _} = mod.put(cfg, "#{ctx.prefix}/cells/b/lease", body, :none, %{})
 
       assert {:error, :corrupt_lease} = Lease.read(ctx, "b")
+    end
+  end
+
+  describe "location prefixes" do
+    @bad [
+      "",
+      "/app",
+      "app/",
+      "a//b",
+      "app/../x",
+      "..",
+      ".",
+      "a/./b",
+      "a\nb",
+      "a\0b",
+      "a\x7Fb"
+    ]
+
+    test "Single and Location refuse them" do
+      store = {MemoryStore, %{}}
+
+      for prefix <- @bad do
+        assert is_binary(Single.validate_options(store: store, prefix: prefix)),
+               inspect(prefix)
+
+        refute Location.valid?(%Location{id: "a", store: store, prefix: prefix}),
+               inspect(prefix)
+      end
+    end
+
+    test "nested and dotted names stay valid" do
+      store = {MemoryStore, %{}}
+
+      for prefix <- ["app", "app/prod", "a.b", "...", "my-app_1", "a/b/c"] do
+        assert :ok = Single.validate_options(store: store, prefix: prefix)
+        assert Location.valid?(%Location{id: "a", store: store, prefix: prefix})
+      end
+    end
+
+    property "a prefix with a dot segment is never valid" do
+      check all(
+              head <- string(:alphanumeric, max_length: 5),
+              dot <- member_of([".", ".."]),
+              tail <- string(:alphanumeric, max_length: 5)
+            ) do
+        prefix = Enum.join([head, dot, tail], "/")
+        refute Location.valid?(%Location{id: "a", store: {MemoryStore, %{}}, prefix: prefix})
+      end
     end
   end
 end
