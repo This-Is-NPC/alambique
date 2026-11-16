@@ -1077,6 +1077,25 @@ defmodule Alambique do
   def join(instance), do: Membership.join(Config.fetch!(instance))
 
   @doc """
+  The nodes that run the instance over its store, this one included, sorted
+  (design §8). Nodes that announced another store identity are left out. It
+  reads the cluster view this node keeps, so it does not scan the groups, and
+  a node that drained (`drain/2`) or never joined is not in it. An unknown
+  instance raises `ArgumentError`.
+  """
+  @spec members(instance) :: [node]
+  def members(instance), do: Membership.nodes(Config.fetch!(instance))
+
+  @doc """
+  The node that routing prefers for `cell` among `members/1`: rendezvous
+  hashing, so a node that joins or leaves moves only the cells it wins or
+  held. It is where a cell is woken when none is awake; `owner/3` tells where
+  it runs. An unknown instance raises `ArgumentError`.
+  """
+  @spec preferred(instance, cell) :: node
+  def preferred(instance, cell), do: Membership.preferred(Config.fetch!(instance), cell)
+
+  @doc """
   Moves the cell to `node`: the current owner hibernates it and `node` wakes
   it. `node` must run the instance.
   """
