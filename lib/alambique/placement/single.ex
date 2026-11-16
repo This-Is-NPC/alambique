@@ -19,8 +19,9 @@ defmodule Alambique.Placement.Single do
       not match?({mod, _} when is_atom(mod), opts[:store]) ->
         ":store must be {module, config}"
 
-      not is_binary(location_prefix(opts)) or location_prefix(opts) == "" ->
-        ":prefix must be a non-empty string"
+      not Location.valid_prefix?(location_prefix(opts)) ->
+        ":prefix must be a non-empty path of segments that are not empty, \".\" or \"..\", " <>
+          "without control characters"
 
       true ->
         :ok

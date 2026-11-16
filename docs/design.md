@@ -525,8 +525,11 @@ one deployment, readers (the Mix tasks that only look, `alambique.inspect`) a
 read-only one, and do not share a bucket prefix with a party you do not trust.
 Endpoints given as `http://` are sent in clear.
 
-A lease whose body names a cell other than the one in its key is
-`{:error, :corrupt_lease}`.
+A location prefix is a slash-separated path whose segments are not empty, `.`
+or `..`, with no control characters; an instance refuses any other at start.
+Give each instance a prefix that is not a path prefix of another's in the same
+store (`app` and `app/cells` would share keys). A lease whose body names a
+cell other than the one in its key is `{:error, :corrupt_lease}`.
 
 ## 4. Storage layout
 
