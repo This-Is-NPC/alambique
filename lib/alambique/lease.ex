@@ -546,7 +546,14 @@ defmodule Alambique.Lease do
     do: Conditional.put(ctx, key(ctx, lease.cell), encode(lease), condition)
 
   defp fetch(ctx, cell) do
-    with {:ok, body, etag} <- Conditional.get(ctx, key(ctx, cell)), do: decode(body, etag)
+    with {:ok, body, etag} <- Conditional.get(ctx, key(ctx, cell)),
+         {:ok, %__MODULE__{cell: ^cell} = lease} <- decode(body, etag) do
+      {:ok, lease}
+    else
+      # A body for another cell would make a renewal write that cell's key.
+      {:ok, %__MODULE__{}} -> {:error, :corrupt_lease}
+      other -> other
+    end
   end
 
   defp now(ctx), do: Conditional.now(ctx)

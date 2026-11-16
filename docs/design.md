@@ -525,6 +525,9 @@ one deployment, readers (the Mix tasks that only look, `alambique.inspect`) a
 read-only one, and do not share a bucket prefix with a party you do not trust.
 Endpoints given as `http://` are sent in clear.
 
+A lease whose body names a cell other than the one in its key is
+`{:error, :corrupt_lease}`.
+
 ## 4. Storage layout
 
 All keys of a cell live under the `prefix` of its location, in the location's
