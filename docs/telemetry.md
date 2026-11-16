@@ -4,6 +4,9 @@ Alambique emits [`:telemetry`](https://hexdocs.pm/telemetry) events. Attach
 handlers with `:telemetry.attach/4`. Durations are in native time units; use
 `System.convert_time_unit/3`.
 
+For which of them to alert on, and at what value, see
+[how-to-monitor-a-node.md](how-to-monitor-a-node.md).
+
 ## Lease events
 
 Emitted by `Alambique.Lease`. `cell` and `owner` are strings.
