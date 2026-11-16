@@ -1995,6 +1995,18 @@ directories (`<data_dir>/work`, §20) are not part of the cache; `inflight`,
   procedure is in [how-to-swap-a-node.md](how-to-swap-a-node.md).
 - **Move**: the owner hibernates the cell, and the target wakes it with a hop
   budget of zero, so it wakes the cell itself. The target must run the instance.
+  With `only_if_idle: true` the owner decides inside the cell process, while
+  it handles the request (`:hibernate_if_idle` in `Router`, `{:hibernate_if_idle,
+  at}` for the cell): the cell counts the calls it has not finished with (the
+  mailbox count and the callers parked on a write, `Cell.pending_calls/1`; the
+  request itself is not counted). If the count is not zero it does not
+  hibernate and the move answers `{:error, :busy}`, so a rebalance never makes
+  a caller wait for a hibernation and a wake. The check and the hibernation
+  are one step of the cell, so no call is accepted in between; a call that
+  arrives later finds the cell asleep and wakes it on the target or the
+  preferred node like any other. A wake is over before the cell reads the
+  request, and the call that caused it is counted. A cell that is asleep is
+  idle.
 - Node join changes the preferred node only for future wakes. Node death
   leaves leases to expire (§5); the cell is served again from another node
   once the lease has expired by that node's clock plus the margin.

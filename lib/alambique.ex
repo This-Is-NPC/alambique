@@ -1097,11 +1097,19 @@ defmodule Alambique do
 
   @doc """
   Moves the cell to `node`: the current owner hibernates it and `node` wakes
-  it. `node` must run the instance.
+  it. `node` must run the instance. Options:
+
+    * `:timeout` - in milliseconds (default `:call_timeout_ms`).
+    * `:only_if_idle` - when `true` (default `false`) the owner decides while
+      it handles the request: if another call is waiting on the cell, or
+      parked on a write, it does not hibernate and the move answers
+      `{:error, :busy}`, leaving the cell where it is. A cell that is asleep
+      is idle. Use it to rebalance without making callers wait for a
+      hibernation and a wake; try again later.
   """
   @spec move(instance, cell, node, keyword) :: {:ok, node} | {:error, term}
   def move(instance, cell, node, opts \\ []) when is_atom(node),
-    do: Router.move(instance, cell, node, opts[:timeout])
+    do: Router.move(instance, cell, node, opts[:timeout], opts[:only_if_idle] == true)
 
   @doc """
   Moves the cell to another location of the placement (design §18). `to` is a

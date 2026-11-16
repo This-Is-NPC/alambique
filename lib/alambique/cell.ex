@@ -96,9 +96,13 @@ defmodule Alambique.Cell do
   @spec pending(pid, :atomics.atomics_ref()) :: {:ok, non_neg_integer} | :none
   def pending(pid, load) do
     if Process.alive?(pid),
-      do: {:ok, :atomics.get(load, 1) + :atomics.get(load, 2)},
+      do: {:ok, pending_calls(load)},
       else: :none
   end
+
+  @doc false
+  @spec pending_calls(:atomics.atomics_ref()) :: non_neg_integer
+  def pending_calls(load), do: :atomics.get(load, 1) + :atomics.get(load, 2)
 
   @doc false
   @spec new_load() :: :atomics.atomics_ref()
@@ -329,7 +333,7 @@ defmodule Alambique.Cell do
     else
       answer = state.inflight |> Inflight.busy(fn -> call(request, from, state) end) |> tracked()
       # Taken back once the call is parked or answered, so it counts all along.
-      unless match?({:hibernate, _}, request), do: :atomics.sub(state.load, 2, 1)
+      unless hibernation?(request), do: :atomics.sub(state.load, 2, 1)
       answer
     end
   end
@@ -390,6 +394,10 @@ defmodule Alambique.Cell do
       end
     end)
   end
+
+  defp hibernation?({:hibernate, _}), do: true
+  defp hibernation?({:hibernate_if_idle, _}), do: true
+  defp hibernation?(_), do: false
 
   # Records the memory of the connection after a call or a message, which is
   # what changes it. The state is the last element of every answer.
@@ -488,6 +496,17 @@ defmodule Alambique.Cell do
     case hibernate(state, :request, at) do
       {:ok, state, released} -> {:stop, :normal, released, %{state | mode: :stopped}}
       {:stop, reason, state} -> stop_serving(state, reason, {:error, reason})
+    end
+  end
+
+  # A move that must not disturb the cell (`Alambique.move/4`,
+  # `only_if_idle: true`). The request itself is not counted, so a count above
+  # zero is another call: one waiting in the mailbox or parked on a write. The
+  # wake is over: a call that arrived during it is counted.
+  defp serve_call({:hibernate_if_idle, at}, from, state) do
+    case pending_calls(state.load) do
+      0 -> serve_call({:hibernate, at}, from, state)
+      _ -> {:reply, {:error, :busy}, state}
     end
   end
 

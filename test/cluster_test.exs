@@ -2,7 +2,7 @@ defmodule Alambique.ClusterTest do
   @moduledoc "Routing, forwarding and moving across peer nodes (design §8)."
   use ExUnit.Case, async: false
 
-  import Alambique.CellHelpers, only: [eventually: 2]
+  import Alambique.CellHelpers, only: [eventually: 1, eventually: 2]
 
   alias Alambique.ClusterFuns
   alias AlambiqueTestkit.Cluster
@@ -108,6 +108,45 @@ defmodule Alambique.ClusterTest do
     assert {:ok, %{rows: [[1]]}} = on(c, :n3, :query, [inst, cell, "SELECT n FROM log"])
     assert {:ok, ^target} = on(c, :n1, :move, [inst, cell, target])
     assert {:error, :unknown_node} = on(c, :n1, :move, [inst, cell, :nobody@nowhere])
+  end
+
+  test "move with only_if_idle refuses a cell with a call pending", %{cluster: c, inst: inst} do
+    cell = cell()
+    assert {:ok, _} = on(c, :n1, :execute, [inst, cell, "INSERT INTO log (n) VALUES (1)"])
+    {:ok, owner} = on(c, :n1, :owner, [inst, cell])
+
+    [target | _] =
+      for name <- Cluster.names(c), Cluster.node(c, name) != owner, do: Cluster.node(c, name)
+
+    owner_name = Enum.find(Cluster.names(c), &(Cluster.node(c, &1) == owner))
+    {:ok, config} = Cluster.call(c, owner_name, Alambique.Config, :fetch!, [inst])
+    {:ok, pid} = Cluster.call(c, owner_name, Alambique.Cell, :whereis, [config, cell])
+    :ok = :sys.suspend(pid)
+
+    move =
+      Task.async(fn ->
+        on(c, :n1, :move, [inst, cell, target, [only_if_idle: true]])
+      end)
+
+    eventually(fn ->
+      Cluster.call(c, owner_name, Process, :info, [pid, :message_queue_len]) ==
+        {:ok, {:message_queue_len, 1}}
+    end)
+
+    call =
+      Task.async(fn -> on(c, :n1, :execute, [inst, cell, "INSERT INTO log (n) VALUES (2)"]) end)
+
+    eventually(fn -> match?({:ok, %{pending: 1}}, on(c, owner_name, :load, [inst, cell])) end)
+
+    :ok = :sys.resume(pid)
+
+    assert {:error, :busy} = Task.await(move, 10_000)
+    assert {:ok, _} = Task.await(call, 10_000)
+    assert {:ok, ^owner} = on(c, :n1, :owner, [inst, cell])
+
+    # Idle now: the same call moves it.
+    assert {:ok, ^target} = on(c, :n1, :move, [inst, cell, target, [only_if_idle: true]])
+    assert {:ok, %{rows: [[2]]}} = on(c, :n3, :query, [inst, cell, "SELECT count(*) FROM log"])
   end
 
   test "the owner-hint cache stays bounded", %{cluster: c, inst: inst} do

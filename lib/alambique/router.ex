@@ -190,15 +190,15 @@ defmodule Alambique.Router do
     end
   end
 
-  @spec move(atom, String.t(), node, timeout | nil) :: {:ok, node} | {:error, term}
-  def move(name, cell, target, timeout) do
+  @spec move(atom, String.t(), node, timeout | nil, boolean) :: {:ok, node} | {:error, term}
+  def move(name, cell, target, timeout, only_if_idle?) do
     config = Config.fetch!(name)
     timeout = timeout || config.call_timeout_ms
 
     with :ok <- Placement.validate_id(config, cell),
          true <- target in Membership.fresh_nodes(config) or {:error, :unknown_node},
          false <- owner(name, cell) == {:ok, target},
-         :ok <- call(name, cell, :hibernate, timeout) do
+         :ok <- call(name, cell, hibernation(only_if_idle?), timeout) do
       # Hops 0: the target wakes the cell itself instead of forwarding again.
       case :erpc.call(
              target,
@@ -221,6 +221,9 @@ defmodule Alambique.Router do
   catch
     :error, {:erpc, reason} -> {:error, {:forward_failed, reason}}
   end
+
+  defp hibernation(true), do: :hibernate_if_idle
+  defp hibernation(false), do: :hibernate
 
   @doc false
   # An instance that stopped while the VM is up refuses like a draining node:
@@ -352,6 +355,7 @@ defmodule Alambique.Router do
   end
 
   defp free({_, _, :hibernate, _, _, _}, _seen), do: {nil, :ok}
+  defp free({_, _, :hibernate_if_idle, _, _, _}, _seen), do: {nil, :ok}
 
   # An asleep cell is not woken to say where its chain ends.
   defp free({config, cell, :position, _, _, _}, _seen), do: {nil, stored_position(config, cell)}
@@ -491,6 +495,7 @@ defmodule Alambique.Router do
   # A hibernation is not counted. `load` is the counter of the registry lookup
   # the caller made, `nil` when the cell is gone.
   defp admit(_config, _load, :hibernate), do: :ok
+  defp admit(_config, _load, :hibernate_if_idle), do: :ok
   defp admit(_config, nil, _request), do: :ok
   defp admit(config, load, _request), do: Cell.admit(load, config.awake.max_pending)
 
@@ -539,11 +544,11 @@ defmodule Alambique.Router do
 
   # A hibernating cell answers before it exits; wait for the exit so that the
   # caller sees the cell asleep.
-  defp call_cell(pid, :hibernate, timeout) do
+  defp call_cell(pid, request, timeout) when request in [:hibernate, :hibernate_if_idle] do
     ref = Process.monitor(pid)
 
     try do
-      with :ok <- GenServer.call(pid, {:hibernate, stop_waiting(timeout)}, timeout) do
+      with :ok <- GenServer.call(pid, {request, stop_waiting(timeout)}, timeout) do
         receive do
           {:DOWN, ^ref, :process, ^pid, _} -> :ok
         after
@@ -649,7 +654,7 @@ defmodule Alambique.Router do
   defp repeatable?({:migrate, _wake}), do: true
   defp repeatable?({:checkpoint, _deadline}), do: true
   defp repeatable?({kind, _, _, _}), do: kind in [:query, :checked_query]
-  defp repeatable?(request), do: request in [:touch, :hibernate]
+  defp repeatable?(request), do: request in [:touch, :hibernate, :hibernate_if_idle]
 
   defp clock_ms(%{clock: {clock, clock_config}}), do: clock.now_ms(clock_config)
 end

@@ -220,6 +220,11 @@ the `@`), sets the cookie (`--cookie`, else `ALAMBIQUE_COOKIE`, else the user's 
 `--connect NODE` (default: the target) and calls `Alambique.move/4` there. The
 target must run the instance. Use `--timeout MS` for slow cells.
 
+From code, `Alambique.move(:demo, "org-1", node, only_if_idle: true)` moves the
+cell only when no other call is waiting on it: a busy cell answers
+`{:error, :busy}` and stays where it is, so a rebalance does not make callers
+wait. Try again later.
+
 ## 5.1 Take over a cell whose owner is down
 
 If a failure detector suspects a node is gone, read the lease without waking
