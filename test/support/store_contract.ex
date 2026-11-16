@@ -145,7 +145,10 @@ defmodule Alambique.StoreContract do
             race(@racers, fn i -> @store.put(c, key, "writer-#{i}", :if_none_match, %{}) end)
 
           assert [{:ok, etag}] = Enum.filter(results, &match?({:ok, _}, &1))
-          assert @racers - 1 == Enum.count(results, &(&1 == {:error, :precondition_failed}))
+
+          assert @racers - 1 == Enum.count(results, &(&1 == {:error, :precondition_failed})),
+                 lost_report(results)
+
           assert {:ok, _, ^etag, _} = @store.get(c, key)
         end
       end
@@ -159,9 +162,23 @@ defmodule Alambique.StoreContract do
             race(@racers, fn i -> @store.put(c, key, "writer-#{i}", {:if_match, etag}, %{}) end)
 
           assert [{:ok, new_etag}] = Enum.filter(results, &match?({:ok, _}, &1))
-          assert @racers - 1 == Enum.count(results, &(&1 == {:error, :precondition_failed}))
+
+          assert @racers - 1 == Enum.count(results, &(&1 == {:error, :precondition_failed})),
+                 lost_report(results)
+
           assert {:ok, _, ^new_etag, _} = @store.get(c, key)
         end
+      end
+
+      # What the racers that did not win got, for a failure message.
+      defp lost_report(results) do
+        lost = Enum.reject(results, &match?({:ok, _}, &1))
+
+        "lost racers: #{inspect(Enum.frequencies(lost))}; first raw results: " <>
+          inspect(Enum.take(Enum.reject(lost, &(&1 == {:error, :precondition_failed})), 5),
+            limit: :infinity,
+            printable_limit: 1_000
+          )
       end
 
       defp race(n, fun) do
