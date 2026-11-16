@@ -82,7 +82,11 @@ file; add the cell terms above for the cell that wakes.
 
 A file larger than `read_limits: [max_object_bytes:]` (default 1 GiB) is never
 read: the wake fails with `{:too_large, size, max}` instead of exhausting the
-memory of the node. Raise the cap only if a cell really has a file that large.
+memory of the node. Files are held whole in memory by a full restore and by
+compaction, so the cap is also the largest snapshot, and with it about the
+largest compressed database a cell can have: compaction skips a merge or
+snapshot over it and an upload over it fails. Raise the cap only if a cell
+really has a file that large, and size the memory of the node for it.
 
 `idle_timeout_ms` (default 300 000) sets how long a cell keeps its memory
 after its last call. Lower it when many cells are touched once.

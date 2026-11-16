@@ -551,6 +551,12 @@ defmodule Alambique.Replication.Replicator do
   #   * anything else belongs to a newer or equal epoch: `:taken`.
   #
   # `:exists_ok` (snapshots) takes any existing object as done.
+  defp put(ctx, _store, _config, key, body, _info, _deadline, _mode)
+       when byte_size(body) > ctx.max_object_bytes do
+    Alambique.Store.too_large(key, byte_size(body), ctx.max_object_bytes)
+    {:error, {:too_large, byte_size(body), ctx.max_object_bytes}}
+  end
+
   defp put(ctx, store, config, key, body, info, deadline, mode) do
     meta = Objects.meta(ctx, info)
 

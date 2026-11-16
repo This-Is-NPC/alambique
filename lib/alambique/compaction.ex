@@ -69,7 +69,7 @@ defmodule Alambique.Compaction do
   alias Alambique.Fault
   alias Alambique.Compaction.{Hold, Plan}
   alias Alambique.Replication.{Keys, Native, Objects, Retry}
-  alias Alambique.{Telemetry, Trash}
+  alias Alambique.{Store, Telemetry, Trash}
 
   @defaults [
     fanout: 8,
@@ -246,7 +246,12 @@ defmodule Alambique.Compaction do
       with {:ok, pred_epoch} <- predecessor_epoch(state, group),
            {:ok, inputs, held} <- fetch_all(state, group.inputs),
            :ok <- check_epochs(inputs, pred_epoch),
-           {:ok, merged} <- merge(inputs, group),
+           {:ok, merged} <-
+             merge(
+               state,
+               Keys.segment(state.ctx.prefix, state.cell, group.level, group.min, group.max),
+               inputs
+             ),
            {:ok, outcome, bytes} <- put_merged(state, group, inputs, merged) do
         {:ok, outcome, bytes, held, level0_bytes(group, inputs)}
       end
@@ -434,10 +439,19 @@ defmodule Alambique.Compaction do
       else: {:skip, :epoch_regression}
   end
 
-  defp merge(inputs, _group) do
+  # An output over `max_object_bytes` is not written: a restore could not read
+  # it back whole, and compaction could not read it as an input.
+  defp merge(state, key, inputs) do
     case Native.merge_ltx(Enum.map(inputs, fn {_, body, _} -> body end)) do
-      {:ok, merged} -> {:ok, merged}
-      {:error, reason} -> {:skip, {:merge_failed, reason}}
+      {:ok, merged} when byte_size(merged) > state.ctx.max_object_bytes ->
+        Store.too_large(key, byte_size(merged), state.ctx.max_object_bytes)
+        {:skip, {:too_large, byte_size(merged), state.ctx.max_object_bytes}}
+
+      {:ok, merged} ->
+        {:ok, merged}
+
+      {:error, reason} ->
+        {:skip, {:merge_failed, reason}}
     end
   end
 
@@ -618,7 +632,7 @@ defmodule Alambique.Compaction do
     result =
       with {:ok, inputs, _held} <- fetch_all(state, files),
            :ok <- check_epochs(inputs, 0),
-           {:ok, merged} <- merge(inputs, nil),
+           {:ok, merged} <- merge(state, key, inputs),
            {:ok, {_, _, ts, _, _, _}, _} <- ltx_info(merged) do
         {_, _, last} = List.last(inputs)
         epoch = Objects.epoch_of(last)

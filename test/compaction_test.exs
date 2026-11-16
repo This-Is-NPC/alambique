@@ -347,6 +347,38 @@ defmodule Alambique.CompactionTest do
     end
   end
 
+  describe "the object cap" do
+    test "a merge larger than max_object_bytes is skipped, not written", env do
+      owner = new_owner(env, "a.db")
+      owner = write!(env, owner, [{:put, 1, 20_000}], 1)
+      write!(env, owner, [{:put, 2, 20_000}], 1)
+
+      largest =
+        for {0, min, max} <- files(env), reduce: 0 do
+          acc ->
+            key = Keys.segment(env.ctx.prefix, cell(), 0, min, max)
+            {:ok, body, _, _} = env.mod.get(env.cfg, key)
+            max(acc, byte_size(body))
+        end
+
+      capped = %{env.ctx | max_object_bytes: largest}
+
+      assert {:ok, %{skipped: skipped, merges: 0}} =
+               Compaction.run(capped, cell(), fanout: 2, max_level: 1)
+
+      assert Enum.any?(
+               skipped,
+               &match?({{:too_large, size, ^largest}, {1, 1, 2}} when size > largest, &1)
+             )
+
+      assert segments(env, 1) == []
+
+      # The same pass under the default cap merges.
+      assert {:ok, %{merges: merges}} = compact(env, max_level: 1)
+      assert merges > 0
+    end
+  end
+
   describe "faults" do
     test "a failed upload fails the pass and the next pass repairs it", env do
       owner = history(env, new_owner(env, "a.db"), 8)
