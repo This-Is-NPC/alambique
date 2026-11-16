@@ -69,7 +69,8 @@ versions from `mise.toml`. A new push to a pull request cancels the run of the
 older commit.
 
 `ci` is the aggregate job: it passes when these jobs passed. Every test runs
-once: the default suite runs with coverage, split into parts.
+once: the default suite runs with coverage, split into parts, and the cluster
+suite runs in parts without coverage.
 
 | Job | What it runs |
 | --- | --- |
@@ -79,13 +80,16 @@ once: the default suite runs with coverage, split into parts.
 | `coverage` | `mise run test:coverage:report`: sums the parts and fails below `ALAMBIQUE_COVERAGE_MIN` |
 | `native` | `mise run test:native`: the Rust unit tests of the NIF |
 | `services` | `mise run test:seaweedfs` and `mise run test:litestream` against a SeaweedFS container |
-| `cluster` | `mise run test:cluster`: failover properties on peer nodes |
+| `cluster (i)` | one of M parts of the failover properties on peer nodes: `mise run test:cluster -- --partitions M` (`scripts/test-cluster`) with `MIX_TEST_PARTITION=i` |
 
 **The partitions.** N is the number of items of the `part` list of
-`coverage-run` in `ci.yml` (default 4). ExUnit deals the test files out to the
-partitions round-robin in sorted order, so every test runs in exactly one part.
-Each part runs on its own runner and prints its seed. The test counts of the
-parts add up to the count of a single run (1453 tests of the default suite when
+`coverage-run` in `ci.yml` (default 4) and M the one of `cluster` (default 3).
+ExUnit deals the test files out to the partitions round-robin in sorted order,
+so every test runs in exactly one part. `scripts/test-cluster` deals out only
+the files that mention the `:cluster` tag; dealing out every file of the project
+puts the two slowest cluster files in one part. Each part runs on its own
+runner and prints its seed. The test counts of the parts add up to the count of
+a single run (1453 tests of the default suite, 38 of the cluster suite when
 this was measured), and the `coverage` summary lists them.
 
 **How coverage is summed.** llvm-cov can merge profiles only of the same
@@ -102,7 +106,8 @@ prints both totals in its job summary.
 the same partition:
 
 ```sh
-MIX_TEST_PARTITION=2 mix test --partitions 4 --seed 123456
+MIX_TEST_PARTITION=2 mix test --partitions 4 --seed 123456            # a coverage-run part
+MIX_TEST_PARTITION=1 scripts/test-cluster --partitions 3 --seed 123456  # a cluster part
 ```
 
 Add `--cover` or run `mise run test:coverage` for the coverage of a single
