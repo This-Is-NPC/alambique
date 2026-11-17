@@ -1,0 +1,229 @@
+# A load round, every key at its built-in default (the load test as it ran before it had a config file).
+# Copy this file under another name, keep the keys you change and delete the rest: a missing key keeps the default shown here.
+#
+#   mise run load -- --config load/rounds/mine.toml --dry-run    print the plan, start nothing
+#   mise run load -- --config load/rounds/mine.toml              run it; rerun the same command to skip the steps already done
+#
+# An ALAMBIQUE_LOAD_* variable overrides the key it is documented for (docs/how-to-load-test.md) and wins over this file.
+
+[round]
+cases = []            # optional ordered list "scenario/measure[/variant]", for example ["A/commits/small", "B/cells"]; a measure without a variant runs all its variants; when set, scenarios and measures are ignored
+scenarios = ["A"]     # scenarios to run, in order: A (1 CPU, 512 MB) and/or B (2 CPUs, 2 GB)
+measures = ["commits", "cells", "wakes", "query"]   # measures to run for each scenario, in order
+step_timeout_s = 1800.0   # a step that runs longer is INVALID (timeout); above the longest step of today's ramps (cells fills 32000 cells in 320 s and holds 60 s, wakes prepares up to 57600 cells)
+timeout_s = 0.0           # the whole round, in seconds; 0 sets none. The case in progress is killed when it runs out
+
+[output]
+dir = ""    # results directory; "" is results/load/<name, or the time stamp when there is no name>
+name = ""   # round name for the default directory (letters, digits, . _ -); a rerun that skips done steps needs one
+
+[host]
+ssh = ""         # ssh target that runs the round with --remote; "" runs it on this machine
+repo = ""        # path of the repository clone on the target (required with ssh)
+results = ""     # directory of the results on the target; "" is results/load/<name> under repo
+timeout_s = 172800.0   # --remote: the detached run on the target is killed after this many seconds
+cgroup_root = "/sys/fs/cgroup/system.slice"   # where Docker's systemd driver keeps the container cgroups, on the machine that runs the round
+
+# The scenarios: the limits of the service container. Each key of a table overrides one default.
+[scenarios.A]
+cpus = 1.0             # CPU limit of the service
+memory = "512m"        # memory limit of the service, without its data tmpfs (k, m or g)
+data_tmpfs = "1g"      # size of the service's data tmpfs; the container limit is memory plus this
+
+[scenarios.B]
+cpus = 2.0
+memory = "2g"
+data_tmpfs = "1g"
+
+# The store: SeaweedFS in a container of its own. [measures.<m>.store] and [measures.<m>.variant.<v>.store] override
+# these keys for one measure or one variant (see o022vm.toml).
+[store]
+backing = "tmpfs"    # tmpfs, or disk (the host's disk, for a case that would fill the store's tmpfs)
+tmpfs_size = "4g"    # size of the store's tmpfs; ignored on disk
+dir = ""             # on disk: the directory the case creates for the store, it must not exist; "" is <case results>/store
+latency_ms = 25.0    # delay the service adds to every store request; 0 adds none
+image = "chrislusf/seaweedfs:4.48"   # the store's image
+
+# The service: one Alambique node. 0 or "" keeps the library's default. Measures override some keys (below).
+[service]
+image = "alambique-load:local"        # built by mise run load:image
+erl_aflags = "+Mdai max +MMmcs 0"     # VM flags of the service
+wal_checkpoint_bytes = 8388608        # wal.checkpoint_bytes (the library's 64 MiB times 64 cells would fill the tmpfs)
+idle_timeout_ms = 0                   # cell idle timeout; 0 keeps the library's
+max_cells = 0                         # awake.max_cells; 0 keeps the library's
+cache_kib = 0                         # awake.cache_kib; 0 keeps the library's (512)
+opts = ""                             # an Elixir keyword list merged over the instance options
+
+# The load generator, which runs on the host outside the limits it measures.
+[generator]
+arrivals = "poisson"     # poisson or fixed arrival times
+max_outstanding = 5000   # operations in flight at most; a due operation over the cap is dropped
+drain_s = 20.0           # seconds to wait for stragglers after the last due time
+timeout_s = 15.0         # seconds before one operation counts as failed
+
+[report]
+fit_min_r2 = 0.8     # the memory slope of a summary is shown only with R2 at least this ...
+fit_min_span = 2.0   # ... and the largest level at least this times the smallest
+
+# The step plan of each measure. `kind = "bisect"` grows from `start` by `factor` up to `max`; after the first bad
+# step it bisects `refine` times between the last good and the bad level. `kind = "ladder"` runs the fixed `values`.
+# A step is a level held for `duration_s`.
+
+[measures.commits]
+variants = ["small", "large"]   # variants this measure runs, in order: small (120-byte row) and large (75 KB blob)
+[measures.commits.steps]
+kind = "bisect"     # bisect or ladder
+values = []         # ladder: the levels (commits per second), growing
+start = 50.0        # bisect: first level
+factor = 2.0        # bisect: growth between levels (> 1)
+max = 3200.0        # bisect: last level to try
+duration_s = 180.0  # seconds of load per step
+refine = 2          # bisections after the first bad step; 0 skips them
+confirm = true      # repeat the last good level once to confirm it
+[measures.commits.workload]
+cells = 64          # cells the commits spread over
+rows = 8            # rows per cell the commits rewrite
+[measures.commits.variant.small]
+[measures.commits.variant.large]
+steps = { start = 5.0, max = 320.0 }   # the 75 KB commits ramp 10 times lower
+
+[measures.cells]
+variants = ["default", "cache256"]   # default keeps the library's cache_kib; cache256 sets it to 256
+[measures.cells.steps]
+kind = "bisect"
+values = []         # ladder: the levels (cells awake)
+start = 500.0
+factor = 2.0
+max = 32000.0
+duration_s = 180.0
+refine = 0          # cells stay awake: no bisection ...
+confirm = false     # ... and no confirmation; the answer is the memory fit
+[measures.cells.workload]
+fill_rate = 100     # cells woken per second while a step adds cells
+hold_s = 60.0       # seconds a step holds for memory to settle
+[measures.cells.service]
+idle_timeout_ms = 86400000   # the cells stay awake for the whole ramp
+max_cells = 10000000
+[measures.cells.judging.memory]
+max_pct = 90.0      # a step is bad when process memory reaches this share of the limit
+[measures.cells.judging.latency]
+enabled = false     # cells has no latency criterion
+[measures.cells.variant.default]
+[measures.cells.variant.cache256]
+service = { cache_kib = 256 }
+
+[measures.wakes]
+[measures.wakes.steps]
+kind = "bisect"
+values = []         # ladder: the levels (wakes per second)
+start = 5.0
+factor = 2.0
+max = 320.0
+duration_s = 180.0
+refine = 2
+confirm = true
+[measures.wakes.workload]
+mode = "cold"            # cold removes the local file first (restore from the store), local keeps it
+tail_s = 60.0            # seconds to wait for the woken cells to sleep again
+cell_bytes = 160000      # bytes one asleep cell is estimated to take on the data tmpfs before one has been measured
+cell_rows = 20           # rows of every cell
+row_bytes = 1500         # bytes of every row
+populate_concurrency = 64   # cells created at once
+[measures.wakes.service]
+idle_timeout_ms = 5000   # woken cells go back to sleep soon
+[measures.wakes.judging.latency]
+percentile = "p95"
+max_ms = 500.0
+
+[measures.query]
+[measures.query.steps]
+kind = "bisect"
+values = []         # ladder: the levels (queries per second)
+start = 1.0
+factor = 2.0
+max = 64.0
+duration_s = 180.0
+refine = 2
+confirm = true
+[measures.query.workload]
+population = 200         # cells in the population
+cells_per_query = 20     # cells one query reads
+cell_rows = 20
+row_bytes = 1500
+populate_concurrency = 64
+[measures.query.judging.latency]
+max_ms = 1000.0
+
+# The judging criteria. A criterion with enabled = false is not judged. A measure overrides keys of a criterion in
+# [measures.<m>.judging.<criterion>] (see cells, wakes and query above). A limit is exclusive: a step is bad (or INVALID)
+# when it goes above it, or below it for a minimum.
+[judging]
+attempts = 5   # times a step that the host disturbed runs before it is INVALID
+
+[judging.latency]     # BAD: the latency percentile of the measure
+enabled = true
+percentile = "p99"    # p50, p95 or p99
+max_ms = 250.0
+
+[judging.memory]      # BAD: process memory (container memory without the data tmpfs) as a share of the scenario limit
+enabled = true
+max_pct = 100.0
+
+[judging.errors]      # BAD: share of the completed operations that failed, without the :busy refusals
+enabled = true
+max_pct = 0.0
+
+[judging.busy]        # BAD: share of the completed operations the library refused with {:error, :busy}
+enabled = true
+max_pct = 1.0
+
+[judging.delivery]    # INVALID: operations completed over planned; the generator or the host, not the service
+enabled = true
+min_ratio = 0.95
+
+[judging.store_full]  # INVALID: the harness ran out of store space (a step is not bad for it)
+enabled = true
+max_pct = 95.0        # the store's tmpfs share used at any sample
+error_pct = 85.0      # a step with store HTTP 5xx whose tmpfs reached this share counts as store_full
+min_free_mb = 1024.0  # on disk: free space below this
+
+[judging.data_full]   # INVALID: wakes, the data tmpfs of the service
+enabled = true
+estimate_pct = 90.0   # a level whose estimated data goes over this share is not run
+full_pct = 95.0       # a failed preparation with the shared memory at this share is data_full
+
+[judging.driver_swap]  # REPEAT, then INVALID: the generator's own VmSwap at its maximum in a step
+enabled = true
+max_mb = 16.0
+
+[judging.store_swap]   # REPEAT, then INVALID: growth of the store's swap in a step
+enabled = true
+max_growth_mb = 0.0
+
+[judging.host_swap]    # REPEAT, then INVALID: the host's swap in use at its maximum in a step
+enabled = true
+max_mb = 512.0
+
+[judging.host_load]    # REPEAT: net load (the host's load average without the test's own tasks) above max in any sample
+enabled = true
+max = 6.0
+quiet_window_s = 30.0       # seconds the net load must stay below max before each step
+quiet_max_wait_s = 1800.0   # seconds to wait for that; then the step is INVALID (host_busy)
+
+[judging.host_memory]  # the round stops cleanly when the host's MemAvailable is below this
+enabled = true
+min_available_gib = 6.0
+
+[judging.host_start]   # a case waits up to max_wait_s before it starts for the load average at most max_load
+enabled = true
+max_load = 8.0
+max_wait_s = 600.0
+
+[judging.cooldown]     # before every step the service must be below this share of its memory limit (not for cells)
+enabled = true
+max_mem_pct = 80.0
+max_wait_s = 300.0     # then the attempt is repeated, finally INVALID (no_cooldown)
+
+[judging.suspect_throttle]   # a step is marked suspect (the verdict stands) when the CPU was throttled this share of it
+enabled = true
+max_pct = 10.0

@@ -1,0 +1,41 @@
+# The pending round of order 022 on the reference VM (4 vCPU, 5.9 GB): the cases still to run, in this order.
+# Everything not listed here keeps the default of load/rounds/example.toml.
+#
+#   mise run load -- --config load/rounds/o022vm.toml --dry-run
+#   mise run load -- --config load/rounds/o022vm.toml --remote    # runs on [host].ssh, detached; --fetch copies the results back
+
+[round]
+cases = [
+  "A/commits/small",
+  "A/commits/large",
+  "B/commits/large",
+  "A/cells",
+  "B/cells",
+  "A/wakes",
+  "B/wakes",
+]
+
+[output]
+name = "o022vm"
+
+[host]
+ssh = "192.168.0.101"
+repo = "~/alambique"
+
+# The VM has 5.9 GB of RAM: the host guard and the tmpfs sizes are the ones approved for it (docs/how-to-load-test.md).
+[judging.host_memory]
+min_available_gib = 1.0   # the default, 6, is above the VM's memory
+
+[scenarios.A]
+data_tmpfs = "768m"
+
+[scenarios.B]
+data_tmpfs = "768m"
+
+[store]
+tmpfs_size = "1536m"
+
+# The 75 KB commits fill a tmpfs store: they run with the store on the VM's disk.
+[measures.commits.variant.large.store]
+backing = "disk"
+tmpfs_size = "12288m"   # the old ALAMBIQUE_LOAD_STORE_MB; on disk the store is bounded by the disk, so the size is not used
