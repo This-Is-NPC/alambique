@@ -71,4 +71,39 @@ defmodule Alambique.QueryTrimTest do
     refute File.exists?(old)
     assert File.exists?(kept)
   end
+
+  test "a temporary file is made while trim removes the empty directory of its cell" do
+    dir = Alambique.TestDirs.new("trim")
+    on_exit(fn -> File.rm_rf(dir) end)
+    File.mkdir_p!(dir)
+
+    # Every `tmp` empties the directory again, so `trim` keeps removing it.
+    trimmers = for _ <- 1..4, do: Task.async(fn -> trim_until_stopped(dir) end)
+
+    makers =
+      for _ <- 1..8 do
+        Task.async(fn ->
+          for _ <- 1..5_000 do
+            {:ok, tmp} = Cache.tmp(dir, "a")
+            File.rm(tmp)
+          end
+
+          :ok
+        end)
+      end
+
+    assert Enum.map(makers, &Task.await(&1, 120_000)) == List.duplicate(:ok, 8)
+    for t <- trimmers, do: send(t.pid, :stop)
+    Enum.each(trimmers, &Task.await/1)
+  end
+
+  defp trim_until_stopped(dir) do
+    receive do
+      :stop -> :ok
+    after
+      0 ->
+        Cache.trim(dir, 1_000, 600)
+        trim_until_stopped(dir)
+    end
+  end
 end

@@ -3619,7 +3619,10 @@ only temporary files, which `trim` deletes after ten minutes. The temporary
 file is created empty before anything is downloaded: `trim` also removes cell
 directories that hold no file, and would otherwise remove the directory of a
 replica still being built (the restore then failed with `{:io, "No such file
-or directory"}` on its first segment). The modification time is the last use. Nothing in memory is kept per cell: no process, no ETS
+or directory"}` on its first segment). Making that directory does not use
+`File.mkdir_p`, which answers `{:error, :enotdir}` when `trim` removes the
+directory between its `eexist` and its check that the path is a directory: the
+leaf is made with `make_dir`, and a removal after that is retried. The modification time is the last use. Nothing in memory is kept per cell: no process, no ETS
 row, no open file while idle. A query opens a cached file for the length of its
 statement (`immutable=1`, so no locks and no `-wal`/`-shm`), and closes it.
 
