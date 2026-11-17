@@ -18,6 +18,10 @@ defmodule Alambique.StoreContract do
 
       @store unquote(store)
       @racers 50
+      # A racer may retry a timed-out put (`put_retrying/6`, 3 attempts of up
+      # to the store's receive timeout, 30 s on SeaweedFS), over 5 rounds: the
+      # default 60 s test timeout is shorter than one slow round.
+      @race_timeout_ms 600_000
 
       setup do
         prefix = "contract/" <> Base.url_encode64(:crypto.strong_rand_bytes(9)) <> "/"
@@ -137,6 +141,7 @@ defmodule Alambique.StoreContract do
                  @store.put(c, p <> "missing", "x", {:if_match, "any"}, %{})
       end
 
+      @tag timeout: @race_timeout_ms
       test "race: exactly one if_none_match put wins, over several keys", %{config: c, prefix: p} do
         for round <- 1..5 do
           key = p <> "race-none-#{round}"
@@ -146,6 +151,7 @@ defmodule Alambique.StoreContract do
         end
       end
 
+      @tag timeout: @race_timeout_ms
       test "race: exactly one if_match put with the same etag wins", %{config: c, prefix: p} do
         for round <- 1..5 do
           key = p <> "race-match-#{round}"
@@ -209,7 +215,8 @@ defmodule Alambique.StoreContract do
 
       defp race(n, fun) do
         1..n
-        |> Task.async_stream(fun, max_concurrency: n, ordered: false, timeout: 60_000)
+        # Bounded by the test's timeout, which covers every retry of a racer.
+        |> Task.async_stream(fun, max_concurrency: n, ordered: false, timeout: :infinity)
         |> Enum.map(fn {:ok, result} -> result end)
       end
     end
