@@ -25,9 +25,45 @@ defmodule Alambique.Load.Results do
     end
   end
 
-  @doc "The file name of a step: sequence, phase and level, sortable."
-  @spec step_name(pos_integer, atom, number) :: String.t()
-  def step_name(seq, phase, level) do
-    "step-#{String.pad_leading(Integer.to_string(seq), 3, "0")}-#{phase}-#{level}.json"
+  @doc """
+  The file name of a step: its level, and `-2` for the confirmation, which
+  repeats the level of an earlier step.
+  """
+  @spec step_name(number, atom) :: String.t()
+  def step_name(level, :confirm), do: "step-#{level}-2.json"
+  def step_name(level, _phase), do: "step-#{level}.json"
+
+  @doc """
+  The step result at `path` when it counts as done: it exists, was made with
+  the settings `hash` and is not invalid. Returns the step with its keys as
+  atoms and `verdict_term` as the driver holds it.
+  """
+  @spec read_done(Path.t(), String.t()) :: {:ok, map} | :none
+  def read_done(path, hash) do
+    with {:ok, text} <- File.read(path),
+         {:ok, %{config_hash: ^hash, verdict: verdict, phase: phase, reason: reason} = step}
+         when verdict != "invalid" <- Jason.decode(text, keys: :atoms) do
+      {:ok,
+       step
+       |> Map.put(:phase, String.to_existing_atom(phase))
+       |> Map.put(:verdict_term, verdict_term(verdict, reason))}
+    else
+      _ -> :none
+    end
+  end
+
+  @doc "The verdict of a stored step as the ramp and the summary hold it: its name and the reason `inspect`ed."
+  @spec verdict_term(String.t(), String.t()) :: :good | {atom, term}
+  def verdict_term("good", _reason), do: :good
+  def verdict_term(name, reason), do: {String.to_existing_atom(name), reason_term(reason)}
+
+  # Reasons are stored as `inspect/1` text; a literal term reads back, anything else stays text.
+  defp reason_term(text) do
+    with {:ok, quoted} <- Code.string_to_quoted(text),
+         true <- Macro.quoted_literal?(quoted) do
+      quoted |> Code.eval_quoted() |> elem(0)
+    else
+      _ -> text
+    end
   end
 end

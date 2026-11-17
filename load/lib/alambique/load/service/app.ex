@@ -21,7 +21,7 @@ defmodule Alambique.Load.Service.App do
     s3 = s3_config()
     wait_for_bucket(s3)
 
-    latency = Env.int("STORE_LATENCY_MS", 25)
+    latency = "STORE_LATENCY_MS" |> Env.get("25") |> Float.parse() |> elem(0) |> round()
     counters = DelayStore.new_counters()
     :persistent_term.put({Ops, :counters}, counters)
     :persistent_term.put({Ops, :latency}, latency)

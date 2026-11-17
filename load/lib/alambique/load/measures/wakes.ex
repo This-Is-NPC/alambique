@@ -3,8 +3,8 @@ defmodule Alambique.Load.Measures.Wakes do
   # Wakes per second: a population of cells with data is put to sleep, then
   # distinct sleeping cells are woken, one read each, at the target rate. Each
   # step wakes cells no step woke before, so the population grows with the
-  # level and the step length (`ALAMBIQUE_LOAD_WAKES_STEP_S`, default the
-  # global step) and sits on the service's data tmpfs, asleep.
+  # level and the step length (`duration_s` of the steps) and sits on the
+  # service's data tmpfs, asleep.
   #
   # In `cold` mode (the default) the local file of every cell of the step is
   # removed first (`Ops.drop_local/1`), so a wake restores the cell from the
@@ -15,24 +15,19 @@ defmodule Alambique.Load.Measures.Wakes do
   #
   # The population has to fit the data tmpfs: before preparing a level its data
   # is estimated (fresh cells times the bytes one asleep cell took, measured
-  # after the previous level, or `ALAMBIQUE_LOAD_CELL_BYTES` before any), and a
-  # level that would take more than `ALAMBIQUE_LOAD_DATA_ESTIMATE_FRACTION`
-  # (0.9) of `ALAMBIQUE_LOAD_DATA_MB` is invalid `data_full` without running.
+  # after the previous level, or `workload.cell_bytes` before any), and a
+  # level that would take more than `judging.data_full.estimate_pct` of the
+  # data tmpfs is invalid `data_full` without running.
 
-  alias Alambique.Load.{Capacity, Env, Measure, Sampler, State}
+  alias Alambique.Load.{Capacity, Config, Measure, Sampler, State}
 
   @mib 1_048_576
 
   def unit, do: "wakes/s"
-  def latency, do: {:p95, Env.float("WAKES_P95_MS", 500)}
-  def mem_fraction, do: 1.0
   def probe?, do: false
   def holds_memory?, do: false
-  def ramp_opts, do: [refine: Env.int("REFINE", 2)]
-  def levels, do: "LEVELS" |> Env.numbers([5, 10, 20, 40, 80, 160, 320]) |> Enum.map(&round/1)
 
-  defp mode, do: Env.get("WAKE_MODE", "cold")
-  def step_s, do: Env.int("WAKES_STEP_S", Measure.step_s())
+  defp mode, do: Config.workload("mode")
 
   def setup(_ctx), do: :ok
 
@@ -40,11 +35,11 @@ defmodule Alambique.Load.Measures.Wakes do
   def rewind(_ctx, _level), do: :ok
 
   def prepare(ctx, level) do
-    offsets = Measure.offsets(level, step_s(), level)
+    offsets = Measure.offsets(level, Measure.step_s(), level)
     needed = length(offsets)
 
     with {:ok, shmem_mb} <- data_used_mb(),
-         :ok <- fits(needed, shmem_mb),
+         :ok <- fits(ctx, needed, shmem_mb),
          :ok <- populate(ctx, needed),
          :ok <- asleep(ctx) do
       remember_cell_bytes()
@@ -60,13 +55,19 @@ defmodule Alambique.Load.Measures.Wakes do
     end
   end
 
-  defp fits(needed, shmem_mb) do
+  defp fits(ctx, needed, shmem_mb) do
     State.get(:data_base_mb) || State.put(:data_base_mb, shmem_mb)
     fresh = max(needed - State.get({:populated, "w"}, 0), 0)
-    per_cell = State.get(:cell_bytes, Env.int("CELL_BYTES", 160_000))
-    data_mb = Env.int("DATA_MB", 1024)
+    per_cell = State.get(:cell_bytes, Config.workload("cell_bytes"))
+    data_mb = Config.get(["data_mb"])
 
-    if Capacity.data_exceeds?(shmem_mb, fresh, per_cell, data_mb, estimate_fraction()) do
+    if Capacity.data_exceeds?(
+         shmem_mb,
+         fresh,
+         per_cell,
+         data_mb,
+         ctx.limits.data_estimate_fraction
+       ) do
       estimate_mb = shmem_mb + fresh * per_cell / @mib
 
       {:invalid, :data_full,
@@ -85,25 +86,30 @@ defmodule Alambique.Load.Measures.Wakes do
   defp populate(ctx, needed) do
     case Measure.populate(ctx, "w", needed) do
       :ok -> :ok
-      {:error, failed, reason} -> failure(%{prepare_error: reason, failed_cells: failed})
+      {:error, failed, reason} -> failure(ctx, %{prepare_error: reason, failed_cells: failed})
     end
   end
 
   defp asleep(ctx) do
     case Measure.call(ctx, :await_asleep, [120_000], 150_000) do
       :ok -> :ok
-      error -> failure(%{prepare_error: inspect(error, limit: 10)})
+      error -> failure(ctx, %{prepare_error: inspect(error, limit: 10)})
     end
   end
 
   # A failed preparation is `data_full` when the data tmpfs is at its limit,
   # else `prepare_failed`; the first error is kept.
-  defp failure(extra) do
+  defp failure(ctx, extra) do
     shmem_mb = with {:ok, shmem_mb} <- data_used_mb(), do: shmem_mb
 
     reason =
       if is_number(shmem_mb),
-        do: Capacity.prepare_failure(shmem_mb, Env.int("DATA_MB", 1024), full_fraction()),
+        do:
+          Capacity.prepare_failure(
+            shmem_mb,
+            Config.get(["data_mb"]),
+            ctx.limits.data_full_fraction
+          ),
         else: :prepare_failed
 
     {:invalid, reason, extra}
@@ -125,14 +131,16 @@ defmodule Alambique.Load.Measures.Wakes do
         do: :ok = Measure.call(ctx, :drop_local, [chunk])
   end
 
-  defp estimate_fraction, do: Env.float("DATA_ESTIMATE_FRACTION", 0.9)
-  defp full_fraction, do: Env.float("DATA_FULL_FRACTION", 0.95)
-
   def run(ctx, _level, offsets) do
     result =
       Measure.open_loop(ctx, offsets, Measure.remote(ctx, :wake, &[Measure.cell("w", &1 + 1)]))
 
-    asleep = Measure.call(ctx, :await_asleep, [Env.int("TAIL_S", 60) * 1000], 120_000)
-    Measure.put_extra(result, %{mode: mode(), asleep_again: asleep == :ok, step_s: step_s()})
+    asleep = Measure.call(ctx, :await_asleep, [round(Config.workload("tail_s") * 1000)], 120_000)
+
+    Measure.put_extra(result, %{
+      mode: mode(),
+      asleep_again: asleep == :ok,
+      step_s: Measure.step_s()
+    })
   end
 end

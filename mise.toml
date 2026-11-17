@@ -199,8 +199,7 @@ description = "Build the image of the load test service (alambique-load:local) a
 run = "scripts/load-image"
 
 [tasks.load]
-description = "Load-test one node as a service in a CPU- and memory-limited container (arguments: scenario A|B|all, measure commits|cells|wakes|query|all; ALAMBIQUE_LOAD_* settings; results in results/load/; see docs/how-to-load-test.md)"
-depends = ["load:image"]
+description = "Load-test one node as a service in a CPU- and memory-limited container, as one round file says (mise run load -- --config load/rounds/example.toml [--dry-run] [--no-skip-done]; ALAMBIQUE_LOAD_* variables override keys; results in results/load/; see docs/how-to-load-test.md)"
 run = "scripts/load"
 
 [tasks."bench:wake"]

@@ -64,6 +64,7 @@ defmodule Alambique.Load.Summary do
 
   defp describe(:prepare_failed), do: "the preparation of the level failed"
   defp describe(:no_operations), do: "the step had no operations"
+  defp describe(:timeout), do: "the step ran past round.step_timeout_s"
 
   defp describe({:no_cooldown, mb}),
     do: "the service did not cool down (process memory #{Float.round(mb * 1.0)} MB)"

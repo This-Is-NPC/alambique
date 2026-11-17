@@ -6,10 +6,10 @@ defmodule Alambique.Load.Cgroup do
 
   @mib 1_048_576
 
-  @doc "The cgroup directory of a container, by its full id (systemd driver; `ALAMBIQUE_LOAD_CGROUP_ROOT` overrides)."
+  @doc "The cgroup directory of a container, by its full id (systemd driver; the root is `host.cgroup_root`)."
   @spec path(String.t()) :: Path.t()
   def path(container_id) do
-    root = System.get_env("ALAMBIQUE_LOAD_CGROUP_ROOT", "/sys/fs/cgroup/system.slice")
+    root = Alambique.Load.Config.get(["host", "cgroup_root"])
     Path.join(root, "docker-#{container_id}.scope")
   end
 
