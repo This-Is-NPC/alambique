@@ -92,6 +92,9 @@ defmodule Alambique.PipelinePropertiesTest do
       lease_ttl_ms: 20_000,
       skew_margin_ms: 500,
       op_timeout_ms: 2_000,
+      # The gate fails puts on purpose; an open breaker would hold later uploads
+      # back for its cool-down, past the wait of `GatedStore.await/3`.
+      breaker: [failures: 1_000_000],
       compaction: false,
       clock: {ManualClock, ManualClock.config(clock, 0)}
     ]
