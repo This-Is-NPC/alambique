@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Run a load round on the host of its round file ([host] ssh and repo), or copy
+# its results back. Usage:
+#   scripts/load-remote --launch FILE [--no-skip-done]   start the round there, detached
+#   scripts/load-remote --fetch FILE                     copy the results to output.dir
+# --launch copies FILE to the host, starts scripts/load under `timeout` with a
+# PID file and a log in the results directory there, and returns at once.
+# Nothing runs on the host without one of these flags.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+mode=${1:?--launch or --fetch}
+config=${2:?round file}
+shift 2
+skip=()
+[ "${1:-}" != --no-skip-done ] || skip=(--no-skip-done)
+
+# ssh, repo, results, timeout_s, local: where the round runs and where its
+# results are on each side. The paths are literal here: the host's shell
+# expands a "~".
+vars=$(python3 -I scripts/load_config.py --remote-env "$config") || exit 1
+eval "$vars"
+target="$ssh"
+
+case "$mode" in
+  --launch)
+    # The file travels with the command: the round that runs is the one that was checked.
+    ssh "$target" "cd $repo && mkdir -p $results" || exit 1
+    ssh "$target" "cat > $repo/$results/round.toml" <"$config"
+    pidfile="$results/load.pid"
+    remote="cd $repo && "
+    remote+="if [ -f $pidfile ] && kill -0 \$(cat $pidfile) 2>/dev/null; then "
+    remote+="echo 'a round is already running there (pid '\$(cat $pidfile)')' >&2; exit 1; fi; "
+    remote+="nohup timeout --kill-after=60 ${timeout_s}s scripts/load --config $results/round.toml "
+    remote+="--output-dir $results ${skip[*]:-} >$results/load.log 2>&1 </dev/null & "
+    remote+="echo \$! >$pidfile; echo started pid \$!"
+    ssh "$target" "$remote" || exit 1
+    echo "follow it: ssh $target 'tail -f $repo/$results/load.log'"
+    echo "copy the results back: mise run load -- --config $config --fetch"
+    ;;
+  --fetch)
+    mkdir -p "$local"
+    state=$(ssh "$target" "cd $repo && if [ -f $results/load.pid ] && kill -0 \$(cat $results/load.pid) 2>/dev/null; then echo running; else echo stopped; fi")
+    # The store directory of a case on disk is the store's data, not a result.
+    ssh "$target" "cd $repo/$results && tar --exclude=store -cf - ." | tar -C "$local" -xf -
+    echo "results of $target:$repo/$results copied to $local (the round is $state there)"
+    ;;
+  *)
+    echo "unknown mode $mode" >&2
+    exit 2
+    ;;
+esac

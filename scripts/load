@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
 # The load test, driven by a round file (load/rounds/example.toml documents every
 # key): scripts/load --config FILE [--dry-run] [--skip-done | --no-skip-done]
+#                                  [--remote | --fetch]
 # Runs the cases of the round in order, one scripts/load-case each, with the
 # results under the round's results directory. A step that already has a result
 # of the same settings is not run again (--skip-done, the default). Stops at
 # once when the host runs low on memory (exit 3) or the round runs out of time
 # (exit 6); the results so far stay. An invalid file is refused before anything
-# starts.
+# starts. With [host] ssh in the file, --remote runs the round on that host,
+# detached (scripts/load-remote), and --fetch copies its results back; without
+# either flag the round runs here.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 usage() {
-  echo "usage: scripts/load --config FILE [--dry-run] [--skip-done | --no-skip-done]" >&2
+  echo "usage: scripts/load --config FILE [--dry-run] [--skip-done | --no-skip-done] [--remote | --fetch]" >&2
   exit 2
 }
 
 config=""
 dry_run=0
+remote=""
+output=()
 skip=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -25,16 +30,23 @@ while [ $# -gt 0 ]; do
     --dry-run) dry_run=1; shift ;;
     --skip-done) skip=(); shift ;;
     --no-skip-done) skip=(--no-skip-done); shift ;;
+    --remote | --fetch) [ -z "$remote" ] || usage; remote=$1; shift ;;
+    --output-dir) output=(--output-dir "${2:?--output-dir needs a directory}"); shift 2 ;;
     *) echo "unknown argument: $1" >&2; usage ;;
   esac
 done
 [ -n "$config" ] || usage
 
 if [ "$dry_run" = 1 ]; then
-  exec python3 -I scripts/load_config.py --dry-run "$config" "${skip[@]}"
+  exec python3 -I scripts/load_config.py --dry-run "$config" "${skip[@]}" "${output[@]}"
 fi
 
-plan=$(python3 -I scripts/load_config.py --prepare "$config" "${skip[@]}") || exit 1
+case "$remote" in
+  --remote) exec scripts/load-remote --launch "$config" "${skip[@]}" ;;
+  --fetch) exec scripts/load-remote --fetch "$config" ;;
+esac
+
+plan=$(python3 -I scripts/load_config.py --prepare "$config" "${skip[@]}" "${output[@]}") || exit 1
 { IFS=$'\t' read -r root round_s; } <<<"$plan"
 echo "results in $root"
 # The image of the service; quick when its layers are cached.
