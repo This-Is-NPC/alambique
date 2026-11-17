@@ -268,6 +268,7 @@ SCHEMA = Table({
         "measures": Leaf("list", list(MEASURES), item="str", choices=MEASURES, nonempty=True),
         "step_timeout_s": positive(1800),
         "timeout_s": Leaf("float", 0.0, lo=0),
+        "case_timeout_s": Leaf("float", 0.0, lo=0),
     }),
     "output": Table({"dir": Leaf("str", ""), "name": Leaf("str", "")}),
     "host": Table({"ssh": Leaf("str", ""), "repo": Leaf("str", ""), "results": Leaf("str", ""), "timeout_s": positive(172800),
@@ -539,6 +540,17 @@ def levels(steps):
     return out
 
 
+def case_bound(config, case_cfg):
+    """Seconds a case may run, always bounded: round.case_timeout_s when set, else the most steps of its plan times
+    step_timeout_s, plus a margin for the wait to start (host_start.max_wait_s) and the preparation of the measure (1800 s)."""
+    explicit = config["round"]["case_timeout_s"]
+    if explicit:
+        return explicit
+    steps = case_cfg["steps"]
+    most = len(levels(steps)) + steps["refine"] + (1 if steps["confirm"] else 0)
+    return most * config["round"]["step_timeout_s"] + case_cfg["judging"]["host_start"]["max_wait_s"] + 1800
+
+
 def config_hash(case):
     """A stable hash of the settings of a case: the same settings give the same hash, whatever the order or spelling in the file."""
     core = {k: v for k, v in case.items() if k not in SKIP_HASH}
@@ -719,7 +731,8 @@ def prepare(config, path, env, skip_done, stamp=None, deadline=0):
         steps = case_cfg["steps"]
         run = {**case_cfg, "hash": config_hash(case_cfg), "levels": levels(steps), "dir": directory, "skip_done": skip_done,
                "command": command_of(path, env, skip_done), "host": {"cgroup_root": config["host"]["cgroup_root"]},
-               "timeouts": {"step_s": config["round"]["step_timeout_s"], "round_s": config["round"]["timeout_s"]}}
+               "timeouts": {"step_s": config["round"]["step_timeout_s"], "round_s": config["round"]["timeout_s"],
+                            "case_s": case_bound(config, case_cfg)}}
         write_json(os.path.join(directory, "case.json"), run)
         out.append((case, os.path.join(directory, "case.json")))
     write_json(os.path.join(root, "config.json"), {"config": config, "cases": [tag(c) for c, _ in out]})
@@ -742,7 +755,10 @@ def dry_run(config, path, env, skip_done):
              f"skip-done {'on' if skip_done else 'off'}" + (f", ran with {', '.join(ENV_PREFIX + n for n in overrides_in(env))}" if overrides_in(env) else "")]
     if config["host"]["ssh"]:
         lines.append(f"host {config['host']['ssh']} (--remote runs the round there, --fetch copies the results back)")
-    lines.append(f"timeouts: {config['round']['step_timeout_s']:g} s a step, round {'none' if not config['round']['timeout_s'] else format(config['round']['timeout_s'], 'g') + ' s'}")
+    bounds = [case_bound(config, case_config(config, *c)) for c in items]
+    how = "" if config["round"]["case_timeout_s"] else " (computed)"
+    lines.append(f"timeouts: {config['round']['step_timeout_s']:g} s a step, {max(bounds, default=0):g} s a case{how}, "
+                 f"round {'none' if not config['round']['timeout_s'] else format(config['round']['timeout_s'], 'g') + ' s'}")
     total = 0.0
     for n, case in enumerate(items, 1):
         c = case_config(config, *case)
@@ -753,7 +769,7 @@ def dry_run(config, path, env, skip_done):
         store = c["store"]
         where = f"tmpfs {store['tmpfs_size']}" if store["backing"] == "tmpfs" else "disk"
         lines += [f"{n}. {tag(case)}: {c['cpus']:g} CPU, {c['memory_mb']} MB, data tmpfs {c['data_mb']} MB; store on {where}, +{store['latency_ms']:g} ms",
-                  f"   steps {steps['kind']} {lv} then {steps['refine']} refinements{', 1 confirmation' if steps['confirm'] else ''}, {steps['duration_s']:g} s each, at most {most}"
+                  f"   case limit {bounds[n - 1]:g} s; steps {steps['kind']} {lv} then {steps['refine']} refinements{', 1 confirmation' if steps['confirm'] else ''}, {steps['duration_s']:g} s each, at most {most}"
                   + (f", {done} already done" if done else "")]
         judged = ", ".join(k for k, v in c["judging"].items() if v.get("enabled"))
         off = ", ".join(k for k, v in c["judging"].items() if not v.get("enabled"))
@@ -772,6 +788,7 @@ def shell_of(case):
         "store_dir": store["dir"], "store_image": store["image"], "image": case["service"]["image"],
         "erl_aflags": case["service"]["erl_aflags"], "out": case["dir"], "command": case["command"],
         "skip_done": "1" if case["skip_done"] else "0",
+        "case_s": f"{case['timeouts']['case_s']:.0f}",
         "start_load": start["max_load"] if start["enabled"] else 1e9, "start_wait_s": start["max_wait_s"],
         "min_gib": host_memory["min_available_gib"] if host_memory["enabled"] else 0,
     }

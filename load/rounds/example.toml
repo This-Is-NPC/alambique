@@ -12,6 +12,7 @@ scenarios = ["A"]     # scenarios to run, in order: A (1 CPU, 512 MB) and/or B (
 measures = ["commits", "cells", "wakes", "query"]   # measures to run for each scenario, in order
 step_timeout_s = 1800.0   # a step that runs longer is INVALID (timeout); above the longest step of today's ramps (cells fills 32000 cells in 320 s and holds 60 s, wakes prepares up to 57600 cells)
 timeout_s = 0.0           # the whole round, in seconds; 0 sets none. The case in progress is killed when it runs out
+case_timeout_s = 0.0      # one case, in seconds; every case runs under timeout. 0 computes it: the most steps of its plan times step_timeout_s, plus host_start.max_wait_s and 1800 s of preparation; a case killed by it stops the round (status 6)
 
 [output]
 dir = ""    # results directory; "" is results/load/<name, or the time stamp when there is no name>

@@ -450,6 +450,58 @@ defmodule Alambique.Load.LoadConfigTest do
       assert levels == [[5, 10, 20, 40, 80, 160, 320], [1, 2, 3, 4, 5, 6, 8], [7, 9], [10]]
     end
 
+    test "every case has a time bound: computed from its plan, or the one the file sets", %{
+      tmp_dir: dir
+    } do
+      path = write(dir, "[round]\ncases = [\"A/commits/small\", \"A/cells/default\"]\n")
+
+      bounds =
+        py("""
+        c = lc.load_config(#{inspect(path)}, {})
+        print(json.dumps([lc.case_bound(c, lc.case_config(c, *k)) for k in lc.cases(c)]))
+        """)
+
+      # commits: 7 levels + 2 refinements + 1 confirmation, cells: 7 levels
+      assert bounds == [10 * 1800 + 600 + 1800, 7 * 1800 + 600 + 1800]
+
+      explicit = write(dir, "e.toml", "[round]\ncase_timeout_s = 90\nstep_timeout_s = 10\n")
+
+      assert py(
+               "c = lc.load_config(#{inspect(explicit)}, {}); print(json.dumps(lc.case_bound(c, lc.case_config(c, *lc.cases(c)[0]))))"
+             ) ==
+               90.0
+
+      shorter = write(dir, "s.toml", "[round]\nstep_timeout_s = 100\n")
+
+      assert py(
+               "c = lc.load_config(#{inspect(shorter)}, {}); print(json.dumps(lc.case_bound(c, lc.case_config(c, *lc.cases(c)[0]))))"
+             ) ==
+               10 * 100 + 600 + 1800
+    end
+
+    test "--dry-run shows the case bound and --prepare writes it", %{tmp_dir: dir} do
+      path = write(dir, "[round]\ncases = [\"A/wakes\"]\n[output]\ndir = \"#{dir}/out\"\n")
+      {out, 0} = run(["--dry-run", path])
+      assert out =~ "timeouts: 1800 s a step, 20400 s a case (computed), round none"
+      assert out =~ "case limit 20400 s; steps bisect"
+
+      explicit =
+        write(
+          dir,
+          "e.toml",
+          "[round]\ncases = [\"A/wakes\"]\ncase_timeout_s = 900\n[output]\ndir = \"#{dir}/out\"\n"
+        )
+
+      {out, 0} = run(["--dry-run", explicit])
+      assert out =~ "timeouts: 1800 s a step, 900 s a case, round none"
+
+      {_, 0} = run(["--prepare", path])
+      case = dir |> Path.join("out/A/wakes/case.json") |> File.read!() |> :json.decode()
+      assert case["timeouts"]["case_s"] == 20400.0
+      {shell, 0} = run(["--shell", Path.join(dir, "out/A/wakes/case.json")])
+      assert shell =~ "case_s=20400\n"
+    end
+
     test "--dry-run prints the cases, their levels and the criteria", %{tmp_dir: dir} do
       path =
         write(
