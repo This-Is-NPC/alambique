@@ -6,7 +6,7 @@
 # results under the round's results directory. A step that already has a result
 # of the same settings is not run again (--skip-done, the default). Stops at
 # once when the host runs low on memory (exit 3) or the round runs out of time
-# (exit 6); the results so far stay. An invalid file is refused before anything
+# (exit 6, also when a case outruns its bound); the results so far stay. An invalid file is refused before anything
 # starts. With [host] ssh in the file, --remote runs the round on that host,
 # detached (scripts/load-remote), and --fetch copies its results back; without
 # either flag the round runs here.
@@ -62,7 +62,7 @@ while read -r scenario measure variant casefile; do
   case "$status" in
     0 | 2 | 4) ;;
     3) echo "host low on memory: stopping, partial results kept" >&2; exit 3 ;;
-    6) echo "round timeout: stopping, partial results kept" >&2; exit 6 ;;
+    6) echo "timeout (case or round): stopping, partial results kept" >&2; exit 6 ;;
     *) echo "case $scenario $measure $variant failed ($status)" >&2; failed=1 ;;
   esac
 done < <(tail -n +2 <<<"$plan")

@@ -222,9 +222,9 @@ the results go. Changing a round is changing a file, never the code.
    ```text
    round mine: 2 cases, results in results/load/mine
    skip-done on
-   timeouts: 1800 s a step, round none
+   timeouts: 1800 s a step, 20400 s a case (computed), round none
    1. A/commits/small: 1 CPU, 512 MB, data tmpfs 1024 MB; store on tmpfs 4g, +25 ms
-      steps bisect [50, 100, 200, 400, 800, 1600, 3200] then 2 refinements, 1 confirmation, 180 s each, at most 10
+      case limit 20400 s; steps bisect [50, 100, 200, 400, 800, 1600, 3200] then 2 refinements, 1 confirmation, 180 s each, at most 10
       judged: latency, memory, errors, busy, delivery, store_full, data_full, driver_swap, store_swap, host_swap, host_load, host_memory, host_start, cooldown, suspect_throttle
    2. A/wakes: 1 CPU, 512 MB, data tmpfs 1024 MB; store on tmpfs 4g, +25 ms
    ...
@@ -335,9 +335,15 @@ step. The default is above the longest step of the default ramps: the largest
 `cells` step fills 32 000 cells at 100 a second (320 s) and holds 60 s, and
 `wakes` prepares up to 57 600 cells before its 180 s. The waits for a quiet
 host and for the cooldown have their own limits and are not counted.
-`round.timeout_s` bounds the whole round (0, the default, sets none): the case
-in progress is stopped with `timeout --kill-after=30`, its containers are
-removed by the usual cleanup, and the round ends with status 6.
+Every case's driver runs under `timeout --kill-after=30`. `round.case_timeout_s`
+is its bound; 0, the default, computes it from the plan of the case: the most
+steps it can run (levels, refinements, confirmation) times `step_timeout_s`,
+plus `judging.host_start.max_wait_s` and 1800 s of preparation. `--dry-run`
+shows it (for the default `commits` ramp, 10 x 1800 + 600 + 1800 = 20 400 s).
+`round.timeout_s` bounds the whole round (0, the default, sets none); when
+set, a case gets the smaller of its bound and the time left. A case stopped by
+either bound has its containers removed by the usual cleanup, and the round
+ends with status 6.
 
 ## Environment overrides
 
@@ -701,7 +707,7 @@ of the limit, errors or `:busy` above 1%, and the harness invalidations
   disturbed. Run again when the other work is done, or raise
   `judging.host_load.quiet_max_wait_s` or `judging.attempts`.
 - Exit status 2 (invalid), 3 (host low on memory), 4 (service down), 5 (host
-  not quiet), 6 (the round ran out of time). For 4, read the container's log;
+  not quiet), 6 (a case ran past its bound or the round ran out of time). For 4, read the container's log;
   a case prints it when the service died.
 - The file is refused: read the problems, one line each, with its key. Check a
   file with `--dry-run` before a long run.

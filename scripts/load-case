@@ -5,7 +5,7 @@
 # case.json is written by scripts/load_config.py (--prepare) from a round file;
 # deadline is the epoch second the round ends at, 0 for none.
 # Exit status: 0 done, 2 stopped invalid, 3 host low on memory, 4 service down,
-# 5 host not quiet, 6 round timeout.
+# 5 host not quiet, 6 timeout (the case bound or the round).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -13,7 +13,7 @@ casefile=${1:?case.json}
 deadline=${2:-0}
 # scenario, measure, variant, cpus, limit_mb, data_mb, store_on, store_mb,
 # store_dir, store_image, image, erl_aflags, out, skip_done, start_load,
-# start_wait_s, min_gib: the settings of the case.
+# start_wait_s, min_gib, case_s: the settings of the case.
 vars=$(python3 -I scripts/load_config.py --shell "$casefile")
 eval "$vars"
 
@@ -136,14 +136,15 @@ export ALAMBIQUE_LOAD_NODE=$node ALAMBIQUE_LOAD_SERVICE_ID=$service ALAMBIQUE_LO
 export ALAMBIQUE_LOAD_STORE_FSTYPE=$store_fs
 [ -z "$store_dir_made" ] || export ALAMBIQUE_LOAD_STORE_PATH=$store_dir_made
 
-# The driver runs on the host, outside the limits it measures, and ends with
-# the round when its time is up.
-limit=()
+# The driver runs on the host, outside the limits it measures, always under
+# timeout: the case bound, or the time left of the round when that is less.
+bound=$case_s
 if [ "$deadline" -gt 0 ]; then
   remaining=$((deadline - $(date +%s)))
   [ "$remaining" -gt 0 ] || { echo "round timeout reached" >&2; exit 6; }
-  limit=(timeout --kill-after=30 "${remaining}s")
+  [ "$remaining" -ge "$bound" ] || bound=$remaining
 fi
+limit=(timeout --kill-after=30 "${bound}s")
 MIX_ENV=test "${limit[@]}" elixir --name "driver$$@127.0.0.1" --cookie "$cookie" \
   -S mix run --no-start load/driver.exs "$casefile" &
 driver=$!
@@ -152,7 +153,7 @@ status=0
 wait "$driver" || status=$?
 driver=""
 case "$status" in
-  124 | 137) echo "round timeout: the case was stopped" >&2; status=6 ;;
+  124 | 137) echo "timeout: the case was stopped after at most ${bound} s (round.case_timeout_s or round.timeout_s)" >&2; status=6 ;;
 esac
 if [ "$status" -ne 0 ] && [ -z "$(docker ps -q --no-trunc -f "id=$service")" ]; then
   docker logs --tail 40 "$service" >&2 || true
