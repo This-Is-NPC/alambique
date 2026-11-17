@@ -1,45 +1,57 @@
 #!/usr/bin/env bash
-# Run the ramps of the load test: scenarios x measures x variants, one
-# scripts/load-case each, with the results of the run under
-# results/load/<run id>/. Usage: scripts/load [A|B|all] [commits|cells|wakes|query|all]
-# Set ALAMBIQUE_LOAD_VARIANT to run one variant only. Stops at once when the
-# host runs low on memory (exit 3); the results so far stay.
+# The load test, driven by a round file (load/rounds/example.toml documents every
+# key): scripts/load --config FILE [--dry-run] [--skip-done | --no-skip-done]
+# Runs the cases of the round in order, one scripts/load-case each, with the
+# results under the round's results directory. A step that already has a result
+# of the same settings is not run again (--skip-done, the default). Stops at
+# once when the host runs low on memory (exit 3) or the round runs out of time
+# (exit 6); the results so far stay. An invalid file is refused before anything
+# starts.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-scenarios=${1:-A}
-measures=${2:-all}
-[ "$scenarios" != all ] || scenarios="A B"
-[ "$measures" != all ] || measures="commits cells wakes query"
-
-# The settings the user made (the variant is added per case), to print the command that reproduces a case.
-user_env=$(env | grep '^ALAMBIQUE_LOAD_' | grep -v '^ALAMBIQUE_LOAD_VARIANT=' | sort | tr '\n' ' ' || true)
-
-export ALAMBIQUE_LOAD_RUN_ID=${ALAMBIQUE_LOAD_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}
-echo "run ${ALAMBIQUE_LOAD_RUN_ID}, results in ${ALAMBIQUE_LOAD_RESULTS:-results/load}/${ALAMBIQUE_LOAD_RUN_ID}"
-
-variants_of() {
-  case "$1" in
-    commits) echo "small large" ;;
-    cells) echo "default cache256" ;;
-    *) echo "default" ;;
-  esac
+usage() {
+  echo "usage: scripts/load --config FILE [--dry-run] [--skip-done | --no-skip-done]" >&2
+  exit 2
 }
 
-failed=0
-for scenario in $scenarios; do
-  for measure in $measures; do
-    variants=${ALAMBIQUE_LOAD_VARIANT:-$(variants_of "$measure")}
-    for variant in $variants; do
-      export ALAMBIQUE_LOAD_COMMAND="${user_env}ALAMBIQUE_LOAD_VARIANT=$variant mise run load -- $scenario $measure"
-      status=0
-      ALAMBIQUE_LOAD_VARIANT=$variant scripts/load-case "$scenario" "$measure" "$variant" || status=$?
-      case "$status" in
-        0 | 2 | 4) ;;
-        3) echo "host low on memory: stopping, partial results kept" >&2; exit 3 ;;
-        *) echo "case $scenario $measure $variant failed ($status)" >&2; failed=1 ;;
-      esac
-    done
-  done
+config=""
+dry_run=0
+skip=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --config) config=${2:?--config needs a file}; shift 2 ;;
+    --config=*) config=${1#--config=}; shift ;;
+    --dry-run) dry_run=1; shift ;;
+    --skip-done) skip=(); shift ;;
+    --no-skip-done) skip=(--no-skip-done); shift ;;
+    *) echo "unknown argument: $1" >&2; usage ;;
+  esac
 done
+[ -n "$config" ] || usage
+
+if [ "$dry_run" = 1 ]; then
+  exec python3 -I scripts/load_config.py --dry-run "$config" "${skip[@]}"
+fi
+
+plan=$(python3 -I scripts/load_config.py --prepare "$config" "${skip[@]}") || exit 1
+{ IFS=$'\t' read -r root round_s; } <<<"$plan"
+echo "results in $root"
+# The image of the service; quick when its layers are cached.
+scripts/load-image
+deadline=0
+[ "${round_s%.*}" = 0 ] || deadline=$(($(date +%s) + ${round_s%.*}))
+
+failed=0
+while read -r scenario measure variant casefile; do
+  [ -n "$scenario" ] || continue
+  status=0
+  scripts/load-case "$casefile" "$deadline" </dev/null || status=$?
+  case "$status" in
+    0 | 2 | 4) ;;
+    3) echo "host low on memory: stopping, partial results kept" >&2; exit 3 ;;
+    6) echo "round timeout: stopping, partial results kept" >&2; exit 6 ;;
+    *) echo "case $scenario $measure $variant failed ($status)" >&2; failed=1 ;;
+  esac
+done < <(tail -n +2 <<<"$plan")
 exit "$failed"

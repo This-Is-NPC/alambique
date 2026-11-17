@@ -3,10 +3,8 @@ defmodule Alambique.Load.Measure do
   # What the four measures share: calls on the service node, the open-loop
   # run of a schedule against it, and the population of cells they use.
   #
-  # A measure module defines `unit/0`, `levels/0`, `ramp_opts/0`, `latency/0`
-  # (`{percentile, limit_ms}` or nil), `mem_fraction/0` (the share of the memory
-  # limit that stops the ramp), `probe?/0`, `holds_memory?/0` (true when the
-  # state of the service legitimately keeps memory between steps: no memory
+  # A measure module defines `unit/0`, `probe?/0`, `holds_memory?/0` (true when
+  # the state of the service legitimately keeps memory between steps: no memory
   # cooldown), `setup/1` (once), `prepare/2` (before each step, outside its
   # measurement: `{:ok, what run/3 needs}`, or `{:invalid, reason, extra}` when
   # the level cannot be prepared), `rewind/2` (before a repeat of a step:
@@ -14,7 +12,7 @@ defmodule Alambique.Load.Measure do
   # `run/3`, which returns the map of `Alambique.Load.OpenLoop.run/3` plus
   # `:extra`.
 
-  alias Alambique.Load.{Env, OpenLoop, Schedule}
+  alias Alambique.Load.{Config, OpenLoop, Schedule}
 
   @ops Alambique.Load.Service.Ops
 
@@ -23,8 +21,10 @@ defmodule Alambique.Load.Measure do
     do: :erpc.call(ctx.node, @ops, fun, args, timeout)
 
   @doc "Settings common to the open-loop steps."
-  def step_s, do: Env.int("STEP_S", 180)
-  def arrivals, do: if(Env.get("ARRIVALS", "poisson") == "fixed", do: :fixed, else: :poisson)
+  def step_s, do: Config.get(["steps", "duration_s"])
+
+  def arrivals,
+    do: if(Config.get(["generator", "arrivals"]) == "fixed", do: :fixed, else: :poisson)
 
   def offsets(rate, step_s \\ step_s(), seed \\ 1),
     do: Schedule.offsets(rate, step_s, arrivals(), seed)
@@ -32,15 +32,15 @@ defmodule Alambique.Load.Measure do
   @doc "Runs `op.(index)` on the schedule, stopping early when the host or the service says so."
   def open_loop(ctx, offsets, op) do
     OpenLoop.run(offsets, op,
-      max_outstanding: Env.int("MAX_OUTSTANDING", 5_000),
-      drain_ms: Env.int("DRAIN_S", 20) * 1000,
+      max_outstanding: Config.get(["generator", "max_outstanding"]),
+      drain_ms: round(Config.get(["generator", "drain_s"]) * 1000),
       abort: ctx.abort
     )
   end
 
   @doc "The op of a rate measure: one call on the service with a timeout."
   def remote(ctx, fun, args_fun) do
-    timeout = Env.int("OP_TIMEOUT_MS", 15_000)
+    timeout = round(Config.get(["generator", "timeout_s"]) * 1000)
     fn index -> :erpc.call(ctx.node, @ops, fun, args_fun.(index), timeout) end
   end
 
@@ -58,9 +58,9 @@ defmodule Alambique.Load.Measure do
 
     if count > have do
       cells = for i <- (have + 1)..count, do: "#{prefix}-#{i}"
-      rows = Env.int("CELL_ROWS", 20)
-      bytes = Env.int("ROW_BYTES", 1_500)
-      conc = Env.int("POPULATE_CONCURRENCY", 64)
+      rows = Config.workload("cell_rows")
+      bytes = Config.workload("row_bytes")
+      conc = Config.workload("populate_concurrency")
 
       # Stops at the first chunk with failures: the next would fail the same way.
       failed =

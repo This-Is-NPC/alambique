@@ -8,26 +8,16 @@ defmodule Alambique.Load.Measures.Cells do
   # the steps (see Alambique.Load.Summary); there is no refinement or
   # confirmation, because the cells stay awake.
 
-  alias Alambique.Load.{Env, Measure}
+  alias Alambique.Load.{Config, Measure}
 
   def unit, do: "awake cells"
-  def latency, do: nil
-  def mem_fraction, do: Env.float("CELLS_MEM_FRACTION", 0.9)
   def probe?, do: false
   # The awake cells are the state of the ramp: memory stays high by design.
   def holds_memory?, do: true
-  def ramp_opts, do: [refine: 0, confirm: false]
-
-  def levels,
-    do:
-      "LEVELS"
-      |> Env.numbers([500, 1_000, 2_000, 4_000, 8_000, 16_000, 32_000])
-      |> Enum.map(&round/1)
-
   def setup(_ctx), do: :ok
 
   def prepare(_ctx, level) do
-    rate = Env.int("CELLS_FILL_RATE", 100)
+    rate = Config.workload("fill_rate")
     added = max(level - Alambique.Load.State.get(:awake, 0), 0)
     {:ok, for(i <- 0..(added - 1)//1, do: div(i * 1_000_000, rate))}
   end
@@ -59,7 +49,9 @@ defmodule Alambique.Load.Measures.Cells do
 
     Alambique.Load.State.put(:awake, have + result.ok)
 
-    result = if result.aborted, do: result, else: hold(ctx, result, Env.int("HOLD_S", 60))
+    result =
+      if result.aborted, do: result, else: hold(ctx, result, round(Config.workload("hold_s")))
+
     awake = Measure.call(ctx, :awake)
     Measure.put_extra(result, %{awake: awake, target: level, added: result.ok})
   end

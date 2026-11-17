@@ -1,39 +1,21 @@
 #!/usr/bin/env bash
 # One ramp of one measure on one scenario: start the store and the service in
 # their own containers, run the driver against them, remove the containers.
-# Usage: scripts/load-case <A|B> <commits|cells|wakes|query> <variant>
-# The settings are the ALAMBIQUE_LOAD_* variables of docs/how-to-load-test.md.
-# Exit status: 0 done, 2 stopped invalid, 3 host low on memory, 4 service down.
+# Usage: scripts/load-case <case.json> [deadline]
+# case.json is written by scripts/load_config.py (--prepare) from a round file;
+# deadline is the epoch second the round ends at, 0 for none.
+# Exit status: 0 done, 2 stopped invalid, 3 host low on memory, 4 service down,
+# 5 host not quiet, 6 round timeout.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-scenario=${1:?scenario A or B}
-measure=${2:?measure}
-variant=${3:-default}
-
-case "$scenario" in
-  A) cpus=1 limit_mb=512 ;;
-  B) cpus=2 limit_mb=2048 ;;
-  *) echo "unknown scenario $scenario" >&2; exit 1 ;;
-esac
-
-run_id=${ALAMBIQUE_LOAD_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}
-tag=$scenario-$measure-$variant
-out=${ALAMBIQUE_LOAD_RESULTS:-results/load}/$run_id/$tag
-data_mb=${ALAMBIQUE_LOAD_DATA_MB:-1024}
-store_mb=${ALAMBIQUE_LOAD_STORE_MB:-4096}
-store_on=${ALAMBIQUE_LOAD_STORE_ON:-tmpfs}
-store_image=chrislusf/seaweedfs:4.48
-image=${ALAMBIQUE_LOAD_IMAGE:-alambique-load:local}
-cookie=$(head -c 24 /dev/urandom | base64 | tr -d '/+=')
-suffix=$run_id-$tag-$$
-min_gib=${ALAMBIQUE_LOAD_MIN_AVAILABLE_GIB:-6}
-quiet_load=${ALAMBIQUE_LOAD_START_LOAD:-8}
-
-case "$store_on" in
-  tmpfs | disk) ;;
-  *) echo "ALAMBIQUE_LOAD_STORE_ON must be tmpfs or disk, not $store_on" >&2; exit 1 ;;
-esac
+casefile=${1:?case.json}
+deadline=${2:-0}
+# scenario, measure, variant, cpus, limit_mb, data_mb, store_on, store_mb,
+# store_dir, store_image, image, erl_aflags, out, skip_done, start_load,
+# start_wait_s, min_gib: the settings of the case.
+vars=$(python3 -I scripts/load_config.py --shell "$casefile")
+eval "$vars"
 
 # The driver is the root project in MIX_ENV=test: fetch its dependencies and
 # compile it now, so that neither a fresh clone nor the build runs inside the
@@ -41,9 +23,22 @@ esac
 MIX_ENV=test mix deps.get
 MIX_ENV=test mix compile
 
+# Steps that are done are read, not run: when they cover the whole ramp the
+# driver only writes the summary, and no container starts (exit status 10 means
+# a step is left to run).
+if [ "$skip_done" = 1 ]; then
+  status=0
+  MIX_ENV=test mix run --no-start load/driver.exs --replay "$casefile" || status=$?
+  [ "$status" -eq 10 ] || exit "$status"
+fi
+
+run_id=$(date -u +%Y%m%dT%H%M%SZ)
+cookie=$(head -c 24 /dev/urandom | base64 | tr -d '/+=')
+suffix=$run_id-$scenario-$measure-$variant-$$
+
 mkdir -p "$out"
-store_dir=""    # the directory this script created for the store (disk only)
-containers=()   # ids of the containers this script started, the only ones it removes
+store_dir_made="" # the directory this script created for the store (disk only)
+containers=()     # ids of the containers this script started, the only ones it removes
 driver=""
 envfile=$(mktemp)
 # The ids and the driver pid are also written to files, so that a run that
@@ -56,13 +51,13 @@ cleanup() {
   trap - EXIT INT TERM
   [ -z "$driver" ] || kill "$driver" 2>/dev/null || true
   for id in "${containers[@]}"; do docker rm -f "$id" >/dev/null 2>&1 || true; done
-  if [ -n "$store_dir" ]; then
+  if [ -n "$store_dir_made" ]; then
     # SeaweedFS runs as root, so its files may not be ours to remove. A
     # throwaway container of the same image empties exactly that directory.
-    docker run --rm --entrypoint find -v "$store_dir:/d" "$store_image" \
+    docker run --rm --entrypoint find -v "$store_dir_made:/d" "$store_image" \
       /d -mindepth 1 -delete >/dev/null 2>&1 || true
-    rmdir "$store_dir" 2>/dev/null ||
-      echo "could not remove the store directory $store_dir; remove it by hand" >&2
+    rmdir "$store_dir_made" 2>/dev/null ||
+      echo "could not remove the store directory $store_dir_made; remove it by hand" >&2
   fi
   rm -f "$envfile" "$out/driver.pid"
   exit "$status"
@@ -70,42 +65,32 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # The host must be quiet and have memory before a case starts.
-deadline=$((SECONDS + ${ALAMBIQUE_LOAD_WAIT_QUIET_S:-600}))
+quiet_until=$((SECONDS + ${start_wait_s%.*}))
 while :; do
   load=$(cut -d' ' -f1 /proc/loadavg)
   avail=$(awk '/^MemAvailable:/ {printf "%.1f", $2/1048576}' /proc/meminfo)
-  if awk -v l="$load" -v q="$quiet_load" -v a="$avail" -v m="$min_gib" \
+  if awk -v l="$load" -v q="$start_load" -v a="$avail" -v m="$min_gib" \
     'BEGIN { exit !(l <= q && a >= m) }'; then break; fi
-  if [ "$SECONDS" -ge "$deadline" ]; then
-    echo "host not quiet: load $load (limit $quiet_load), $avail GiB available (need $min_gib)" >&2
+  if [ "$deadline" -gt 0 ] && [ "$(date +%s)" -ge "$deadline" ]; then
+    echo "round timeout reached while waiting for the host" >&2
+    exit 6
+  fi
+  if [ "$SECONDS" -ge "$quiet_until" ]; then
+    echo "host not quiet: load $load (limit $start_load), $avail GiB available (need $min_gib)" >&2
     exit 5
   fi
   sleep 10
 done
 
-# What the measure needs from the service. Variables already set win.
-export ALAMBIQUE_LOAD_VARIANT=$variant
-case "$measure" in
-  cells) # cells stay awake for the whole ramp
-    export ALAMBIQUE_LOAD_IDLE_TIMEOUT_MS=${ALAMBIQUE_LOAD_IDLE_TIMEOUT_MS:-86400000}
-    export ALAMBIQUE_LOAD_MAX_CELLS=${ALAMBIQUE_LOAD_MAX_CELLS:-10000000}
-    ;;
-  wakes) # woken cells go back to sleep soon
-    export ALAMBIQUE_LOAD_IDLE_TIMEOUT_MS=${ALAMBIQUE_LOAD_IDLE_TIMEOUT_MS:-5000}
-    ;;
-esac
-case "$variant" in
-  cache[0-9]*) export ALAMBIQUE_LOAD_CACHE_KIB=${variant#cache} ;;
-esac
-
 # The store: SeaweedFS in a container of its own, on a free port, with its
-# data on a tmpfs or, with ALAMBIQUE_LOAD_STORE_ON=disk, in a fresh directory.
+# data on a tmpfs or, with store.backing = "disk", in a fresh directory.
 port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
 if [ "$store_on" = disk ]; then
-  store_dir=${ALAMBIQUE_LOAD_STORE_DIR:-$out/store}
+  store_dir=${store_dir:-$out/store}
   mkdir -p "$(dirname "$store_dir")"
   store_dir=$(cd "$(dirname "$store_dir")" && pwd)/$(basename "$store_dir")
   mkdir "$store_dir" # fails if it exists: only a directory made here is ever removed
+  store_dir_made=$store_dir
   echo "$store_dir" >"$out/store-dir.txt"
   store_fs=$(findmnt -no FSTYPE -T "$store_dir" 2>/dev/null || stat -fc %T "$store_dir")
   store_mount=(-v "$store_dir:/data")
@@ -113,10 +98,6 @@ else
   store_fs=tmpfs
   store_mount=(--tmpfs "/data:rw,size=${store_mb}m")
 fi
-export ALAMBIQUE_LOAD_STORE_ON=$store_on ALAMBIQUE_LOAD_STORE_FSTYPE=$store_fs
-# What the driver needs to tell when the data tmpfs or the store is full.
-export ALAMBIQUE_LOAD_DATA_MB=$data_mb ALAMBIQUE_LOAD_STORE_MB=$store_mb
-[ "$store_on" != disk ] || export ALAMBIQUE_LOAD_STORE_PATH=$store_dir
 store=$(docker run -d --name "alambique-load-store-$suffix" \
   "${store_mount[@]}" \
   -p "127.0.0.1:${port}:8333" \
@@ -135,32 +116,44 @@ curl -s -o /dev/null "http://127.0.0.1:${port}/" || { docker logs --tail 30 "$st
 # pages count as shared memory in the cgroup, so the cgroup limit is the
 # nominal one plus the tmpfs; the criteria use the nominal one.
 node="load$$@127.0.0.1"
-export ALAMBIQUE_LOAD_S3_ENDPOINT="http://127.0.0.1:${port}"
-env | grep '^ALAMBIQUE_LOAD_' >"$envfile" || true
+{
+  python3 -I scripts/load_config.py --service-env "$casefile"
+  echo "ALAMBIQUE_LOAD_S3_ENDPOINT=http://127.0.0.1:${port}"
+} >"$envfile"
 total_mb=$((limit_mb + data_mb))
 service=$(docker run -d --name "alambique-load-service-$suffix" \
   --network host --cpus "$cpus" --memory "${total_mb}m" --memory-swap "${total_mb}m" \
   --tmpfs "/data:rw,size=${data_mb}m" \
   --env-file "$envfile" \
   -e "RELEASE_NODE=$node" -e "RELEASE_COOKIE=$cookie" \
-  -e "ERL_AFLAGS=${ALAMBIQUE_LOAD_ERL_AFLAGS:-+Mdai max +MMmcs 0}" \
+  -e "ERL_AFLAGS=$erl_aflags" \
   "$image")
 containers+=("$service")
 echo "$service" >>"$started"
 
+# What the driver needs besides the case: where the containers are.
 export ALAMBIQUE_LOAD_NODE=$node ALAMBIQUE_LOAD_SERVICE_ID=$service ALAMBIQUE_LOAD_STORE_ID=$store
-export ALAMBIQUE_LOAD_SCENARIO=$scenario ALAMBIQUE_LOAD_MEASURE=$measure ALAMBIQUE_LOAD_OUT=$out
-export ALAMBIQUE_LOAD_MEM_LIMIT_MB=$limit_mb ALAMBIQUE_LOAD_CPUS=$cpus
-export ALAMBIQUE_LOAD_COMMAND=${ALAMBIQUE_LOAD_COMMAND:-"scripts/load-case $scenario $measure $variant"}
+export ALAMBIQUE_LOAD_STORE_FSTYPE=$store_fs
+[ -z "$store_dir_made" ] || export ALAMBIQUE_LOAD_STORE_PATH=$store_dir_made
 
-# The driver runs on the host, outside the limits it measures.
-MIX_ENV=test elixir --name "driver$$@127.0.0.1" --cookie "$cookie" \
-  -S mix run --no-start load/driver.exs &
+# The driver runs on the host, outside the limits it measures, and ends with
+# the round when its time is up.
+limit=()
+if [ "$deadline" -gt 0 ]; then
+  remaining=$((deadline - $(date +%s)))
+  [ "$remaining" -gt 0 ] || { echo "round timeout reached" >&2; exit 6; }
+  limit=(timeout --kill-after=30 "${remaining}s")
+fi
+MIX_ENV=test "${limit[@]}" elixir --name "driver$$@127.0.0.1" --cookie "$cookie" \
+  -S mix run --no-start load/driver.exs "$casefile" &
 driver=$!
 echo "$driver" >"$out/driver.pid"
 status=0
 wait "$driver" || status=$?
 driver=""
+case "$status" in
+  124 | 137) echo "round timeout: the case was stopped" >&2; status=6 ;;
+esac
 if [ "$status" -ne 0 ] && [ -z "$(docker ps -q --no-trunc -f "id=$service")" ]; then
   docker logs --tail 40 "$service" >&2 || true
 fi

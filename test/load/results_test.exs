@@ -33,17 +33,60 @@ defmodule Alambique.Load.ResultsTest do
     assert File.ls!(dir) == ["step.json"]
   end
 
-  test "step files sort in the order the steps ran" do
-    names = [
-      Results.step_name(10, :ramp, 5),
-      Results.step_name(2, :refine, 900),
-      Results.step_name(1, :ramp, 50)
-    ]
+  test "a step is named by its level, the confirmation by a second run of it" do
+    assert Results.step_name(50, :ramp) == "step-50.json"
+    assert Results.step_name(75, :refine) == "step-75.json"
+    assert Results.step_name(50, :confirm) == "step-50-2.json"
+  end
 
-    assert Enum.sort(names) == [
-             "step-001-ramp-50.json",
-             "step-002-refine-900.json",
-             "step-010-ramp-5.json"
-           ]
+  describe "read_done/2" do
+    defp stored(dir, name, fields) do
+      path = Path.join(dir, name)
+
+      Results.write!(
+        path,
+        Map.merge(
+          %{level: 50, phase: "ramp", verdict: "good", reason: "", config_hash: "h1"},
+          fields
+        )
+      )
+
+      path
+    end
+
+    test "a good or bad step of the same settings is done, with its verdict as a term", %{
+      tmp_dir: dir
+    } do
+      assert {:ok, %{level: 50, phase: :ramp, verdict_term: :good}} =
+               Results.read_done(stored(dir, "good.json", %{}), "h1")
+
+      bad = stored(dir, "bad.json", %{verdict: "bad", reason: "{:latency, :p99, 250.0}"})
+
+      assert {:ok, %{verdict_term: {:bad, {:latency, :p99, 250.0}}}} =
+               Results.read_done(bad, "h1")
+
+      conf = stored(dir, "conf.json", %{phase: "confirm", verdict: "bad", reason: ":errors"})
+
+      assert {:ok, %{phase: :confirm, verdict_term: {:bad, :errors}}} =
+               Results.read_done(conf, "h1")
+    end
+
+    test "other settings, an invalid step and a missing or broken file are not done", %{
+      tmp_dir: dir
+    } do
+      assert Results.read_done(stored(dir, "other.json", %{}), "h2") == :none
+
+      invalid = stored(dir, "invalid.json", %{verdict: "invalid", reason: ":timeout"})
+      assert Results.read_done(invalid, "h1") == :none
+
+      assert Results.read_done(Path.join(dir, "missing.json"), "h1") == :none
+      File.write!(Path.join(dir, "broken.json"), "{")
+      assert Results.read_done(Path.join(dir, "broken.json"), "h1") == :none
+    end
+
+    test "a reason that is not a literal term stays text", %{tmp_dir: dir} do
+      path = stored(dir, "odd.json", %{verdict: "bad", reason: "System.halt()"})
+      assert {:ok, %{verdict_term: {:bad, "System.halt()"}}} = Results.read_done(path, "h1")
+    end
   end
 end

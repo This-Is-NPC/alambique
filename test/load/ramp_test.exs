@@ -105,4 +105,63 @@ defmodule Alambique.Load.RampTest do
     assert Ramp.next(ramp) == {:run, 20, :confirm}
     assert %{stopped: :exhausted, first_bad: nil} = Ramp.outcome(ramp)
   end
+
+  describe "the sequence of a round's steps" do
+    # Good up to `threshold`: the `{level, phase}` of every step that runs.
+    defp sequence(levels, threshold, opts \\ []) do
+      {steps, _} =
+        levels
+        |> Ramp.new(opts)
+        |> drive(fn level -> if level <= threshold, do: :good, else: :bad end)
+
+      for {level, phase, _} <- steps, do: {level, phase}
+    end
+
+    test "climbs, bisects between the last good and the first bad level, then confirms" do
+      assert sequence([50, 100, 200, 400], 150, refine: 2) ==
+               [
+                 {50, :ramp},
+                 {100, :ramp},
+                 {200, :ramp},
+                 {150, :refine},
+                 {175, :refine},
+                 {150, :confirm}
+               ]
+    end
+
+    test "the bisection narrows toward the threshold and stops when the levels touch" do
+      assert sequence([100, 200], 130, refine: 5) ==
+               [
+                 {100, :ramp},
+                 {200, :ramp},
+                 {150, :refine},
+                 {125, :refine},
+                 {137, :refine},
+                 {131, :refine},
+                 {128, :refine},
+                 {128, :confirm}
+               ]
+
+      assert sequence([10, 12], 10, refine: 5) ==
+               [{10, :ramp}, {12, :ramp}, {11, :refine}, {10, :confirm}]
+    end
+
+    test "refine 0 goes straight to the confirmation, and confirm false ends the ramp" do
+      assert sequence([50, 100, 200], 120, refine: 0) ==
+               [{50, :ramp}, {100, :ramp}, {200, :ramp}, {100, :confirm}]
+
+      assert sequence([50, 100, 200], 120, refine: 1, confirm: false) ==
+               [{50, :ramp}, {100, :ramp}, {200, :ramp}, {150, :refine}]
+    end
+
+    test "a ladder that never fails confirms its last level; one that fails at once stops" do
+      assert sequence([5, 7, 9], 100) == [{5, :ramp}, {7, :ramp}, {9, :ramp}, {9, :confirm}]
+      assert sequence([5, 7, 9], 1) == [{5, :ramp}]
+    end
+
+    test "the cells plan (no refinement, no confirmation) climbs every level that is good" do
+      assert sequence([500, 1000, 2000], 1500, refine: 0, confirm: false) ==
+               [{500, :ramp}, {1000, :ramp}, {2000, :ramp}]
+    end
+  end
 end

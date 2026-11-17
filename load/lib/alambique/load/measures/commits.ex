@@ -4,27 +4,15 @@ defmodule Alambique.Load.Measures.Commits do
   # one acknowledged write. Variant `small` writes a 120-byte row, `large` a
   # 75 KB blob. Ack latency is measured at the caller from the scheduled time.
 
-  alias Alambique.Load.{Env, Measure}
+  alias Alambique.Load.{Config, Measure}
 
   def unit, do: "commits/s"
-  def latency, do: {:p99, Env.float("COMMITS_P99_MS", 250)}
-  def mem_fraction, do: 1.0
   def probe?, do: false
   def holds_memory?, do: false
-  def ramp_opts, do: [refine: Env.int("REFINE", 2)]
 
-  def levels do
-    default =
-      if variant() == :large,
-        do: [5, 10, 20, 40, 80, 160, 320],
-        else: [50, 100, 200, 400, 800, 1600, 3200]
-
-    "LEVELS" |> Env.numbers(default) |> Enum.map(&round/1)
-  end
-
-  defp variant, do: if(Env.get("VARIANT") == "large", do: :large, else: :small)
-  defp cells, do: Env.int("COMMIT_CELLS", 64)
-  defp rows, do: Env.int("COMMIT_ROWS", 8)
+  defp variant, do: if(Config.get(["variant"]) == "large", do: :large, else: :small)
+  defp cells, do: Config.workload("cells")
+  defp rows, do: Config.workload("rows")
 
   def setup(ctx) do
     # Wake every cell before the first step, so that no step pays for it.

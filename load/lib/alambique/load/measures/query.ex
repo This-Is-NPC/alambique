@@ -6,18 +6,14 @@ defmodule Alambique.Load.Measures.Query do
   # queries (a freshness check per cell, not a restore). The dirty IO pool use
   # comes from the service's probe.
 
-  alias Alambique.Load.{Env, Measure}
+  alias Alambique.Load.{Config, Measure}
 
   def unit, do: "queries/s"
-  def latency, do: {:p99, Env.float("QUERY_P99_MS", 1_000)}
-  def mem_fraction, do: 1.0
   def probe?, do: true
   def holds_memory?, do: false
-  def ramp_opts, do: [refine: Env.int("REFINE", 2)]
-  def levels, do: "LEVELS" |> Env.numbers([1, 2, 4, 8, 16, 32, 64]) |> Enum.map(&round/1)
 
-  defp population, do: Env.int("QUERY_POPULATION", 200)
-  defp per_query, do: Env.int("QUERY_CELLS", 20)
+  defp population, do: Config.workload("population")
+  defp per_query, do: Config.workload("cells_per_query")
 
   def setup(ctx) do
     :ok = Measure.populate(ctx, "q", population())

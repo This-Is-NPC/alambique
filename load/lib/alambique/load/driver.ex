@@ -7,6 +7,7 @@ defmodule Alambique.Load.Driver do
   alias Alambique.Load.{
     Capacity,
     Cgroup,
+    Config,
     Cooldown,
     Env,
     Host,
@@ -30,10 +31,89 @@ defmodule Alambique.Load.Driver do
     "query" => Measures.Query
   }
 
-  @doc "Runs the ramp; returns the exit status: 0 done, 2 stopped invalid, 3 host low on memory, 4 service down."
-  def main do
-    measure = Env.get("MEASURE")
-    mod = Map.fetch!(@measures, measure)
+  @incomplete 10
+
+  @doc """
+  Runs the ramp of the case in `argv` (the path of its `case.json`) and returns
+  the exit status: 0 done, 2 stopped invalid, 3 host low on memory, 4 service
+  down. With `--replay` it starts no service: it only reads the steps that are
+  done, writes the summary and returns 0 when they cover the ramp, or 10 when a
+  step is left to run.
+  """
+  def main(argv \\ System.argv()) do
+    {replay?, path} =
+      case argv do
+        ["--replay", path] -> {true, path}
+        [path] -> {false, path}
+      end
+
+    cfg = Config.read!(path)
+    Config.put(cfg)
+    mod = Map.fetch!(@measures, cfg["measure"])
+    limits = Config.limits(cfg, mod.holds_memory?())
+    out = cfg["dir"]
+
+    plan = %{
+      cfg: cfg,
+      mod: mod,
+      limits: limits,
+      out: out,
+      meta: meta(cfg, limits, mod, out),
+      replay?: replay?,
+      skip?: cfg["skip_done"],
+      timeout_ms: round(cfg["timeouts"]["step_s"] * 1000)
+    }
+
+    steps = cfg["steps"]
+    ramp = Ramp.new(cfg["levels"], refine: steps["refine"], confirm: steps["confirm"])
+
+    case climb(plan, nil, ramp, 1, []) do
+      :incomplete ->
+        @incomplete
+
+      {ctx, ramp, steps} ->
+        meta = %{plan.meta | service: (ctx && ctx.settings) || plan.meta.service}
+        summary = Summary.build(meta, Enum.reverse(steps), Ramp.outcome(ramp))
+        Results.write!(Path.join(out, "summary.json"), summary)
+        File.write!(Path.join(out, "summary.md"), Summary.markdown(summary))
+        IO.puts(Summary.markdown(summary))
+        exit_status(steps)
+    end
+  end
+
+  defp meta(cfg, limits, mod, out) do
+    before = previous_summary(out)
+
+    %{
+      scenario: cfg["scenario"],
+      measure: cfg["measure"],
+      variant: cfg["variant"],
+      store_on: cfg["store"]["backing"],
+      store_fstype: Env.get("STORE_FSTYPE") || before["store_fstype"] || "tmpfs",
+      unit: mod.unit(),
+      cpus: cfg["cpus"],
+      mem_limit_mb: limits.mem_limit_mb,
+      command: cfg["command"],
+      config_hash: cfg["hash"],
+      started_at: iso_now(),
+      limits: limits,
+      service: before["service"]
+    }
+  end
+
+  defp previous_summary(out) do
+    with {:ok, text} <- File.read(Path.join(out, "summary.json")),
+         {:ok, summary} <- Jason.decode(text) do
+      summary
+    else
+      _ -> %{}
+    end
+  end
+
+  # What the case needs to run steps: the node, the sampler and the measure's
+  # setup. Started at the first step that is not done, so that a case whose
+  # steps are all done starts nothing.
+  defp start(%{cfg: cfg, mod: mod, limits: limits}) do
     node = Env.get("NODE") |> String.to_atom()
     connect(node)
 
@@ -43,75 +123,53 @@ defmodule Alambique.Load.Driver do
       Sampler.start_link(%{
         service: Cgroup.path(Env.get("SERVICE_ID")),
         store: Cgroup.path(Env.get("STORE_ID")),
-        store_dir: if(Env.get("STORE_ON", "tmpfs") == "disk", do: Env.get("STORE_PATH"))
+        store_dir: if(cfg["store"]["backing"] == "disk", do: Env.get("STORE_PATH"))
       })
 
-    limits = %{
-      delivery_min: Env.float("DELIVERY_MIN", 0.95),
-      max_net_load: Env.float("MAX_NET_LOAD", 6),
-      max_driver_swap_mb: Env.float("MAX_DRIVER_SWAP_MB", 16),
-      max_store_swap_mb: Env.float("MAX_STORE_SWAP_MB", 0),
-      max_host_swap_mb: Env.float("MAX_HOST_SWAP_MB", 512),
-      max_error_ratio: Env.float("MAX_ERROR_RATIO", 0),
-      max_busy_ratio: Env.float("MAX_BUSY_RATIO", 0.01),
-      latency: mod.latency(),
-      mem_limit_mb: Env.int("MEM_LIMIT_MB", 512),
-      mem_fraction: mod.mem_fraction(),
-      cooldown_mem_fraction: Env.float("COOLDOWN_MEM_FRACTION", 0.8),
-      cooldown_max_s: Env.int("COOLDOWN_MAX_S", 300),
-      cooldown_memory?: not mod.holds_memory?(),
-      store_mb: Env.int("STORE_MB", 4096),
-      store_full_fraction: Env.float("STORE_FULL_FRACTION", 0.95),
-      store_error_fraction: Env.float("STORE_ERROR_FRACTION", 0.85),
-      store_min_free_mb: Env.float("STORE_MIN_FREE_MB", 1024),
-      suspect_throttle_fraction: Env.float("SUSPECT_THROTTLE_FRACTION", 0.1),
-      fit_min_r2: Env.float("FIT_MIN_R2", 0.8),
-      fit_min_span: Env.float("FIT_MIN_SPAN", 2),
-      min_available_gib: Env.float("MIN_AVAILABLE_GIB", 6),
-      settle_s: Env.int("SETTLE_S", 30),
-      wait_quiet_step_s: Env.int("WAIT_QUIET_STEP_S", 1800),
-      attempts: Env.int("ATTEMPTS", 5)
-    }
-
-    ctx = %{node: node, measure: measure, limits: limits, abort: abort_fun(limits)}
+    ctx = %{node: node, measure: cfg["measure"], limits: limits, abort: abort_fun(limits)}
     ctx = Map.put(ctx, :settings, settings(ctx))
-
-    meta = %{
-      scenario: Env.get("SCENARIO"),
-      measure: measure,
-      variant: Env.get("VARIANT", "default"),
-      store_on: Env.get("STORE_ON", "tmpfs"),
-      store_fstype: Env.get("STORE_FSTYPE", "tmpfs"),
-      unit: mod.unit(),
-      cpus: Env.float("CPUS", 1),
-      mem_limit_mb: limits.mem_limit_mb,
-      command: Env.get("COMMAND", ""),
-      started_at: iso_now(),
-      limits: limits,
-      service: ctx.settings
-    }
-
-    out = Env.get("OUT")
     :ok = mod.setup(ctx)
-    ramp = Ramp.new(mod.levels(), mod.ramp_opts())
-    {ramp, steps} = climb(ctx, mod, ramp, 1, [], out, meta)
-
-    summary = Summary.build(meta, Enum.reverse(steps), Ramp.outcome(ramp))
-    Results.write!(Path.join(out, "summary.json"), summary)
-    File.write!(Path.join(out, "summary.md"), Summary.markdown(summary))
-    IO.puts(Summary.markdown(summary))
-    exit_status(steps)
+    ctx
   end
 
-  defp climb(ctx, mod, ramp, seq, steps, out, meta) do
+  # `ctx` is nil until the first step that has to run.
+  defp climb(plan, ctx, ramp, seq, steps) do
     case Ramp.next(ramp) do
       :done ->
-        {ramp, steps}
+        {ctx, ramp, steps}
 
       {:run, level, phase} ->
-        {step, verdict} = step_with_repeats(ctx, mod, level, phase, seq, out, meta)
-        ramp = Ramp.record(ramp, Verdict.ramp_verdict(verdict))
-        climb(ctx, mod, ramp, seq + 1, [Map.put(step, :verdict_term, verdict) | steps], out, meta)
+        name = Results.step_name(level, phase)
+
+        case done_step(plan, name, seq) do
+          {:ok, step} ->
+            IO.puts("#{plan.cfg["measure"]} #{level}: done, #{step.verdict} #{step.reason}")
+            advance(plan, ctx, ramp, seq, steps, step)
+
+          :none when plan.replay? ->
+            :incomplete
+
+          :none ->
+            ctx = ctx || start(plan)
+            {step, verdict} = step_with_repeats(plan, ctx, level, phase, seq, name)
+            advance(plan, ctx, ramp, seq, steps, Map.put(step, :verdict_term, verdict))
+        end
+    end
+  end
+
+  defp advance(plan, ctx, ramp, seq, steps, step) do
+    ramp = Ramp.record(ramp, Verdict.ramp_verdict(step.verdict_term))
+    climb(plan, ctx, ramp, seq + 1, [step | steps])
+  end
+
+  # A step with a result of the same settings that is not invalid is done: it
+  # is read, not run (never with --no-skip-done).
+  defp done_step(%{skip?: false}, _name, _seq), do: :none
+
+  defp done_step(plan, name, seq) do
+    case Results.read_done(Path.join(plan.out, name), plan.meta.config_hash) do
+      {:ok, step} -> {:ok, %{step | seq: seq}}
+      :none -> :none
     end
   end
 
@@ -122,45 +180,44 @@ defmodule Alambique.Load.Driver do
   # `waits` is the time spent waiting so far in this step, this attempt
   # included in the step it is written to.
   defp step_with_repeats(
+         plan,
          ctx,
-         mod,
          level,
          phase,
          seq,
-         out,
-         meta,
+         name,
          attempt \\ 1,
          waits \\ %{quiet: 0.0, cooldown: 0.0}
        ) do
-    name = Results.step_name(seq, phase, level)
     key = {level, phase, seq, attempt}
 
     case wait_to_start(ctx, waits) do
       {:ready, waits} ->
-        {step, verdict} = run_step(ctx, mod, level, phase, seq, attempt)
+        {step, verdict} = run_step(plan, ctx, level, phase, seq, attempt)
         step = Map.merge(step, %{quiet_wait_s: waits.quiet, cooldown_s: waits.cooldown})
-        finish(ctx, mod, {step, verdict}, key, waits, out, meta, name)
+        finish(plan, ctx, {step, verdict}, key, waits, name)
 
       {:no_cooldown, waits, mb} when attempt < ctx.limits.attempts ->
-        IO.puts("#{meta.measure} #{level}: repeated, no cooldown (#{round(mb)} MB)")
-        step_with_repeats(ctx, mod, level, phase, seq, out, meta, attempt + 1, waits)
+        IO.puts("#{plan.meta.measure} #{level}: repeated, no cooldown (#{round(mb)} MB)")
+        step_with_repeats(plan, ctx, level, phase, seq, name, attempt + 1, waits)
 
       {:no_cooldown, waits, mb} ->
-        unrun_step(ctx, key, waits, {:invalid, {:no_cooldown, mb}}, %{})
-        |> write_step(out, name, meta, mod)
+        plan
+        |> unrun_step(key, waits, {:invalid, {:no_cooldown, mb}}, %{})
+        |> write_step(plan, name)
 
       {:stop, waits, verdict} ->
-        unrun_step(ctx, key, waits, verdict, %{}) |> write_step(out, name, meta, mod)
+        plan |> unrun_step(key, waits, verdict, %{}) |> write_step(plan, name)
     end
   end
 
   # Cooldown first, then the quiet window: the service idles through both.
   defp wait_to_start(ctx, waits) do
-    case Cooldown.wait(cooldown_opts(ctx.limits), cooldown_io(ctx)) do
+    case cooldown(ctx) do
       {:cooled, s} ->
         waits = %{waits | cooldown: waits.cooldown + s}
 
-        case Quiet.wait(quiet_opts(ctx.limits), quiet_io()) do
+        case quiet(ctx) do
           {:quiet, s} -> {:ready, %{waits | quiet: waits.quiet + s}}
           {:busy, s, load} -> {:stop, add_quiet(waits, s), {:invalid, {:host_busy, load}}}
           {:low_memory, s} -> {:stop, add_quiet(waits, s), {:invalid, :host_low_memory}}
@@ -174,38 +231,49 @@ defmodule Alambique.Load.Driver do
     end
   end
 
+  # A criterion that is off waits for nothing.
+  defp cooldown(%{limits: %{cooldown?: false}}), do: {:cooled, 0.0}
+  defp cooldown(ctx), do: Cooldown.wait(cooldown_opts(ctx.limits), cooldown_io(ctx))
+
+  defp quiet(%{limits: %{wait_quiet?: false}}), do: {:quiet, 0.0}
+  defp quiet(ctx), do: Quiet.wait(quiet_opts(ctx.limits), quiet_io())
+
   defp add_quiet(waits, s), do: %{waits | quiet: waits.quiet + s}
 
-  defp finish(ctx, mod, {step, verdict}, {level, phase, seq, attempt}, waits, out, meta, name) do
+  defp finish(plan, ctx, {step, verdict}, {level, phase, seq, attempt}, waits, name) do
     case verdict do
       {:repeat, reason} when attempt < ctx.limits.attempts ->
         Results.write!(
-          Path.join(out, String.replace(name, ".json", "-attempt#{attempt}.json")),
-          step
+          Path.join(plan.out, String.replace(name, ".json", "-attempt#{attempt}.json")),
+          Map.put(step, :config_hash, plan.meta.config_hash)
         )
 
-        IO.puts("#{meta.measure} #{level}: repeated, #{inspect(reason)}")
+        IO.puts("#{plan.meta.measure} #{level}: repeated, #{inspect(reason)}")
         # What the disturbed attempt left is undone, so the repeat redoes all of it.
-        mod.rewind(ctx, level)
-        step_with_repeats(ctx, mod, level, phase, seq, out, meta, attempt + 1, waits)
+        plan.mod.rewind(ctx, level)
+        step_with_repeats(plan, ctx, level, phase, seq, name, attempt + 1, waits)
 
       {:repeat, reason} ->
         step = %{step | verdict: "invalid", reason: inspect(reason)}
-        write_step({step, {:invalid, reason}}, out, name, meta, mod)
+        write_step({step, {:invalid, reason}}, plan, name)
 
       _ ->
-        write_step({step, verdict}, out, name, meta, mod)
+        write_step({step, verdict}, plan, name)
     end
   end
 
-  defp write_step({step, verdict}, out, name, meta, mod) do
-    Results.write!(Path.join(out, name), step)
-    IO.puts("#{meta.measure} #{step.level} #{mod.unit()}: #{step.verdict} #{step.reason}")
+  defp write_step({step, verdict}, plan, name) do
+    step = Map.put(step, :config_hash, plan.meta.config_hash)
+    Results.write!(Path.join(plan.out, name), step)
+
+    IO.puts(
+      "#{plan.meta.measure} #{step.level} #{plan.mod.unit()}: #{step.verdict} #{step.reason}"
+    )
 
     if verdict == {:invalid, :store_full},
       do:
         IO.puts(
-          "the store is out of space: stopping. Run the case again with ALAMBIQUE_LOAD_STORE_ON=disk (a store on disk needs at least #{round(meta.limits.store_min_free_mb)} MB free)"
+          "the store is out of space: stopping. Run the case again with the store on disk (store.backing = \"disk\"; a store on disk needs at least #{round(plan.limits.store_min_free_mb)} MB free)"
         )
 
     {step, verdict}
@@ -264,14 +332,9 @@ defmodule Alambique.Load.Driver do
 
   # The step of an attempt that never ran: the host or the service did not
   # allow it, or its preparation failed. `extra` says why in detail.
-  defp unrun_step(ctx, {level, phase, seq, attempt}, waits, verdict, extra) do
+  defp unrun_step(plan, {level, phase, seq, attempt}, waits, verdict, extra) do
     step = %{
       schema: 1,
-      scenario: Env.get("SCENARIO"),
-      measure: ctx.measure,
-      variant: Env.get("VARIANT", "default"),
-      store_on: Env.get("STORE_ON", "tmpfs"),
-      store_fstype: Env.get("STORE_FSTYPE", "tmpfs"),
       seq: seq,
       phase: phase,
       level: level,
@@ -304,19 +367,45 @@ defmodule Alambique.Load.Driver do
       reason: reason(verdict)
     }
 
-    {step, verdict}
+    {Map.merge(identity(plan), step), verdict}
+  end
+
+  # What every step result says about its case.
+  defp identity(plan),
+    do: Map.take(plan.meta, [:scenario, :measure, :variant, :store_on, :store_fstype])
+
+  # A step that runs past `round.step_timeout_s` is invalid with reason
+  # `timeout`: its work is stopped and the ramp ends, as for any invalid step.
+  defp run_step(plan, ctx, level, phase, seq, attempt) do
+    task = Task.async(fn -> run_step_now(plan, ctx, level, phase, seq, attempt) end)
+
+    case Task.yield(task, plan.timeout_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} ->
+        result
+
+      nil ->
+        Sampler.collect()
+
+        unrun_step(
+          plan,
+          {level, phase, seq, attempt},
+          %{quiet: 0.0, cooldown: 0.0},
+          {:invalid, :timeout},
+          %{timeout_s: plan.timeout_ms / 1000}
+        )
+    end
   end
 
   # A level that cannot be prepared (or a store with no room left) is an
   # invalid step with its reason, not a crash: the summary is always written.
-  defp run_step(ctx, mod, level, phase, seq, attempt) do
+  defp run_step_now(plan, ctx, level, phase, seq, attempt) do
     with :ok <- check_store(ctx.limits),
-         {:ok, prep} <- prepare(ctx, mod, level) do
-      measure_step(ctx, mod, prep, level, phase, seq, attempt)
+         {:ok, prep} <- prepare(ctx, plan.mod, level) do
+      measure_step(plan, ctx, prep, level, phase, seq, attempt)
     else
       {:invalid, reason, extra} ->
         unrun_step(
-          ctx,
+          plan,
           {level, phase, seq, attempt},
           %{quiet: 0.0, cooldown: 0.0},
           {:invalid, reason},
@@ -341,7 +430,7 @@ defmodule Alambique.Load.Driver do
     kind, reason -> {:invalid, :prepare_failed, %{prepare_error: inspect({kind, reason})}}
   end
 
-  defp measure_step(ctx, mod, prep, level, phase, seq, attempt) do
+  defp measure_step(%{mod: mod} = plan, ctx, prep, level, phase, seq, attempt) do
     if mod.probe?(), do: Measure.call(ctx, :probe_begin)
     {:ok, cg0} = Cgroup.read(Cgroup.path(Env.get("SERVICE_ID")))
     snap0 = Measure.call(ctx, :snapshot)
@@ -356,7 +445,7 @@ defmodule Alambique.Load.Driver do
     {cg1, snap1} = after_readings(ctx)
     probe = if mod.probe?(), do: Measure.call(ctx, :probe_finish)
 
-    step = build(ctx, result, samples, {cg0, cg1}, {snap0, snap1}, probe)
+    step = build(plan, result, samples, {cg0, cg1}, {snap0, snap1}, probe)
 
     duration_s = (ended - started) / 1000
 
@@ -421,19 +510,14 @@ defmodule Alambique.Load.Driver do
     }
   end
 
-  defp build(ctx, result, samples, {cg0, cg1}, {snap0, snap1}, probe) do
+  defp build(plan, result, samples, {cg0, cg1}, {snap0, snap1}, probe) do
     latency = latency_ms(result.latencies_us)
     cgroup = cgroup_stats(samples.cgroup, cg0, cg1)
     swap = Host.swap_stats(samples.swap)
     ops = result.ok
 
-    %{
+    Map.merge(identity(plan), %{
       schema: 1,
-      scenario: Env.get("SCENARIO"),
-      measure: ctx.measure,
-      variant: Env.get("VARIANT", "default"),
-      store_on: Env.get("STORE_ON", "tmpfs"),
-      store_fstype: Env.get("STORE_FSTYPE", "tmpfs"),
       delivery: %{
         planned: result.planned,
         issued: result.issued,
@@ -455,7 +539,7 @@ defmodule Alambique.Load.Driver do
       service: service_stats(snap0, snap1, probe),
       cost: cost(cgroup, snap0, snap1, ops),
       extra: Map.get(result, :extra, %{})
-    }
+    })
   end
 
   defp latency_ms([]), do: %{}
