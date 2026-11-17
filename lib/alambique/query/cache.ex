@@ -35,12 +35,24 @@ defmodule Alambique.Query.Cache do
     cell_dir = cell_dir(dir, cell)
     path = Path.join(cell_dir, ".tmp-#{System.unique_integer([:positive])}")
 
-    with :ok <- File.mkdir_p(cell_dir) do
+    with :ok <- make_dir(dir, cell_dir) do
       case File.write(path, "", [:exclusive]) do
         :ok -> {:ok, path}
         # `trim/3` removed the directory just created: make it again.
         {:error, :enoent} -> tmp(dir, cell)
         {:error, _} = error -> error
+      end
+    end
+  end
+
+  # Not `File.mkdir_p/1`: when `trim/3` removes the directory between its
+  # `eexist` and its check that the path is a directory, it answers `enotdir`.
+  # `dir` itself is never removed.
+  defp make_dir(dir, cell_dir) do
+    with :ok <- File.mkdir_p(dir) do
+      case :file.make_dir(cell_dir) do
+        {:error, :eexist} -> :ok
+        other -> other
       end
     end
   end
