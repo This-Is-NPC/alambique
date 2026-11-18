@@ -67,13 +67,21 @@ defmodule Alambique.WakeOverlapTest do
     reads = Enum.filter(trace, fn {op, key, _, _} -> op == :get and key =~ "/0000/" end)
     assert Enum.count(reads, &TracingStore.overlap?(&1, hd(reads))) > @commits / 2
 
-    {:put, _, fence_from, _} = request(trace, :put, ~r|/0000/|)
+    {:put, _, fence_from, fence_to} = request(trace, :put, ~r|/0000/|)
 
     assert Enum.all?(reads, fn {_, _, _, to} -> to <= fence_from end)
     assert elem(lease, 3) <= fence_from
 
-    # Before: one request after the other, about 22 of them (880 ms).
-    assert System.convert_time_unit(measurements.duration, :native, :millisecond) < 13 * @latency
+    # One request after the other, the wake cannot be shorter than the sum of
+    # its requests, from the lease to the fence (about 22, 880 ms). A fixed
+    # bound failed on a slow CI runner (814 ms against 520).
+    serial_us =
+      trace
+      |> Enum.filter(fn {_, _, from, to} -> from >= elem(lease, 2) and to <= fence_to end)
+      |> Enum.map(fn {_, _, from, to} -> to - from end)
+      |> Enum.sum()
+
+    assert System.convert_time_unit(measurements.duration, :native, :microsecond) < serial_us
 
     assert {:ok, %{rows: [[@commits]]}} = Alambique.query(reader, cell, "SELECT count(*) FROM t")
   end
