@@ -66,6 +66,14 @@ defmodule Alambique.LazyRestoreInterruptTest do
       :global.register_name(name, test)
       {:ok, :yes} = Cluster.call(c, :n1, :global, :register_name, [name, test])
 
+      # Background reads wait, so the query meets pages that are not there yet.
+      {:ok, :ok} =
+        Cluster.call(c, :n1, CrashPoints, :arm, [
+          :hydrate_before_fetch,
+          &ClusterFuns.park/2,
+          [times: :infinity]
+        ])
+
       {:ok, :ok} =
         Cluster.call(c, :n1, CrashPoints, :arm, [
           :hydrate_before_miss,
