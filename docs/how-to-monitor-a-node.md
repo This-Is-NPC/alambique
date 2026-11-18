@@ -126,7 +126,7 @@ recovers before then costs none, because lease renewals bypass the breaker
 
 | Signal | Limit | Source |
 | --- | --- | --- |
-| `tail` of `[:alambique, :cell, :hibernate]` | Look above 32: a release of that cell compacts first. Page at 256: the compactor is behind. | `compaction: [release_min_tail: 32, max_chain_segments: 256]` (design §9, "Chain cap") |
+| `tail` of `[:alambique, :cell, :hibernate]` | It is what the release left. Look above 32: the next wake reads a long chain, and `compaction:` below says why. Page at 256: the compactor is behind. | `compaction: [release_min_tail: 32, max_chain_segments: 256]` (design §9, "Chain cap") |
 | `compaction:` of the same event | Watch `:deadline`, `:deadline_error` and `:error`: the lease was handed over without a full compaction and the next wake reads a longer chain; `tail` of the same event is what is left. | `release_deadline_ms: 3_000` (design §9) |
 | `[:alambique, :compaction, :pass]` with `result: :error` or `more: true` | Watch the rate of errors. `more: true` is a pass that ran out of its budget; the row stays queued. | design §9; telemetry.md |
 | `[:alambique, :compactor, :tick]` `duration` | No library limit. A tick that lasts longer every day is a compactor that falls behind. | telemetry.md, Compactor events |
