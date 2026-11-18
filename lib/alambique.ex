@@ -849,6 +849,11 @@ defmodule Alambique do
   before `:timeout` runs out, and does not start with less left, so the call
   answers in time. Design §9.
 
+  Options: `:timeout` in milliseconds (default `:call_timeout_ms`) and
+  `:release_deadline_ms`, a non-negative integer that replaces
+  `:release_deadline_ms` of the instance for this call (0 for no compaction);
+  the lease and `:timeout` less `:release_reserve_ms` still bound it.
+
   When the store refuses the release, the cell is asleep and its data is
   durable, but the lease stays until it expires: the answer is
   `{:error, {:release_failed, reason}}`, so a caller that waits for another
@@ -856,7 +861,21 @@ defmodule Alambique do
   """
   @spec hibernate(instance, cell, keyword) :: :ok | {:error, term}
   def hibernate(instance, cell, opts \\ []),
-    do: Router.call(instance, cell, :hibernate, opts[:timeout])
+    do: Router.call(instance, cell, {:hibernate, release_deadline!(opts)}, opts[:timeout])
+
+  defp release_deadline!(opts) do
+    case opts[:release_deadline_ms] do
+      nil ->
+        nil
+
+      ms when is_integer(ms) and ms >= 0 ->
+        ms
+
+      other ->
+        raise ArgumentError,
+              ":release_deadline_ms must be a non-negative integer, got: #{inspect(other)}"
+    end
+  end
 
   @doc """
   Moves the WAL of an awake cell into its database file now, without
@@ -1106,10 +1125,26 @@ defmodule Alambique do
       `{:error, :busy}`, leaving the cell where it is. A cell that is asleep
       is idle. Use it to rebalance without making callers wait for a
       hibernation and a wake; try again later.
+    * `:release_deadline_ms` - a non-negative integer: the time the owner may
+      spend compacting the cell's level-0 tail before it hands the lease
+      over, for this call only. It replaces `:release_deadline_ms` of the
+      instance's `:compaction` option, which keeps applying to the hibernation
+      by pressure, the drain and the stop (0 for no compaction). The lease
+      and `:timeout` less `:release_reserve_ms` still bound it, so a move with
+      a long `:timeout` can give the compaction more than the default 3 000.
+      See `hibernate/3` and design §9.
   """
   @spec move(instance, cell, node, keyword) :: {:ok, node} | {:error, term}
-  def move(instance, cell, node, opts \\ []) when is_atom(node),
-    do: Router.move(instance, cell, node, opts[:timeout], opts[:only_if_idle] == true)
+  def move(instance, cell, node, opts \\ []) when is_atom(node) do
+    Router.move(
+      instance,
+      cell,
+      node,
+      opts[:timeout],
+      opts[:only_if_idle] == true,
+      release_deadline!(opts)
+    )
+  end
 
   @doc """
   Moves the cell to another location of the placement (design §18). `to` is a

@@ -87,7 +87,10 @@ the fence.
    rate of the node. A node that hands a cell over on purpose (`hibernate/3`, `drain/2`, a
    stop) compacts its tail first when it has `compaction: [release_min_tail:]`
    (default 32) level-0 files or more, for at most `compaction: [release_deadline_ms:]`
-   (default 3 000), so the next node reads a short chain.
+   (default 3 000), so the next node reads a short chain. `Alambique.move/4` and
+   `hibernate/3` take `release_deadline_ms:` to give one call more or less; it
+   replaces the default for that call and stays under the call's `:timeout` less
+   `compaction: [release_reserve_ms:]`.
    `[:alambique, :cell, :wake]` reports `store_time` (the time of the store
    requests, summed) and `reductions` to tell a slow store from a starved node.
 

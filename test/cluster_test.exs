@@ -132,7 +132,7 @@ defmodule Alambique.ClusterTest do
       {:ok, {:messages, messages}} =
         Cluster.call(c, owner_name, Process, :info, [pid, :messages])
 
-      Enum.any?(messages, &match?({:"$gen_call", _, {:hibernate_if_idle, _}}, &1))
+      Enum.any?(messages, &match?({:"$gen_call", _, {:hibernate_if_idle, _, _}}, &1))
     end)
 
     call =
@@ -149,6 +149,32 @@ defmodule Alambique.ClusterTest do
     # Idle now: the same call moves it.
     assert {:ok, ^target} = on(c, :n1, :move, [inst, cell, target, [only_if_idle: true]])
     assert {:ok, %{rows: [[2]]}} = on(c, :n3, :query, [inst, cell, "SELECT count(*) FROM log"])
+  end
+
+  test "move takes the release deadline of its own call", %{cluster: c, inst: inst} do
+    # 40 level-0 files: a release with the default deadline compacts them.
+    for {cell, opts} <- [{cell(), [release_deadline_ms: 0]}, {cell(), []}] do
+      for n <- 1..40 do
+        assert {:ok, _} = on(c, :n1, :execute, [inst, cell, "INSERT INTO log (n) VALUES (#{n})"])
+      end
+
+      {:ok, owner} = on(c, :n1, :owner, [inst, cell])
+
+      [target | _] =
+        for name <- Cluster.names(c), Cluster.node(c, name) != owner, do: Cluster.node(c, name)
+
+      assert {:ok, ^target} = on(c, :n1, :move, [inst, cell, target, opts])
+
+      eventually(fn ->
+        Enum.any?(Cluster.events(c), fn
+          %{event: [:alambique, :cell, :hibernate], meta: %{cell: ^cell} = meta} ->
+            meta.compaction == if(opts == [], do: :done, else: :none)
+
+          _ ->
+            false
+        end)
+      end)
+    end
   end
 
   test "the owner-hint cache stays bounded", %{cluster: c, inst: inst} do

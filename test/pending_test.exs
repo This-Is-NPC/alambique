@@ -84,11 +84,11 @@ defmodule Alambique.PendingTest do
       :sys.suspend(pid)
 
       hibernate =
-        Task.async(fn -> Alambique.Router.call(inst, cell, :hibernate_if_idle, 5_000) end)
+        Task.async(fn -> Alambique.Router.call(inst, cell, {:hibernate_if_idle, nil}, 5_000) end)
 
       eventually(fn ->
         {:messages, messages} = Process.info(pid, :messages)
-        Enum.any?(messages, &match?({:"$gen_call", _, {:hibernate_if_idle, _}}, &1))
+        Enum.any?(messages, &match?({:"$gen_call", _, {:hibernate_if_idle, _, _}}, &1))
       end)
 
       call = Task.async(fn -> Alambique.execute(inst, cell, @insert, [1]) end)
@@ -106,13 +106,13 @@ defmodule Alambique.PendingTest do
       cell = unique_cell()
       {:ok, _} = Alambique.execute(inst, cell, @insert, [0])
 
-      assert Alambique.Router.call(inst, cell, :hibernate_if_idle, 5_000) == :ok
+      assert Alambique.Router.call(inst, cell, {:hibernate_if_idle, nil}, 5_000) == :ok
       eventually(fn -> Alambique.load(inst, cell) == :none end)
     end
 
     test "a cell that is asleep is already idle", env do
       inst = start_instance(env, migrations: @schema)
-      assert Alambique.Router.call(inst, unique_cell(), :hibernate_if_idle, 5_000) == :ok
+      assert Alambique.Router.call(inst, unique_cell(), {:hibernate_if_idle, nil}, 5_000) == :ok
     end
   end
 end
