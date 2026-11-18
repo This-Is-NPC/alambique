@@ -176,8 +176,11 @@ Each push to `master` updates a release pull request with the next version and
 its `CHANGELOG.md` entry. Merging that pull request tags `vX.Y.Z` and publishes
 the GitHub release. Before 1.0, `feat` bumps the minor version and `fix` the
 patch. The version lives in `mix.exs`, `testkit/mix.exs` and the status and
-installation lines of `README.md`, which carry `x-release-please` annotations
-so the release pull request updates them. The Rust crates under `native/` are
-internal and keep their own version.
+installation lines of `README.md`, which carry the one-line marker
+`x-release-please-version` so the release pull request updates them. Never use
+a start and end block: `scripts/readme-check` (`mise run check:readme`) rejects
+it. A block opened and closed on one line is never closed for the updater,
+which then rewrites every version-like string to the end of the file. The Rust
+crates under `native/` are internal and keep their own version.
 
 Applications depend on a release by tag, as the README shows.

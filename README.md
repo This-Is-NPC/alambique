@@ -18,10 +18,8 @@ locations and publishes a per-cell change feed.
 
 ## Status
 
-<!-- x-release-please-start-version -->
-The current version is 0.12.0. It is not published on Hex: depend on a release
-by its git tag.
-<!-- x-release-please-end -->
+The current version is 0.12.0. <!-- x-release-please-version -->
+It is not published on Hex: depend on a release by its git tag.
 Before 1.0, a new minor version may change behavior. What changed since the
 first release (0.1.0):
 
