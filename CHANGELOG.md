@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.12.0](https://github.com/This-Is-NPC/alambique/compare/v0.11.0...v0.12.0) (2026-11-18)
+
+
+### Features
+
+* **load:** bound every case with a timeout ([cd2d0ba](https://github.com/This-Is-NPC/alambique/commit/cd2d0ba056d14026ea10ae538e82312c82b5d150))
+* **load:** read a load round from a TOML file ([51eda71](https://github.com/This-Is-NPC/alambique/commit/51eda71cae30d729cca831e3746ce209f4d6baa0))
+* **load:** run a round on a remote host ([0fc8b80](https://github.com/This-Is-NPC/alambique/commit/0fc8b80d5ef0904cdc21d4056db4393f8642f48a))
+* **load:** run the load test from a round file ([ba0f92c](https://github.com/This-Is-NPC/alambique/commit/ba0f92c756336f301061573fe07b43f0905d668d))
+
+
+### Bug Fixes
+
+* **load:** read the rust pin in its table form ([0b57032](https://github.com/This-Is-NPC/alambique/commit/0b57032227da767e641e167ec2a582ba2a720fe5))
+* **query:** make a cell cache dir without mkdir_p ([92af423](https://github.com/This-Is-NPC/alambique/commit/92af423ea4c7544a1c2d1d30701e86d868c0a80b))
+
 ## [0.11.0](https://github.com/This-Is-NPC/alambique/compare/v0.10.2...v0.11.0) (2026-11-16)
 
 
