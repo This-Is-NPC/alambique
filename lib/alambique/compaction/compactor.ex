@@ -80,7 +80,9 @@ defmodule Alambique.Compaction.Compactor do
         min_tail: config.compaction.release_min_tail
       )
 
-    Compaction.run(%{ctx | timeout_ms: timeout_ms}, cell, opts)
+    # The budget is the release's, not the store's timeout: a request cut at
+    # its end says nothing about the store (design §3, the breaker).
+    Compaction.run(Map.merge(ctx, %{timeout_ms: timeout_ms, budget_cut: true}), cell, opts)
   end
 
   @doc """

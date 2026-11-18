@@ -17,7 +17,9 @@ defmodule Alambique.Replication.Retry do
   attempts, and `{:retry, :store_unavailable}` (an open breaker: another
   attempt would fail the same way) end with `{:error, reason}`. An
   attempt still running at `deadline` is killed and ends with the reason of
-  the last failure, or `{:error, :timeout}` if there was none. An attempt that
+  the last failure, or `{:error, :timeout}` if there was none. With
+  `ctx.budget_cut` the deadline is the end of a time budget the caller chose,
+  not a timeout of the store, so the kill is not reported to the breaker. An attempt that
   starts at or past the deadline gets `ctx.backoff_ms`, the first backoff,
   before it is killed. An attempt that
   raises, throws or exits does so in the caller.
@@ -52,7 +54,7 @@ defmodule Alambique.Replication.Retry do
     case attempt(remaining, fun) do
       # Killed at the deadline: the reason of the last failure says more.
       {:killed, where} ->
-        Breaker.timed_out(ctx.store, where)
+        unless Map.get(ctx, :budget_cut, false), do: Breaker.timed_out(ctx.store, where)
         {:error, last}
 
       {:retry, :store_unavailable} ->

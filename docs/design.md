@@ -422,6 +422,17 @@ the panic tests abort the VM when `guard` does not catch.
     and a threshold of lag would be a guess.
   - A request killed at its deadline never answers, so `Retry` reports it with
     how far it got; only a closed breaker counts it.
+  - **The end of a budget is not a timeout of the store.** The compaction of
+    a release (§9) runs under a budget the caller chose, `release_deadline_ms`,
+    and `Retry` kills the requests still running at its end, up to four input
+    fetches at once. Those kills say nothing about the store, and counted they
+    opened the breaker for its cool-down, so the release of the lease right
+    after failed with `:store_unavailable` and the lease expired instead of
+    being handed over, and every other cell of the node met an open breaker.
+    The pass sets `budget_cut` in its context, and a kill at that deadline is
+    not reported. A request of the pass that fails or times out on its own
+    still counts, and so does every request outside it, so a store that is
+    really slow still opens the breaker.
   - **Lease renewals bypass it** (`Lease.renew/2`). A cell renews every third
     of the TTL and its lease is valid for `lease_ttl_ms - skew_margin_ms`, so
     it has two tries after a failed renewal. A breaker that stayed open after

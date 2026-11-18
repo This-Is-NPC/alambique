@@ -157,13 +157,18 @@ defmodule Alambique.ReleaseCompactionTest do
 
   # A cell with `rows` level-0 files whose lease is free, and an instance over
   # a store that takes `ms` per request to hibernate it.
-  defp slow_release(ctx, ms, rows, compaction) do
+  defp slow_release(ctx, ms, rows, compaction, extra \\ []) do
     fast = writer(ctx, compaction: [release_deadline_ms: 0])
     cell = unique_cell()
     insert(fast, cell, 1..rows)
     :ok = Alambique.hibernate(fast, cell)
 
-    inst = writer(%{ctx | store: SlowStore.wrap(ctx.store, ms)}, compaction: compaction)
+    inst =
+      writer(%{ctx | store: SlowStore.wrap(ctx.store, ms)},
+        compaction: compaction,
+        breaker: Keyword.get(extra, :breaker, [])
+      )
+
     assert {:ok, %{rows: [[^rows]]}} = Alambique.query(inst, cell, "SELECT count(*) FROM t", [])
     capture([[:alambique, :cell, :hibernate], [:alambique, :compaction, :pass]])
     {inst, cell}
@@ -198,8 +203,7 @@ defmodule Alambique.ReleaseCompactionTest do
     before = tail_length(ctx, cell)
     assert before >= 200
 
-    # The release may fail on a store the cut tripped; the compaction is the subject.
-    _ = Alambique.hibernate(inst, cell)
+    assert :ok = Alambique.hibernate(inst, cell)
 
     assert {%{tail: tail}, %{compaction: :deadline}} =
              await_event([:alambique, :cell, :hibernate], cell)
@@ -207,6 +211,25 @@ defmodule Alambique.ReleaseCompactionTest do
     assert {_, %{result: :ok, more: true}} = await_event([:alambique, :compaction, :pass], cell)
     assert tail_length(ctx, cell) < before, "nothing was merged"
     assert tail == tail_length(ctx, cell)
+  end
+
+  # A request killed at the budget is the budget's end, not a failure of the
+  # store: it must not open the breaker, or the release that follows fails.
+  test "a request cut at the end of the budget does not open the breaker", ctx do
+    {inst, cell} =
+      slow_release(ctx, 90, 200, [release_deadline_ms: 1_000, release_min_tail: 30],
+        breaker: [failures: 1]
+      )
+
+    assert :ok = Alambique.hibernate(inst, cell)
+
+    assert {_, %{compaction: :deadline}} = await_event([:alambique, :cell, :hibernate], cell)
+    assert %{state: :closed} = Alambique.breaker_status(inst)["default"]
+
+    other = start_instance(ctx, migrations: @schema, retention: false)
+
+    assert {:ok, %{rows: [[200]]}} =
+             Alambique.query(other, cell, "SELECT count(*) FROM t", [], timeout: 2_000)
   end
 
   describe "a release deadline for one call" do
