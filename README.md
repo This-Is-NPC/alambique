@@ -145,6 +145,15 @@ first release (0.1.0):
   ([design §14](docs/design.md#14-cross-cell-queries)). The load test now runs
   from one round file (`mise run load -- --config <file>`). There is no
   breaking change and no new library option.
+- 0.13.0: a release compaction cut by its deadline keeps the merges it
+  published, and the cut no longer opens the store breaker, which made the
+  lease release fail and left the lease to expire. `tail` in
+  `[:alambique, :cell, :hibernate]` is now what the chain still has after the
+  compaction, and a cut before the chain is known gives `:deadline_error`.
+  `move/4` and `hibernate/3` take `release_deadline_ms:` for one call, and
+  `[:alambique, :admission, :overloaded]` names the limit behind each
+  `{:error, :overloaded}` (design.md, sections 7 and 9). There is no breaking
+  change to the API.
 
 The full list is in [CHANGELOG.md](CHANGELOG.md).
 
@@ -283,7 +292,8 @@ UTF-8 locale. Run with `LANG=C.UTF-8`, for example
   [docs/how-to-operate-a-cell.md](docs/how-to-operate-a-cell.md), step 10.
 - On a saturated CPU, the compaction at the release of a cell can be cut by
   `compaction: [release_deadline_ms:]`, and the next node reads a longer tail
-  ([docs/design.md](docs/design.md), section 9).
+  ([docs/design.md](docs/design.md), section 9). `move/4` and `hibernate/3`
+  take a larger `release_deadline_ms:` for one call.
 - Known defects and limits are listed in
   [docs/what-does-not-work.md](docs/what-does-not-work.md).
 
