@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The fast checks behind the pre-push hook and the start of scripts/check:
-# warnings-as-errors compile and the format checks of Elixir and Rust.
+# warnings-as-errors compile, the format checks of Elixir and Rust, and the
+# README release-please marker check (scripts/readme-check).
 #
 #   scripts/quick-check          incremental compile: only what changed, so a
 #                                push with nothing new takes seconds
@@ -32,3 +33,6 @@ mix format --check-formatted
 step "cargo fmt"
 cargo fmt --check --manifest-path native/alambique_nif/Cargo.toml
 cargo fmt --check --manifest-path native/alambique_nif/fuzz/Cargo.toml
+
+step "readme markers"
+"$root/scripts/readme-check"
