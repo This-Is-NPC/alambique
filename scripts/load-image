@@ -7,7 +7,13 @@ cd "$(dirname "$0")/.."
 # The Debian release of the hexpm base images; the one place that pins it.
 debian="${ALAMBIQUE_LOAD_DEBIAN:-trixie-20261005-slim}"
 
-pinned() { sed -n "s/^$1 = \"\(.*\)\"/\1/p" mise.toml | head -n1; }
+# A pin is `tool = "version"` or `tool = { version = "version", ... }`.
+pinned() {
+  local v
+  v=$(sed -nE "s/^$1 = (\{ *version = )?\"([^\"]+)\".*/\2/p" mise.toml | head -n1)
+  [ -n "$v" ] || { echo "no $1 pin found in mise.toml" >&2; exit 1; }
+  echo "$v"
+}
 erlang=$(pinned erlang)
 elixir=$(pinned elixir)
 rust=$(pinned rust)
