@@ -2220,14 +2220,22 @@ turns the compaction off.
 
 *The bound of a release.* The compaction never outlasts the call that asked
 for the release. The caller's time reaches the cell as the monotonic time at
-which it stops waiting (`{:hibernate, at}`, from `Router`), and the pass
-budget is the least of `release_deadline_ms`, what is left of the lease and
+which it stops waiting (`{:hibernate, at, release_ms}`, from `Router`), and the
+pass budget is the least of `release_deadline_ms`, what is left of the lease and
 what is left of the call minus `release_reserve_ms` (default 2 000), which is
 kept for the rest of the release: the merge in flight when the pass is cut
 (it ends, see above) and the request that frees the lease. With nothing left after the reserve the cell does not compact
 (`compaction: :none`, `tail: 0`, no listing) and releases at once. The stop of
 the instance is bounded by the cell's child shutdown, 30 000 ms, the same way.
-Idle and frozen releases do not compact. A drain therefore ends within
+Idle and frozen releases do not compact.
+
+*A deadline for one call.* `Alambique.move/4` and `Alambique.hibernate/3`
+take `release_deadline_ms:` (a non-negative integer, `0` for no compaction). It
+travels in the request as `release_ms` and replaces the instance's
+`release_deadline_ms` for that release only; the lease and the call's time less
+`release_reserve_ms` still cap it. A rebalance that moves cells with a 15 s
+`:timeout` can so give each compaction up to 13 s without raising the value
+that the hibernation by pressure, the drain and the stop keep using. A drain therefore ends within
 `drain.deadline_ms` (default 60 000): each cell in flight gets what is left
 of it as its call time, so the compaction is cut by `release_deadline_ms` and
 by the drain's remaining time, and a cell that starts later than the

@@ -209,6 +209,73 @@ defmodule Alambique.ReleaseCompactionTest do
     assert tail == tail_length(ctx, cell)
   end
 
+  describe "a release deadline for one call" do
+    # The instance gives a release 100 ms; a call may ask for more or for none.
+    setup ctx do
+      {inst, cell} =
+        slow_release(ctx, 25, 150, release_deadline_ms: 100, release_min_tail: 30)
+
+      {:ok, inst: inst, cell: cell}
+    end
+
+    test "replaces the deadline of the instance for that call", ctx do
+      assert :ok = Alambique.hibernate(ctx.inst, ctx.cell, release_deadline_ms: 5_000)
+
+      assert {%{tail: tail, compact_duration: spent}, %{compaction: :done}} =
+               await_event([:alambique, :cell, :hibernate], ctx.cell)
+
+      assert tail == tail_length(ctx, ctx.cell)
+      assert tail < 30
+      assert System.convert_time_unit(spent, :native, :millisecond) > 100
+    end
+
+    test "leaves the deadline of the instance to the other releases", ctx do
+      before = tail_length(ctx, ctx.cell)
+
+      assert {:ok, %{hibernated: 1, errors: []}} = Alambique.drain(ctx.inst)
+
+      assert {%{tail: tail, compact_duration: spent}, %{compaction: :deadline}} =
+               await_event([:alambique, :cell, :hibernate], ctx.cell)
+
+      assert tail > 30
+      assert tail <= before
+      assert System.convert_time_unit(spent, :native, :millisecond) < 1_000
+    end
+
+    test "0 turns the compaction off for that call", ctx do
+      assert :ok = Alambique.hibernate(ctx.inst, ctx.cell, release_deadline_ms: 0)
+
+      assert {_, %{compaction: :none}} = await_event([:alambique, :cell, :hibernate], ctx.cell)
+    end
+
+    test "is bounded by the time the call has left", ctx do
+      assert :ok =
+               Alambique.hibernate(ctx.inst, ctx.cell,
+                 release_deadline_ms: 60_000,
+                 timeout: 2_500
+               )
+
+      assert {%{compact_duration: spent}, %{compaction: compaction}} =
+               await_event([:alambique, :cell, :hibernate], ctx.cell)
+
+      assert compaction in [:done, :deadline]
+      # The reserve of 2 000 ms leaves 500 ms of the 2 500.
+      assert System.convert_time_unit(spent, :native, :millisecond) < 1_500
+    end
+
+    test "must be a non-negative integer", ctx do
+      for bad <- [-1, 1.5, "3000", :infinity] do
+        assert_raise ArgumentError, ~r/release_deadline_ms/, fn ->
+          Alambique.hibernate(ctx.inst, ctx.cell, release_deadline_ms: bad)
+        end
+
+        assert_raise ArgumentError, ~r/release_deadline_ms/, fn ->
+          Alambique.move(ctx.inst, ctx.cell, node(), release_deadline_ms: bad)
+        end
+      end
+    end
+  end
+
   describe "when the caller gives less time than the compaction may take" do
     setup ctx do
       slow = SlowStore.wrap(ctx.store, 40)

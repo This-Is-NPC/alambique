@@ -395,8 +395,8 @@ defmodule Alambique.Cell do
     end)
   end
 
-  defp hibernation?({:hibernate, _}), do: true
-  defp hibernation?({:hibernate_if_idle, _}), do: true
+  defp hibernation?({:hibernate, _, _}), do: true
+  defp hibernation?({:hibernate_if_idle, _, _}), do: true
   defp hibernation?(_), do: false
 
   # Records the memory of the connection after a call or a message, which is
@@ -491,9 +491,10 @@ defmodule Alambique.Cell do
     end
   end
 
-  # `at` is the time the caller stops waiting (`:infinity` for none).
-  defp serve_call({:hibernate, at}, _from, state) do
-    case hibernate(state, :request, at) do
+  # `at` is the time the caller stops waiting (`:infinity` for none);
+  # `release_ms` replaces `release_deadline_ms` for this release (`nil`: keep it).
+  defp serve_call({:hibernate, at, release_ms}, _from, state) do
+    case hibernate(state, :request, at, release_ms) do
       {:ok, state, released} -> {:stop, :normal, released, %{state | mode: :stopped}}
       {:stop, reason, state} -> stop_serving(state, reason, {:error, reason})
     end
@@ -503,9 +504,9 @@ defmodule Alambique.Cell do
   # `only_if_idle: true`). The request itself is not counted, so a count above
   # zero is another call: one waiting in the mailbox or parked on a write. The
   # wake is over: a call that arrived during it is counted.
-  defp serve_call({:hibernate_if_idle, at}, from, state) do
+  defp serve_call({:hibernate_if_idle, at, release_ms}, from, state) do
     case pending_calls(state.load) do
-      0 -> serve_call({:hibernate, at}, from, state)
+      0 -> serve_call({:hibernate, at, release_ms}, from, state)
       _ -> {:reply, {:error, :busy}, state}
     end
   end
@@ -1118,12 +1119,12 @@ defmodule Alambique.Cell do
   # Hibernation (design §7): upload what is pending, checkpoint, release. The
   # third element is `:ok`, or the error of a release that failed: the cell
   # is asleep and its lease expires as after a crash.
-  defp hibernate(state, why, deadline) do
+  defp hibernate(state, why, deadline, release_ms \\ nil) do
     started = System.monotonic_time()
 
     with {:ok, state} <- drain(state) do
       state = state |> Publisher.flush() |> finish_local()
-      {compacted, tail, spent} = compact_tail(state, why, deadline)
+      {compacted, tail, spent} = compact_tail(state, why, deadline, release_ms)
       released = release(state)
 
       Telemetry.span_stop([:cell, :hibernate], started, %{tail: tail, compact_duration: spent}, %{
@@ -1146,10 +1147,10 @@ defmodule Alambique.Cell do
   # shutdown time), and hands over with what it merged. Returns the outcome
   # (`:none`, `:done`, `:deadline`, `:deadline_error` or `:error`), the level-0
   # files still in the chain (0 when it did not look) and the time spent.
-  defp compact_tail(%State{config: %{compaction: c} = config} = state, why, deadline)
+  defp compact_tail(%State{config: %{compaction: c} = config} = state, why, deadline, release_ms)
        when why in [:request, :shutdown] and c != nil do
     budget =
-      [c.release_deadline_ms, State.lease_left_ms(state), call_left(deadline, c)]
+      [release_ms || c.release_deadline_ms, State.lease_left_ms(state), call_left(deadline, c)]
       |> Enum.min()
       |> max(0)
 
@@ -1165,7 +1166,7 @@ defmodule Alambique.Cell do
     end
   end
 
-  defp compact_tail(_state, _why, _deadline), do: {:none, 0, 0}
+  defp compact_tail(_state, _why, _deadline, _release_ms), do: {:none, 0, 0}
 
   defp call_left(:infinity, _c), do: :infinity
 

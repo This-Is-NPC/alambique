@@ -201,6 +201,10 @@ the only errors were lease errors and `:draining`.
   worst wake still took 0.37 s, and none took over 0.41 s in 5 runs. Raise
   `compaction: [release_deadline_ms:]` for a shorter tail, at the cost of a
   longer drain (0 turns the compaction off), and keep `drain: [deadline_ms:]`
+  above it. For cells that you move one by one, give the call its own budget
+  with `Alambique.move(inst, cell, node, timeout: 15_000, release_deadline_ms:
+  10_000)`: it replaces `compaction: [release_deadline_ms:]` for that move only,
+  and the time left of `:timeout` less `release_reserve_ms` still caps it.
 - **A drain returns `hibernated: 0` and the cells are awake on another
   node.** `drain/2` acts on the cells with a process on this node only.
 

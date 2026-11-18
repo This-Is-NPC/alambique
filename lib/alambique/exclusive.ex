@@ -47,7 +47,7 @@ defmodule Alambique.Exclusive do
   # cell again at once: take the lease right away, and wait only when the
   # owner did not answer.
   defp wait_for_owner(config, cell, ctx, owner, poll_ms, deadline) do
-    if Router.call(config.name, cell, :hibernate, 2_000) != :ok, do: Process.sleep(poll_ms)
+    if Router.call(config.name, cell, {:hibernate, nil}, 2_000) != :ok, do: Process.sleep(poll_ms)
     take(config, cell, ctx, owner, poll_ms, deadline)
   end
 
