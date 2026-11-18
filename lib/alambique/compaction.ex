@@ -261,8 +261,7 @@ defmodule Alambique.Compaction do
     meta = %{cell: state.cell, level: group.level, min: group.min, max: group.max}
 
     result =
-      with {:ok, pred_epoch} <- predecessor_epoch(state, group),
-           {:ok, inputs, held} <- fetch_all(state, group.inputs),
+      with {:ok, pred_epoch, inputs, held} <- load(state, group),
            :ok <- check_epochs(inputs, pred_epoch),
            {:ok, merged} <-
              merge(
@@ -364,6 +363,38 @@ defmodule Alambique.Compaction do
     Trash.mark(state.ctx, state.cell, keys, opts, state.deadline)
   end
 
+  # The predecessor's epoch and the inputs do not depend on each other, so the
+  # HEAD and the GETs run together: a cold merge waits for one wave of requests
+  # and then for the write. The predecessor is judged first, as when it ran
+  # before the reads.
+  defp load(state, group) do
+    pred = async(fn -> predecessor_epoch(state, group) end)
+    fetched = fetch_all(state, group.inputs)
+
+    with {:ok, pred_epoch} <- await(pred),
+         {:ok, inputs, held} <- fetched,
+         do: {:ok, pred_epoch, inputs, held}
+  end
+
+  # A linked process whose exception or exit is raised again in the caller, as
+  # if the function ran there.
+  defp async(fun) do
+    Task.async(fn ->
+      try do
+        {:ok, fun.()}
+      catch
+        kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+      end
+    end)
+  end
+
+  defp await(task) do
+    case Task.await(task, :infinity) do
+      {:ok, result} -> result
+      {:raised, kind, reason, stack} -> :erlang.raise(kind, reason, stack)
+    end
+  end
+
   # The epoch of what comes before the group: the snapshot or the file that
   # ends right before it. A group without a predecessor cannot be placed on
   # the chain.
@@ -405,7 +436,8 @@ defmodule Alambique.Compaction do
 
   defp held(_state, _file), do: nil
 
-  # `held` of the inputs come from the hold table, the others from the store.
+  # `held` of the inputs come from the hold table, the others from the store,
+  # at most `fanout` at a time: all the inputs of a merge in one wave.
   defp fetch_all(state, files) do
     looked = Enum.map(files, &{&1, held(state, &1)})
 
@@ -430,7 +462,7 @@ defmodule Alambique.Compaction do
           {:error, _} = error -> error
         end
       end,
-      max_concurrency: 4,
+      max_concurrency: state.opts[:fanout],
       ordered: true,
       timeout: :infinity
     )
