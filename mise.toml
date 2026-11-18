@@ -28,7 +28,7 @@ description = "Remove the disposable SeaweedFS container"
 run = "scripts/seaweedfs-down"
 
 [tasks."check:quick"]
-description = "Run the fast checks of the pre-push hook: incremental warnings-as-errors compile and the format checks (scripts/quick-check --force recompiles everything)"
+description = "Run the fast checks of the pre-push hook: incremental warnings-as-errors compile and the format checks and the README marker check (scripts/quick-check --force recompiles everything)"
 run = "scripts/quick-check"
 
 [tasks.check]
@@ -43,6 +43,10 @@ run = "scripts/check"
 [tasks."check:links"]
 description = "Check the relative links and anchors of README.md, CHANGELOG.md, AGENTS.md and docs/*.md"
 run = "scripts/link-check"
+
+[tasks."check:readme"]
+description = "Check README.md for release-please damage: start/end blocks and address-like 0.x.y.z replaces"
+run = "scripts/readme-check"
 
 [tasks.local-check]
 description = "Run the full gate on HEAD by hand and post a local-check commit status (not required by master; --post-only --state=... posts without running; ALAMBIQUE_LOCAL_CHECK_DRY_RUN=1 posts nothing)"

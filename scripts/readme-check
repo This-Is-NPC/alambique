@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""Check README.md for the damage a release-please version replace can do.
+
+Usage: readme-check [file]. Prints each finding as file:line: problem and
+exits 1 if any. It fails on:
+- an x-release-please-start block (the standard here is the one-line
+  x-release-please-version marker; a start and end on one line is never closed
+  and the updater rewrites the rest of the file);
+- an address-like 0.x.y.z other than 0.0.0.0 (127.0.0.1 became 0.4.0.1).
+"""
+
+import os
+import re
+import sys
+
+ADDRESS = re.compile(r"\b0\.[0-9]+\.[0-9]+\.[0-9]+\b")
+
+
+def check(path):
+    issues = []
+    with open(path, "r", encoding="utf-8") as f:
+        for number, line in enumerate(f, 1):
+            if "x-release-please-start" in line and "x-release-please-end" in line:
+                issues.append(f"{path}:{number}: release-please start and end markers on one line")
+            elif "x-release-please-start" in line:
+                issues.append(f"{path}:{number}: release-please start block; use the one-line x-release-please-version marker")
+            for match in ADDRESS.finditer(line):
+                if match.group(0) != "0.0.0.0":
+                    issues.append(f"{path}:{number}: address-like version replace: {match.group(0)}")
+    return issues
+
+
+if __name__ == "__main__":
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+    target = sys.argv[1] if len(sys.argv) > 1 else os.path.join(root, "README.md")
+    problems = check(target)
+    for problem in problems:
+        print(problem)
+    sys.exit(1 if problems else 0)
