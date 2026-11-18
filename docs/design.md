@@ -2147,7 +2147,8 @@ The bound is: while the cells over the cap do not outnumber the slots, the
 TXIDs a cell has committed since its oldest uncompacted one are at most
 `max(cap, d) + d`, where `d` is what the cell commits while one pass of it
 runs (`rate * pass_time`; a pass costs the listing, one request for every
-1 000 files of the cell, and for each merge about four round trips). A cell
+1 000 files of the cell, and for each merge two round trips: the predecessor's
+`HEAD` with the `GET`s of the inputs, then the `PUT`). A cell
 has one pass at a time, so the row that grew during a pass goes into the next
 pass, and a cell whose `d` is more than the cap is compacted back to back. The
 property `test/chain_cap_properties_test.exs` checks the bound in a model of
@@ -2208,8 +2209,8 @@ Calls that reach the cell meanwhile wait in its mailbox, as they do while it
 uploads, and are answered as for any hibernation. The row
 stays in the compactor, which finds nothing left to merge. The default of 32
 is four merges of level 1: a tail below it adds at most that many files to a
-wake, and merging more costs about four round trips per eight files (about
-0.1 s each at 25 ms per request). In `mise run bench:swap` (12 cells at 30
+wake, and merging more costs two round trips per eight files (about
+0.05 s each at 25 ms per request, with no held bytes). In `mise run bench:swap` (12 cells at 30
 commits per second, 30 s, one CPU, 25 ms per request, load average 7 to 13 on
 a shared machine, 2026-11-14) the four cells with tails of about 200 files
 used the whole deadline and were cut, and the eight others released in
@@ -2408,8 +2409,10 @@ therefore deleted only after the anchor snapshot has existed for `grace_ms`
 the anchor existed has finished by then, and one that listed after it starts
 from the anchor or a newer snapshot. An anchor without a `created` stamp is not
 trusted and nothing is deleted for it. Requests per compaction without held bytes: one `LIST` per pass, one `HEAD`
-for the predecessor and `fanout` `GET`s per merge, a `PUT`, and per snapshot
-one `HEAD` for its age plus a `GET` per file in the chain.
+for the predecessor and `fanout` `GET`s per merge, all at once (the epoch of
+the predecessor and the inputs do not depend on each other), then a `PUT`, and
+per snapshot one `HEAD` for its age plus a `GET` per file in the chain, at
+most `fanout` at a time.
 
 **Held bytes.** The cell that owns a cell's chain has every segment it
 uploaded in memory at the moment it acknowledges it, and the compactor of the
