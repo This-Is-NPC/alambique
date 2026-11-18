@@ -19,7 +19,7 @@ defmodule Alambique.Admission.Wakes do
 
   use GenServer
 
-  alias Alambique.Telemetry
+  alias Alambique.{Admission, Telemetry}
 
   def start_link(config), do: GenServer.start_link(__MODULE__, config, name: config.wakes)
 
@@ -36,10 +36,12 @@ defmodule Alambique.Admission.Wakes do
         {:reply, :ok, hold(state, pid, Process.monitor(pid))}
 
       wait_ms <= 0 ->
+        Admission.overloaded(:no_wait)
         {:reply, {:error, :overloaded}, state}
 
       map_size(state.waiting) >= awake.max_wake_queue ->
         emit(System.monotonic_time(), :full)
+        Admission.overloaded(:queue_full)
         {:reply, {:error, :overloaded}, state}
 
       true ->
@@ -104,6 +106,7 @@ defmodule Alambique.Admission.Wakes do
         Process.demonitor(mon, [:flush])
         GenServer.reply(entry.from, {:error, :overloaded})
         emit(entry.at, :expired)
+        Admission.overloaded(:wait_expired)
         {:noreply, %{state | waiting: waiting}}
     end
   end

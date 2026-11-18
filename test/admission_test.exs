@@ -422,4 +422,96 @@ defmodule Alambique.AdmissionTest do
       end
     end
   end
+
+  describe "the reason of a refusal" do
+    @event [:alambique, :admission, :overloaded]
+
+    setup env do
+      capture([@event])
+      {:ok, gate} = GatedStore.start_link()
+      on_exit(fn -> if Process.alive?(gate), do: GenServer.stop(gate) end)
+      {:ok, gate: gate, gated: %{env | store: GatedStore.wrap(gate, env.store)}}
+    end
+
+    # A wake that waits for the store holds the only slot.
+    defp hold_the_slot(env, awake) do
+      GatedStore.hold(env.gate, ~r{/0000/})
+      inst = start_instance(env.gated, migrations: @schema, awake: [max_wakes: 1] ++ awake)
+      waking = Task.async(fn -> Alambique.touch(inst, unique_cell()) end)
+      eventually(fn -> length(GatedStore.held(env.gate)) == 1 end)
+      {inst, waking}
+    end
+
+    defp refused(reason), do: assert_receive({:telemetry, @event, %{}, %{reason: ^reason}})
+
+    defp release_the_slot(env, waking) do
+      GatedStore.open(env.gate)
+      assert {:ok, _} = Task.await(waking, 10_000)
+    end
+
+    test ":no_wait when no slot is free and the call has no time to wait", env do
+      {inst, waking} = hold_the_slot(env, [])
+
+      assert {:error, :overloaded} = Alambique.touch(inst, unique_cell(), timeout: 0)
+
+      refused(:no_wait)
+      release_the_slot(env, waking)
+    end
+
+    test ":queue_full when the wake queue holds max_wake_queue waiters", env do
+      {inst, waking} = hold_the_slot(env, max_wake_queue: 1, wake_queue_ms: 5_000)
+      config = Alambique.Config.fetch!(inst)
+
+      queued = Task.async(fn -> Alambique.touch(inst, unique_cell()) end)
+      eventually(fn -> map_size(:sys.get_state(config.wakes).waiting) == 1 end)
+
+      assert {:error, :overloaded} = Alambique.touch(inst, unique_cell())
+
+      refused(:queue_full)
+      release_the_slot(env, waking)
+      assert {:ok, _} = Task.await(queued, 10_000)
+    end
+
+    test ":wait_expired when the wait in the queue passes wake_queue_ms", env do
+      {inst, waking} = hold_the_slot(env, wake_queue_ms: 50)
+
+      assert {:error, :overloaded} = Alambique.touch(inst, unique_cell())
+
+      refused(:wait_expired)
+      release_the_slot(env, waking)
+    end
+
+    test ":crowded when every awake cell has callers waiting", env do
+      inst = start_instance(env.gated, migrations: @schema, awake: [max_cells: 1])
+      busy = unique_cell()
+      {:ok, _} = Alambique.execute(inst, busy, @insert, [0])
+
+      GatedStore.hold(env.gate, ~r{/0000/})
+      writer = Task.async(fn -> Alambique.execute(inst, busy, @insert, [1]) end)
+      eventually(fn -> Alambique.load(inst, busy) == {:ok, %{pending: 1, waking: false}} end)
+
+      assert {:error, :overloaded} = Alambique.touch(inst, unique_cell())
+
+      refused(:crowded)
+      GatedStore.open(env.gate)
+      assert {:ok, _} = Task.await(writer, 10_000)
+    end
+
+    test ":max_children when the cell supervisor is full and the budget is not", env do
+      inst = start_instance(env.gated, migrations: @schema, awake: [max_cells: 1])
+      config = Alambique.Config.fetch!(inst)
+
+      # A child that the admission does not count takes the only place.
+      {:ok, _} =
+        DynamicSupervisor.start_child(config.supervisor, %{
+          id: :filler,
+          start: {Agent, :start_link, [fn -> :ok end]},
+          restart: :temporary
+        })
+
+      assert {:error, :overloaded} = Alambique.touch(inst, unique_cell())
+
+      refused(:max_children)
+    end
+  end
 end

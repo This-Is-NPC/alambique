@@ -114,7 +114,7 @@ recovers before then costs none, because lease renewals bypass the breaker
 
 | Signal | Limit | Source |
 | --- | --- | --- |
-| `{:error, :overloaded}` returned to callers, and `[:alambique, :admission, :wake_queue]` with `result: :expired` or `:full` | Page on any sustained rate. | `awake: [max_wakes: 256, wake_queue_ms: 500]`; `max_wake_queue` is four times `max_wakes` (how-to-size-a-node.md) |
+| `{:error, :overloaded}` returned to callers, and `[:alambique, :admission, :overloaded]` (its `reason` says which limit) or `[:alambique, :admission, :wake_queue]` with `result: :expired` or `:full` | Page on any sustained rate. | `awake: [max_wakes: 256, wake_queue_ms: 500]`; `max_wake_queue` is four times `max_wakes` (how-to-size-a-node.md) |
 | `:granted` of the same event, `duration` | Watch; a duration near 500 ms says bursts wait for slots. | `wake_queue_ms: 500` |
 | `[:alambique, :admission, :evict]` | Watch the rate. A rate that never stops means `awake: [max_cells:]` or `max_bytes` is below the working set. | how-to-size-a-node.md, "Check it", step 4 |
 | `{:error, :busy}` returned to callers | Count it at the call site: no event is emitted. It means `awake: [max_pending: 10_000]` calls wait on one cell, or the reads reached the node's limit. | config.ex; `sql: [max_concurrent_statements:]`, the dirty IO schedulers minus two (how-to-size-a-node.md) |

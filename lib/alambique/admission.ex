@@ -39,6 +39,15 @@ defmodule Alambique.Admission do
     do:
       GenServer.call(config.wakes, {:begin, min(wait_ms, config.awake.wake_queue_ms)}, :infinity)
 
+  @doc """
+  Reports a wake refused with `{:error, :overloaded}` and why, in
+  `[:alambique, :admission, :overloaded]`: `:no_wait` (no free slot and no
+  time to wait for one), `:queue_full`, `:wait_expired`, `:max_children` and
+  `:crowded`.
+  """
+  @spec overloaded(:no_wait | :queue_full | :wait_expired | :max_children | :crowded) :: :ok
+  def overloaded(reason), do: Telemetry.emit([:admission, :overloaded], %{}, %{reason: reason})
+
   @doc "Gives back the slot the calling process holds, when no cell took it over."
   @spec release(Config.t()) :: :ok
   def release(config), do: end_wake(config, self())
