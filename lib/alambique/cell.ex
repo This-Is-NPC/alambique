@@ -1144,8 +1144,8 @@ defmodule Alambique.Cell do
   # the end of the lease, and `release_reserve_ms` before the time the caller
   # stops waiting (`deadline`, monotonic; the stop of the instance has its
   # shutdown time), and hands over with what it merged. Returns the outcome
-  # (`:none`, `:done`, `:deadline` or `:error`), the tail it found and the
-  # time spent.
+  # (`:none`, `:done`, `:deadline`, `:deadline_error` or `:error`), the level-0
+  # files still in the chain (0 when it did not look) and the time spent.
   defp compact_tail(%State{config: %{compaction: c} = config} = state, why, deadline)
        when why in [:request, :shutdown] and c != nil do
     budget =
@@ -1172,8 +1172,11 @@ defmodule Alambique.Cell do
   defp call_left(deadline, c),
     do: deadline - System.monotonic_time(:millisecond) - c.release_reserve_ms
 
-  defp release_compaction({:ok, %{tail: tail}}, _deadline, _cell, min) when tail < min,
-    do: {:none, tail}
+  # A pass that found a short tail did nothing; one that merged and left a
+  # short tail is `:done`.
+  defp release_compaction({:ok, %{merges: 0, tail: tail}}, _deadline, _cell, min)
+       when tail < min,
+       do: {:none, tail}
 
   defp release_compaction({:ok, %{more: false, tail: tail}}, _deadline, _cell, _min),
     do: {:done, tail}
@@ -1183,7 +1186,8 @@ defmodule Alambique.Cell do
 
   defp release_compaction({:error, reason}, deadline, cell, _min) do
     if System.monotonic_time(:millisecond) >= deadline do
-      {:deadline, 0}
+      # The budget ended inside a request before the pass knew the chain.
+      {:deadline_error, 0}
     else
       Logger.warning(
         "Alambique could not compact #{cell} before releasing it: #{inspect(reason)}"
