@@ -635,10 +635,12 @@ repeat waits again. This is an estimate: no full ramp has been run.
 
 ## Results on the reference VM (order 022)
 
-These are the first full set of numbers. Runs were cut by host shutdowns, so
-some cases are unconfirmed: a level is **confirmed** when a repeat of it was
-also good, **not repeated** when it was good once, and **not measured** when no
-step reached it.
+Two sets of numbers, both from the same VM. The round `o022vm` (2026-11-17) is
+the official one. The earlier runs (2026-11-12) were cut by host shutdowns and
+include the `query` measure, which `o022vm` did not run.
+
+A level is **confirmed** when a repeat of it was also good, **not repeated**
+when it was good once, and **not measured** when no step reached it.
 
 ### Setup
 
@@ -647,21 +649,88 @@ step reached it.
 - The driver runs on the same VM, outside the measured container, and **shares
   the 4 vCPUs** with the service and the store. The numbers include that
   contention.
-- The store is seaweedfs with +25 ms per request (`store.latency_ms`),
-  on a tmpfs, or on the VM's disk in the rows marked "store on disk". Those
-  rows measure the VM's virtual disk, not the library.
-- Settings changed, and why: `judging.host_memory.min_available_gib = 1.0` (the
-  default, 6, is above the VM's 5.9 GB; the first run used 0.5),
-  `store.tmpfs_size = "1536m"` and `data_tmpfs = "768m"` (the default
-  tmpfs of 4096 and 1024 MB do not fit). No other limit was changed.
+- The store is seaweedfs with +25 ms per request (`store.latency_ms`, the
+  default), on a tmpfs, or on the VM's disk in the rows marked "store on disk".
+  Those rows measure the VM's virtual disk, not the library.
+- Settings that differ from the defaults of `load/rounds/example.toml`, in
+  `o022vm.toml`: `judging.host_memory.min_available_gib = 1.0` (the default, 6,
+  is above the VM's 5.9 GB), `scenarios.A.data_tmpfs` and
+  `scenarios.B.data_tmpfs` = `"768m"`, `store.tmpfs_size = "1536m"` (the
+  defaults, 1 GB and 4 GB, do not fit), and `store.backing = "disk"` for
+  `commits` `large` (its `tmpfs_size = "12288m"` is not used on disk). No other key was changed; the first earlier run used
+  `min_available_gib = 0.5`.
 - Scenario A is 1 CPU and 512 MB, scenario B is 2 CPU and 2 GB. The service
   container's memory limit is the scenario's plus `data_tmpfs`, with swap equal to
   memory, and the memory criterion is `memory.current` minus the tmpfs.
-- The swap of the service, the driver and the store was 0 in every step. The
-  host's swap was 270 to 291 MB in the first run (recorded only; the limit is
-  512) and 0 in the others.
+- The swap of the service, the driver and the store was 0 in every step of the
+  earlier runs. The host's swap was 270 to 291 MB in the first one (recorded
+  only; the limit is 512) and 0 in the others.
 
-### Capacity
+### Round o022vm (2026-11-17)
+
+How it ran:
+
+- `mise run load -- --config load/rounds/o022vm.toml` on the VM, from commit
+  0b57032, with no `ALAMBIQUE_LOAD_*` override. It ran from 22:17 to 00:18.
+- 9 cases: `commits` small in A, `commits` large in A and B, `cells`
+  (`default` and `cache256`) in A and B, `wakes` in A and B. The two `large`
+  cases had the store on the VM's disk; the others had it on a tmpfs.
+- Every case waited for a quiet host (88 to 208 s in all per case).
+
+Capacity. "CPU" is milliseconds of CPU per operation, the same as cores per
+1000 operations per second, taken at the last good level. "Memory" is the
+process memory without the tmpfs, as a fit over the good steps when the
+summary gives one.
+
+| measure | A (1 CPU, 512 MB) | B (2 CPU, 2 GB) |
+| --- | --- | --- |
+| small commits/s, store on tmpfs | 300 good, its repeat bad; 200 was clean (p99 45 ms). CPU 3.9 ms at 50 to 200 (3.2 ms at 300). No memory fit (R² 0.79) | not run |
+| 75 KB commits/s, store on disk | 5 good (p99 172 ms), its repeat bad (p99 609 ms). CPU 22.8 ms, 237 KB put per commit. No memory fit | 7 good (p99 82 ms), its repeat bad (p99 741 ms). CPU 26.8 ms, 263 KB put per commit. No memory fit |
+| awake cells, `default` | 1000, not repeated; 2000 bad on memory. CPU 31.3 ms. No memory fit (2 good steps) | 4000, not repeated; 8000 bad on memory. CPU 45.3 ms. 127 MB + 0.235 MB per awake cell (R² 1.0) |
+| awake cells, `cache256` | 1000, not repeated; 2000 bad on memory. CPU 31.1 ms. No memory fit | 4000, not repeated; 8000 bad on memory. CPU 45.5 ms. 129 MB + 0.234 MB per awake cell (R² 1.0) |
+| cold wakes/s (restore from the store) | 20, not repeated (p95 177 ms, p99 184 ms); 40 invalid (`data_full`). CPU 17.2 ms. 129 MB + 3.045 MB per wake/s (R² 1.0) | 20, not repeated (p95 173 ms, p99 175 ms); 40 invalid (`data_full`). CPU 23.1 ms. 144 MB + 2.498 MB per wake/s (R² 0.96) |
+
+Details that the table leaves out:
+
+- Commits: the first step that broke the p99 limit was 400/s for small in A
+  (p99 481 ms), 10/s for large in A (p99 299 ms) and 10/s for large in B
+  (p99 288 ms). A large commit costs about 5 store trips.
+- Cells: the 2000-cell step in A delivered 18.0% (`default`) and 26.8%
+  (`cache256`) of its operations. The 8000-cell step in B delivered 97.4% and
+  98.6%. The 256 KiB cache did not change the slope or the level that
+  carried.
+- Wakes: a wake costs 12 to 15 store trips and reads 144 KB.
+
+### What these numbers do not say
+
+- No last good level of a commits case is confirmed. Small commits in A and
+  both `large` cases passed a level once and failed its repeat. Read
+  them as the first good level, not as a confirmed ceiling.
+- Cells and wakes were not repeated: the next step ended the case.
+- The steps of small commits in A at 400/s and above, and of `cells` in A, were
+  marked **suspect**: the service's CPU was throttled for more than 10% of
+  them. For `cells` in A that is all three steps. Read those rows as limited
+  by the CPU quota of the scenario, not as a clean measure of the library.
+- The wakes ceiling is the harness, not the service: the data tmpfs (768 MB)
+  would fill at 40/s, so the step was `invalid (data_full)`, not bad. The
+  service may carry more.
+- On disk the p99 rises while the rest stays flat. In A, large commits show
+  p50 34 to 35 ms, p95 41 to 49 ms and CPU 21 to 23 ms per commit in every
+  step, and a p99 of 172, 299, 2370, 545 and 609 ms. In B, p50 is 34 ms, p95 37
+  to 38 ms and the p99 is 49, 288, 82, 289 and 741 ms. This is observed. The
+  inference is that the delay comes from the virtual disk, not from the
+  library, because the CPU per commit and the median do not move. The run did
+  not isolate the disk, so it is not proved.
+- `query` was not run in this round: its numbers are the earlier ones below.
+
+### Earlier runs (2026-11-12)
+
+The first full set of numbers, on the same VM. Runs were cut by host
+shutdowns, so some cases are unconfirmed. The settings are those of "Setup",
+with the first run at `min_available_gib = 0.5`. Compare `o022vm` first; these
+rows remain for `query` and for the small commits in B.
+
+#### Capacity
 
 Cost per unit: "CPU" is milliseconds of CPU per operation, the same as cores
 per 1000 operations per second; "memory" is the process memory without the
@@ -681,7 +750,7 @@ Stop criteria are the defaults: p99 above 250 ms, memory above its fraction
 of the limit, errors or `:busy` above 1%, and the harness invalidations
 (`data_full`, `store_full`, `host_busy`, `no_cooldown`).
 
-### What these numbers do not say
+#### What these numbers do not say
 
 - Small commits in A have no clean confirmation: the repeat of 400/s ran with
   the store at 86% and failed on memory. Small commits in B at 800/s were not
