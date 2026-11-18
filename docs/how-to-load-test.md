@@ -631,7 +631,7 @@ preparation (creating the cells of `wakes` and `query`), and 6 to 8 hours for
 both. Ramps that stop early are shorter. Every step also waits at least the
 settle window (30 s, 5 to 6 minutes per ramp). A busy host makes the run longer:
 each wait lasts until the host is quiet, up to 30 minutes per step, and each
-repeat waits again. This is an estimate: no full ramp has been run.
+repeat waits again. This is an estimate. The round `o022vm` (9 cases, most of them stopped early) took 2 hours on the reference VM; see "Results on the reference VM".
 
 ## Results on the reference VM (order 022)
 
