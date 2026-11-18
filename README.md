@@ -142,6 +142,11 @@ first release (0.1.0):
   character. A deployment that used one must copy its objects to a valid
   prefix with the store's own tools and point the instance at it
   ([how-to](docs/how-to-manage-the-bucket.md#7-choose-the-prefix)).
+- 0.12.0: `query` no longer fails a cell with a read error when the cache
+  trim removes that cell's empty directory while the query creates it
+  ([design §14](docs/design.md#14-cross-cell-queries)). The load test now runs
+  from one round file (`mise run load -- --config <file>`). There is no
+  breaking change and no new library option.
 
 The full list is in [CHANGELOG.md](CHANGELOG.md).
 
