@@ -31,7 +31,7 @@ mise run bench:breaker   # commits above a 1-CPU node's capacity: throughput, br
 mise run bench:lease     # cost of Alambique.lease/3, in memory and with store latency
 mise run bench:stall     # per-second latency, run queues, NIF calls and store requests under steady load
 mise run load:image      # build the image of the load test service
-mise run load -- A commits  # load-test one node in a limited container (docs/how-to-load-test.md)
+mise run load -- --config load/rounds/example.toml --dry-run  # plan a load test of one node in a limited container (docs/how-to-load-test.md)
 mise run test:seaweedfs  # store contract tests against a disposable SeaweedFS
 mise run test:litestream # Litestream 0.5.18 restores replicas Alambique wrote (needs SeaweedFS)
 mise run seaweedfs:down  # remove the SeaweedFS container
