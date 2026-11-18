@@ -90,7 +90,8 @@ defmodule Alambique.ReleaseCompactionTest do
     assert {%{tail: tail, compact_duration: spent}, %{compaction: :done, reason: :request}} =
              await_event([:alambique, :cell, :hibernate], cell)
 
-    assert tail >= 100
+    assert tail == tail_length(ctx, cell)
+    assert tail < 16
     assert spent > 0
   end
 
@@ -143,6 +144,69 @@ defmodule Alambique.ReleaseCompactionTest do
                "SELECT count(*) FROM t",
                []
              )
+  end
+
+  # The level-0 files of the chain a restore walks: the tail the release reports.
+  defp tail_length(ctx, cell) do
+    prefix = Keys.files_prefix("cells-test", cell)
+    {:ok, keys, nil} = AlambiqueTestkit.MemoryStore.list(ctx.store_config, prefix, nil, 100_000)
+    {segments, snapshots} = Keys.parse("cells-test", cell, keys)
+    from = snapshots |> List.last() |> then(&((&1 && &1.txid) || 0))
+    segments |> Plan.index() |> Plan.chain(from) |> Enum.count(&(&1.level == 0))
+  end
+
+  # A cell with `rows` level-0 files whose lease is free, and an instance over
+  # a store that takes `ms` per request to hibernate it.
+  defp slow_release(ctx, ms, rows, compaction) do
+    fast = writer(ctx, compaction: [release_deadline_ms: 0])
+    cell = unique_cell()
+    insert(fast, cell, 1..rows)
+    :ok = Alambique.hibernate(fast, cell)
+
+    inst = writer(%{ctx | store: SlowStore.wrap(ctx.store, ms)}, compaction: compaction)
+    assert {:ok, %{rows: [[^rows]]}} = Alambique.query(inst, cell, "SELECT count(*) FROM t", [])
+    capture([[:alambique, :cell, :hibernate], [:alambique, :compaction, :pass]])
+    {inst, cell}
+  end
+
+  test "the end of the budget reports the tail that is left", ctx do
+    {inst, cell} =
+      slow_release(ctx, 25, 150, release_deadline_ms: 400, release_min_tail: 30)
+
+    before = tail_length(ctx, cell)
+    assert before >= 150
+
+    assert :ok = Alambique.hibernate(inst, cell)
+
+    assert {%{tail: tail}, %{compaction: :deadline}} =
+             await_event([:alambique, :cell, :hibernate], cell)
+
+    assert tail_length(ctx, cell) < before, "nothing was merged"
+
+    assert tail == tail_length(ctx, cell),
+           "the event reports #{tail} for a tail of #{tail_length(ctx, cell)}"
+
+    assert {_, %{result: :ok, more: true}} = await_event([:alambique, :compaction, :pass], cell)
+  end
+
+  # A request slower than the retry backoff (50 ms) that is running at the end
+  # of the budget is killed there: the pass ends with what it published.
+  test "a request cut at the end of the budget keeps the merges done before", ctx do
+    {inst, cell} =
+      slow_release(ctx, 90, 200, release_deadline_ms: 1_000, release_min_tail: 30)
+
+    before = tail_length(ctx, cell)
+    assert before >= 200
+
+    # The release may fail on a store the cut tripped; the compaction is the subject.
+    _ = Alambique.hibernate(inst, cell)
+
+    assert {%{tail: tail}, %{compaction: :deadline}} =
+             await_event([:alambique, :cell, :hibernate], cell)
+
+    assert {_, %{result: :ok, more: true}} = await_event([:alambique, :compaction, :pass], cell)
+    assert tail_length(ctx, cell) < before, "nothing was merged"
+    assert tail == tail_length(ctx, cell)
   end
 
   describe "when the caller gives less time than the compaction may take" do

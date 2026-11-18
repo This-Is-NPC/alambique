@@ -124,14 +124,26 @@ defmodule Alambique.Compaction do
     result
   end
 
+  # Every step may end at the deadline inside a store request, which `Retry`
+  # kills there. The pass then ends as one that ran out of time (`more: true`)
+  # with what the steps before it published, instead of an error that drops it.
   defp work(state) do
-    with {:ok, state} <- merge_levels(state),
-         {:ok, state} <- delete_superseded(state),
-         {:ok, state} <- count_bytes(state),
-         {:ok, state} <- snapshot(state) do
-      {:ok, summary(state)}
+    [&merge_levels/1, &delete_superseded/1, &count_bytes/1, &snapshot/1]
+    |> Enum.reduce_while({:ok, state}, fn step, {:ok, state} ->
+      case step.(state) do
+        {:ok, state} -> {:cont, {:ok, state}}
+        {:error, _} = error -> {:halt, cut(state, error)}
+      end
+    end)
+    |> case do
+      {:ok, state} -> {:ok, state |> recount_tail() |> summary()}
+      {:error, _} = error -> error
     end
   end
+
+  # An error after the deadline is the end of the budget; before it, a failure.
+  defp cut(state, error),
+    do: if(expired?(state), do: {:ok, %{state | more: true}}, else: error)
 
   defp pass_measurements({:ok, s}), do: %{merges: s.merges, bytes: s.bytes}
   defp pass_measurements({:error, _}), do: %{merges: 0, bytes: 0}
@@ -203,6 +215,10 @@ defmodule Alambique.Compaction do
       else: 0
   end
 
+  # What a restore still reads that no merge covers, after the pass.
+  defp recount_tail(state),
+    do: %{state | tail: tail(state.index, state.snapshot || state.from, state.opts)}
+
   # Merging
 
   defp merge_levels(state) do
@@ -227,13 +243,15 @@ defmodule Alambique.Compaction do
   end
 
   # A request past the deadline still gets one attempt (`Retry`), so the pass
-  # stops starting merges once it passed, and `more: true` says so.
+  # stops starting merges once it passed, and `more: true` says so. A merge cut
+  # at the deadline is dropped: its output is written whole or not at all, and
+  # a file that exists is the same content for the next pass (see the moduledoc).
   defp expired?(state), do: System.monotonic_time(:millisecond) >= state.deadline
 
   defp merge_next(state, [group | rest]) do
     case merge_group(state, group) do
       {:ok, state} -> merge_groups(state, rest)
-      {:error, _} = error -> error
+      {:error, _} = error -> cut(state, error)
     end
   end
 

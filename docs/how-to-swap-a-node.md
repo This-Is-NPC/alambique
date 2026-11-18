@@ -96,7 +96,8 @@ For each cell A writes what is pending, compacts a long level-0 tail
 `compaction: [release_deadline_ms:]`, default 3 000 ms), releases the lease
 explicitly and hibernates. B then wakes the cell on a short chain; a cell
 whose compaction hit the deadline is handed over anyway, and its
-`[:alambique, :cell, :hibernate]` event says `compaction: :deadline`. First it leaves the members and refuses to wake any more cells.
+`[:alambique, :cell, :hibernate]` event says `compaction: :deadline`, and its
+`tail` is the level-0 files left. First it leaves the members and refuses to wake any more cells.
 Forty cells took 12 ms in the swap test. From the moment a lease is released,
 B serves its cell on the next request. A call that reaches A now gets
 `{:error, {:unavailable, owner, expires}}` for a cell B holds and
@@ -195,12 +196,11 @@ the only errors were lease errors and `:draining`.
   saturated CPU the compaction at the release can be cut by
   `release_deadline_ms`, and B reads the tail that was left (design section 9,
   "Limit: a saturated CPU"). The `[:alambique, :cell, :hibernate]` event of A
-  says `compaction: :deadline` and its `tail`. In the bench with the writer on
+  says `compaction: :deadline` and its `tail`, the files left. In the bench with the writer on
   one busy CPU, four of 12 cells were cut with tails of 208 to 250 files; the
   worst wake still took 0.37 s, and none took over 0.41 s in 5 runs. Raise
   `compaction: [release_deadline_ms:]` for a shorter tail, at the cost of a
   longer drain (0 turns the compaction off), and keep `drain: [deadline_ms:]`
-  above it.
 - **A drain returns `hibernated: 0` and the cells are awake on another
   node.** `drain/2` acts on the cells with a process on this node only.
 

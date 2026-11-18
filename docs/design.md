@@ -2176,12 +2176,19 @@ tail it did not reach with no row. Counting the files is exact.
 
 The pass has a deadline, `release_deadline_ms` (default 3 000, capped by what
 is left of the lease; `0` turns the compaction off, with no listing either).
-It starts no merge after the deadline, and a merge already in flight ends;
-the lease is then released with what was merged, and the event says
-`compaction: :deadline`. The files already written stay valid, because each
-merge is a conditional write of a file the chain can do without, so a cut
-loses nothing. Calls that reach the cell meanwhile wait in its mailbox, as
-they do while it uploads, and are answered as for any hibernation. The row
+It starts no merge after the deadline. A store request still running at the
+deadline is killed there (`Retry`), and the merge it belonged to is dropped:
+its output is one conditional write, so the store holds it whole or not at
+all, and a file that exists is the same content the next pass would write.
+The pass ends with `more: true` and the merges it had published, not with an
+error that would throw them away, and its `tail` is counted again over the
+files it leaves. The lease is then released, and the event says
+`compaction: :deadline` with that `tail`. A budget that ends inside the
+listing, before the pass knows the chain, gives `compaction: :deadline_error`
+and `tail: 0`; the files already written stay valid, because each merge is a
+conditional write of a file the chain can do without, so a cut loses nothing.
+Calls that reach the cell meanwhile wait in its mailbox, as they do while it
+uploads, and are answered as for any hibernation. The row
 stays in the compactor, which finds nothing left to merge. The default of 32
 is four merges of level 1: a tail below it adds at most that many files to a
 wake, and merging more costs about four round trips per eight files (about
