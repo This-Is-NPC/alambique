@@ -50,7 +50,8 @@ defmodule Alambique.LocationTest do
     property "any non-empty id and prefix with a module store is valid, and each field matters" do
       check all(
               id <- StreamData.string(:printable, min_length: 1),
-              prefix <- StreamData.string(:printable, min_length: 1),
+              # Prefix rules are tested in key_validation_test.exs.
+              prefix <- StreamData.string(:alphanumeric, min_length: 1),
               config <- StreamData.term()
             ) do
         good = %Location{id: id, store: {MemoryStore, config}, prefix: prefix}
