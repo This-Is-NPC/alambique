@@ -57,6 +57,19 @@ defmodule Alambique.ClusterFuns do
     end
   end
 
+  @doc """
+  A crash-point action for `:hydrate_before_fetch` that holds a background
+  read until its hydrator ends, so only the pages a statement misses are
+  filled.
+  """
+  def park(_point, %{hydrator: hydrator}) do
+    ref = Process.monitor(hydrator)
+
+    receive do
+      {:DOWN, ^ref, :process, _, _} -> :ok
+    end
+  end
+
   @doc "A transaction that stops the whole VM while it runs in the cell, as a crashing NIF would."
   def poison, do: fn _tx -> System.halt(137) end
 
