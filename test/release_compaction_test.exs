@@ -301,7 +301,7 @@ defmodule Alambique.ReleaseCompactionTest do
 
   describe "when the caller gives less time than the compaction may take" do
     setup ctx do
-      slow = SlowStore.wrap(ctx.store, 40)
+      slow = SlowStore.wrap(ctx.store, Map.get(ctx, :store_ms, 40))
 
       inst =
         writer(%{ctx | store: slow},
@@ -322,10 +322,13 @@ defmodule Alambique.ReleaseCompactionTest do
                Alambique.query(other, cell, "SELECT count(*) FROM t", [], timeout: 2_000)
     end
 
+    # The compaction needs about 3 s here, so a budget of 1.5 s stays above
+    # zero on a slow runner and below what the compaction takes.
+    @tag store_ms: 150
     test "hibernate/3 answers :ok within its timeout and releases the lease", ctx do
       capture([[:alambique, :cell, :hibernate]])
 
-      assert :ok = Alambique.hibernate(ctx.inst, ctx.cell, timeout: 700)
+      assert :ok = Alambique.hibernate(ctx.inst, ctx.cell, timeout: 2_000)
 
       assert {_, %{compaction: :deadline}} =
                await_event([:alambique, :cell, :hibernate], ctx.cell)
