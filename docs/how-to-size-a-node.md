@@ -180,6 +180,10 @@ should leave more of the pool to other work.
    `duration` mean bursts wait for slots; any `:expired` or `:full` is a
    caller that got `:overloaded`: raise `wake_queue_ms` or `max_wake_queue`
    if the callers can wait, or `max_wakes` if the node has the memory.
+   `[:alambique, :admission, :overloaded]` names the limit of every
+   `:overloaded` in its `reason`: `:no_wait`, `:queue_full`, `:wait_expired`,
+   `:crowded` (`max_cells` or `max_bytes` with every awake cell busy) or
+   `:max_children`.
 
 ## Troubleshooting
 

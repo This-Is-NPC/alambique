@@ -1587,7 +1587,13 @@ Why each overlap is safe:
   ends, the reply is `{:error, :overloaded}` as before. The wait does not
   count in `max_pending` or `max_cells`: it happens after `make_room`, before
   the cell exists, so a queued wake holds no cell. Each wake that queued, or
-  met a full queue, emits `[:alambique, :admission, :wake_queue]`. The
+  met a full queue, emits `[:alambique, :admission, :wake_queue]`. Every
+  refusal with `{:error, :overloaded}`, from the queue or from the places
+  below (`make_room` with no cell to hibernate, the full cell supervisor),
+  also emits `[:alambique, :admission, :overloaded]` with a `reason`:
+  `:no_wait`, `:queue_full`, `:wait_expired`, `:crowded` or `:max_children`.
+  The return value is the same for all, so a caller that has to tell them
+  apart reads the event, which names the limit that was hit. The
   defaults come from the case that motivated them: a burst of 63 cold wakes
   on a node with few slots. A wake takes tens to hundreds of milliseconds (an
   estimate, not measured here), so 500 ms covers a few rounds of slots

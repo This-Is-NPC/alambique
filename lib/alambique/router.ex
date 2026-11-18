@@ -420,14 +420,19 @@ defmodule Alambique.Router do
 
         {:error, reason} ->
           Admission.release(config)
-
-          {nil,
-           {:error, if(reason == :max_children, do: :overloaded, else: {:wake_failed, reason})}}
+          {nil, {:error, start_failed(reason)}}
       end
     else
       {:error, _} = error -> {nil, error}
     end
   end
+
+  defp start_failed(:max_children) do
+    Admission.overloaded(:max_children)
+    :overloaded
+  end
+
+  defp start_failed(reason), do: {:wake_failed, reason}
 
   # The cell takes over the slot this process holds.
   defp with_holder({config, cell, opts}), do: {config, cell, [{:holder, self()} | opts]}
@@ -442,8 +447,14 @@ defmodule Alambique.Router do
       else: :ok
   end
 
-  defp evict_lru(config, []),
-    do: if(Admission.crowded?(config), do: {:error, :overloaded}, else: :ok)
+  defp evict_lru(config, []) do
+    if Admission.crowded?(config) do
+      Admission.overloaded(:crowded)
+      {:error, :overloaded}
+    else
+      :ok
+    end
+  end
 
   defp evict_lru(config, [{pid, load, id} | rest]) do
     cond do
