@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.13.0](https://github.com/This-Is-NPC/alambique/compare/v0.12.0...v0.13.0) (2026-11-18)
+
+
+### Features
+
+* **admission:** report why a wake is overloaded ([6af531a](https://github.com/This-Is-NPC/alambique/commit/6af531a3837e00b0bf5bbe457619056a7e178d68))
+* **move:** take a release deadline per call ([0758e39](https://github.com/This-Is-NPC/alambique/commit/0758e39adfd64ad0c7c10362388c73bb9aaf962f))
+
+
+### Bug Fixes
+
+* **compaction:** keep budget cuts out of the breaker ([ceb1260](https://github.com/This-Is-NPC/alambique/commit/ceb1260a670052ff0f6eeee8956d6d4cf1f87698))
+* **compaction:** keep merges when the budget ends ([8f85423](https://github.com/This-Is-NPC/alambique/commit/8f854230dd18580d065d6366e69bf2a593c9e23d))
+* **readme:** mark the version on one line ([c47a534](https://github.com/This-Is-NPC/alambique/commit/c47a53421ebfff44102cd52525ad7f47f8365e44))
+
 ## [0.12.0](https://github.com/This-Is-NPC/alambique/compare/v0.11.0...v0.12.0) (2026-11-18)
 
 
