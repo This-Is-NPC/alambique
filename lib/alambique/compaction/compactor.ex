@@ -26,7 +26,7 @@ defmodule Alambique.Compaction.Compactor do
   require Logger
 
   alias Alambique.{Compaction, Config, Inflight, Placement, Retention, Telemetry}
-  alias Alambique.Compaction.Hold
+  alias Alambique.Compaction.{Hold, Slots}
   alias Alambique.Relocate.Cleanup
 
   # Cleanup jobs a tick takes, per unit of `concurrency`.
@@ -118,6 +118,7 @@ defmodule Alambique.Compaction.Compactor do
 
     :ets.new(config.cleanups, [:named_table, :public, :set])
     Hold.create(config)
+    Slots.create(config)
 
     state = %{
       config: config,

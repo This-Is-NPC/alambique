@@ -2319,6 +2319,30 @@ deadlines still bound them. In `mise run bench:swap` with the defaults
 about 200 files, took 5.2 s: the four cut cells released in 3.2 s at most
 and the others in 0.2 s.
 
+*Release concurrency.* Every cell that releases compacts in its own process,
+so a drain of 64 cells, or a rebalance, could start 64 compactions at once on
+one node, each with up to `merge_concurrency * (fanout + 1)` requests (36 by
+default), all in the pool of the store (`pool_size`, 256, shared with the
+traffic). `compaction: [release_concurrency:]` (default 4) bounds the cells of
+an instance that compact at once when they release. The requests in flight a
+node's releases add are at most `release_concurrency * merge_concurrency *
+(fanout + 1)`, 144 by default, so the pool keeps room for commits and wakes;
+the compactor's passes add `merge_concurrency * (fanout + 1)` each, for
+`concurrency + urgent_concurrency` of them. Size the three against `pool_size`.
+
+A node keeps the places in an ordered table (`Alambique.Compaction.Slots`),
+one row per cell that compacts or waits, so the cells take them in the order
+they asked, and the row of a process that died frees its place. A cell that
+has no place waits for one, but only inside its own budget (`release_deadline_ms`,
+the lease, the call), and compacts with what is left of the budget when one
+frees. When the budget ends first the cell releases without a request for
+the chain: `compaction: :busy` and `tail: 0` in `[:alambique, :cell,
+:hibernate]`, with `compact_duration` the time it waited. The chain it leaves
+is for the compactor of the node that wakes it, as after `:deadline`. A drain
+that releases more cells than `release_concurrency` therefore compacts them in
+waves, as many as their budgets allow; raise the option (and `pool_size`) to
+compact more of them at once, or lower it where the store's pool is small.
+
 **Levels.** A pass merges level-0 files, one per batch, `fanout` (default 8)
 at a time into level 1, level 1 into level 2, up to `max_level` (default 2).
 Merged files cover *aligned blocks*: level `L` covers blocks of `fanout^L`

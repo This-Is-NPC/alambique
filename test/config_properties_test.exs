@@ -81,6 +81,7 @@ defmodule Alambique.ConfigPropertiesTest do
     {:compaction, :retry_ms},
     {:compaction, :max_chain_segments},
     {:compaction, :merge_concurrency},
+    {:compaction, :release_concurrency},
     {:sweeper, :interval_ms},
     {:sweeper, :concurrency},
     {:sweeper, :rate},

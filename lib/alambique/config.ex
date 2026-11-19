@@ -109,6 +109,7 @@ defmodule Alambique.Config do
     release_deadline_ms: 3_000,
     release_reserve_ms: 2_000,
     release_min_tail: 32,
+    release_concurrency: 4,
     release_on: [:request, :shutdown, :evict, :idle]
   ]
   @release_reasons [:request, :shutdown, :evict, :idle, :frozen]
@@ -262,6 +263,7 @@ defmodule Alambique.Config do
           compactor: atom,
           cleanups: atom,
           holds: atom,
+          release_slots: atom,
           lazy_restore: map | nil,
           drain: map,
           quarantine: map | nil,
@@ -479,6 +481,7 @@ defmodule Alambique.Config do
       compactor: Module.concat(name, Compactor),
       cleanups: Module.concat(name, Cleanups),
       holds: Module.concat(name, Holds),
+      release_slots: Module.concat(name, ReleaseSlots),
       query_supervisor: Module.concat(name, QuerySupervisor),
       inflight: Module.concat(name, Inflight),
       replica_registry: Module.concat(name, ReplicaRegistry),

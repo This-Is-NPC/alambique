@@ -103,7 +103,11 @@ B serves its cell on the next request. A call that reaches A now gets
 `{:error, {:unavailable, owner, expires}}` for a cell B holds and
 `{:error, :draining}` for one nobody holds.
 
-The drain has a bound. Each compaction stops after `release_deadline_ms`, or
+A node compacts at most `compaction: [release_concurrency:]` cells at once
+(default 4), so a drain of many cells compacts them in waves, each cell inside
+its own `release_deadline_ms`; a cell that finds no place in time is handed
+over with `compaction: :busy` and its chain as it is (design §9, "Release
+concurrency"). The drain has a bound. Each compaction stops after `release_deadline_ms`, or
 `compaction: [release_reserve_ms:]` (default 2 000 ms) before the end of the
 time the drain has left, whichever comes first; a cell with less than that left does not compact
 (`compaction: :none`). The drain ends within `drain: [deadline_ms:]` (default

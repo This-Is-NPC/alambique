@@ -145,6 +145,10 @@ defmodule Alambique do
       the release's and the compactor's, default 4; a cold merge has up to
       `:fanout + 1` requests in flight, so a pass has up to
       `:merge_concurrency * (:fanout + 1)`; 1 merges one at a time),
+      `:release_concurrency` (cells of the instance that compact their tail
+      at once when they release, default 4; a cell with no place waits for
+      one inside its budget and then releases with `compaction: :busy`;
+      design §9, "Release concurrency"),
       `:release_on` (the reasons of a hibernation that compact first, a list of
       `:request`, `:shutdown`, `:evict`, `:idle` and `:frozen`, default
       `[:request, :shutdown, :evict, :idle]`; `:evict` is the room another wake

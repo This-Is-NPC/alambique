@@ -124,9 +124,12 @@ anything but `s3://bucket` or `s3://bucket/path`.
   when none frees up in time: the store holds at most `:pool_size`
   connections (default 256) and a request waits for one at most `:pool_timeout`
   (default 2 000 ms, below `:receive_timeout`), so a queue shows as this short
-  error. Raise `:pool_size`, or `:pool_timeout`
+  error and not as an 8 s read timeout. Raise `:pool_size`, or `:pool_timeout`
   (or set `finch: [pool_timeout: ...]` in `:req_options`, which wins), if many
-  cells wake together (design §6.3).
+  cells wake or compact together (design §6.3). The requests in flight that
+  compaction adds are bounded: up to `release_concurrency * merge_concurrency *
+  (fanout + 1)` for the releases of a node (default 4 * 4 * 9 = 144) and
+  `merge_concurrency * (fanout + 1)` for each pass of the compactor (design §9).
   Such a request never reached the store, so the circuit breaker does not count
   it (`reason: :local`, `detail: :pool_checkout_timeout` in
   `[:alambique, :store, :failure]`, design §3), and the library asks again until
