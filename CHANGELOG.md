@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.14.0](https://github.com/This-Is-NPC/alambique/compare/v0.13.0...v0.14.0) (2026-11-19)
+
+
+### Features
+
+* **compaction:** cap the release compactions of a node ([8e82671](https://github.com/This-Is-NPC/alambique/commit/8e82671fdb69f251653b0df614662f222a556f9b))
+* **compaction:** compact idle and evicted releases ([fa3853b](https://github.com/This-Is-NPC/alambique/commit/fa3853b2c660d18b4ebab432a7bcf3fe5d28861d))
+* **s3:** bound the wait for a pooled connection ([2015414](https://github.com/This-Is-NPC/alambique/commit/2015414e34b475234b303d445cc670d77af6cb00))
+
+
+### Performance Improvements
+
+* **compaction:** fetch a merge's inputs in one wave ([1bd1e63](https://github.com/This-Is-NPC/alambique/commit/1bd1e635864af615ded0226aa29f21ec4895199e))
+* **compaction:** run the merges of a level in parallel ([3e232c5](https://github.com/This-Is-NPC/alambique/commit/3e232c58513c881c81607c1810d337847cb4abde))
+
 ## [0.13.0](https://github.com/This-Is-NPC/alambique/compare/v0.12.0...v0.13.0) (2026-11-18)
 
 
