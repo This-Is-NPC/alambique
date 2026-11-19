@@ -124,7 +124,9 @@ defmodule Alambique.ReleaseCompactionTest do
     slow = SlowStore.wrap(ctx.store, 40)
 
     inst =
-      writer(%{ctx | store: slow}, compaction: [release_deadline_ms: 100, release_min_tail: 30])
+      writer(%{ctx | store: slow},
+        compaction: [release_deadline_ms: 100, release_min_tail: 30, merge_concurrency: 1]
+      )
 
     capture([[:alambique, :cell, :hibernate]])
     cell = unique_cell()
@@ -158,7 +160,8 @@ defmodule Alambique.ReleaseCompactionTest do
   # A cell with `rows` level-0 files whose lease is free, and an instance over
   # a store that takes `ms` per request to hibernate it.
   defp slow_release(ctx, ms, rows, compaction, extra \\ []) do
-    fast = writer(ctx, compaction: [release_deadline_ms: 0])
+    # No pass of the compactor either, which a chain over the cap would start.
+    fast = writer(ctx, compaction: [release_deadline_ms: 0, max_chain_segments: 1_000_000])
     cell = unique_cell()
     insert(fast, cell, 1..rows)
     :ok = Alambique.hibernate(fast, cell)
@@ -176,7 +179,11 @@ defmodule Alambique.ReleaseCompactionTest do
 
   test "the end of the budget reports the tail that is left", ctx do
     {inst, cell} =
-      slow_release(ctx, 25, 150, release_deadline_ms: 400, release_min_tail: 30)
+      slow_release(ctx, 25, 150,
+        release_deadline_ms: 400,
+        release_min_tail: 30,
+        merge_concurrency: 1
+      )
 
     before = tail_length(ctx, cell)
     assert before >= 150
@@ -192,6 +199,39 @@ defmodule Alambique.ReleaseCompactionTest do
            "the event reports #{tail} for a tail of #{tail_length(ctx, cell)}"
 
     assert {_, %{result: :ok, more: true}} = await_event([:alambique, :compaction, :pass], cell)
+  end
+
+  test "the end of the budget reports the tail left by merges that ran in parallel", ctx do
+    {inst, cell} =
+      slow_release(ctx, 25, 600,
+        release_deadline_ms: 400,
+        release_min_tail: 30,
+        merge_concurrency: 4
+      )
+
+    before = tail_length(ctx, cell)
+    assert before >= 600
+
+    assert :ok = Alambique.hibernate(inst, cell)
+
+    assert {%{tail: tail}, %{compaction: :deadline}} =
+             await_event([:alambique, :cell, :hibernate], cell)
+
+    assert tail_length(ctx, cell) < before, "nothing was merged"
+
+    assert tail == tail_length(ctx, cell),
+           "the event reports #{tail} for a tail of #{tail_length(ctx, cell)}"
+
+    assert {_, %{result: :ok, more: true}} = await_event([:alambique, :compaction, :pass], cell)
+    assert %{state: :closed} = Alambique.breaker_status(inst)["default"]
+
+    assert {:ok, %{rows: [[600]]}} =
+             Alambique.query(
+               start_instance(ctx, migrations: @schema, retention: false),
+               cell,
+               "SELECT count(*) FROM t",
+               []
+             )
   end
 
   # A request slower than the retry backoff (50 ms) that is running at the end
@@ -305,7 +345,12 @@ defmodule Alambique.ReleaseCompactionTest do
 
       inst =
         writer(%{ctx | store: slow},
-          compaction: [release_deadline_ms: 5_000, release_min_tail: 30, release_reserve_ms: 450]
+          compaction: [
+            release_deadline_ms: 5_000,
+            release_min_tail: 30,
+            release_reserve_ms: 450,
+            merge_concurrency: 1
+          ]
         )
 
       cell = unique_cell()

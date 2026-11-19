@@ -25,14 +25,17 @@ defmodule Alambique.CompactorDispatchTest do
     setup_store()
   end
 
-  # Every pass stops once, after its first merge, until the test releases it.
+  # Every cell's pass stops once, at its second merge, until the test releases
+  # it. The merges of a pass run in processes of their own, so the cell's name
+  # is what remembers that it stopped.
   defp gate_passes do
     test = self()
+    stopped = :ets.new(:stopped, [:public])
 
     CrashPoints.arm(
       :compact_between_merges,
       fn _point, %{cell: cell} ->
-        unless Process.put(:gated, true) do
+        if :ets.insert_new(stopped, {cell}) do
           send(test, {:gated, cell, self()})
           receive do: (:release -> :ok)
         end

@@ -2283,6 +2283,85 @@ it reads at most `fanout - 1` files for each level below the top one, plus the
 top-level files since the newest snapshot, for example 13 files for a chain of
 1 000 batches and 16 for 5 000.
 
+**Parallel merges.** The merges of one level run at once, up to
+`compaction: [merge_concurrency:]` (default 4), for the release pass and the
+passes of the compactor alike. A level starts when every merge of the level
+below has ended, so a merge never waits for another of its own level. What
+makes a merged file safe to publish and to read, and why parallel merges keep
+it:
+
+1. *One key, one content.* The key of a merged file is fixed by the aligned
+   block of TXIDs it covers, and its content is the merge of the files of that
+   block. Every write is `:if_none_match` and a lost race is a success
+   (`:exists`). Two merges of a pass never share a key, and a merge that
+   another compactor wrote first is the same file.
+2. *Disjoint groups.* The groups of one level are blocks of `fanout^(L+1)`
+   TXIDs that do not overlap, and a group reads only files of level `L` that
+   the listing showed (or the next level's index after the level below ended).
+   No merge reads what another merge of its level writes.
+3. *The predecessor and the epochs (R2).* A merge writes its file only when the
+   epochs of its inputs do not decrease and are not below the epoch of the
+   file that ends right before the block, or of the snapshot; a block with no
+   predecessor is skipped. The predecessor comes from the listing of the pass
+   (the lowest level that ends at `min - 1`), never from a merge in flight:
+   that file is an input of the block before, which exists because that block
+   was planned, and a merged file carries the epoch of its last input, so even
+   the output of the block before would give the same number. The `HEAD` of
+   the predecessor and the `GET`s of the inputs are independent, so they run
+   together; the epochs are checked after both, before the write.
+4. *One `PUT` per file, whole or not at all.* A restore, or a wake that reads
+   while merges are in flight, lists and then walks the chain, at each step the
+   file that starts at the next TXID and reaches furthest. Any set of merged
+   files that exist is a valid chain, because each one is the union of its
+   inputs, the level-0 files stay and a merged file is never visible half
+   written. Parallel merges publish their files in any order, the serial pass
+   in block order: both leave a state that a serial pass could have left, so a
+   wake sees the same database whichever files it reads.
+5. *Deletions follow.* Superseded files (level 1 and above) are marked only
+   after every merge of the pass ended, through the trash and its grace
+   period, so a merge in flight never reads a file that this pass deleted.
+6. *A cut leaves a valid chain.* When the deadline passes, no merge starts. A
+   request in flight is killed at the deadline (`Retry`), and so is the merge
+   it belongs to: the files that were published stay, and the summary counts
+   those it saw published (`merges`), so it says `more: true` and its `tail`
+   is counted again over the files the pass knows. A `PUT` that landed with its
+   answer lost leaves a complete file that the next pass finds as `:exists`.
+   The kill is the budget's end, not a failure of the store, so it stays out
+   of the breaker (`budget_cut`). A merge that fails before the deadline ends
+   the pass as an error and drops the merges in flight.
+7. *The budget counts the merges in flight.* `max_merges` bounds the merges
+   published plus those running, so a pass never starts more than it may keep.
+8. *Held bytes stay advisory.* A merge drops its inputs and holds its output;
+   another merge may evict rows meanwhile. The epochs of the predecessors are
+   taken from the held rows for the whole level before its first merge runs,
+   so a merge that ends does not make the next ask the store. A row that is
+   gone is read from the store, and the table is used only for keys of the listing whose epoch
+   passes the same check as a fetched file.
+
+A cell in a pass has up to `merge_concurrency * (fanout + 1)` requests in
+flight (a cold merge has the `HEAD` and `fanout` `GET`s together).
+
+*Measured* (2026-11-18, a laptop, `MemoryStore` with 25 ms added to every
+request, a cell with 1 000 level-0 files woken without held bytes and then
+hibernated with `release_deadline_ms: 13_000`, and with 1 500 for the cut):
+
+| | Merges in parallel | Time | Result | Files left | Requests (GET, HEAD, PUT) |
+|---|---|---|---|---|---|
+| Two waves of reads, one merge at a time (before) | 1 | 13.1 s | cut at the deadline | 19 | 985, 122, 125 |
+| One wave of reads, `HEAD` with the `GET`s | 1 | 7.8 s | done | 3 | 1 121, 139, 143 |
+| | 2 | 4.1 s | done | 3 | 1 121, 139, 143 |
+| | 4 (default) | 2.2 s | done | 3 | 1 121, 139, 143 |
+| | 8 | 1.2 s | done | 3 | 1 121, 139, 143 |
+| Deadline of 1.5 s | 1 | 1.6 s | cut | 787 | 216, 26, 27 |
+| Deadline of 1.5 s | 4 | 1.7 s | cut | 139 | 864, 107, 108 |
+
+The requests are the same for every concurrency: parallel merges do the same
+work sooner. The default of 4 is 3.5 times faster than one at a time and puts
+at most 36 requests of a cell in flight (4 merges of 9); 8 doubles both the
+speed and the requests, so a node with many cells releasing together would
+have its `pool_size` (256) used by seven cells. Raise it when the store has
+room and the tails are long; lower it to 1 to get the old order.
+
 **Superseded files.** A file of level `L` (1 to `max_level - 1`) is redundant
 for restore once the file of level `L + 1` that contains its block exists:
 restore picks the one that reaches furthest. When a pass writes a merged file of
