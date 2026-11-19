@@ -19,7 +19,7 @@ defmodule Alambique.Cell do
   require Logger
 
   alias Alambique.Cell.{Commit, Db, Hydration, Local, Pipe, State, Wake}
-  alias Alambique.Compaction.{Compactor, Hold}
+  alias Alambique.Compaction.{Compactor, Hold, Slots}
 
   alias Alambique.{
     Admission,
@@ -1157,9 +1157,9 @@ defmodule Alambique.Cell do
   # the end of the lease, and `release_reserve_ms` before the time the caller
   # stops waiting (`deadline`, monotonic; the stop of the instance has its
   # shutdown time), and hands over with what it merged. Returns the outcome
-  # (`:none`, `:done`, `:deadline`, `:deadline_error` or `:error`), the level-0
+  # (`:none`, `:busy`, `:done`, `:deadline`, `:deadline_error` or `:error`), the level-0
   # files still in the chain (0 when it did not look) and the time spent.
-  defp compact_tail(%State{config: %{compaction: c} = config} = state, why, deadline, release_ms) do
+  defp compact_tail(%State{config: %{compaction: c}} = state, why, deadline, release_ms) do
     budget =
       if c != nil and why in c.release_on,
         do:
@@ -1172,15 +1172,40 @@ defmodule Alambique.Cell do
           |> max(0),
         else: 0
 
-    if budget == 0 do
-      {:none, 0, 0}
-    else
-      started = System.monotonic_time()
-      deadline = Retry.deadline_in(budget)
-      result = Compactor.compact(config, state.repl_ctx, state.id, budget)
-      spent = System.monotonic_time() - started
-      {outcome, tail} = release_compaction(result, deadline, state.id, c.release_min_tail)
-      {outcome, tail, spent}
+    if budget == 0, do: {:none, 0, 0}, else: compact_within(state, c, budget)
+  end
+
+  # Waits for one of the `release_concurrency` places of the node inside the
+  # budget, and compacts with what is left of it. A cell that finds none by
+  # then releases without looking at the chain (`:busy`).
+  defp compact_within(%State{config: config} = state, c, budget) do
+    started = System.monotonic_time()
+    deadline = Retry.deadline_in(budget)
+
+    {outcome, tail} =
+      case Slots.acquire(config, c.release_concurrency, deadline) do
+        :busy ->
+          {:busy, 0}
+
+        {:ok, place} ->
+          try do
+            compact_left(state, c, deadline)
+          after
+            Slots.release(config, place)
+          end
+      end
+
+    {outcome, tail, System.monotonic_time() - started}
+  end
+
+  defp compact_left(state, c, deadline) do
+    case deadline - System.monotonic_time(:millisecond) do
+      left when left > 0 ->
+        result = Compactor.compact(state.config, state.repl_ctx, state.id, left)
+        release_compaction(result, deadline, state.id, c.release_min_tail)
+
+      _ ->
+        {:busy, 0}
     end
   end
 
