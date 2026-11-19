@@ -154,6 +154,14 @@ first release (0.1.0):
   `[:alambique, :admission, :overloaded]` names the limit behind each
   `{:error, :overloaded}` (design.md, sections 7 and 9). There is no breaking
   change to the API.
+- 0.14.0: a compaction merge waits for 2 requests to the store instead of 4,
+  and the merges of one level run in parallel
+  (`compaction: [merge_concurrency: 4]`). Idle and evicted cells compact at
+  release too (`release_on:`), at most `release_concurrency:` (4) cells of a
+  node compact at release at once, and the S3 store bounds the wait for a
+  pooled connection (`pool_timeout:`, 2000 ms) (design.md, sections 3 and 9).
+  In `[:alambique, :cell, :hibernate]`, an eviction now reports
+  `reason: :evict` (it was `:request`), and `compaction: :busy` is new.
 
 The full list is in [CHANGELOG.md](CHANGELOG.md).
 
