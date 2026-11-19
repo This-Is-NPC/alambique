@@ -29,7 +29,9 @@ defmodule Alambique.ReleaseReasonsTest do
         [
           migrations: @schema,
           retention: false,
-          lease_ttl_ms: 600,
+          # A release compacts only for what the lease has left, and a frozen
+          # cell is found at a renewal, a third of the ttl after the last one.
+          lease_ttl_ms: 3_000,
           skew_margin_ms: 100,
           compaction: @idle_compactor ++ [release_min_tail: 8] ++ compaction
         ],
