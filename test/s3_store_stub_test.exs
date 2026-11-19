@@ -80,6 +80,30 @@ defmodule Alambique.Store.S3StubTest do
       assert sent().options.receive_timeout == 77
     end
 
+    test "bounds the wait for a pooled connection, below receive_timeout" do
+      assert {:ok, _, _} = S3.head(config(reply(200)), "k")
+      assert sent().options.finch == [size: 256, pool_timeout: 2_000]
+
+      c = config(reply(200), %{pool_size: 8, pool_timeout: 77})
+      assert {:ok, _, _} = S3.head(c, "k")
+      assert sent().options.finch == [size: 8, pool_timeout: 77]
+    end
+
+    test "req_options win over the pool timeout, and a pool of its own keeps it" do
+      options = [adapter: Adapter, finch: [pool_timeout: 5]]
+      assert {:ok, _, _} = S3.head(config(reply(200), %{req_options: options}), "k")
+      assert sent().options.finch == [size: 256, pool_timeout: 5]
+
+      options = [adapter: Adapter, finch: [name: MyPool]]
+      assert {:ok, _, _} = S3.head(config(reply(200), %{req_options: options}), "k")
+      assert sent().options.finch == [pool_timeout: 2_000, name: MyPool]
+
+      assert {:ok, _, _} =
+               S3.head(config(reply(200), %{req_options: [adapter: Adapter, finch: MyPool]}), "k")
+
+      assert sent().options.finch == [name: MyPool, pool_timeout: 2_000]
+    end
+
     test "req_options win over the defaults" do
       c = config(reply(200), %{req_options: [receive_timeout: 5, adapter: Adapter]})
       assert {:ok, _, _} = S3.head(c, "k")

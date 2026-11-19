@@ -42,15 +42,21 @@ defmodule Alambique.Store.S3 do
     * `:pool_size` - connections to the endpoint that the store may hold
       open at once, default `256`. Connections are opened when a request needs
       one and closed when idle. A request waits for a free connection
-      (`finch: [pool_timeout: ...]`), so a pool smaller than the requests in
+      (`:pool_timeout`), so a pool smaller than the requests in
       flight queues them: 12 cells waking together read ahead 16 files each,
       192 requests, and the default pool of Finch (50) made them 30% slower.
       Size it for `awake: [max_wakes:]` times `restore: [fetch_concurrency:]`
       if you wake that many at once.
+    * `:pool_timeout` - milliseconds a request may wait for a free connection
+      of the pool, default `2_000`, below `:receive_timeout`. A request that
+      waits longer fails at once with a short error (a pool checkout timeout)
+      instead of queueing until the client gives up on a read, and the library
+      retries it as any failed request. That wait never left the node, so the
+      circuit breaker does not count it (design §3). Raise it together with
+      `:pool_size` if you expect bursts that queue longer.
     * `:req_options` - extra options merged into every `Req` request, for
-      example `finch: [pool_timeout: 5_000]` for the wait for a pooled
-      connection. With `finch: [name: pool]` the store uses a pool of your own
-      and `:pool_size` does not apply.
+      example `finch: [pool_timeout: 5_000]`, which wins over `:pool_timeout`. With `finch: [name: pool]` the store uses a
+      pool of your own and `:pool_size` does not apply.
 
   `from_url/2` builds the config from `"s3://bucket/prefix"`.
 
@@ -74,6 +80,7 @@ defmodule Alambique.Store.S3 do
 
   @default_timeout 8_000
   @default_pool_size 256
+  @default_pool_timeout 2_000
   @default_error_limit 512
   @credentials [:access_key_id, :secret_access_key, :session_token]
   @credentials_margin_ms 300_000
@@ -317,15 +324,25 @@ defmodule Alambique.Store.S3 do
     |> send_request()
   end
 
-  # The pool of `:pool_size`, with the `:finch` options of `:req_options` over
-  # it; a pool given by name is not sized here.
+  # The pool of `:pool_size` and the wait of `:pool_timeout`, with the `:finch`
+  # options of `:req_options` over them; a pool given by name is not sized here.
   defp finch_options(config, extra) when is_list(extra) do
-    options = Keyword.merge([size: Map.get(config, :pool_size, @default_pool_size)], extra)
+    options = Keyword.merge(pool_options(config), extra)
     if options[:name], do: Keyword.delete(options, :size), else: options
   end
 
-  defp finch_options(_config, name) when is_atom(name) and name != nil, do: [name: name]
-  defp finch_options(config, _extra), do: [size: Map.get(config, :pool_size, @default_pool_size)]
+  defp finch_options(config, name) when is_atom(name) and name != nil,
+    do: [name: name, pool_timeout: pool_timeout(config)]
+
+  defp finch_options(config, _extra), do: pool_options(config)
+
+  defp pool_options(config),
+    do: [
+      size: Map.get(config, :pool_size, @default_pool_size),
+      pool_timeout: pool_timeout(config)
+    ]
+
+  defp pool_timeout(config), do: Map.get(config, :pool_timeout, @default_pool_timeout)
 
   # The client also raises or exits, for example when its connection pool is
   # exhausted; every operation reports those as errors.
