@@ -856,7 +856,16 @@ defmodule Alambique.FeedTest do
     test "a read lists each shard once however many cells exist", ctx do
       counting = CountingStore.wrap(ctx.store)
       {_, counts} = counting
-      inst = start_instance(%{ctx | store: counting}, migrations: @schema, idle_timeout_ms: 200)
+
+      # An idle cell lists its files to compact them as it hibernates, which
+      # the counts below must not see.
+      inst =
+        start_instance(%{ctx | store: counting},
+          migrations: @schema,
+          idle_timeout_ms: 200,
+          compaction: [release_on: [:request, :shutdown, :evict]]
+        )
+
       cells = for _ <- 1..150, do: unique_cell()
 
       cells
