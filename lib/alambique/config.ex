@@ -108,8 +108,10 @@ defmodule Alambique.Config do
     hold_object_bytes: 1_048_576,
     release_deadline_ms: 3_000,
     release_reserve_ms: 2_000,
-    release_min_tail: 32
+    release_min_tail: 32,
+    release_on: [:request, :shutdown, :evict, :idle]
   ]
+  @release_reasons [:request, :shutdown, :evict, :idle, :frozen]
 
   @sweeper_defaults [
     interval_ms: 60_000,
@@ -764,7 +766,8 @@ defmodule Alambique.Config do
           :delete_superseded,
           :snapshot_ratio,
           :snapshot_keep_ms,
-          :pitr_window_ms
+          :pitr_window_ms,
+          :release_on
         ],
         not (is_integer(value) and value > 0),
         do: bad!(":compaction #{inspect(key)} must be a positive integer")
@@ -778,6 +781,11 @@ defmodule Alambique.Config do
         ],
         not (is_integer(merged[key]) and merged[key] >= 0),
         do: bad!(":compaction #{inspect(key)} must be a non-negative integer")
+
+    on = merged[:release_on]
+
+    unless is_list(on) and on -- @release_reasons == [],
+      do: bad!(":compaction :release_on must be a list of #{inspect(@release_reasons)}")
 
     if merged[:max_chain_segments] < merged[:fanout],
       do: bad!(":compaction :max_chain_segments must be at least :fanout")

@@ -145,6 +145,10 @@ defmodule Alambique do
       the release's and the compactor's, default 4; a cold merge has up to
       `:fanout + 1` requests in flight, so a pass has up to
       `:merge_concurrency * (:fanout + 1)`; 1 merges one at a time),
+      `:release_on` (the reasons of a hibernation that compact first, a list of
+      `:request`, `:shutdown`, `:evict`, `:idle` and `:frozen`, default
+      `[:request, :shutdown, :evict, :idle]`; `:evict` is the room another wake
+      needs; design §9, "Which releases compact"),
       `:release_min_tail` (level-0 files in the chain a restore would walk
       from which a graceful release compacts the cell first, default 32)
       and `:release_deadline_ms` (time the release may spend compacting before
@@ -1133,7 +1137,7 @@ defmodule Alambique do
       spend compacting the cell's level-0 tail before it hands the lease
       over, for this call only. It replaces `:release_deadline_ms` of the
       instance's `:compaction` option, which keeps applying to the hibernation
-      by pressure, the drain and the stop (0 for no compaction). The lease
+      by pressure, the idle one, the drain and the stop (0 for no compaction). The lease
       and `:timeout` less `:release_reserve_ms` still bound it, so a move with
       a long `:timeout` can give the compaction more than the default 3 000.
       See `hibernate/3` and design §9.

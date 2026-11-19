@@ -1556,7 +1556,8 @@ Why each overlap is safe:
   slot: while it is at or over `max_bytes` (or at `max_cells`, above) it
   hibernates the cells in the order of their last call, oldest first, skipping a cell with callers waiting, and
   re-reading the total after each (the same hibernation as
-  `Alambique.hibernate/3`, so pending writes are uploaded first). When no cell
+  `Alambique.hibernate/3`, so pending writes are uploaded first, with the
+  reason `:evict`, §9 "Which releases compact"). When no cell
   is left to hibernate and the total is still over, the wake is refused with
   `{:error, :overloaded}`. A record is as old as the
   last call or message of its cell (a lease renewal is a message, every
@@ -2178,10 +2179,10 @@ node whose passes took longer still: a cell at the cap waited for the round
 that was running and then for its own pass, each as long as the slowest pass of
 the round.
 
-**Compaction on release.** A cell that gives its lease up on purpose
-(`Alambique.hibernate/3`, `Alambique.drain/2` and the stop of the instance:
-`reason: :request` or `:shutdown`, not the idle timer nor a freeze) first
-compacts its own tail, so the node that wakes it next reads a short chain.
+**Compaction on release.** A cell that gives its lease up (`Alambique.hibernate/3`,
+`Alambique.drain/2`, the stop of the instance, the idle timer, the room another
+wake needs; the reasons that `compaction: [release_on:]` lists, see "Which
+releases compact") first compacts its own tail, so the node that wakes it next reads a short chain.
 After the uploads are acknowledged and the local file is closed, and before
 the lease is released, the cell runs one pass of the same code the compactor
 runs (`Compactor.compact/4`, `Compaction.run/3` with no limit on the merges).
@@ -2245,7 +2246,50 @@ kept for the rest of the release: the merge in flight when the pass is cut
 (it ends, see above) and the request that frees the lease. With nothing left after the reserve the cell does not compact
 (`compaction: :none`, `tail: 0`, no listing) and releases at once. The stop of
 the instance is bounded by the cell's child shutdown, 30 000 ms, the same way.
-Idle and frozen releases do not compact.
+
+*Which releases compact.* `compaction: [release_on:]` lists the reasons of a
+hibernation (`reason` of `[:alambique, :cell, :hibernate]`) that compact first.
+The default is `[:request, :shutdown, :evict, :idle]`:
+
+| Reason | What releases the cell | Default |
+|---|---|---|
+| `:request` | `Alambique.hibernate/3`, `drain/2`, `move/4`, the drain of a stopping instance | compacts |
+| `:shutdown` | the supervisor stopping a cell that no drain released | compacts |
+| `:evict` | the room an `awake: [max_cells:, max_bytes:]` limit needs for another wake (it reported `:request` before the option, and compacted) | compacts |
+| `:idle` | `idle_timeout_ms` with no callers | compacts |
+| `:frozen` | the cell found the freeze marker at its renewal (§10) | does not |
+
+Each reason is compacted under the same budget rules: `release_deadline_ms`,
+the lease that is left, `release_reserve_ms` and `release_min_tail`. A reason
+that is not in the list gives `compaction: :none` and `tail: 0` with no
+listing, as `release_deadline_ms: 0` does. The reason is why the default is
+what it is:
+
+- The chain should be short before any move or wake, and a cell that left
+  the node by idleness or by room is as likely to be woken elsewhere as one
+  that was asked to go. A chain the background compactor left long (it counts
+  commits, not the chain, and a busy node falls behind, "Chain cap") is cut
+  down at the last moment the cell holds it.
+- The cost of `:idle` is one listing of the cell's files for each idle
+  hibernation (a quiet cell with a short tail pays only that) and, for a long
+  tail, up to `release_deadline_ms` more before the lease is freed. A call
+  that reaches the cell meanwhile waits in its mailbox and then wakes it
+  again, so it can wait that long: an idle cell with a long tail is rare, as
+  the compactor works on every written cell, and the call that wakes the cell
+  again finds a short chain. A node with many idle hibernations per second
+  and a slow store pays the listings; leave `:idle` out then.
+- The cost of `:evict` is that the wake that needed the room waits for the
+  compaction of each cell it evicts, up to `release_deadline_ms` each (the
+  `call_timeout_ms` less `release_reserve_ms` bounds it too), before memory is
+  freed. That is how a `:request` eviction already behaved; the new reason
+  only names it. Leave `:evict` out to free memory at once and let the
+  compactor shorten the chain later.
+- `:frozen` is not in the default. A freeze is an operator's order to stop the
+  cell at once (a backup, an incident, a repair), nobody is waiting for the
+  chain, and a store in trouble would make the cell hold the lease for the
+  whole budget. A frozen cell is still compacted by the compactor, which does
+  not look at the marker. Add `:frozen` to compact before the lease is
+  freed.
 
 *A deadline for one call.* `Alambique.move/4` and `Alambique.hibernate/3`
 take `release_deadline_ms:` (a non-negative integer, `0` for no compaction). It
