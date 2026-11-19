@@ -471,7 +471,7 @@ defmodule Alambique.Router do
   end
 
   defp evict(config, pid, id) do
-    with :ok <- hibernate_pid(pid, config.call_timeout_ms) do
+    with :ok <- hibernate_pid(pid, :evict, config.call_timeout_ms) do
       Telemetry.emit([:admission, :evict], %{bytes: Admission.bytes(config)}, %{
         cell: id,
         max_cells: config.awake.max_cells,
@@ -541,12 +541,12 @@ defmodule Alambique.Router do
   def hibernate_local(config, cell, timeout) do
     case Cell.whereis(config, cell) do
       nil -> :ok
-      pid -> hibernate_pid(pid, timeout)
+      pid -> hibernate_pid(pid, :hibernate, timeout)
     end
   end
 
-  defp hibernate_pid(pid, timeout) do
-    call_cell(pid, {:hibernate, nil}, timeout)
+  defp hibernate_pid(pid, kind, timeout) do
+    call_cell(pid, {kind, nil}, timeout)
   catch
     :exit, {reason, {GenServer, :call, _}} when reason in [:noproc, :normal] -> :ok
     :exit, {{:shutdown, why}, {GenServer, :call, _}} -> {:error, why}
@@ -557,7 +557,7 @@ defmodule Alambique.Router do
   # A hibernating cell answers before it exits; wait for the exit so that the
   # caller sees the cell asleep.
   defp call_cell(pid, {kind, release_ms}, timeout)
-       when kind in [:hibernate, :hibernate_if_idle] do
+       when kind in [:hibernate, :hibernate_if_idle, :evict] do
     ref = Process.monitor(pid)
 
     try do

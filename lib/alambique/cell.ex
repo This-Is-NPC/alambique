@@ -397,6 +397,7 @@ defmodule Alambique.Cell do
 
   defp hibernation?({:hibernate, _, _}), do: true
   defp hibernation?({:hibernate_if_idle, _, _}), do: true
+  defp hibernation?({:evict, _, _}), do: true
   defp hibernation?(_), do: false
 
   # Records the memory of the connection after a call or a message, which is
@@ -495,6 +496,15 @@ defmodule Alambique.Cell do
   # `release_ms` replaces `release_deadline_ms` for this release (`nil`: keep it).
   defp serve_call({:hibernate, at, release_ms}, _from, state) do
     case hibernate(state, :request, at, release_ms) do
+      {:ok, state, released} -> {:stop, :normal, released, %{state | mode: :stopped}}
+      {:stop, reason, state} -> stop_serving(state, reason, {:error, reason})
+    end
+  end
+
+  # Another cell needs the room (`Admission`): a hibernation like the request's,
+  # with its own reason so that `compaction: [release_on:]` can tell them apart.
+  defp serve_call({:evict, at, release_ms}, _from, state) do
+    case hibernate(state, :evict, at, release_ms) do
       {:ok, state, released} -> {:stop, :normal, released, %{state | mode: :stopped}}
       {:stop, reason, state} -> stop_serving(state, reason, {:error, reason})
     end
@@ -1139,20 +1149,28 @@ defmodule Alambique.Cell do
     end
   end
 
-  # A graceful release (`Alambique.hibernate/3`, a drain, a stop) compacts a
-  # long level-0 tail before it gives the lease away, so the next node wakes on
-  # a short chain (design §9). It stops at `release_deadline_ms`, or earlier at
+  # A release compacts a long level-0 tail before it gives the lease away, so
+  # the next node wakes on a short chain (design §9), when its reason is in
+  # `compaction: [release_on:]`: `:request` (`Alambique.hibernate/3`, a drain,
+  # a move), `:shutdown` (the stop of the instance), `:evict` (room for another
+  # cell), `:idle` and `:frozen`. It stops at `release_deadline_ms`, or earlier at
   # the end of the lease, and `release_reserve_ms` before the time the caller
   # stops waiting (`deadline`, monotonic; the stop of the instance has its
   # shutdown time), and hands over with what it merged. Returns the outcome
   # (`:none`, `:done`, `:deadline`, `:deadline_error` or `:error`), the level-0
   # files still in the chain (0 when it did not look) and the time spent.
-  defp compact_tail(%State{config: %{compaction: c} = config} = state, why, deadline, release_ms)
-       when why in [:request, :shutdown] and c != nil do
+  defp compact_tail(%State{config: %{compaction: c} = config} = state, why, deadline, release_ms) do
     budget =
-      [release_ms || c.release_deadline_ms, State.lease_left_ms(state), call_left(deadline, c)]
-      |> Enum.min()
-      |> max(0)
+      if c != nil and why in c.release_on,
+        do:
+          [
+            release_ms || c.release_deadline_ms,
+            State.lease_left_ms(state),
+            call_left(deadline, c)
+          ]
+          |> Enum.min()
+          |> max(0),
+        else: 0
 
     if budget == 0 do
       {:none, 0, 0}
@@ -1165,8 +1183,6 @@ defmodule Alambique.Cell do
       {outcome, tail, spent}
     end
   end
-
-  defp compact_tail(_state, _why, _deadline, _release_ms), do: {:none, 0, 0}
 
   defp call_left(:infinity, _c), do: :infinity
 

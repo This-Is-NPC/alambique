@@ -84,7 +84,8 @@ the fence.
    saturated, and the tail with them; if `[:alambique, :compaction, :pass]`
    `duration` times the commits per second of a cell comes near the cap, raise
    `compaction: [concurrency:]` or `urgent_concurrency:`, or lower the commit
-   rate of the node. The merges of one pass run `compaction: [merge_concurrency:]`
+   rate of the node.
+   The merges of one pass run `compaction: [merge_concurrency:]`
    (default 4) at a time, each asking for the predecessor and its eight inputs
    together: against a store at 25 ms per request, a cold chain of 1 000 files
    is merged in 2.2 s, against 13.1 s one merge at a time with two waves of
@@ -93,7 +94,12 @@ the fence.
    store's `pool_size` divided by the cells that compact together. A node that hands a cell over on purpose (`hibernate/3`, `drain/2`, a
    stop) compacts its tail first when it has `compaction: [release_min_tail:]`
    (default 32) level-0 files or more, for at most `compaction: [release_deadline_ms:]`
-   (default 3 000), so the next node reads a short chain. `Alambique.move/4` and
+   (default 3 000), so the next node reads a short chain. So does a cell that
+   hibernates for being idle or because another cell needs the room;
+   `compaction: [release_on:]` lists the reasons (default `:request`,
+   `:shutdown`, `:evict` and `:idle`; add `:frozen`, or leave `:idle` out on a
+   node with many idle hibernations and a slow store, design §9, "Which
+   releases compact"). `Alambique.move/4` and
    `hibernate/3` take `release_deadline_ms:` to give one call more or less; it
    replaces the default for that call and stays under the call's `:timeout` less
    `compaction: [release_reserve_ms:]`.
