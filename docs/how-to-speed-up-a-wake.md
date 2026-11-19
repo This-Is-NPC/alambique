@@ -84,7 +84,13 @@ the fence.
    saturated, and the tail with them; if `[:alambique, :compaction, :pass]`
    `duration` times the commits per second of a cell comes near the cap, raise
    `compaction: [concurrency:]` or `urgent_concurrency:`, or lower the commit
-   rate of the node. A node that hands a cell over on purpose (`hibernate/3`, `drain/2`, a
+   rate of the node. The merges of one pass run `compaction: [merge_concurrency:]`
+   (default 4) at a time, each asking for the predecessor and its eight inputs
+   together: against a store at 25 ms per request, a cold chain of 1 000 files
+   is merged in 2.2 s, against 13.1 s one merge at a time with two waves of
+   reads (design §9, "Parallel merges"). A pass has up to
+   `merge_concurrency * (fanout + 1)` requests in flight, so keep it below the
+   store's `pool_size` divided by the cells that compact together. A node that hands a cell over on purpose (`hibernate/3`, `drain/2`, a
    stop) compacts its tail first when it has `compaction: [release_min_tail:]`
    (default 32) level-0 files or more, for at most `compaction: [release_deadline_ms:]`
    (default 3 000), so the next node reads a short chain. `Alambique.move/4` and

@@ -141,6 +141,10 @@ defmodule Alambique do
       least `:fanout`), `:urgent_concurrency` (passes at once added to
       `:concurrency` while a cell is over the cap, default 4, 0 for none; a
       pass that ends starts the next at once),
+      `:merge_concurrency` (merges of one level that run at once in a pass,
+      the release's and the compactor's, default 4; a cold merge has up to
+      `:fanout + 1` requests in flight, so a pass has up to
+      `:merge_concurrency * (:fanout + 1)`; 1 merges one at a time),
       `:release_min_tail` (level-0 files in the chain a restore would walk
       from which a graceful release compacts the cell first, default 32)
       and `:release_deadline_ms` (time the release may spend compacting before

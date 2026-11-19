@@ -44,6 +44,10 @@ defmodule Alambique.Compaction do
       (design §9)
     * `:max_merges` - merges per pass; `more: true` in the result says more is
       left (default 32)
+    * `:merge_concurrency` - merges of one level that run at once (default 4;
+      with `:fanout` 8 a cold merge has up to 9 requests in flight, so a pass
+      has up to `merge_concurrency * (fanout + 1)`). Release passes and
+      background passes alike
     * `:timeout_ms` - time budget of the whole pass (default 120 000)
     * `:delete_superseded` - mark for deletion the merged files that a file of
       the next level replaces (default `true`). Level 0 files stay, because a
@@ -81,6 +85,7 @@ defmodule Alambique.Compaction do
     snapshot_keep_ms: 259_200_000,
     pitr_window_ms: nil,
     max_merges: 32,
+    merge_concurrency: 4,
     timeout_ms: 120_000,
     delete_superseded: true
   ]
@@ -187,6 +192,7 @@ defmodule Alambique.Compaction do
          opts: opts,
          hold: opts[:hold],
          max_merges: opts[:max_merges],
+         merge_concurrency: opts[:merge_concurrency],
          deadline: deadline,
          index: index,
          snapshot_at: newest && newest.txid,
@@ -224,7 +230,11 @@ defmodule Alambique.Compaction do
   defp merge_levels(state) do
     Enum.reduce_while(0..(state.opts[:max_level] - 1)//1, {:ok, state}, fn level, {:ok, state} ->
       head = state.index |> Plan.chain(state.from) |> Plan.head(state.from)
-      groups = Plan.groups(state.index, state.from, head, state.opts[:fanout], level)
+
+      groups =
+        state.index
+        |> Plan.groups(state.from, head, state.opts[:fanout], level)
+        |> Enum.map(&Map.put(&1, :pred, held_predecessor(state, &1)))
 
       case merge_groups(%{state | head: head}, groups) do
         {:ok, state} -> {:cont, {:ok, state}}
@@ -233,13 +243,34 @@ defmodule Alambique.Compaction do
     end)
   end
 
-  defp merge_groups(state, []), do: {:ok, state}
+  # The groups of one level are disjoint and aligned, and none reads what
+  # another writes (design §9, "Parallel merges"), so up to `:merge_concurrency`
+  # of them run at once. A level starts only when the one below has ended.
+  # `running` holds the merges in flight by monitor reference.
+  defp merge_groups(state, groups), do: run_merges(state, groups, %{}, nil)
 
-  defp merge_groups(%{merges: merges, max_merges: max} = state, _groups) when merges >= max,
-    do: {:ok, %{state | more: true}}
+  defp run_merges(state, groups, running, failed) do
+    free? = failed == nil and groups != [] and map_size(running) < state.merge_concurrency
+    # The merges in flight count against `max_merges` as if they had finished.
+    room? = state.merges + map_size(running) < state.max_merges
 
-  defp merge_groups(state, groups) do
-    if expired?(state), do: {:ok, %{state | more: true}}, else: merge_next(state, groups)
+    cond do
+      free? and room? and not expired?(state) ->
+        [group | rest] = groups
+        run_merges(state, rest, start_merge(state, group, running), failed)
+
+      running != %{} ->
+        await_merge(state, groups, running, failed)
+
+      failed != nil ->
+        cut(state, failed)
+
+      groups != [] ->
+        {:ok, %{state | more: true}}
+
+      true ->
+        {:ok, state}
+    end
   end
 
   # A request past the deadline still gets one attempt (`Retry`), so the pass
@@ -248,20 +279,51 @@ defmodule Alambique.Compaction do
   # a file that exists is the same content for the next pass (see the moduledoc).
   defp expired?(state), do: System.monotonic_time(:millisecond) >= state.deadline
 
-  defp merge_next(state, [group | rest]) do
-    case merge_group(state, group) do
-      {:ok, state} -> merge_groups(state, rest)
-      {:error, _} = error -> cut(state, error)
+  defp start_merge(state, group, running) do
+    between? = state.merges > 0 or running != %{}
+    task = async(fn -> merge_group(state, group, between?) end)
+    Map.put(running, task.ref, {task, group})
+  end
+
+  defp await_merge(state, groups, running, failed) do
+    receive do
+      {ref, result} when is_map_key(running, ref) ->
+        Process.demonitor(ref, [:flush])
+        {{_task, group}, running} = Map.pop!(running, ref)
+        settled(state, groups, running, failed, group, unwrap(result))
+
+      {:DOWN, ref, :process, _pid, reason} when is_map_key(running, ref) ->
+        {{_task, group}, running} = Map.pop!(running, ref)
+        settled(state, groups, running, failed, group, {:error, {:task_exit, reason}})
     end
   end
 
-  defp merge_group(state, group) do
-    if state.merges > 0, do: Fault.point(:compact_between_merges, %{cell: state.cell})
+  defp settled(state, groups, running, failed, group, result) do
+    case settle_merge(state, group, result) do
+      {:ok, state} ->
+        run_merges(state, groups, running, failed)
+
+      {:error, _} = error ->
+        # Before the deadline an error ends the pass: the merges in flight are
+        # dropped, as a cut one is. After it they end by themselves (`Retry`)
+        # and the ones that published are kept.
+        if expired?(state) do
+          run_merges(state, groups, running, failed || error)
+        else
+          for {_ref, {task, _group}} <- running, do: Task.shutdown(task, :brutal_kill)
+          error
+        end
+    end
+  end
+
+  # Runs in a process of its own; the result goes to `settle_merge/3`.
+  defp merge_group(state, group, between?) do
+    if between?, do: Fault.point(:compact_between_merges, %{cell: state.cell})
     started = System.monotonic_time()
     meta = %{cell: state.cell, level: group.level, min: group.min, max: group.max}
 
     result =
-      with {:ok, pred_epoch, inputs, held} <- load(state, group),
+      with {:ok, pred_epoch, inputs, held} <- load_merge(state, group),
            :ok <- check_epochs(inputs, pred_epoch),
            {:ok, merged} <-
              merge(
@@ -274,7 +336,7 @@ defmodule Alambique.Compaction do
       end
 
     case result do
-      {:ok, outcome, bytes, held, level0} ->
+      {:ok, outcome, bytes, held, _level0} ->
         Telemetry.span_stop(
           [:compaction, :merge],
           started,
@@ -287,8 +349,6 @@ defmodule Alambique.Compaction do
           Map.put(meta, :result, outcome)
         )
 
-        {:ok, record(state, group, outcome, bytes, level0)}
-
       {:skip, reason} ->
         Telemetry.span_stop(
           [:compaction, :merge],
@@ -297,8 +357,6 @@ defmodule Alambique.Compaction do
           Map.merge(meta, %{result: :skipped, reason: reason})
         )
 
-        {:ok, %{state | skipped: [{reason, {group.level, group.min, group.max}} | state.skipped]}}
-
       {:error, reason} ->
         Telemetry.span_stop(
           [:compaction, :merge],
@@ -306,10 +364,18 @@ defmodule Alambique.Compaction do
           %{bytes: 0, inputs: length(group.inputs)},
           Map.merge(meta, %{result: :error, reason: reason})
         )
-
-        {:error, reason}
     end
+
+    result
   end
+
+  defp settle_merge(state, group, {:ok, outcome, bytes, _held, level0}),
+    do: {:ok, record(state, group, outcome, bytes, level0)}
+
+  defp settle_merge(state, group, {:skip, reason}),
+    do: {:ok, %{state | skipped: [{reason, {group.level, group.min, group.max}} | state.skipped]}}
+
+  defp settle_merge(_state, _group, {:error, _} = error), do: error
 
   # The bytes of the level-0 files a level-1 merge consumed: each batch is
   # counted once, when its file is merged.
@@ -367,7 +433,7 @@ defmodule Alambique.Compaction do
   # HEAD and the GETs run together: a cold merge waits for one wave of requests
   # and then for the write. The predecessor is judged first, as when it ran
   # before the reads.
-  defp load(state, group) do
+  defp load_merge(state, group) do
     pred = async(fn -> predecessor_epoch(state, group) end)
     fetched = fetch_all(state, group.inputs)
 
@@ -388,34 +454,40 @@ defmodule Alambique.Compaction do
     end)
   end
 
-  defp await(task) do
-    case Task.await(task, :infinity) do
-      {:ok, result} -> result
-      {:raised, kind, reason, stack} -> :erlang.raise(kind, reason, stack)
-    end
-  end
+  defp await(task), do: task |> Task.await(:infinity) |> unwrap()
+
+  defp unwrap({:ok, result}), do: result
+  defp unwrap({:raised, kind, reason, stack}), do: :erlang.raise(kind, reason, stack)
 
   # The epoch of what comes before the group: the snapshot or the file that
   # ends right before it. A group without a predecessor cannot be placed on
   # the chain.
+  defp predecessor_epoch(_state, %{pred: {:ok, _} = held}), do: held
   defp predecessor_epoch(_state, %{min: 1}), do: {:ok, 0}
 
   defp predecessor_epoch(state, %{min: min}) do
     files = Plan.ending_at(state.index, min - 1)
 
     cond do
-      files != [] -> epoch_of_files(state, files)
+      files != [] -> epoch_of_file(state, hd(files))
       state.snapshot_at == min - 1 -> epoch_of_file(state, state.snapshot_key)
       true -> {:skip, :no_predecessor}
     end
   end
 
-  # Files that end at the same TXID have the epoch of the same last batch.
-  defp epoch_of_files(state, [file | _] = files) do
-    case Enum.find_value(files, &held(state, &1)) do
-      {meta, _body} -> {:ok, Objects.epoch_of(meta)}
-      nil -> epoch_of_file(state, file)
-    end
+  # The epoch of the predecessor from the held bytes, if there are any (files
+  # that end at the same TXID have the epoch of the same last batch). Taken
+  # for every group of a level before its first merge runs: a merge that ends
+  # drops its inputs from the hold, and a later group would find the held
+  # row gone and ask the store.
+  defp held_predecessor(_state, %{min: 1}), do: {:ok, 0}
+
+  defp held_predecessor(state, %{min: min}) do
+    state.index
+    |> Plan.ending_at(min - 1)
+    |> Enum.find_value(fn file ->
+      with {meta, _body} <- held(state, file), do: {:ok, Objects.epoch_of(meta)}
+    end)
   end
 
   defp epoch_of_file(state, file) do
