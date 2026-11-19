@@ -288,8 +288,14 @@ the panic tests abort the VM when `guard` does not catch.
   error; a lost lease is still `{:error, :lost}`. `Alambique.Store.S3` does
   the same for its HTTP client with `{:error, {:request_crashed, kind, reason}}`,
   for example when the connection pool of Finch is exhausted. The pool has
-  `:pool_size` connections (default 256); the wait for one is set in
-  `:req_options` (`finch: [pool_timeout: ...]`).
+  `:pool_size` connections (default 256); the wait for one is `:pool_timeout`
+  (default 2 000 ms, below `:receive_timeout`, 8 000), which `finch:
+  [pool_timeout: ...]` in `:req_options` overrides. A request that waits longer
+  fails with the checkout timeout of the pool, `:pool_checkout_timeout` in
+  `[:alambique, :store, :failure]`, which is the node's own wait and does not
+  count toward the breaker (below). Finch's own default is 5 000 ms; the store
+  sets one of its own, shorter, so that a queue for a connection is told
+  apart from a read that timed out.
 - **Hard deadline.** Every store request of the library runs in its own
   process, linked to the caller and killed when its time passes, and then
   answers `{:error, :timeout}`; a store that never returns cannot hold a
