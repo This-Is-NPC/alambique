@@ -84,7 +84,21 @@ the fence.
    saturated, and the tail with them; if `[:alambique, :compaction, :pass]`
    `duration` times the commits per second of a cell comes near the cap, raise
    `compaction: [concurrency:]` or `urgent_concurrency:`, or lower the commit
-   rate of the node.
+   rate of the node. How many files a slot folds: a pass folds about
+   `merge_concurrency * fanout` files for every round trip of a merge, which
+   is two with no held bytes (the `HEAD` with the `GET`s, then the `PUT`) and
+   one with them. At 25 ms per request that is about 640 files per second per
+   slot cold and 1 280 warm (measured on a cell of 1 000 files: about 450 and
+   970, design §9, "Parallel merges"). Compare that with the files the cells
+   write per second: the slots are `concurrency + urgent_concurrency` (2 + 4)
+   and a cell has one pass at a time, so one cell that commits faster than a
+   slot folds is never caught up whatever the other settings. Raise
+   `concurrency` or `urgent_concurrency` only when the node's commits per
+   second come near the files per second of the slots it can use, and watch
+   `[:alambique, :compactor, :tick]` and the `tail` of the hibernation: the
+   defaults were not changed with the faster merges, because no measurement
+   with many cells shows them short. Each slot adds up to
+   `merge_concurrency * (fanout + 1)` requests to the store's pool.
    The merges of one pass run `compaction: [merge_concurrency:]`
    (default 4) at a time, each asking for the predecessor and its eight inputs
    together: against a store at 25 ms per request, a cold chain of 1 000 files

@@ -2399,6 +2399,10 @@ hibernated with `release_deadline_ms: 13_000`, and with 1 500 for the cut):
 | Deadline of 1.5 s | 1 | 1.6 s | cut | 787 | 216, 26, 27 |
 | Deadline of 1.5 s | 4 | 1.7 s | cut | 139 | 864, 107, 108 |
 
+With the bytes still held (the cell that wrote the files hibernates), the
+same 144 merges of 1 000 files are one `PUT` each: 4.0 s one at a time and
+1.2 s with 4 in parallel.
+
 The requests are the same for every concurrency: parallel merges do the same
 work sooner. The default of 4 is 3.5 times faster than one at a time and puts
 at most 36 requests of a cell in flight (4 merges of 9); 8 doubles both the
