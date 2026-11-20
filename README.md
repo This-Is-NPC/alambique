@@ -18,7 +18,7 @@ locations and publishes a per-cell change feed.
 
 ## Status
 
-The current version is 0.14.0. <!-- x-release-please-version -->
+The current version is 0.15.0. <!-- x-release-please-version -->
 It is not published on Hex: depend on a release by its git tag.
 Before 1.0, a new minor version may change behavior. What changed since the
 first release (0.1.0):
@@ -180,7 +180,7 @@ Add Alambique to `mix.exs`, by tag:
 ```elixir
 def deps do
   [
-    {:alambique, git: "https://github.com/This-Is-NPC/alambique.git", tag: "v0.14.0"} # x-release-please-version
+    {:alambique, git: "https://github.com/This-Is-NPC/alambique.git", tag: "v0.15.0"} # x-release-please-version
   ]
 end
 ```

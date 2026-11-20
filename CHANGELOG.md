@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.15.0](https://github.com/This-Is-NPC/alambique/compare/v0.14.0...v0.15.0) (2026-11-20)
+
+
+### Features
+
+* **lazy:** let reads wait for the hydration ([93483f0](https://github.com/This-Is-NPC/alambique/commit/93483f080961611b27e0593d07d774798afb74ad))
+
+
+### Bug Fixes
+
+* **sql:** keep two statement slots on small nodes ([06a939e](https://github.com/This-Is-NPC/alambique/commit/06a939ec6532f060f58bc860dc0d975f60419866))
+
 ## [0.14.0](https://github.com/This-Is-NPC/alambique/compare/v0.13.0...v0.14.0) (2026-11-19)
 
 
