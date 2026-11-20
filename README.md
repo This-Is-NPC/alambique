@@ -162,6 +162,14 @@ first release (0.1.0):
   pooled connection (`pool_timeout:`, 2000 ms) (design.md, sections 3 and 9).
   In `[:alambique, :cell, :hibernate]`, an eviction now reports
   `reason: :evict` (it was `:request`), and `compaction: :busy` is new.
+- 0.15.0: on a node with 2 to 4 dirty IO schedulers, the default
+  `sql: [max_concurrent_statements:]` keeps 2 slots, so reads are no longer
+  refused with `:busy` while a scheduler is free. `lazy_restore:
+  [verify_reads: true]` (default `false`) makes owner reads wait for the end
+  of a lazy wake's download instead of holding a dirty IO scheduler on a
+  missing page. A guide sizes a node with one or two CPUs (`+SDio`,
+  [how to size a node](docs/how-to-size-a-node.md)). There is no breaking
+  change.
 
 The full list is in [CHANGELOG.md](CHANGELOG.md).
 
