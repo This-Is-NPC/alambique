@@ -341,10 +341,15 @@ defmodule Alambique.Cell do
   # A write that arrives while the file is still being filled waits for the
   # end of the hydration (design §16): until then the pages the transaction
   # reads, and the CRCs of its segment, may come from a file that no checksum
-  # has covered. The call keeps counting in `load`, so the cell is not idle.
+  # has covered. With `verify_reads` so does a read, so that no statement
+  # blocks a dirty IO scheduler on a page that is not there yet. The call keeps
+  # counting in `load`, so the cell is not idle.
   defp parkable?(%State{mode: :serving, hydrator: hydrator} = state, request)
-       when hydrator != nil,
-       do: state.config.lazy_restore.verify_writes and write_call?(request)
+       when hydrator != nil do
+    lazy = state.config.lazy_restore
+
+    (lazy.verify_writes and write_call?(request)) or (lazy.verify_reads and read_call?(request))
+  end
 
   defp parkable?(_state, _request), do: false
 
@@ -354,12 +359,16 @@ defmodule Alambique.Cell do
   defp write_call?({:migrate, _wake}), do: true
   defp write_call?(_request), do: false
 
+  defp read_call?({:query, _sql, _params, _ms}), do: true
+  defp read_call?({:checked_query, _sql, _params, _ms}), do: true
+  defp read_call?(_request), do: false
+
   defp park(state, call, from) do
     parked = [{call, from, System.monotonic_time()} | state.parked]
     {:noreply, %{state | parked: parked}}
   end
 
-  # Runs the parked writes in arrival order once the file is complete.
+  # Runs the parked calls in arrival order once the file is complete.
   defp release_parked(%State{parked: []} = state), do: {:noreply, Publisher.after_ack(state)}
 
   defp release_parked(state) do

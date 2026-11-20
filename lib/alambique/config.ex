@@ -176,7 +176,8 @@ defmodule Alambique.Config do
     batch_bytes: 4_194_304,
     miss_pages: 16,
     verify_bytes: 1_048_576,
-    verify_writes: true
+    verify_writes: true,
+    verify_reads: false
   ]
 
   @query_defaults [
@@ -977,13 +978,14 @@ defmodule Alambique.Config do
     opts = checked_keyword!(:lazy_restore, opts, Keyword.keys(@lazy_defaults))
     merged = Keyword.merge(@lazy_defaults, opts)
 
-    for {key, value} <- Keyword.delete(merged, :verify_writes),
+    for {key, value} <- Keyword.drop(merged, [:verify_writes, :verify_reads]),
         not (is_integer(value) and
                (value > 0 or (key in [:min_bytes, :verify_bytes] and value == 0))),
         do: bad!(":lazy_restore #{inspect(key)} must be a positive integer")
 
-    unless is_boolean(merged[:verify_writes]),
-      do: bad!(":lazy_restore :verify_writes must be a boolean")
+    for key <- [:verify_writes, :verify_reads],
+        not is_boolean(merged[key]),
+        do: bad!(":lazy_restore #{inspect(key)} must be a boolean")
 
     Map.new(merged)
   end

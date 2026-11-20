@@ -188,7 +188,13 @@ defmodule Alambique do
       checksum before its pages are used, default 1 048 576; 0 turns it off) and
       `:verify_writes` (a write waits for the end of the hydration and its
       checksum, default `true`; `false` runs it at once on a file that is still
-      being filled).
+      being filled) and `:verify_reads` (the same wait for a read of the owner,
+      default `false`: a read runs at once and, on a page the file does not
+      have yet, holds a dirty IO scheduler until the page arrives, for up to
+      `:op_timeout_ms` plus one second. `true` keeps reads off the schedulers
+      on a node with one or two, and gives up the early reads of a lazy wake).
+      Replica reads and `Alambique.Query` read their own downloaded files, so
+      the option does not apply to them.
     * `:drain` - how `drain/2` and the stop of the instance hibernate the cells
       (design §8): a keyword list with `:concurrency` (cells hibernating at
       once, default 64), `:timeout_ms` (per cell, default 15 000), `:deadline_ms`

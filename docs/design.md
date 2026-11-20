@@ -4241,7 +4241,8 @@ The feed rows the previous owner left unpublished are read from the file and
 uploaded as feed objects, so `Publisher.after_ack/1` hands them over only when
 the hydration ended. `Capture.current?` and the feed floor only read pages and
 upload nothing. The release emits `[:cell, :writes_released]` with the number
-of writes that waited and the wait of the oldest. The wait is for the
+of calls that waited (writes, and reads with `verify_reads`) and the wait of
+the oldest. The wait is for the
 start of the write, not for its acknowledgement: a write that ran would
 already derive its segment CRCs from pages that no checksum has covered
 (`prepare_sums`, below), and the segment would be uploaded before the check.
@@ -4249,6 +4250,24 @@ The hydrator needs no call of the cell (it reads and installs pages through
 the store and the NIF), so the wait cannot deadlock. The cost is that the
 first write after a lazy wake takes as long as the rest of the download
 (§12). With the option off, writes run at once, as described next.
+
+**Read gate.** `lazy_restore: [verify_reads: true]` (default `false`) parks the
+owner's reads the same way, through the same `parked` list and the same
+release: `:query` and `:checked_query` calls, which include the reads that fall
+back from a replica to the owner. A read that is not parked runs at once and,
+on a page the file does not have, blocks inside `sqlite_run` on the dirty IO
+scheduler (the VFS waits on the page map for up to `op_timeout_ms` + 1 s, see
+`Hydration.restore_opts/1`). On a node with one or two dirty IO schedulers
+that stalls every commit and read of the node, so the option moves the wait to
+the mailbox of the cell: no read reaches `sqlite_run` before the hydration
+ended, and the hydrator needs no scheduler to finish. The price is the early
+reads of a lazy wake: the first read waits for the whole download, like the
+first write. The deadline and the failure are those of a parked write (a late
+call is dropped; `{:error, {:hydration_failed, reason}}`). Replica reads and
+`Alambique.Query` read the files of their own replicas, which are downloaded
+before they are opened, so they never wait on a lazy page and the option does
+not apply to them. With the option on the window of the limit below is closed
+for reads too.
 
 **Writes during hydration.** (`verify_writes: false`.) A write goes to the WAL as usual. Before a
 checkpoint writes a whole page, the VFS marks it local, and a fetch that
@@ -4325,7 +4344,8 @@ which acknowledge nothing; the mismatch stops the cell with
 are served. Raising `:verify_bytes` narrows the window for reads at the price
 of larger reads. With `verify_writes: false` the window is also open for
 writes: the cell can acknowledge writes whose segment CRCs derive from the
-damaged page, and the mismatch stops it afterwards. A page-1 range
+damaged page, and the mismatch stops it afterwards. With `verify_reads: true`
+the window is closed for reads as well. A page-1 range
 read that fails falls back to a full restore; a wake still fails when the
 store is unreachable or an object of the chain is gone. Raise `idle_timeout_ms`
 for very large cells.

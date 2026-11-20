@@ -104,6 +104,105 @@ defmodule Alambique.LazyRestoreTest do
              Alambique.query(inst, cell, "SELECT count(*), sum(length(v)) FROM t")
   end
 
+  describe "reads while the file is filling (verify_reads)" do
+    # Reports every page a statement misses, from the hydrator that serves it.
+    defp watch_misses(cell) do
+      test = self()
+
+      CrashPoints.arm(
+        :hydrate_before_miss,
+        fn _, %{pgno: pgno} -> send(test, {:page_miss, pgno}) end,
+        times: :infinity,
+        when: &match?(%{cell: ^cell}, &1)
+      )
+    end
+
+    # Wakes the cell and drops the misses of the wake itself, which reads
+    # pages too: what arrives afterwards belongs to the statements.
+    defp wake_and_flush(inst, cell) do
+      assert {:ok, _node} = Alambique.touch(inst, cell)
+      refute hydrated?(cell)
+      flush_misses()
+    end
+
+    defp flush_misses do
+      receive do
+        {:page_miss, _} -> flush_misses()
+      after
+        0 -> :ok
+      end
+    end
+
+    test "with verify_reads a read waits for the end of the hydration, off the dirty IO", ctx do
+      cell = seed(ctx, 300)
+      release = hold_hydration(cell)
+      watch_misses(cell)
+      inst = lazy_instance(ctx, lazy_restore: @lazy ++ [verify_reads: true])
+      config = Alambique.Config.fetch!(inst)
+      wake_and_flush(inst, cell)
+
+      read = Task.async(fn -> Alambique.query(inst, cell, "SELECT n FROM t WHERE n = 5") end)
+
+      checked =
+        Task.async(fn ->
+          Alambique.query(inst, cell, "SELECT n FROM t WHERE n = 6", [], verify_lease: true)
+        end)
+
+      pid = Alambique.Cell.whereis(config, cell)
+      eventually(fn -> length(:sys.get_state(pid).parked) == 2 end)
+      refute hydrated?(cell)
+      # No statement ran, so none waits for a page.
+      assert Task.yield(read, 200) == nil
+      refute_received {:page_miss, _}
+
+      release.()
+      assert {:ok, %{rows: [[5]]}} = Task.await(read, 30_000)
+      assert {:ok, %{rows: [[6]]}} = Task.await(checked, 30_000)
+      assert hydrated?(cell)
+      refute_received {:page_miss, _}
+
+      assert {%{count: 2}, _} = await_event([:alambique, :cell, :writes_released], cell, 5_000)
+      assert :sys.get_state(pid).parked == []
+    end
+
+    test "without verify_reads a read runs at once and misses the page", ctx do
+      cell = seed(ctx, 300)
+      release = hold_hydration(cell)
+      watch_misses(cell)
+      inst = lazy_instance(ctx)
+      wake_and_flush(inst, cell)
+
+      assert {:ok, %{rows: [[5]]}} = Alambique.query(inst, cell, "SELECT n FROM t WHERE n = 5")
+      assert_received {:page_miss, _}
+      refute hydrated?(cell)
+      release.()
+    end
+
+    test "a read that waits gets the error of a failed hydration", ctx do
+      cell = seed(ctx, 300)
+      {:ok, keys, nil} = MemoryStore.list(ctx.store_config, "", nil, 10_000)
+
+      for key <- keys, String.ends_with?(key, ".ltx") do
+        {:ok, body, _etag, _meta} = MemoryStore.get(ctx.store_config, key)
+
+        {:ok, _} =
+          MemoryStore.put(
+            ctx.store_config,
+            key,
+            Alambique.LtxTamper.alter_frames(body, :last),
+            :none,
+            %{}
+          )
+      end
+
+      inst =
+        lazy_instance(ctx, lazy_restore: @lazy ++ [verify_bytes: 0, verify_reads: true])
+
+      assert {:error, {:hydration_failed, _}} =
+               Alambique.query(inst, cell, "SELECT n FROM t WHERE n = 5")
+    end
+  end
+
   describe "writes while the file is filling (design 16)" do
     test "a write waits for the end of the hydration and is then acknowledged", ctx do
       cell = seed(ctx, 300)
@@ -349,6 +448,15 @@ defmodule Alambique.LazyRestoreTest do
 
     assert_raise ArgumentError, ~r/verify_writes must be a boolean/, fn ->
       Alambique.Config.build(base ++ [lazy_restore: [verify_writes: 1]])
+    end
+
+    assert %{lazy_restore: %{verify_reads: false}} = Alambique.Config.build(base)
+
+    assert %{lazy_restore: %{verify_reads: true}} =
+             Alambique.Config.build(base ++ [lazy_restore: [verify_reads: true]])
+
+    assert_raise ArgumentError, ~r/verify_reads must be a boolean/, fn ->
+      Alambique.Config.build(base ++ [lazy_restore: [verify_reads: 1]])
     end
 
     assert_raise ArgumentError, ~r/unknown :lazy_restore/, fn ->
