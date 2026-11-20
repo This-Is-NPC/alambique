@@ -137,7 +137,7 @@ the fence.
    download, or raise it to check larger files.
    `lazy_restore: [verify_writes:]` (default `true`) makes the first write
    after a lazy wake wait until the whole file is downloaded and its checksum
-   matched; reads do not wait. Measured on a 297 MB cell (`mise run
+   matched; reads do not wait (see `verify_reads` below). Measured on a 297 MB cell (`mise run
    bench:lazy 256`, one run on a loaded laptop), a write took 210 ms to
    acknowledge without the wait and 1.37 s with it (memory store), and 1.86 s
    against 3.71 s with 20 ms added to each request. The wait is roughly the
@@ -145,15 +145,25 @@ the fence.
    matters more than protection from a damaged object: the cell then
    acknowledges writes whose checksums derive from pages nobody verified yet
    (design section 16).
+   `lazy_restore: [verify_reads: true]` (default `false`) makes the reads of
+   the owner wait the same way. A read that does not wait and finds a page
+   missing holds a dirty IO scheduler until the page arrives, for up to
+   `op_timeout_ms` plus one second, and on a node with one or two schedulers
+   that stalls every commit and read of the node
+   ([how-to-size-a-node.md](how-to-size-a-node.md)). With the option on the
+   first reads of a lazy wake take as long as the download, so the rule below
+   applies to them too. Replica reads and `Alambique.Query` are not affected:
+   they read their own downloaded copy.
    **Rule:** the download time of your largest cell must stay under
    `call_timeout_ms` (default 15 000 ms) or under the caller's deadline, or the
-   first writes after a lazy wake time out. From the figures above, the memory
+   first writes (and, with `verify_reads`, reads) after a lazy wake time out. From the figures above, the memory
    store delivers about 217 MB/s (297 MB in 1.37 s) and 80 MB/s with 20 ms per
    request (297 MB in 3.71 s). At the default 15 s that is about 3.2 GB and
    1.2 GB. A real store is slower than the in-memory one, so measure yours with
    `mise run bench:lazy` and divide `call_timeout_ms` by the time per MB.
    `[:alambique, :cell, :writes_released]` reports how long the first writes
-   waited (`wait_ms`) and how many there were (`count`).
+   waited (`wait_ms`) and how many there were (`count`; reads count with
+   `verify_reads`).
 
 6. Check `restore: [fetch_concurrency:]` (default 16) and
    `restore: [max_inflight_bytes:]` (default 64 MiB). A full restore reads the
