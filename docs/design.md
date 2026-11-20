@@ -1738,7 +1738,9 @@ the connection, in the NIF, and not by looking at the SQL text:
   slot gets `{:error, :busy}` at once, so the cell process never waits for
   one. Owner reads (checked or not), replica reads and `Alambique.Query` (whose cells queue behind a per-query gate, §14, so the query itself never takes more slots than the limit) use
   `sql: [max_concurrent_statements:]` as the limit (default: the dirty IO
-  schedulers minus two, at least 1). The count is VM-wide (the dirty IO pool
+  schedulers minus two, at least `min(schedulers, 2)`: 1, 2, 2, 2, 3 … 8 for
+  1 … 10 schedulers; the statements of a write hold slots too, so a single
+  slot refused reads on 2 schedulers while one was free). The count is VM-wide (the dirty IO pool
   is per VM, so the counter is shared by every Alambique instance in the
   BEAM), while the limit is per instance: each instance refuses its reads when
   the shared count reaches its own limit. Instances in one VM should use the

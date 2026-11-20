@@ -331,7 +331,8 @@ defmodule Alambique do
       `{:error, :statement_timeout}` or `{:error, :result_too_large}`.
       `:max_concurrent_statements` is the most reads (owner, replica and
       cross-cell) that run on the node at once, so that commits keep dirty IO
-      schedulers (default the dirty IO schedulers minus two, at least 1); a
+      schedulers (default the dirty IO schedulers minus two, but at least 2
+      when there are 2 or more, and 1 when there is 1); a
       read over it gets `{:error, :busy}` at once. The count is VM-wide,
       shared by every instance in the VM, and the limit is per instance: an
       instance refuses its reads when the shared count reaches its own limit,

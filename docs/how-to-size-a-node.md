@@ -131,9 +131,15 @@ per request, so 15 s covers about 3.2 GB and 1.2 GB; measure your store with
 Every SQLite call runs on a dirty IO scheduler, and the VM has 10 by default
 (`+SDio`). Reads, cross-cell queries and the statements of a write share a
 node-wide limit, `sql: [max_concurrent_statements:]`, which defaults to the
-dirty IO schedulers minus two. A read over the limit gets `{:error, :busy}` at
-once, and the other schedulers stay free for commits, leases and the library's
-own statements. A node with 10 schedulers allows 8 reads at once. The count is shared by
+dirty IO schedulers minus two, but never below `min(schedulers, 2)`. A read
+over the limit gets `{:error, :busy}` at once, and the other schedulers stay
+free for commits, leases and the library's own statements. A node with 10
+schedulers allows 8 reads at once; one with 1 to 4 schedulers allows 1, 2, 2
+and 2. The floor of 2 exists because the statements of a write hold slots
+too: with 2 schedulers and one slot, a read was refused while a scheduler was
+free (about 2.2 % of the requests in a downstream node's load run). Where the
+limit equals the schedulers, a commit may wait in the scheduler queue behind
+reads instead of the read being refused. The count is shared by
 every Alambique instance in the VM, while the limit is set per instance: each
 instance refuses its reads when the shared count reaches its own limit. Give
 the instances of one VM the same value; with different values the lower one

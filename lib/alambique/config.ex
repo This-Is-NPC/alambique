@@ -1022,17 +1022,25 @@ defmodule Alambique.Config do
   end
 
   # Statements of callers run on the dirty IO schedulers, which the commits of
-  # the node share; the default leaves two for them.
+  # the node share; the default leaves two for them. With few schedulers it
+  # keeps two slots: a write's statements hold slots too, so one slot refused
+  # reads while a scheduler was free.
   defp sql(opts, op_timeout) do
     options!(
       :sql,
       opts,
-      [statement_timeout_ms: op_timeout, max_concurrent_statements: default_statement_slots()] ++
+      [
+        statement_timeout_ms: op_timeout,
+        max_concurrent_statements:
+          default_statement_slots(:erlang.system_info(:dirty_io_schedulers))
+      ] ++
         @sql_defaults
     )
   end
 
-  defp default_statement_slots, do: max(:erlang.system_info(:dirty_io_schedulers) - 2, 1)
+  @doc false
+  @spec default_statement_slots(pos_integer) :: pos_integer
+  def default_statement_slots(dirty_io), do: max(dirty_io - 2, min(dirty_io, 2))
 
   defp options!(name, opts, defaults) do
     opts = checked_keyword!(name, opts, Keyword.keys(defaults))

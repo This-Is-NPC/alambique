@@ -75,6 +75,12 @@ defmodule Alambique.ConfigOptionsTest do
     end
   end
 
+  test "the statement limit is the dirty IO schedulers minus two, at least two slots" do
+    # 1 thread: statements queue anyway; 2 to 4: reads use both threads.
+    limits = for dio <- 1..10, do: Alambique.Config.default_statement_slots(dio)
+    assert limits == [1, 2, 2, 2, 3, 4, 5, 6, 7, 8]
+  end
+
   test "the operational groups have documented defaults", ctx do
     config = Alambique.Config.build(base(ctx))
 
