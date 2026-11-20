@@ -1,7 +1,8 @@
 # How to size the memory of a node
 
 **The question:** how much memory does a node need for N awake cells, and
-which options keep it from running out when more cells wake?
+which options keep it from running out when more cells wake? The last section
+answers the same question for CPU on a node with one or two CPUs.
 
 This guide stands alone. The measurements behind the numbers are in
 [design.md](design.md), section 12, "Memory of an awake cell"; the admission
@@ -164,6 +165,57 @@ for one query). When other callers hold the slots, the cells of a query get
 `:busy` at once like any read. Lower the share if a query over many cells
 should leave more of the pool to other work.
 
+## A node with one or two CPUs
+
+On a container with a CPU quota of one or two CPUs, the 10 dirty IO threads
+of the default are too many. The VM opens 10 whatever the quota, and a burst of
+them spends the quota of a 100 ms period at once, so the node is throttled and
+every request waits for the next period.
+
+1. Set the dirty IO schedulers to the CPU quota: `+SDio 1` for 1 CPU, `+SDio 2`
+   for 2. In a release, put the flag in `vm.args`, or set
+   `ERL_FLAGS="+SDio 1"`. Check it with
+   `:erlang.system_info(:dirty_io_schedulers)`.
+2. Leave `sql: [max_concurrent_statements:]` unset. Its default is the
+   schedulers minus two, but at least `min(schedulers, 2)`: 1 for 1, and 2 for
+   2, 3 and 4 schedulers. With `+SDio 1` two statements never run at once, so
+   the limit of 1 never refuses a read. With `+SDio 2` the old default of 1
+   refused reads while a thread was free, because the statements of a write
+   hold slots too.
+3. Choose how lazy reads behave. A read of a lazily restored cell that misses a
+   page holds a dirty IO thread until the page arrives, for up to
+   `op_timeout_ms` plus one second. With one or two threads that stalls every
+   commit and read of the node, and a store with 50 to 150 ms per request
+   makes each miss longer. Pick one, and
+   see [how-to-speed-up-a-wake.md](how-to-speed-up-a-wake.md) step 5:
+   - `lazy_restore: [verify_reads: true]`: the reads of a lazily woken cell
+     wait in the mailbox of the cell until the download ends. No read holds a
+     thread. The early reads of a lazy wake are lost: the first read takes as
+     long as the download, like the first write.
+   - `lazy_restore: false`: a cell of `min_bytes` (default 4 MiB) or more is
+     downloaded whole before it is served, in Elixir and without a dirty IO
+     thread (smaller cells already were). The wake of big cells is slower.
+4. No NIF of the library needs a second dirty IO thread to finish: every wait
+   inside a dirty call is released by a normal or `DirtyCpu` NIF or by Elixir,
+   so `+SDio 1` cannot deadlock. This is read from the code
+   (`native/alambique_nif/src`), not proven by a test.
+
+**Measured by a downstream node (Atanor, not by this library).** Atanor
+`4e11d57` on Alambique 0.14.0, on a node with a quota of 1 CPU, on its load
+host (`howlsroom`), at 490 requests per second over HTTP, half of them writes,
+store on disk, 180 s per step, 2 runs per arm:
+
+| `+SDio` | `max_concurrent_statements` | `:busy` per step | p99 | Throttled in 180 s |
+| --- | --- | --- | --- | --- |
+| 10 (default) | 8 | 0 | 274 to 377 ms | 152 to 173 s |
+| 2 | 1 (the default before this change) | about 1 800 (2.2 % of the requests) | 179 to 190 ms | about 101 to 103 s |
+| 1 | 1 | 0 | 135 to 143 ms | 39 to 41 s |
+
+The node was throttled less the fewer threads it had. The row with 2 threads is the
+reason for the floor of 2 slots; its figures are from the old default, and the
+library has not repeated that arm with the new one. The lazy options of step 3
+were not part of this run.
+
 ## Check it
 
 1. Run `mise run bench:memory` with your `cache_kib` in
@@ -221,6 +273,9 @@ should leave more of the pool to other work.
   pages that no longer fit from the operating system's file cache. Raise
   `cache_kib` for those cells, or accept about 7 % at 512 KiB on a 4.6 MB
   table (design section 12).
+
+- **The node is throttled and `:erlang.system_info(:dirty_io_schedulers)` is
+  10.** The quota is one or two CPUs: see "A node with one or two CPUs".
 
 ## Next steps
 

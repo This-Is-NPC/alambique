@@ -12,7 +12,7 @@
 | [how-to-configure-the-s3-store.md](how-to-configure-the-s3-store.md) | How do I point the S3 store at AWS or a compatible server, with static keys or with temporary credentials that renew? |
 | [how-to-swap-a-node.md](how-to-swap-a-node.md) | How do I replace one node by another that started beside it, with no cluster between them, and what do callers see meanwhile? |
 | [how-to-discover-nodes.md](how-to-discover-nodes.md) | How do nodes find each other through the store, so that my application can connect them? |
-| [how-to-size-a-node.md](how-to-size-a-node.md) | How much memory does a node need for N awake cells, and which `awake` options keep it from running out? |
+| [how-to-size-a-node.md](how-to-size-a-node.md) | How much memory does a node need for N awake cells, and which `awake` options keep it from running out? What to set on a node with one or two CPUs? |
 | [how-to-speed-up-a-wake.md](how-to-speed-up-a-wake.md) | Why does the first call to a hibernated cell take long, how do I measure it for each user, which options change it, and what does a small node pay when many cells wake at once? |
 | [how-to-load-test.md](how-to-load-test.md) | How many commits, awake cells, wakes and cross-cell queries does one node carry in a CPU- and memory-limited container, and what does each unit cost? |
 | [how-to-size-storage.md](how-to-size-storage.md) | How many bytes does the store receive and keep for a cell that is written once in a while, what causes the difference from the data, and which options shrink it? |
