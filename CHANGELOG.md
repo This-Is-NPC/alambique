@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.16.0](https://github.com/This-Is-NPC/alambique/compare/v0.15.0...v0.16.0) (2026-11-21)
+
+
+### Features
+
+* **load:** let a wakes round add variants ([c71483d](https://github.com/This-Is-NPC/alambique/commit/c71483df3fc34f40a13b2d01663498b4088e8dcf))
+* **load:** set service keys per scenario ([932fd93](https://github.com/This-Is-NPC/alambique/commit/932fd93369f83a927315c495f7112281088023d1))
+
 ## [0.15.0](https://github.com/This-Is-NPC/alambique/compare/v0.14.0...v0.15.0) (2026-11-20)
 
 
