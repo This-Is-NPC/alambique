@@ -258,7 +258,8 @@ def measure_table(name):
 
 
 def scenario_table(cpus, memory):
-    return Table({"cpus": positive(cpus), "memory": Leaf("size", memory), "data_tmpfs": Leaf("size", "1g")})
+    return Table({"cpus": positive(cpus), "memory": Leaf("size", memory), "data_tmpfs": Leaf("size", "1g"),
+                  "service": Table(SERVICE_LEAVES, sparse=True)})
 
 
 SCHEMA = Table({
@@ -519,7 +520,7 @@ def case_config(config, scenario, measure, variant):
         "scenario": scenario, "measure": measure, "variant": variant or "default",
         "cpus": scen["cpus"], "memory_mb": size_mb(scen["memory"]), "data_mb": size_mb(scen["data_tmpfs"]),
         "store": {**store, "tmpfs_mb": size_mb(store["tmpfs_size"])},
-        "service": layer("service", config["service"]),
+        "service": layer("service", deep_update(config["service"], scen["service"])),
         "generator": config["generator"], "report": config["report"],
         "attempts": config["judging"]["attempts"],
         "steps": steps, "judging": judging, "workload": entry["workload"],

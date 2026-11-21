@@ -30,6 +30,7 @@ cgroup_root = "/sys/fs/cgroup/system.slice"   # where Docker's systemd driver ke
 cpus = 1.0             # CPU limit of the service
 memory = "512m"        # memory limit of the service, without its data tmpfs (k, m or g)
 data_tmpfs = "1g"      # size of the service's data tmpfs; the container limit is memory plus this
+# [scenarios.A.service]  # the [service] keys for this scenario only, under a measure's and a variant's own (for example erl_aflags = "+Mdai max +MMmcs 0 +SDio 1")
 
 [scenarios.B]
 cpus = 2.0
@@ -45,7 +46,7 @@ dir = ""             # on disk: the directory the case creates for the store, it
 latency_ms = 25.0    # delay the service adds to every store request; 0 adds none
 image = "chrislusf/seaweedfs:4.48"   # the store's image
 
-# The service: one Alambique node. 0 or "" keeps the library's default. Measures override some keys (below).
+# The service: one Alambique node. 0 or "" keeps the library's default. Scenarios and measures override some keys (below).
 [service]
 image = "alambique-load:local"        # built by mise run load:image
 erl_aflags = "+Mdai max +MMmcs 0"     # VM flags of the service

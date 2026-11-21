@@ -269,7 +269,7 @@ recorded id when it ends, fails or is interrupted, and never kills by name.
 | `[round]` | `cases`: the ordered list `"scenario/measure[/variant]"` to run (a measure without a variant runs all of its variants); when empty, `scenarios` x `measures` run, as before. `step_timeout_s` and `timeout_s`: time limits (below). |
 | `[output]` | `dir` and `name` of the results directory. |
 | `[host]` | `ssh`, `repo`, `results`, `timeout_s` for `--remote`; `cgroup_root`. |
-| `[scenarios.A]`, `[scenarios.B]` | `cpus`, `memory` and `data_tmpfs` of the service container. |
+| `[scenarios.A]`, `[scenarios.B]` | `cpus`, `memory` and `data_tmpfs` of the service container; `service` overrides the `[service]` keys for that scenario, for example `[scenarios.A.service]` with `erl_aflags = "+Mdai max +MMmcs 0 +SDio 1"`. |
 | `[store]` | `backing` (`tmpfs` or `disk`), `tmpfs_size`, `dir`, `latency_ms` added to every store request, `image`. |
 | `[service]` | `image`, `erl_aflags`, `wal_checkpoint_bytes`, `idle_timeout_ms`, `max_cells`, `cache_kib`, `opts`. |
 | `[generator]` | `arrivals`, `max_outstanding`, `drain_s`, `timeout_s` of one operation. |
@@ -287,8 +287,9 @@ default to bisecting from 50, 5 and 1 (the `large` variant of `commits` from
 5) by 2 up to 3200, 320 and 64 (320 for `large`); `cells` goes from 500 to
 32 000 with no refinement and no confirmation.
 
-**Overrides by measure and variant.** The `store`, `service` and `judging`
-tables of the top level apply to every case. `[measures.<m>.store]` (and
+**Overrides by scenario, measure and variant.** The `store`, `service` and `judging`
+tables of the top level apply to every case. `[scenarios.<s>.service]` changes
+`service` keys for that scenario; a measure or a variant overrides it in turn. `[measures.<m>.store]` (and
 `.service`, `.judging.<criterion>`) change keys for that measure only, and
 `[measures.<m>.variant.<v>.store]` (and `.service`, `.steps`) for one variant,
 and enter the hash of those cases only. The defaults use this: `cells` keeps

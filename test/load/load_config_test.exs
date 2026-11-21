@@ -229,6 +229,40 @@ defmodule Alambique.Load.LoadConfigTest do
              ]
     end
 
+    test "a scenario sets service keys under the measure and variant", %{tmp_dir: dir} do
+      path =
+        write(dir, """
+        [round]
+        scenarios = ["A", "B"]
+        measures = ["wakes"]
+        [service]
+        erl_aflags = "+SDio 10"
+        [scenarios.A.service]
+        erl_aflags = "+SDio 1"
+        [scenarios.B.service]
+        erl_aflags = "+SDio 2"
+        opts = "[]"
+        [measures.wakes]
+        variants = ["plain", "verified"]
+        [measures.wakes.variant.plain]
+        [measures.wakes.variant.verified.service]
+        opts = "[lazy_restore: [verify_reads: true]]"
+        """)
+
+      c =
+        py("""
+        c = lc.load_config(#{inspect(path)}, {})
+        print(json.dumps([[lc.tag(k), lc.case_config(c, *k)['service']['erl_aflags'], lc.case_config(c, *k)['service']['opts']] for k in lc.cases(c)]))
+        """)
+
+      assert c == [
+               ["A/wakes/plain", "+SDio 1", ""],
+               ["A/wakes/verified", "+SDio 1", "[lazy_restore: [verify_reads: true]]"],
+               ["B/wakes/plain", "+SDio 2", "[]"],
+               ["B/wakes/verified", "+SDio 2", "[lazy_restore: [verify_reads: true]]"]
+             ]
+    end
+
     test "o022vm.toml is valid and its cases are the pending ones, in order", %{tmp_dir: _dir} do
       c =
         py("""
