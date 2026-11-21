@@ -205,6 +205,30 @@ defmodule Alambique.Load.LoadConfigTest do
       assert c == [["A/cells/default", 0], ["A/cells/cache1024", 1024]]
     end
 
+    test "a wakes variant can be added", %{tmp_dir: dir} do
+      path =
+        write(dir, """
+        [round]
+        measures = ["wakes"]
+        [measures.wakes]
+        variants = ["plain", "verified"]
+        [measures.wakes.variant.plain]
+        [measures.wakes.variant.verified.service]
+        opts = "[lazy_restore: [verify_reads: true]]"
+        """)
+
+      c =
+        py("""
+        c = lc.load_config(#{inspect(path)}, {})
+        print(json.dumps([[lc.tag(k), lc.case_config(c, *k)['service']['opts']] for k in lc.cases(c)]))
+        """)
+
+      assert c == [
+               ["A/wakes/plain", ""],
+               ["A/wakes/verified", "[lazy_restore: [verify_reads: true]]"]
+             ]
+    end
+
     test "o022vm.toml is valid and its cases are the pending ones, in order", %{tmp_dir: _dir} do
       c =
         py("""
@@ -333,14 +357,14 @@ defmodule Alambique.Load.LoadConfigTest do
     test "an unknown scenario, measure or variant in the cases", %{tmp_dir: dir} do
       assert problems(dir, """
              [round]
-             cases = ["C/cells", "A/disk", "A/commits/huge", "A/wakes/small", "A/cells/default", "A/cells/default", "A"]
+             cases = ["C/cells", "A/disk", "A/commits/huge", "A/query/small", "A/cells/default", "A/cells/default", "A"]
              measures = ["disk"]
              """) == [
                "round.measures[0]: 'disk' is not one of commits, cells, wakes, query",
                "round.cases[0]: unknown scenario 'C', expected one of A, B",
                "round.cases[1]: unknown measure 'disk', expected one of commits, cells, wakes, query",
                "round.cases[2]: unknown variant 'huge' of commits, expected one of small, large",
-               "round.cases[3]: unknown variant 'small' of wakes, expected one of none (it has no variants)",
+               "round.cases[3]: unknown variant 'small' of query, expected one of none (it has no variants)",
                "round.cases[5]: 'A/cells/default' is listed twice",
                "round.cases[6]: 'A' is not scenario/measure or scenario/measure/variant"
              ]
