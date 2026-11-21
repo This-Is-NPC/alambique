@@ -14,6 +14,12 @@ about it, and where the evidence is.
   `compaction: [release_deadline_ms:]`, and the next node reads a longer tail
   ([design.md](design.md), section 9). `move/4` and `hibernate/3` take a
   larger `release_deadline_ms:` for one call.
+- Litestream 0.5.18 cannot restore the latest state of a cell whose chain has
+  a gap (a cell that crashed with uploads in flight, until a later owner
+  writes over it): restore it with `mix alambique.restore`, or with Litestream
+  up to a TXID before the gap. Alambique does not apply files written by
+  Litestream. See
+  [segment-format.md](segment-format.md#litestream-compatibility).
 
 ## Load measurements
 
