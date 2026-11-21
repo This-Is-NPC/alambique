@@ -5,7 +5,7 @@ defmodule Alambique.SwapClusterTest do
   Node A serves cells under load. Node B starts beside it as a separate
   instance over the same store, with no cluster between them. A small router
   sends every request to B; B refuses a cell A still holds with the lease
-  error, and the client retries after a short Retry-After, as Atanor does with
+  error, and the client retries after a short Retry-After, as a downstream client does with
   a 503. Then A drains and stops. Every acknowledged write must be present
   once, and the only errors seen are lease errors (`:unavailable`) and
   `:draining`. The swap runs twice: with two node ids and with one.

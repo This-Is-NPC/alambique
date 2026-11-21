@@ -2182,7 +2182,7 @@ average), and the longest tail of a row was 159 to 310 TXIDs against a cap of
 256. With passes started as slots free, the same run had no sample with a cell
 at the cap, and the longest tail of a row was 92 to 113. Without the busy
 loops, at 30 commits per second per cell, the longest tail went from 283-336
-to 141-228. Atanor's slow wakes (500 to 760 level-0 GETs) came from this on a
+to 141-228. Slow wakes measured downstream (500 to 760 level-0 GETs) came from this on a
 node whose passes took longer still: a cell at the cap waited for the round
 that was running and then for its own pass, each as long as the slowest pass of
 the round.
