@@ -12,7 +12,7 @@ store.
 
 Use it when you have many small databases, one per user, organization or
 mailbox, and want them to move between nodes without a database server. It
-replicates as LTX files (the format Litestream 0.5 writes; Litestream 0.5.18 restores them, with [one limit](docs/segment-format.md#litestream-compatibility)), restores lazily,
+replicates as LTX files (the format Litestream 0.5 writes; Litestream 0.5.18 restores them), restores lazily,
 compacts its history, migrates schemas with an N-1 window, moves cells between
 locations and publishes a per-cell change feed.
 
@@ -295,23 +295,6 @@ UTF-8 locale. Run with `LANG=C.UTF-8`, for example
   leases also carry a random incarnation per start (design section 5).
 - Docker, only to run the SeaweedFS of the example and the SeaweedFS tests.
   A store that meets the S3 requirement above works instead.
-
-## Limitations
-
-- Write access to the bucket prefix is full control of its cells: checksums
-  detect corruption, not forgery. Give each deployment its own prefix and
-  readers a read-only credential
-  ([docs/design.md](docs/design.md), section 3.1). No prefix may be a path
-  prefix of another instance's in the same store (`app` and `app/cells`
-  share keys).
-- A file system whose writes can stall stalls every write of every cell. See
-  [docs/how-to-operate-a-cell.md](docs/how-to-operate-a-cell.md), step 10.
-- On a saturated CPU, the compaction at the release of a cell can be cut by
-  `compaction: [release_deadline_ms:]`, and the next node reads a longer tail
-  ([docs/design.md](docs/design.md), section 9). `move/4` and `hibernate/3`
-  take a larger `release_deadline_ms:` for one call.
-- Known defects and limits are listed in
-  [docs/what-does-not-work.md](docs/what-does-not-work.md).
 
 ## Documentation
 

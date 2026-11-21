@@ -25,7 +25,7 @@
 | [how-to-roll-out-a-schema-change.md](how-to-roll-out-a-schema-change.md) | How do I change the schema while old and new code run together? |
 | [telemetry.md](telemetry.md) | Which telemetry events does Alambique emit, and with what data? |
 | [storage-compatibility.md](storage-compatibility.md) | Which object stores pass the conditional-write tests? |
-| [what-does-not-work.md](what-does-not-work.md) | Which known defects are still open? |
+| [known-limitations.md](known-limitations.md) | What are the known limitations? |
 | [contributing.md](contributing.md) | How do I build, test and measure the project? |
 
 Recommended path: read the project [README](../README.md), then
