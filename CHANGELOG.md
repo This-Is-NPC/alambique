@@ -125,7 +125,7 @@
 
 ### ⚠ BREAKING CHANGES
 
-* **compaction:** compaction: [batch_factor:] is no longer an option. [:alambique, :compactor, :tick] is emitted when the passes of a busy period end, with the passes started in it as cells. Para o Atanor: it does not set batch_factor, nothing to change there.
+* **compaction:** compaction: [batch_factor:] is no longer an option. [:alambique, :compactor, :tick] is emitted when the passes of a busy period end, with the passes started in it as cells.
 
 ### Features
 

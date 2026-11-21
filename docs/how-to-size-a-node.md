@@ -200,8 +200,8 @@ every request waits for the next period.
    so `+SDio 1` cannot deadlock. This is read from the code
    (`native/alambique_nif/src`), not proven by a test.
 
-**Measured by a downstream node (Atanor, not by this library).** Atanor
-`4e11d57` on Alambique 0.14.0, on a node with a quota of 1 CPU, on its load
+**Measured by a downstream application (not by this library).** The
+application on Alambique 0.14.0, on a node with a quota of 1 CPU, on its load
 host, at 490 requests per second over HTTP, half of them writes,
 store on disk, 180 s per step, 2 runs per arm:
 

@@ -1,4 +1,4 @@
-# A node swap under continuous load, as the Atanor runtime saw it (design §6.3,
+# A node swap under continuous load, as a downstream runtime saw it (design §6.3,
 # §9): busy cells commit until the old node stops, then a fresh node wakes all
 # of them at once on one CPU.
 #
