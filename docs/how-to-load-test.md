@@ -295,7 +295,8 @@ and enter the hash of those cases only. The defaults use this: `cells` keeps
 its awake cells for the whole ramp (`service.idle_timeout_ms`, `max_cells`), judges
 memory at 90% and has no latency criterion; `wakes` lets cells sleep after 5 s
 and judges the p95; `cache256` is a `service.cache_kib` of 256. A `cells`
-variant can be added with any lowercase name:
+or `wakes` variant can be added with any lowercase name (declare each name
+in `variants` and give it a table, which may be empty):
 
 ```toml
 [measures.cells]

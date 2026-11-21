@@ -231,7 +231,7 @@ VARIANTS = {  # name -> default value of the variant table; None keys: any name
     "wakes": {},
     "query": {},
 }
-OPEN_VARIANTS = ("cells",)
+OPEN_VARIANTS = ("cells", "wakes")
 
 
 def variant_table(measure):
@@ -511,9 +511,9 @@ def case_config(config, scenario, measure, variant):
     entry = config["measures"][measure]
     vtable = entry["variant"].get(variant, {}) if variant else {}
     layer = lambda name, base: deep_update(deep_update(base, entry[name]), vtable.get(name, {}))
+    scen = config["scenarios"][scenario]
     steps = deep_update(entry["steps"], vtable.get("steps", {}))
     judging = deep_update({k: v for k, v in config["judging"].items() if k != "attempts"}, entry["judging"])
-    scen = config["scenarios"][scenario]
     store = layer("store", config["store"])
     return {
         "scenario": scenario, "measure": measure, "variant": variant or "default",
