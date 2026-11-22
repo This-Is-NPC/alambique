@@ -42,9 +42,9 @@ defmodule Alambique.NodesTest do
     ctx = ctx(t)
 
     assert {:ok, %Nodes{} = entry} =
-             Nodes.register(ctx, "n1", "i1", "10.0.0.1:4369", meta: %{"az" => "a"})
+             Nodes.register(ctx, "n1", "i1", "192.0.2.1:4369", meta: %{"az" => "a"})
 
-    assert %{node_id: "n1", incarnation: "i1", advertise: "10.0.0.1:4369", meta: %{"az" => "a"}} =
+    assert %{node_id: "n1", incarnation: "i1", advertise: "192.0.2.1:4369", meta: %{"az" => "a"}} =
              entry
 
     assert entry.seq == 1 and entry.released == false
@@ -52,7 +52,12 @@ defmodule Alambique.NodesTest do
 
     assert {:ok, body, _etag, _} = mod.get(conf, "#{t.prefix}/nodes/n1")
 
-    assert %{"node_id" => "n1", "incarnation" => "i1", "advertise" => "10.0.0.1:4369", "seq" => 1} =
+    assert %{
+             "node_id" => "n1",
+             "incarnation" => "i1",
+             "advertise" => "192.0.2.1:4369",
+             "seq" => 1
+           } =
              Jason.decode!(body)
 
     assert {:ok, [], nil} = mod.list(conf, "#{t.prefix}/cells/", nil, 10)
