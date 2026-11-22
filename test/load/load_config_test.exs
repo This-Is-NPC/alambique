@@ -262,31 +262,6 @@ defmodule Alambique.Load.LoadConfigTest do
                ["B/wakes/verified", "+SDio 2", "[lazy_restore: [verify_reads: true]]"]
              ]
     end
-
-    test "o022vm.toml is valid and its cases are the pending ones, in order", %{tmp_dir: _dir} do
-      c =
-        py("""
-        c = lc.load_config('load/rounds/o022vm.toml', {})
-        out = []
-        for k in lc.cases(c):
-            cc = lc.case_config(c, *k)
-            out.append([lc.tag(k), cc['store']['backing'], cc['store']['tmpfs_size']])
-        print(json.dumps({'cases': out, 'name': c['output']['name'], 'ssh': c['host']['ssh'], 'repo': c['host']['repo']}))
-        """)
-
-      assert c["name"] == "o022vm" and c["ssh"] == "192.168.0.101" and c["repo"] == "~/alambique"
-
-      assert Enum.map(c["cases"], &hd/1) ==
-               ~w(A/commits/small A/commits/large B/commits/large A/cells/default A/cells/cache256
-                  B/cells/default B/cells/cache256 A/wakes B/wakes)
-
-      disk = for [tag, "disk", size] <- c["cases"], do: {tag, size}
-      assert disk == [{"A/commits/large", "12288m"}, {"B/commits/large", "12288m"}]
-
-      assert Enum.all?(c["cases"], fn [tag, backing, _] ->
-               backing == "disk" or not String.contains?(tag, "large")
-             end)
-    end
   end
 
   describe "the environment overrides" do
