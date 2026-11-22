@@ -1,4 +1,4 @@
-# A load round, every key at its built-in default (the load test as it ran before it had a config file).
+# A load round, every key at its built-in default.
 # Copy this file under another name, keep the keys you change and delete the rest: a missing key keeps the default shown here.
 #
 #   mise run load -- --config load/rounds/mine.toml --dry-run    print the plan, start nothing
@@ -10,7 +10,7 @@
 cases = []            # optional ordered list "scenario/measure[/variant]", for example ["A/commits/small", "B/cells"]; a measure without a variant runs all its variants; when set, scenarios and measures are ignored
 scenarios = ["A"]     # scenarios to run, in order: A (1 CPU, 512 MB) and/or B (2 CPUs, 2 GB)
 measures = ["commits", "cells", "wakes", "query"]   # measures to run for each scenario, in order
-step_timeout_s = 1800.0   # a step that runs longer is INVALID (timeout); above the longest step of today's ramps (cells fills 32000 cells in 320 s and holds 60 s, wakes prepares up to 57600 cells)
+step_timeout_s = 1800.0   # a step that runs longer is INVALID (timeout); above the longest step of the default ramps (cells fills 32000 cells in 320 s and holds 60 s, wakes prepares up to 57600 cells)
 timeout_s = 0.0           # the whole round, in seconds; 0 sets none. The case in progress is killed when it runs out
 case_timeout_s = 0.0      # one case, in seconds; every case runs under timeout. 0 computes it: the most steps of its plan times step_timeout_s, plus host_start.max_wait_s and 1800 s of preparation; a case killed by it stops the round (status 6)
 
@@ -38,7 +38,7 @@ memory = "2g"
 data_tmpfs = "1g"
 
 # The store: SeaweedFS in a container of its own. [measures.<m>.store] and [measures.<m>.variant.<v>.store] override
-# these keys for one measure or one variant (see o022vm.toml).
+# these keys for one measure or one variant.
 [store]
 backing = "tmpfs"    # tmpfs, or disk (the host's disk, for a case that would fill the store's tmpfs)
 tmpfs_size = "4g"    # size of the store's tmpfs; ignored on disk
