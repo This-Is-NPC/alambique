@@ -1,4 +1,4 @@
-# Thousands of cells on one node (design §12).
+# Thousands of cells on one node (docs/cost-of-a-cell.md).
 #
 #   mise run bench:cells            # 5 000 cells
 #   mise run bench:cells -- 20000   # another count

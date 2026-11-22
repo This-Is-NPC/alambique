@@ -1,5 +1,5 @@
 # Bytes the store receives and keeps for one mailbox, against what the
-# application wrote (design section 9, docs/how-to-size-storage.md).
+# application wrote (design section 9, docs/cost-of-a-cell.md).
 #
 #   mise run bench:amplification               # 1 simulated hour
 #   mise run bench:amplification -- 240        # simulated hours (10 days)

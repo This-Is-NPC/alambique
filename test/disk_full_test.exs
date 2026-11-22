@@ -1,5 +1,5 @@
 defmodule Alambique.DiskFullTest do
-  @moduledoc "A full local disk is `{:error, :disk_full}` for the caller, and the cell keeps its acknowledged data (design §6.4)."
+  @moduledoc "A full local disk is `{:error, :disk_full}` for the caller, and the cell keeps its acknowledged data (design §6.2)."
   use ExUnit.Case, async: false
 
   import Alambique.CellHelpers

@@ -2,7 +2,7 @@ defmodule Alambique.WalPagesTest do
   @moduledoc """
   Pages that one small write puts in its segment (and so in the WAL): the
   table, its index, and what the change feed adds. A write that bookkeeps in
-  another page costs 4 KiB more on every commit (docs/how-to-size-storage.md).
+  another page costs 4 KiB more on every commit (docs/cost-of-a-cell.md).
   """
   use ExUnit.Case, async: false
 

@@ -344,7 +344,7 @@ defmodule Alambique.Replication.Restore do
     state = Map.drop(state, [:lazy, :files, :bytes])
 
     # A write the disk refuses (`:enospc`) fails the restore: the caller sees
-    # `:disk_full` (design §6.4).
+    # `:disk_full` (design §6.2).
     with :ok <- Fault.point(:restore_install, %{cell: env.cell, path: env.tmp}),
          :ok <- if(state.txid == 0, do: File.write(env.tmp, ""), else: :ok),
          :ok <- sync_file(env.tmp),

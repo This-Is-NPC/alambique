@@ -1,5 +1,5 @@
 # Memory of awake cells by purpose, and what a smaller page cache costs
-# (design section 12).
+# (docs/cost-of-a-cell.md).
 #
 #   mise run bench:memory               # 1, 100 and 500 cells
 #   mise run bench:memory -- 50 200     # other counts

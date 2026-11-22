@@ -75,7 +75,7 @@ defmodule Alambique do
       request each) before it sleeps; lower this for hosts that touch many
       cells once. It is part of the memory budget of a node: an awake cell
       keeps its page cache until it sleeps (see `:awake`, and
-      `docs/how-to-size-a-node.md`).
+      `docs/cost-of-a-cell.md`).
     * `:op_timeout_ms` - time budget of one store operation such as an upload or
       a restore, capped by the lease (default 10 000). Every attempt of a store
       call runs under this deadline and is killed when it passes, so a store
@@ -172,7 +172,7 @@ defmodule Alambique do
       written), `:snapshot_keep_ms` (default three days) and
       `:delete_superseded` (default `true`: a merged file is deleted once a
       file of the next level replaces it). Design §9,
-      "Held bytes"; sizes in `docs/how-to-size-storage.md`.
+      "Held bytes"; sizes in `docs/cost-of-a-cell.md`.
     * `:retention` - what compaction deletes (default: on, with the defaults of
       `Alambique.Retention.run/3`). `false` keeps everything; a keyword list
       sets its options. It runs inside the compactor, so it does nothing when
@@ -205,7 +205,7 @@ defmodule Alambique do
     * `:registry` - registers this node in the store so that nodes find each
       other (design §22; `docs/how-to-discover-nodes.md`). `false` (default)
       turns it off; a keyword list turns it on and sets `:advertise` (required:
-      a non-empty string, opaque to the library, such as `"10.0.0.7:4369"`),
+      a non-empty string, opaque to the library, such as `"192.0.2.7:4369"`),
       `:meta` (a JSON-encodable map for the application, default `%{}`),
       `:ttl_ms` (how long an entry stays live without a renewal, default
       `:lease_ttl_ms`; it must be greater than twice `:skew_margin_ms`),
@@ -284,7 +284,7 @@ defmodule Alambique do
       the store that one restore, or the hydration of one lazily restored cell,
       holds in memory at once, default 67 108 864, 64 MiB; one file larger than
       that is read alone, and the memory of N wakes in progress is about N
-      times this, see `docs/how-to-size-a-node.md`).
+      times this, see `docs/cost-of-a-cell.md`).
     * `:read_limits` - `:max_object_bytes` (largest segment, snapshot or feed
       object read whole, default 1 073 741 824, 1 GiB) and `:max_control_bytes`
       (largest lease, node entry, marker, manifest or crash counter, default
@@ -435,7 +435,7 @@ defmodule Alambique do
   `feed: false` turns the feed off: no table gets triggers, the cell keeps no
   feed rows and publishes no object. Each row change is otherwise stored three
   times in the first hours (in the table, in the feed row inside the cell's
-  file and in the feed object); `docs/how-to-size-storage.md` has the numbers.
+  file and in the feed object); `docs/cost-of-a-cell.md` has the numbers.
   `:feed` takes:
 
     * `:window_ms` - a batch is published under its own time only within this
