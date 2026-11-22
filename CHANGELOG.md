@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.1](https://github.com/This-Is-NPC/alambique/compare/v0.16.0...v0.16.1) (2026-11-22)
+
+
+### Documentation
+
+* rewrite the docs as the current code ([31bc72e](https://github.com/This-Is-NPC/alambique/commit/31bc72e8bba0c634fdfb80d00bcd7f67a524f33e))
+
 ## [0.16.0](https://github.com/This-Is-NPC/alambique/compare/v0.15.0...v0.16.0) (2026-11-21)
 
 
