@@ -1,36 +1,32 @@
 # How to operate a cell
 
-**The question:** how do I look at a cell in the store, restore it to a local
-file, freeze it, deal with a cell the instance froze because it crashed the VM,
-move it to another node or another location, get back files that retention
-removed, read what the scrub found, restart a node without failed calls, check that the disk under the cells does not stall
-writes, empty the WAL of an awake cell now or keep all WALs under a budget, or tell that the disk is full and recover?
+**The question:** how do I run and maintain a cell that is in the store:
+look at it, restore it, freeze it, move it, read the scrub results, restart a
+node, and keep its disk from filling or stalling?
 
-This guide stands alone. It needs the store and, for moving a cell and for
-hibernating a frozen one at once, the running cluster. The background
-reasoning (compaction, retention, the freeze marker) is in
-[design.md](design.md) sections 9 and 10.
+This guide stands alone. It needs the store, and the running cluster for the
+steps that call a node (`--connect`). The background (compaction, retention,
+the freeze marker) is in [design.md](design.md) sections 9 and 10.
 
-The command output below was produced on 2026-10-26 against the disposable
-SeaweedFS 4.48 container from `mise run seaweedfs:up` (bucket `compact-demo`,
-prefix `demo`) and two nodes, `a@127.0.0.1` and `b@127.0.0.1`, running one
-instance named `demo` with the cell `org-1` (40 notes written through it).
-Your hosts, keys and sizes will differ.
+The names in the examples (`demo`, `org-1`, `a@127.0.0.1`, `compact-demo`) are
+placeholders. The output blocks show the layout that each command prints. Their
+values are placeholders too.
 
 ## Prerequisites
 
-- A project that depends on `alambique`. Run the commands in its directory.
+- A project that depends on `alambique`. Run the `mix` tasks in its directory.
 - Credentials for the S3 bucket the instance uses.
-- For `move` and `freeze --connect`: the node names, the cluster cookie, and the
-  instance name (the `:name` given to `{Alambique, ...}`).
+- For the steps that call a node (`move`, `relocate`, `cleanup`, and
+  `freeze --connect`): the node name, the cluster cookie, and the instance name
+  (the `:name` given to `{Alambique, ...}`).
 
 ## 1. Tell the tasks where the store is
 
-The tasks use the store directly and start no instance. Give them the same
-store and prefix the instance uses, in one of three ways. Flags win over
-environment variables, which win over the config.
+The tasks read the store directly and start no instance. Give them the same
+store and prefix that the instance uses. Flags win over environment variables,
+which win over the config.
 
-Environment variables (used for every command below):
+Environment variables, used by every command below:
 
 ```sh
 export ALAMBIQUE_S3_ENDPOINT=http://127.0.0.1:18333
@@ -40,17 +36,23 @@ export ALAMBIQUE_S3_SECRET_ACCESS_KEY=alambique-secret
 export ALAMBIQUE_PREFIX=demo
 ```
 
-Flags: `--bucket`, `--access-key-id`, `--secret-access-key`, `--endpoint`
-(optional; without it the tasks use AWS, derived from the region),
-`--region` (default `us-east-1`), `--session-token` (environment variable
-`ALAMBIQUE_S3_SESSION_TOKEN`), `--no-path-style` and `--prefix`. The
-environment variable of `--no-path-style` is `ALAMBIQUE_S3_PATH_STYLE=false`.
+The flags are `--bucket`, `--access-key-id`, `--secret-access-key`,
+`--endpoint`, `--region`, `--session-token`, `--no-path-style` and `--prefix`.
+Their variables are `ALAMBIQUE_S3_BUCKET`, `ALAMBIQUE_S3_ACCESS_KEY_ID`,
+`ALAMBIQUE_S3_SECRET_ACCESS_KEY`, `ALAMBIQUE_S3_ENDPOINT`,
+`ALAMBIQUE_S3_REGION`, `ALAMBIQUE_S3_SESSION_TOKEN`, and
+`ALAMBIQUE_S3_PATH_STYLE=false` for `--no-path-style`.
 
-Prefer the environment variables for the secret key, the session token and the cookie. A flag
-is visible to every local user in the process list (`ps`) and may stay in the
-shell history; a variable is not.
+- `--endpoint`: without it the tasks use AWS, at `https://s3.<region>.amazonaws.com`.
+- `--region`: default `us-east-1`.
+- `--prefix`: default `alambique`.
+- `--no-path-style`: virtual-hosted bucket addressing. Path style is the default.
 
-Config, which also accepts any other store module:
+Prefer the variables for the secret key, the session token and the cookie. A
+flag shows in the process list (`ps`) and may stay in the shell history.
+
+The same settings can go in the config. The store can be any module that
+implements the store behaviour:
 
 ```elixir
 config :alambique, :ops,
@@ -58,7 +60,7 @@ config :alambique, :ops,
   prefix: "demo"
 ```
 
-Without any of them a task stops and lists the three ways.
+With none of them, a task stops and lists the three ways.
 
 ## 2. Look at a cell
 
@@ -70,6 +72,7 @@ mix alambique.inspect org-1
 Cell:       org-1
 Prefix:     demo
 Frozen:     no
+Crashes:    none
 Lease:      epoch 3, owner a@127.0.0.1, held, expires in 7.6 s
 Head:       TXID 43, epoch 3, page size 4096
 Segments:
@@ -77,21 +80,25 @@ Segments:
   level 1: 10 files, TXID 1-40, 3.6 KiB
   level 2: 2 files, TXID 1-32, 915 B
 Snapshots:
-  TXID 42, 693 B, epoch 1, state of 2026-10-26T05:59:34.431Z
+  TXID 42, 693 B, epoch 1, state of <ISO 8601 time>
 ```
 
-The lease is `held` while its owner renews it, `expired` when the owner is
-gone and nobody took over yet, `released` after a clean hibernation, and
-`none` for a cell that never woke. The head is the newest TXID in the store.
-Levels 1 and above are compacted copies of level 0 that restore uses to read
-fewer files.
+The `Lease` line has one of these states:
 
-A `Crashes:` line follows `Frozen:` (`none`, or `3 recorded, 3 in the window`
-for a cell that crashed the VM; see step 4). The output above was captured
-before that line existed.
+- `held`: the owner renews it.
+- `expired`: the owner is gone and no node has taken over yet.
+- `released`: the owner hibernated the cell cleanly.
+- `none`: the cell has never woken.
 
-`--no-sizes` skips fetching every object to measure it, which is slow for cells
-with many files. `--json` prints one JSON object with the same facts.
+The `Head` is the newest TXID in the store. Levels 1 and above are compacted
+copies of level 0, which restore reads to open fewer files.
+
+`Crashes` is `none`, or `N recorded, M in the window` for a cell that crashed
+the VM (step 4).
+
+- `--no-sizes` skips the size of each object. Use it for cells with many files.
+- `--json` prints one JSON object with the same facts.
+- `--location ID` picks a location when the placement has several (step 6).
 
 ## 3. Restore a cell into a file
 
@@ -100,36 +107,43 @@ mix alambique.restore org-1 ./org-1.db
 ```
 
 ```text
-Restored org-1 to ./org-1.db: TXID 43, epoch 3, 2 files applied
+Restored org-1 to /home/you/project/org-1.db: TXID 43, epoch 3, 2 files applied
 ```
 
-The result is an ordinary SQLite file; open it with `sqlite3 ./org-1.db`. The
-cell is not touched, awake or not, and an existing file at the path is replaced.
+The output is an ordinary SQLite file. Open it with `sqlite3 ./org-1.db`. The
+task builds the file next to the path and renames it into place. An existing
+file at the path is replaced. The cell is not touched, awake or asleep.
 
-`--at` picks the point: `latest` (default), `txid:N`, an ISO 8601 UTC time, or
-`ms:N` for Unix milliseconds.
+`--at` picks the point in time:
+
+- `latest` (default)
+- `txid:N`
+- an ISO 8601 UTC time, such as `2026-01-01T00:00:00Z`
+- `ms:N`, Unix milliseconds
 
 ```sh
 mix alambique.restore org-1 ./org-1-txid20.db --at txid:20
-mix alambique.restore org-1 ./org-1-time.db --at 2026-10-26T05:59:34.415Z
+mix alambique.restore org-1 ./org-1-time.db --at 2026-01-01T00:00:00Z
 ```
 
 ```text
-Restored org-1 to ./org-1-txid20.db: TXID 20, epoch 1, 2 files applied
-Restored org-1 to ./org-1-time.db: TXID 24, epoch 1, 3 files applied
+Restored org-1 to /home/you/project/org-1-txid20.db: TXID 20, epoch 1, 2 files applied
+Restored org-1 to /home/you/project/org-1-time.db: TXID 24, epoch 1, 3 files applied
 ```
 
-A time gives the last TXID stamped at or before it. Retention keeps every point
-of its window (seven days by default) and refuses older ones once the reaper
-deleted their files, with an error, never with an older state (see the
-troubleshooting list). Until then, for `deletion_grace_ms` (one day by
-default), the files are only marked and older points still restore (step 7).
+A time gives the last TXID stamped at or before it.
+
+Retention keeps every point in its window, seven days by default
+(`pitr_window_ms`). A point older than the window fails once the reaper has
+deleted its files (see the troubleshooting list). Until then the files are only
+marked, for `deletion_grace_ms` (one day by default), so older points still
+restore (step 7).
 
 ## 4. Freeze a cell
 
-A frozen cell refuses to wake, so nothing writes to it, for example while you
-investigate it or run a repair. Reads of the store, restores and compaction are
-not affected.
+A frozen cell refuses to wake, so nothing writes to it. Use this while you
+investigate the cell or run a repair. Reads of the store, restores and
+compaction still work.
 
 ```sh
 mix alambique.freeze org-1 --instance demo --connect a@127.0.0.1 --cookie demo
@@ -140,20 +154,13 @@ Froze org-1
 org-1 is asleep
 ```
 
-`--connect` also asks the cluster to hibernate the cell now. Without it the
-task only writes the marker, and an awake cell hibernates at its next lease
+`--connect` also asks the cluster to hibernate the cell now. Without it, the
+task only writes the marker. An awake cell then hibernates at its next lease
 renewal, within a third of `:lease_ttl_ms`. A call to a frozen cell fails with
-`{:error, :frozen}`:
+`{:error, :frozen}`.
 
-```text
-Frozen:     yes
-Lease:      epoch 3, owner a@127.0.0.1, released
-{:error, :frozen}
-```
-
-(The two lines above are lines 3 and 4 of `mix alambique.inspect org-1`, and the
-result of `Alambique.query(:demo, "org-1", "SELECT count(*) FROM notes")` on
-node `a`.)
+Check the state with `mix alambique.inspect org-1`. It shows `Frozen: yes` and
+`Lease: ..., released`.
 
 Undo it:
 
@@ -165,37 +172,37 @@ mix alambique.unfreeze org-1
 Unfroze org-1
 ```
 
-From inside the application the same is `Alambique.freeze(MyApp.Cells, cell)`,
-`Alambique.unfreeze/2` and `Alambique.frozen?/2`.
+From inside the application, use `Alambique.freeze(MyApp.Cells, cell)`,
+`Alambique.unfreeze(MyApp.Cells, cell)` and `Alambique.frozen?(MyApp.Cells, cell)`.
 
 ### A cell the instance froze
 
-An instance freezes a cell by itself when it keeps crashing the VM: after
-`:threshold` crashes (3 by default) within `:window_ms` (one hour) it writes the
-same freeze marker, logs an error and emits `[:alambique, :cell, :quarantined]`
+An instance freezes a cell by itself when the cell keeps crashing the VM. After
+`:threshold` crashes (3 by default) within `:window_ms` (one hour), it writes
+the same freeze marker, logs an error, and emits `[:alambique, :cell, :quarantined]`
 (see [telemetry.md](telemetry.md)). Alert on that event. The other cells of the
-node are not affected. To handle one:
+node keep running. To handle one:
 
-1. Look at it. `mix alambique.inspect CELL` shows `Frozen: yes` and a `Crashes:`
-   line, `N recorded, M in the window`. From the application,
-   `Alambique.crashes(MyApp.Cells, cell)` returns the counter: `total`, and
-   `recent` with the time, node and kind of work in flight for each crash (a
-   `cell` is the cell process itself; `compaction`, `query`, `hydrator` and
-   `relocate` are the other work on its data).
+1. Look at it. `mix alambique.inspect org-1` shows `Frozen: yes` and a
+   `Crashes:` line such as `3 recorded, 3 in the window`. From the application,
+   `Alambique.crashes(MyApp.Cells, cell)` returns `{:ok, counter}`. The counter
+   has `total`, and `recent`, a list of crashes with `at_ms`, `node` and
+   `kinds`. A kind names the work in flight: `cell` (the cell process itself),
+   `hydrator`, `compaction`, `query`, `rewind` or `relocate`.
 2. Take a copy to reproduce the crash away from production:
-   `mix alambique.restore CELL ./CELL.db` (step 3). The cell is frozen, so
+   `mix alambique.restore org-1 ./org-1.db` (step 3). The cell is frozen, so
    nothing writes to it meanwhile.
-3. Fix what crashed, for example the statement the application sends or the
-   version of the code, and deploy it.
-4. Unfreeze it: `mix alambique.unfreeze CELL`, or `Alambique.unfreeze/2`. This
-   also forgets the recorded crashes, so the cell starts counting from zero. If
-   it crashes the VM again it is frozen again after `:threshold` more crashes.
+3. Fix the cause, for example the statement the application sends or the
+   version of the code, and deploy the fix.
+4. Unfreeze the cell with `mix alambique.unfreeze org-1` or
+   `Alambique.unfreeze/2`. This also forgets the recorded crashes, so the count
+   starts again from zero. If the VM crashes again, the cell is frozen again
+   after `:threshold` more crashes.
 
-The crashes are recorded when the node that had the cell starts again. If the
-store was not reachable then, the instance keeps the record on the node's disk
-(`<data_dir>/inflight`) and tries again every `:retry_ms` (30 seconds). To
-change the numbers or turn the feature off, see `:quarantine` in the
-documentation of the `Alambique` module.
+The instance records a crash when the node that had the cell starts again. If
+the store is not reachable then, the record is kept in `<data_dir>/inflight` and
+written again every `:retry_ms` (30 seconds). To change the numbers or turn the
+feature off, see `:quarantine` in the documentation of the `Alambique` module.
 
 ## 5. Move a cell to another node
 
@@ -207,29 +214,31 @@ mix alambique.move org-1 b@127.0.0.1 --instance demo --cookie demo
 Moved org-1 to b@127.0.0.1
 ```
 
-The current owner hibernates the cell and `b@127.0.0.1` wakes it; the lease
-shows the new owner and a higher epoch:
+The current owner hibernates the cell, and `b@127.0.0.1` wakes it. The lease
+then shows the new owner and a higher epoch:
 
 ```text
 Lease:      epoch 5, owner b@127.0.0.1, held, expires in 8.6 s
 ```
 
 Moving needs the Erlang cluster, not only the store. The task starts
-distribution under a random name (long names when the target has a dot after
-the `@`), sets the cookie (`--cookie`, else `ALAMBIQUE_COOKIE`, else the user's `~/.erlang.cookie`), connects to
-`--connect NODE` (default: the target) and calls `Alambique.move/4` there. The
-target must run the instance. Use `--timeout MS` for slow cells.
+distribution under a random name (a long name when the target has a dot after
+the `@`) and sets the cookie. The cookie comes from `--cookie`, then
+`ALAMBIQUE_COOKIE`, then the user's `~/.erlang.cookie`. The task connects to
+`--connect NODE`, which defaults to the target, and calls `Alambique.move/4`
+there. The target must run the instance. Use `--timeout MS` for slow cells
+(default 15000).
 
-From code, `Alambique.move(:demo, "org-1", node, only_if_idle: true)` moves the
-cell only when no other call is waiting on it: a busy cell answers
+From code, `Alambique.move(:demo, "org-1", node, only_if_idle: true)` moves
+the cell only when no other call waits on it. A busy cell answers
 `{:error, :busy}` and stays where it is, so a rebalance does not make callers
 wait. Try again later.
 
 ## 5.1 Take over a cell whose owner is down
 
-If a failure detector suspects a node is gone, read the lease without waking
-the cell and pass the epoch to `take_over/4`, so two nodes cannot take the
-same cell from each other:
+If a failure detector suspects that a node is gone, read the lease without
+waking the cell. Pass its epoch to `take_over/4`. With the epoch, two nodes
+cannot take the same cell from each other.
 
 ```elixir
 {:ok, %{owner: _node, owner_id: owner_id, epoch: epoch, released: false}} =
@@ -239,19 +248,21 @@ same cell from each other:
   Alambique.take_over(:demo, "org-1", :owner_down, epoch: epoch)
 ```
 
-`owner` is the node when it still runs the instance; `owner_id` is the raw
-owner id in the lease, useful while the detector still names the failed node.
-A released lease (`released: true`, after a clean hibernation) needs no epoch.
-A moved lease reports `moved_to`; a cell that never had a lease answers epoch
-0 with `owner: nil`. `Alambique.lease/3` does not wake or freeze the cell, and
-`:timeout` bounds the read. The old `mix alambique.inspect` output still shows
-the same lease.
+- `owner` is the node, when that node still runs the instance. `owner_id` is
+  the raw owner id in the lease. Use it while the detector still names the
+  failed node.
+- A released lease (`released: true`, after a clean hibernation) needs no epoch.
+- A moved lease reports `moved_to`.
+- A cell that never had a lease reports epoch 0 and `owner: nil`.
+- `Alambique.lease/3` reads the lease only. It does not wake or freeze the
+  cell. `:timeout` bounds the read.
 
 ## 6. Move a cell to another location
 
-Where a cell lives (which store and prefix) comes from the placement of the
-instance (design §18). To move a cell to another location of it, give the id of
-the destination as the placement lists it:
+A placement can put a cell in one of several locations (a store and prefix
+each). The placement of the instance decides where a cell lives (design section
+18). To move a cell to another location, give the id of the destination as the
+placement lists it:
 
 ```sh
 mix alambique.relocate org-1 us --instance demo --connect a@127.0.0.1 --cookie demo
@@ -261,107 +272,93 @@ mix alambique.relocate org-1 us --instance demo --connect a@127.0.0.1 --cookie d
 Moved org-1 to location us
 ```
 
-The format above comes from the task's code. The same call from a console, run
-against two in-memory stores named `eu` and `us` (observed):
+From a console, the same call is:
 
 ```elixir
 {:ok, %Alambique.Location{id: "us", prefix: "demo"}} = Alambique.relocate(:demo, "org-1", "us")
 {:ok, %{columns: ["body"], rows: [["hi"]]}} = Alambique.query(:demo, "org-1", "SELECT body FROM notes")
 ```
 
-Afterwards the old location holds a released lease marked `moved_to` the new
-one, and the new location holds the data and a held lease with a higher epoch
-(`Alambique.Ops.describe/3` of each, `lease` and `head`):
+After the move, the old location keeps a released lease whose `moved_to` names
+the new location. The new location holds the data and a held lease with a higher
+epoch. Check each location with `mix alambique.inspect org-1 --location ID`.
 
-```text
-eu: owner relocate, released, epoch 2, moved_to "us", head TXID 4
-us: owner nonode@nohost, held, epoch 4, moved_to nil, head TXID 5
-```
+While the move runs, calls to the cell fail with
+`{:error, {:unavailable, "relocate", _}}`. If the task fails or is interrupted,
+run it again with the same arguments. It continues from where it stopped. A node
+that still caches the old location finds the marker there, asks the placement
+again, and needs no restart.
 
-While it runs, calls to the cell fail with `{:error, {:unavailable,
-"relocate", _}}`. If the task fails or is interrupted, run it again with the
-same arguments: it finishes from where it stopped. A node that still has the
-old location cached finds the marker at the old location and asks the
-placement again, so no restart is needed.
-
-After the move the task reports what happened to the objects the cell left at
-the old location (format from the task's code; with the default grace period
-it says this):
+After the move, the task reports what happens to the objects that the cell left
+at the old location:
 
 ```text
 Moved org-1 to location us
-Location eu keeps the objects of org-1 until 2026-10-26T12:10:01Z; the instance deletes them then, or run: mix alambique.cleanup org-1 eu
+Location eu keeps the objects of org-1 until <ISO 8601 time>; the instance deletes them then, or run: mix alambique.cleanup org-1 eu
 ```
 
-Those objects stay for `moved_grace_ms` (instance option, default ten minutes),
-so that a query or restore that started before the move still finds its files.
-Then the instance marks the segments and snapshots for deletion and the reaper
-deletes them another `deletion_grace_ms` later (one day by default; step 7).
-The frozen marker, the crash counter, the retention marker and the schema index
-entries go at once, at cleanup time: they belong to the old residency. The
-compactor does this. `relocate` queues the cleanup, and `relocate` also leaves
-a marker for it in the old location, so a node that restarts (or another node)
-finds the pending cleanup by its periodic scan (`compaction: [moved_scan_ms:]`,
-default 60 000) and waits for the grace period counted from the move, not from
-the restart. Nothing is needed by hand. To finish a cleanup early, or when
-compaction is off, run `mix alambique.cleanup` or
-`Alambique.cleanup_moved/4`:
+The objects stay for `moved_grace_ms` (an instance option, ten minutes by
+default). This lets a query or restore that started before the move still find
+its files. After that, the instance marks the segments and snapshots for
+deletion, and the reaper deletes them `deletion_grace_ms` later (one day by
+default, step 7). The frozen marker, the trashed key (the retention marker), the
+crash counter and the schema index entry go at once, when the cleanup runs. The
+compactor runs the cleanup on its own. It also scans for cleanups that a restart
+left pending (`compaction: [moved_scan_ms:]`, 60 000 by default). Nothing is
+needed by hand. To finish a cleanup early, or when compaction is off, run:
 
 ```sh
 mix alambique.cleanup org-1 eu --instance demo --connect a@127.0.0.1 --cookie demo
 ```
 
 ```text
-Cleaned 7 objects of org-1 at location eu (deleted after deletion_grace_ms)
+Cleaned <n> objects of org-1 at location eu (deleted after deletion_grace_ms)
 ```
 
-(The count varies with the cell's history.)
+The count depends on the cell's history.
 
-`--grace-ms 0` frees the storage early, at the risk of failing a reader that
-started before the move. The lease of the old location stays, marked
-`moved_to`: nodes that still have the old location cached read it and ask the
-placement again, so they never write there. Cleaning up the location where the
-cell lives is refused (`:live_location`).
+- `--grace-ms 0` frees the storage at once. It can fail a reader that started
+  before the move.
+- The lease of the old location stays, marked `moved_to`. Nodes that still have
+  the old location cached read it, ask the placement again, and never write there.
+- A cleanup of the location where the cell lives is refused (`:live_location`).
 
-A cell can move back to a location it left, and again, as often as needed.
-The old location must be cleaned up first, and the cleanup must be a few
-operation timeouts old (eight times `op_timeout_ms`), so a slow cleanup cannot
-delete the new objects. It does not have to wait for `deletion_grace_ms`: the
-marked segments and snapshots may still be there, because the returning
-snapshot has a TXID above them and covers them; the reaper deletes them later.
-Until the cleanup is ready `relocate` answers:
+A cell can move back to a location it left. The old location must be cleaned up
+first. The cleanup must also be older than eight times `op_timeout_ms`, so a slow
+cleanup cannot delete new objects. The cleanup does not have to wait for
+`deletion_grace_ms`: the returning snapshot has a TXID above the marked files, so
+it covers them. Until the cleanup is ready, `relocate` answers:
 
-- `{:error, :destination_not_cleaned}`: no cleanup finished there, usually
-  because the grace period is still running. The call queues the cleanup in
-  the compactor; `relocate` again once the grace period has passed. With
-  compaction off, run the cleanup yourself first.
-- `{:error, {:destination_settling, ready_at_ms}}`: the cleanup finished but
-  is too recent. Wait until `ready_at_ms` (Unix milliseconds) and run
-  `relocate` again. Do not clean again: that restarts the wait.
-- `{:error, :destination_not_empty}`: data is there but the lease does not say
-  the cell moved (for example a store where the lease was lost). Inspect the
-  location before deciding.
+- `{:error, :destination_not_cleaned}`: no cleanup finished there yet, usually
+  because the grace period is still running. The call queues the cleanup in the
+  compactor. Run `relocate` again after the grace period. With compaction off,
+  run the cleanup yourself first.
+- `{:error, {:destination_settling, ready_at_ms}}`: the cleanup finished too
+  recently. Wait until `ready_at_ms` (Unix milliseconds), then run `relocate`
+  again. Do not clean up again, because that restarts the wait.
+- `{:error, :destination_not_empty}`: data is there, but the lease does not say
+  the cell moved. For example, the lease was lost on that store. Inspect the
+  location before you decide.
 - `{:error, {:destination_ahead, txid}}`: a data file ends beyond the restored
-  state. The move refuses instead of colliding with a writer it does not know.
+  state, so the move refuses rather than collide with a writer it does not know.
   Find and remove that file, then run the cleanup and `relocate` again.
 
-Epochs keep growing across the moves. A placement without
-`commit_move/4` answers `{:error, :relocation_unsupported}`. If a move to one
-location did not finish, a move to the other answers `{:error, {:move_pending,
-id}}`: run the first one again to the end.
+Epochs keep growing across moves. If a move to one location did not finish, a
+move to another location answers `{:error, {:move_pending, id}}`. Run the first
+move to the end.
 
 ## 7. Get back files that retention removed
 
-Retention and the cleanup of a moved cell do not delete at once: they mark the
-files, and the reaper deletes them `deletion_grace_ms` later (one day by
-default; design section 9.1). During that time:
+Retention and the cleanup of a moved cell do not delete at once. They mark the
+files, and the reaper deletes them `deletion_grace_ms` later (one day by default,
+design section 9.1). During that time:
 
-1. **Restore a point before the window.** `mix alambique.restore` still sees
-   the marked files, so `mix alambique.restore org-1 ./old.db --at txid:7` works
-   for a point retention already covered. Once the file is restored, copy out
-   what you need.
-2. **Keep the files.** From a console on a node of the instance, list the
-   pending deletions and cancel the ones you want to keep:
+1. **Restore a point before the window.** `mix alambique.restore` still sees the
+   marked files. For example, `mix alambique.restore org-1 ./old.db --at txid:7`
+   works for a point that retention already covered. Copy out what you need from
+   the restored file.
+2. **Keep the files.** From a console on a node of the instance, list the pending
+   deletions and cancel the ones you want to keep:
 
    ```elixir
    {:ok, %{entries: entries}} = Alambique.Trash.pending(:demo)
@@ -369,200 +366,187 @@ default; design section 9.1). During that time:
    :ok = Alambique.Trash.cancel(:demo, hd(entries).key)
    ```
 
-   Without a console, delete the object `<prefix>/trash/<due>/<cell>/<id>`
+   Without a console, delete the manifest object `<prefix>/trash/<due>/<cell>/<id>`
    with your S3 tool. A cancelled manifest is never processed. Retention marks
-   its files again at its next run that finds them covered: set
-   `retention: false` (or a longer `pitr_window_ms`) first if you want them to
-   stay.
-3. **Check what is left.** `Alambique.Trash.pending/2` shows what waits and
-   until when; `Alambique.Trash.reap/2` runs a round now.
+   covered files again in a later run, so set `retention: false`, or a longer
+   `pitr_window_ms`, first if the files must stay.
+3. **Check what is left.** `Alambique.Trash.pending/2` lists what waits and when
+   it is due. `Alambique.Trash.reap/2` runs a deletion round now.
 
-After the due time the files are gone and the usual rules apply. If the store
-has object versioning, they may still be recoverable there
-([storage-compatibility.md](storage-compatibility.md)).
+After the due time the files are gone, and the usual rules apply. If the store
+has object versioning, the files may still be recoverable there (see
+[storage-compatibility.md](storage-compatibility.md)).
 
 ## 8. Read the scrub results
 
-With `scrub: [...]` set (or `Alambique.scrub(:demo)` from a console) the
-library restores sampled cells and checks them (design section 6.1). It
-returns, and emits as telemetry, one result per cell:
+With `scrub: [...]` set on the instance, or with `Alambique.scrub(:demo)` from a
+console, the library restores sampled cells and checks them (design section 6.1).
+The check does not wake or freeze a cell. It returns a summary, and emits one
+telemetry event per cell:
 
 ```elixir
 {:ok, summary} = Alambique.scrub(:demo)
-# %{cells: 10, ok: 9, empty: 0, failed: 1,
-#   failures: [%{cell: "org-7", location: "default", reason: {:restore, {:gap, 12}}}]}
+# %{cells: <n>, ok: <n>, empty: <n>, failed: <n>,
+#   failures: [%{cell: "<cell>", location: "<location>", reason: <reason>}]}
 ```
 
-Every failed cell is also logged as an error: `Alambique scrub: replica of
-org-7 at default is damaged: ...`. Watch `[:alambique, :scrub, :cell]` for
-`result: :error`. The `reason` says what broke:
+Each failed cell is also logged as an error, for example
+`Alambique scrub: replica of <cell> at <location> is damaged: ...`. Watch
+`[:alambique, :scrub, :cell]` for `result: :error`. The `reason` says what failed:
 
-- `{:restore, reason}`: a file is missing, damaged or out of order; the reason
-  is the one `mix alambique.restore` prints, such as `{:gap, txid}`. Restore
-  `--at txid:N` with an `N` before the problem to read the last good state, and
-  do not delete anything.
-- `{:checksum_mismatch, expected, found}`: the files restored, and the result
-  does not have the checksum the chain ends with.
+- `{:restore, reason}`: a file is missing, damaged or out of order. The reason is
+  the one `mix alambique.restore` prints, such as `{:gap, txid}`. To read the last
+  good state, restore with `--at txid:N`, where `N` is before the problem. Do not
+  delete anything.
+- `{:checksum_mismatch, expected, found}`: the files restored, but the result
+  does not have the checksum that the chain ends with.
 - `{:integrity_check, findings}` or `{:quick_check, findings}`: the files
-  restored and SQLite found the database damaged; the findings are its lines.
-  The cell was probably damaged before it was replicated.
+  restored, but SQLite reports the database as damaged. The findings are its
+  lines. The damage was probably there before the cell was replicated.
+- `{:checksum, reason}` or `{:open, reason}`: the restored file could not be
+  read or opened.
 
-The scrub never freezes or repairs a cell. `empty` is a cell in the schema
-index without objects in the store, for example one that moved away.
+`empty` counts cells that are in the schema index but have no objects in the
+store, for example a cell that moved away.
 
 ## 9. Restart a node without failed calls
 
-A node that starts takes part in routing at once: other nodes can forward
-calls to it before the processes your application needs to serve them are
-running. To keep it out until it is ready, start the instance with
-`join: false` and join when everything is up.
+A node that starts takes part in routing at once. Other nodes can then forward
+calls to it before the processes that serve them are running. To keep the node
+out until it is ready, start the instance with `join: false`, and join when
+everything is up.
 
-1. Before stopping the node, drain it, or just stop the instance, which runs
-   the same drain (design section 8):
+1. Before you stop the node, drain it. Stopping the instance runs the same drain
+   (design section 8):
 
    ```elixir
    {:ok, %{hibernated: _, errors: []}} = Alambique.drain(MyApp.Cells)
    ```
 
-   Other nodes stop choosing it and serve its cells from their released
+   Other nodes stop choosing this node and serve its cells from the released
    leases.
 
-2. Start the new release with the option, and list `Alambique` first in the
-   supervision tree, before the processes that depend on it:
+2. Start the new release with `join: false`, and list `Alambique` before the
+   processes that depend on it in the supervision tree:
 
    ```elixir
    {Alambique, name: MyApp.Cells, join: false, ...}
    ```
 
-   Until step 3 the node is not a member: no other node prefers it, picks it
-   as an owner or lists it for `Alambique.move/4`. It still serves the calls
-   made on it, which another member runs when it has to wake a cell; a cell
-   whose lease it holds stays reachable from other nodes.
+   Until step 3, the node is not a member. No other node prefers it, picks it as
+   an owner, or lists it for `Alambique.move/4`. It still serves the calls made
+   on it, and a cell whose lease it holds stays reachable from other nodes.
 
-3. After your own processes started (put this in the last child of the tree
-   or in `Application.start/2` after `Supervisor.start_link/2`), join:
+3. After your own processes have started, join. Put this in the last child of
+   the tree, or in `Application.start/2` after `Supervisor.start_link/2`:
 
    ```elixir
    :ok = Alambique.join(MyApp.Cells)
    ```
 
-   It returns `:ok` at once on a member, so it is safe to repeat. After a
-   `drain/2` it also ends the drain: the node wakes cells again.
+   `join/1` returns `:ok` at once on a member, so it is safe to repeat. After a
+   `drain/2`, it also ends the drain, and the node wakes cells again.
 
-Expected result: after a moment other nodes route new wakes to the node, and
+Expected result: after a moment, other nodes route new wakes to the node, and
 `Alambique.move(MyApp.Cells, cell, node)` no longer answers
-`{:error, :unknown_node}` for it. A node that never calls `join/1` only
-serves the calls made on it.
+`{:error, :unknown_node}` for it.
 
 ## 10. Check that the disk does not stall writes
 
 Every write waits for its SQLite commit on the node's disk and for its upload to
-the store. If the file system under either one stalls writes, all the cells
-stall with it. On btrfs we measured stalls of 1 to 3 s that hit every cell of a
-node, and every node that shares the store, at once. Check your own disks
-before you trust a latency figure.
+the store (design section 15). If the file system under either one stalls,
+every cell that waits on it stalls too.
 
-Run the bench on a disk of the kind your `:data_dir` uses. `TMPDIR` picks the
-disk for the cell files (`/tmp` may be a tmpfs):
+Attach a handler once per node. It logs each commit and each segment upload that
+takes 1 s or more. Put it in `Application.start/2`, or run it from a console on
+the node:
 
-```sh
-TMPDIR=/path/on/the/disk/under/test ALAMBIQUE_BENCH_RATES=400 mise run bench:stall -- 60
+```elixir
+defmodule StallWatch do
+  require Logger
+
+  @threshold_ms 1_000
+
+  def attach do
+    :telemetry.attach_many(
+      "alambique-stall-watch",
+      [[:alambique, :cell, :commit], [:alambique, :replication, :sync]],
+      &__MODULE__.handle/4,
+      nil
+    )
+  end
+
+  def handle(event, %{duration: duration}, meta, _config) do
+    ms = System.convert_time_unit(duration, :native, :millisecond)
+    if ms >= @threshold_ms, do: Logger.warning("#{inspect(event)} #{meta.cell}: #{ms} ms")
+  end
+end
+
+:ok = StallWatch.attach()
 ```
 
-It writes to 12 cells at a fixed rate and prints one line per second: the
-requests, p50, p99 and max latency, the requests over 1 s, and what can explain
-a stall, including the threads of the VM blocked in the kernel (`Dthr`). To
-include the store, start the disposable one with `mise run seaweedfs:up` and add
-`ALAMBIQUE_BENCH_STORE=seaweedfs`; the bench then does not test the disk of the
-store's data, which is in the container. Stalls are intermittent: a 60 s run on
-a disk that stalls can still show none, so repeat it, and give the VM fewer
-CPUs and dirty IO threads to make them easier to see, for example
-`ELIXIR_ERL_OPTIONS="+SDio 4" taskset -c 0,1`.
+Expected result: no log line while the disk and the store answer quickly. A
+line such as `[:alambique, :cell, :commit] org-1: 1450 ms` names a cell and a
+duration in milliseconds. The `duration` of both events is in native time units,
+which the handler converts.
 
-A clean run, with the cell files on btrfs and the SeaweedFS store (60 s at 400
-writes per second, 2 CPUs with a 150 % quota, `+SDio 4`, measured on
-2026-11-03):
+A commit includes the upload, so the events do not tell a slow disk from a slow
+store. Compare the lines with the store's latency and with the disk's own metrics.
+Stalls can be intermittent, so keep the handler attached for a while before you
+decide that the disk is clean.
 
-```text
-summary: n=24017 failed=0 p50=2.7 p99=21.6 p999=34.2 max=71.5 ms, over 1000 ms: 0
-```
-
-The same command with `TMPDIR=/tmp`, a tmpfs, on the same host and shortly
-after:
-
-```text
-summary: n=23867 failed=0 p50=7.5 p99=135.8 p999=210.5 max=291.3 ms, over 1000 ms: 0
-```
-
-These two runs do not show a difference: the host was busy with other work, and
-the btrfs run did not stall. A run that did stall (an earlier build of the
-bench, same settings, 90 s, cell files on btrfs, SeaweedFS store) printed:
-
-```text
-  84   400    6.2 2758.7 2799.6   21 |  10/  1/  0 |   1981/ 121.1    405/   3.4     0 | 2793.0 *****   0.0 2742.5  3131.7 ***** |  2748.5 put:ltx
-  85   417 2275.5 2725.9 2762.2  417 |   1/  0/  0 |   1173/ 121.1     78/   3.4     0 | 2728.9 *****   0.0    0.0  2717.4 ***** |  2718.9 put:ltx
-  86   370 1239.5 1733.0 1740.5  271 |   1/  0/  0 |   1026/ 121.1      0/   3.4     0 |    0.0   0.0   0.0    0.0     0.0   0.0 |     0.0 -
-summary: n=35946 failed=0 p50=3.4 p99=1987.4 p999=2712.5 max=2799.6 ms, over 1000 ms: 709
-```
-
-The columns after the latencies are the run queues, the NIF calls and their
-longest, the longest commit, sync, checkpoint, lease, compaction and feed spans,
-and the longest store request (`put:ltx` here: the upload took 2.7 s). The
-measurements behind this advice are in
-[design.md section 12](design.md#12-requirements-and-measurements).
-
-**What to do.** Put `:data_dir` and the store's data on a file system that does
-not stall writes this way. Both: moving only one did not help. We measured
-tmpfs only (a lab setup that loses the data at a reboot). ext4 and xfs are the
-usual choice, but we did not measure them. We also did not test nodatacow
-volumes for the store, or btrfs mount options. If you cannot move the disk,
-expect every acknowledged write to wait out the stall.
+**What to do.** If the handler logs commits or uploads at 1 s or more, the file
+system under `:data_dir`, or the store, stalls writes. Move `:data_dir` to a file
+system that does not stall, and check the store's disk as well.
 
 ## 11. Empty the WAL of an awake cell now
 
 An awake cell moves its WAL into the database file when the `-wal` file passes
-`wal: [checkpoint_bytes: ...]` (default 64 MiB), and a hibernating cell does
-it before it releases. To free the disk sooner, for example when a monitor sees
-the disk filling, without putting the cell to sleep:
+`wal: [checkpoint_bytes: ...]` (default 64 MiB). A cell that hibernates does the
+same before it releases its lease. To free disk space without putting the cell
+to sleep, for example when a monitor sees the disk filling up:
 
 ```elixir
 :ok = Alambique.checkpoint(MyApp.Cells, "org-1")
 ```
 
 The cell uploads what is pending, waits until the store has acknowledged every
-upload, runs `wal_checkpoint(TRUNCATE)`, and keeps serving. It truncates no
+upload, runs `wal_checkpoint(TRUNCATE)`, and keeps serving. It never truncates a
 frame that is not yet replicated. It answers no other call meanwhile.
 
 | Answer | Meaning | What to do |
 | --- | --- | --- |
 | `:ok` | The `-wal` file is empty. | Nothing. |
-| `{:error, :busy}` | The uploads were not acknowledged within `deadline_ms` (default `wal: [checkpoint_deadline_ms: 10_000]`), or SQLite could not finish. The WAL stays and the cell serves. | Repeat later; look at the store if it persists. |
-| `:asleep` | Nobody owns the cell. It is not woken. | Nothing: hibernation already moved its WAL. |
+| `{:error, :busy}` | The uploads were not acknowledged within `deadline_ms` (default `wal: [checkpoint_deadline_ms: 10_000]`), or SQLite could not finish. The WAL stays, and the cell keeps serving. | Repeat the call later. If it keeps failing, check the store. |
+| `:asleep` | Nobody owns the cell. It is not woken. | Nothing. Hibernation already emptied its WAL. |
 
 `Alambique.checkpoint(MyApp.Cells, "org-1", deadline_ms: 30_000)` waits longer
-for one call. The call goes to the node that owns the cell, as any other. The
-telemetry event `[:alambique, :cell, :checkpoint]` reports each checkpoint
-([telemetry.md](telemetry.md)).
+for one call. The call goes to the node that owns the cell, like any other call.
+The telemetry event `[:alambique, :cell, :checkpoint]` reports each checkpoint
+(see [telemetry.md](telemetry.md)).
 
 To keep the WALs of all awake cells under one limit, set
-`wal: [max_bytes: 2_000_000_000]` (default `nil`, no budget). A background
-round every `wal: [budget_interval_ms: 1_000]` adds the WAL sizes and, at or
-above the limit, checkpoints the cell with the largest WAL as above, then the
-next, until the sum is under it. Cells that answer `:busy` or `{:error, :disk_full}` wait for the
-next round. `[:alambique, :wal, :budget]` reports each round that acted
-([telemetry.md](telemetry.md)); `Alambique.cells(inst, details: true)` lists
-the size of each WAL. The sum can pass the limit by what the cells write in
-one interval.
+`wal: [max_bytes: 2_000_000_000]`. The default is `nil`, which means no budget.
+A background round runs every `wal: [budget_interval_ms: 1_000]`. It adds up the
+WAL sizes. If the sum is at or above the limit, it checkpoints the cell with the
+largest WAL, then the next one, until the sum is below the limit. A cell that
+answers `:busy` or `{:error, :disk_full}` waits for the next round.
+
+- `[:alambique, :wal, :budget]` reports each round that acted (see
+  [telemetry.md](telemetry.md)).
+- `Alambique.cells(MyApp.Cells, details: true)` lists each cell with its
+  `wal_bytes`.
+
+The sum can exceed the limit by what the cells write in one interval.
 
 ## 12. Recover from a full disk
 
 When the disk under `:data_dir` has no room, the calls that need it return
-`{:error, :disk_full}`: writes, reads that need temporary space, and wakes (a
-restore or a migration that cannot write the file). The write did not run. Cells
-that are awake keep serving reads and the writes that fit, and nothing they
-acknowledged is lost, because the store holds it.
+`{:error, :disk_full}`. These are writes, reads that need temporary space, and
+wakes (a restore or a migration that cannot write its file). The call that gets
+this error did not run.
 
-1. Match on the atom, not on SQLite's text:
+1. Match on the atom, not on SQLite's message text:
 
    ```elixir
    case Alambique.execute(MyApp.Cells, cell, sql, params) do
@@ -571,10 +555,10 @@ acknowledged is lost, because the store holds it.
    end
    ```
 
-2. Free space. The local files of hibernated cells are a cache, so you can
-   remove them, or lower `:local_cache` `:max_bytes`, which evicts them
-   ([design.md](design.md) section 7.1). Section 11 empties the WAL of an
-   awake cell without putting it to sleep.
+2. Free space. The local files of hibernated cells are a cache of the store, so
+   you can remove them. Or lower `:local_cache` `:max_bytes`, which evicts them
+   (design section 7.1). Step 11 empties the WAL of an awake cell without putting
+   it to sleep.
 3. Repeat the call. A cell whose wake failed wakes again on the next call.
 
 Expected result: the next write that fits is acknowledged with `{:ok, _}`. The
@@ -583,86 +567,74 @@ wake event shows `reason: :disk_full` (`[:alambique, :cell, :wake]`).
 ## Troubleshooting
 
 - **`no store configured`**: see step 1.
-- **`could not connect to NODE`**: check the node name (`name@host`, as the
-  node prints it), the cookie, that `epmd` runs on both machines, and that the
-  hosts resolve each other. The tasks that only use the store do not need any
-  of this.
-- **`--instance NAME is required`**: `move` and `freeze --connect` call the
-  running instance; pass the name given to `{Alambique, name: ...}`.
-- **`{:error, :unknown_node}` from `move` to a node just started**: the node
+- **`could not connect to NODE`**: check the node name (`name@host`, as the node
+  prints it), the cookie, that `epmd` runs on both machines, and that the hosts
+  resolve each other. Tasks that use only the store need none of this.
+- **`--instance NAME is required`**: `move`, `relocate`, `cleanup` and
+  `freeze --connect` call the running instance. Pass the name given to
+  `{Alambique, name: ...}`.
+- **`{:error, :unknown_node}` from `move` to a node that just started**: the node
   runs with `join: false` and has not called `Alambique.join/1` (step 9).
-- **`{:error, :store_unavailable}` from calls.** The circuit breaker of the
-  store is open: it saw `breaker: [failures:]` failures in a row (default 5:
-  5xx, answers that did not come, connection errors; not a request that gave
-  up waiting for a connection of the pool, which is the node's queue) and refuses requests without reaching the
-  store for `breaker: [cooldown_ms:]` (default 5 000, plus up to 20 %). Then it
-  lets one request through and closes if it succeeds. Look for
-  `[:alambique, :store, :breaker, :open]` events (see
-  [telemetry.md](telemetry.md#store-events)), whose `reason` says whether the
-  failures or the probe opened it, and for `[:alambique, :store, :failure]`,
-  which gives the `reason` and the `operation` of each failure and whether it
-  `counted`, and for a crash of the store the `kind` and a short `detail`
-  (a crash is also logged, at most once every 10 s for a store).
-  `Alambique.breaker_status(instance)` shows
-  the state of each location now (`:closed`, `:open`, `:half_open`), since
-  when and the failures in a row, without asking the store; use it for a
-  health check. Check the store, not the node. Calls are
-  safe to repeat when the store answers again. Raise `failures` if a store
-  that fails now and then opens the breaker too often. `retry:
-  [max_attempts:]` (default 10) limits how often one request is repeated while
-  the breaker is closed. `retry: [check_timeout_ms:]` (default 1 000, lower on a
-  short lease) is the time the freeze check of each lease renewal may take;
-  raise it if the store is slow enough that the check is killed and the breaker
-  counts a timeout. It cannot exceed half of `lease_ttl_ms / 3` (less the
-  renewal jitter) minus `skew_margin_ms`, 3 500 with the default lease; start
-  refuses a larger value, so raise `lease_ttl_ms` with it.
-- **Writes wait or time out while the store fails.** A cell whose upload fails
-  for a store reason (an error, a timeout, a 5xx, `:store_unavailable`) does
-  not stop: it keeps the batch and uploads it again, waiting
-  `upload: [retry_backoff_ms:]` (default 500) and doubling up to
-  `retry_backoff_max_ms` (default 5 000), for as long as its lease is valid.
-  Writers wait for it, so a caller sees `{:error, :timeout}` when its own
-  timeout passes (the write may still land: treat it as unknown) and
-  `{:error, :busy}` when `awake: [max_pending:]` calls wait on the cell. Look
-  for `[:alambique, :cell, :upload_retry]` events (see
-  [telemetry.md](telemetry.md)). The cell stops with `{:sync_failed, reason}`
-  and its writers get `{:error, :outcome_unknown}` only when the store stays
-  down until the lease runs out; the next call wakes it from the store.
-- **`{:error, :frozen}` from a call**: unfreeze the cell (step 4). If you did
-  not freeze it, look at its `Crashes:` line first: the instance may have frozen
-  it.
-- **Restore fails with `{:gap, txid}`**: a file in the middle is missing. It
-  happens for points older than the newest snapshot when a reaper round was cut
-  short. Run `Alambique.Trash.reap/2` (or wait for the next round) to finish
-  the deletion, and restore a newer point. A gap in the chain that is not a
-  tail means lost data: restore `--at txid:N` with an `N` before the gap and
-  report it. A level-0 file
-  missing among the newest 16 TXIDs gives no error, because it reads as a tail
-  (design.md section 6, "The tail").
+- **`{:error, :store_unavailable}` from calls**: the circuit breaker of the store
+  is open. It opens after `breaker: [failures:]` failures in a row (5 by default:
+  5xx answers, requests that got no answer, and connection errors). While it is
+  open, it refuses requests without reaching the store for
+  `breaker: [cooldown_ms:]` (5 000 by default, plus up to 20 %). Then it lets one
+  request through, and it closes if that request succeeds.
+  - Look for `[:alambique, :store, :breaker, :open]`. Its `reason` says whether
+    failures or a probe opened it. See [telemetry.md](telemetry.md#store-events).
+  - Look for `[:alambique, :store, :failure]`. It gives the `reason`, the
+    `operation`, and whether the failure `counted` toward the breaker.
+  - `Alambique.breaker_status(MyApp.Cells)` shows the state of each location
+    (`:closed`, `:open` or `:half_open`), without asking the store. Use it for a
+    health check.
+  - Check the store, not the node. Calls are safe to repeat once the store
+    answers again.
+  - Raise `breaker: [failures:]` if a store that fails now and then opens the
+    breaker too often.
+- **Writes wait, or time out, while the store fails**: a cell whose upload fails
+  for a store reason keeps its batch and uploads it again. It waits
+  `upload: [retry_backoff_ms:]` (500 by default) and doubles the wait up to
+  `upload: [retry_backoff_max_ms:]` (5 000 by default), for as long as its lease
+  is valid. Writers wait for it. A caller gets `{:error, :timeout}` when its own
+  timeout passes. The write may still land, so treat its outcome as unknown. A
+  caller gets `{:error, :busy}` when more than `awake: [max_pending:]` calls wait
+  on the cell. Look for `[:alambique, :cell, :upload_retry]` events (see
+  [telemetry.md](telemetry.md)). When the store stays down until the lease runs
+  out, the cell stops with `{:sync_failed, reason}`, and its writers get
+  `{:error, :outcome_unknown}`. The next call wakes the cell from the store.
+- **`{:error, :frozen}` from a call**: unfreeze the cell (step 4). If you did not
+  freeze it, look at its `Crashes:` line first. The instance may have frozen it.
+- **Restore fails with `{:gap, txid}`**: a file in the middle of the chain is
+  missing. This can happen for points older than the newest snapshot when a
+  reaper round was cut short. Run `Alambique.Trash.reap/2`, or wait for the next
+  round, to finish the deletion, then restore a newer point. A gap that is not
+  at the tail means lost data. Restore `--at txid:N` with an `N` before the gap,
+  and report it. A level-0 file missing among the newest 16 TXIDs gives no
+  error. It reads as a tail (design.md section 6, "The tail").
 - **Restore fails with `:history_truncated` or `{:history_coarse, txid}`**: the
   point is older than what retention keeps. Only newer points can be restored.
 - **Calls for a cell fail at once with the same store error, and the store log
-  shows few requests**: the wake failed because the store did, and the node
-  remembers it with a backoff (`wake: [backoff_ms: 200, backoff_factor: 2,
-  backoff_max_ms: 10_000, backoff_jitter: 0.2]`, design section 7). Calls
-  for the cell get the error until the delay ends, then one call wakes it
-  again; the delay grows with each failure in a row up to the cap and starts
-  over after a wake succeeds. Each delay is in the `delay_ms` of
+  shows few requests**: the wake failed because the store did. The node remembers
+  the failure and waits before it retries, with `wake: [backoff_ms: 200,
+  backoff_factor: 2, backoff_max_ms: 10_000, backoff_jitter: 0.2]` (design section
+  7). Calls for the cell get the error until the delay ends. Then one call wakes
+  the cell again. Each failure in a row makes the delay longer, up to the cap, and
+  a successful wake resets it. Each delay is in the `delay_ms` of
   `[:alambique, :admission, :wake_backoff]`. Wait for the store to answer, or
   lower `backoff_max_ms` if a cell must retry sooner.
 - **A cell fails to wake with `{:restore, {:epoch_regression, key, ...}}`**: a
-  file of a lower epoch sits past the chain and it is not a tail (a merged file,
-  a snapshot, or a file more than 16 TXIDs past the head), so the tail rule
-  cannot explain it. A lower-epoch level-0 file within that reach is ignored
-  and the next owner overwrites it, so it never gives this error. Retention
-  does not delete such files. Inspect the object at `key`, and read the state
-  before it with `mix alambique.restore --at txid:N`. See
+  file of a lower epoch sits past the chain, and it is not a tail. A merged file,
+  a snapshot, or a file more than 16 TXIDs past the head cannot be a tail. A
+  lower-epoch level-0 file within that reach is ignored, and the next owner
+  overwrites it. Inspect the object at `key`. Read the state before it with
+  `mix alambique.restore --at txid:N`. See
   [design.md](design.md#6-replication-and-fencing), "The tail".
 
 ## Next steps
 
 - [design.md](design.md) section 9 for the compaction and retention options
-  (`:compaction` and `:retention` on `{Alambique, ...}`), 9.1 for delayed
-  deletions, 6.1 for the scrub, and section 12 for what they cost.
-- [telemetry.md](telemetry.md) for the events to watch (`[:alambique,
-  :compaction, :pass]`, `[:alambique, :retention, :run]`).
+  (`:compaction` and `:retention` on `{Alambique, ...}`), section 9.1 for delayed
+  deletions, section 6.1 for the scrub, and section 12 for the requirements.
+- [telemetry.md](telemetry.md) for the events to watch, such as
+  `[:alambique, :compaction, :pass]` and `[:alambique, :retention, :run]`.

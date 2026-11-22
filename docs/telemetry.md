@@ -227,7 +227,7 @@ from the encode to then, so it includes the wait for earlier batches.
 hibernating; a wake that fails is reported by `:wake` with `result: :error`.
 
 `store_time` of `[:alambique, :cell, :wake]` is the sum of the time of each
-store request of the wake, measured around the call to the store, so it
+store request of the wake, timed around the call to the store, so it
 includes the wait of the process for a scheduler once the answer is there.
 Requests that run together each add their own time, so it can exceed
 `duration`; a `store_time` far below `duration` says the wake waited for the
@@ -256,8 +256,7 @@ this event; `[:alambique, :replication, :hydrate]` reports when they are all
 there. `trips` is the number of requests, which is not the time they took:
 requests that run together count each.
 
-Per user, key a metric by `cell` (for a mail service, the user's mailbox). For example,
-with `Telemetry.Metrics`:
+Key metrics by `cell`. For example, with `Telemetry.Metrics`:
 
 ```elixir
 summary("alambique.cell.wake.duration", unit: {:native, :millisecond}, tags: [:cell, :source])
@@ -269,7 +268,7 @@ summary("alambique.cell.wake.trips", tags: [:cell, :source])
 To account for what a cell costs in the store, sum the `bytes` of these events
 by `cell`. Each reports the size of the object it put, only when the put
 worked, and the sums equal the sizes of the objects of the kind that the store
-received (`test/store_bytes_test.exs` checks it).
+received (a test in the default suite checks it).
 
 | Kind of object | Event | Filter |
 | --- | --- | --- |
@@ -278,14 +277,13 @@ received (`test/store_bytes_test.exs` checks it).
 | Snapshot of level 9 | `[:alambique, :compaction, :snapshot]` | `result: :ok` |
 | Feed object | `[:alambique, :feed, :publish]` | `result` `:ok` (`bytes` is 0 for `:exists` and `:error`) |
 
-The lease (one object of about 140 bytes, put again every `lease_ttl_ms / 3`),
-the trash manifests (`[:alambique, :trash, :mark]` counts their keys), the `chain` count of the compactor, the
-`trashed` marker and the entries of the schema index are under 1 KiB each and
-have no `bytes`. For a cell that is written once an hour the lease is the
-largest of them, about 50 KiB an hour at the default TTL.
+The lease (one small JSON object, put again every `lease_ttl_ms / 3` while the
+cell is awake), the trash manifests (`[:alambique, :trash, :mark]` counts their
+keys), the `chain` count of the compactor, the `trashed` marker and the entries
+of the schema index are small objects with no `bytes`. Their sizes are not
+measured here.
 
-`mise run bench:amplification` prints these sums next to what the store
-received, by kind (`docs/how-to-size-storage.md`).
+See [cost-of-a-cell.md](cost-of-a-cell.md) for the cost of one cell.
 
 ## Routing events
 
