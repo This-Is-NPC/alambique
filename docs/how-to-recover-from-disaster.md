@@ -1,12 +1,11 @@
 # How to recover from the loss of a node and its disk
 
-**The question:** a node is gone with its disk and only the bucket is left.
-How do I bring its cells back on a new node, how long does it take, and what
-do I check afterwards?
+**The question:** a node is gone with its disk, and only the bucket is left.
+How do I bring its cells back on a new node, and what do I check afterwards?
 
-This guide stands alone. It rehearses the loss on your machine against the
-disposable SeaweedFS of the project, and then lists what changes in
-production. The background is in [design.md](design.md): the lease in section
+This guide stands alone. Section 1 rehearses the loss on your machine, in a
+disposable store. Sections 2 to 4 bring the cells back, and section 5 lists
+the checks. The background is in [design.md](design.md): the lease in section
 5, the restore in section 6 and the early takeover in section 5.1.
 
 ## What survives
@@ -21,8 +20,8 @@ for any unknown outcome.
 What the lost node leaves behind is its **leases**. A lease is held until its
 `lease_ttl_ms` ends (30 s by default), and the new node takes it only after
 `skew_margin_ms` more (2 s). Until then calls for that cell answer
-`{:error, {:unavailable, owner, expires_at_ms}}`. Section 3 shows it, and
-section 4 shows how to skip the wait.
+`{:error, {:unavailable, owner, expires_at_ms}}`. Section 3 shows the refusal,
+and section 4 shows how to skip the wait.
 
 This guide does not cover the loss of the bucket itself. For that, see
 versioning in [storage-compatibility.md](storage-compatibility.md).
@@ -39,18 +38,25 @@ versioning in [storage-compatibility.md](storage-compatibility.md).
 
 ## 1. Rehearse the loss
 
-Start the disposable store. In a checkout of the repository:
+Start a disposable SeaweedFS on your machine. It uses the port of the
+[first cell walkthrough](how-to-run-a-first-cell.md), so remove that container
+first if it still runs (`docker rm -f alambique-first-try`):
 
 ```sh
-mise run seaweedfs:up
+docker run -d --name alambique-disaster-demo -p 127.0.0.1:18333:8333 \
+  -e AWS_ACCESS_KEY_ID=alambique -e AWS_SECRET_ACCESS_KEY=alambique-secret \
+  chrislusf/seaweedfs:4.48 \
+  mini -dir=/data -ip=127.0.0.1 -ip.bind=0.0.0.0 -s3.port=8333 -admin.ui=false
 ```
 
-Without a checkout, use the `docker run` of the
-[README](../README.md#example); the container name does not matter.
+Check that the S3 gateway answers. Any HTTP status code is enough, even `403`:
 
-```text
-SeaweedFS ready on 127.0.0.1:18333
+```sh
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:18333/
 ```
+
+If the command prints nothing or `000`, wait a few seconds and run it again.
+SeaweedFS creates the bucket `disaster-demo` on the first write.
 
 In your project, save the settings that every node shares as `common.exs`.
 They are the credentials of the disposable container; use your own in
@@ -89,29 +95,27 @@ defmodule Disaster do
     :telemetry.attach_many("disaster-log", events, &__MODULE__.log/4, nil)
   end
 
-  def log([_, :lease, :acquire], m, meta, _) do
-    IO.puts("lease.acquire #{meta.cell} result=#{meta.result} epoch=#{meta[:epoch]} #{ms(m.duration)} ms")
+  def log([_, :lease, :acquire], _m, meta, _) do
+    IO.puts("lease.acquire #{meta.cell} result=#{meta.result} epoch=#{meta[:epoch]}")
   end
 
-  def log([_, :cell, :wake], m, meta, _) do
-    IO.puts("cell.wake #{meta.cell} result=#{meta.result} source=#{meta[:source]} txid=#{meta[:txid]} #{ms(m.duration)} ms trips=#{m.trips}")
+  def log([_, :cell, :wake], _m, meta, _) do
+    IO.puts("cell.wake #{meta.cell} result=#{meta.result} source=#{meta[:source]} txid=#{meta[:txid]}")
   end
 
   def log([_, :replication, :restore], _, meta, _) do
     IO.puts("replication.restore #{meta.cell} result=#{meta.result} txid=#{meta[:txid]} files=#{meta[:segments]}")
   end
-
-  defp ms(native), do: System.convert_time_unit(native, :native, :millisecond)
 end
 ```
 
-Save `write.exs`. It is node A: it writes 50 rows to each of three cells and
-stops the VM without a drain, as a machine that loses power does.
+Save `write.exs`. It runs the old node: it writes 50 rows to each of three
+cells and stops the VM without a drain, as a machine that loses power does.
 
 ```elixir
 Code.require_file("common.exs", __DIR__)
 
-{:ok, _} = Supervisor.start_link([Disaster.child("node-a", "data-a")], strategy: :one_for_one)
+{:ok, _} = Supervisor.start_link([Disaster.child("old-node", "data-old")], strategy: :one_for_one)
 
 cells = ["org-1", "org-2", "org-3"]
 
@@ -120,7 +124,7 @@ for cell <- cells, i <- 1..50 do
 end
 
 for cell <- cells, do: IO.puts(Disaster.summary(cell))
-IO.puts("node A: stopping without a drain")
+IO.puts("old node: stopping without a drain")
 System.halt(0)
 ```
 
@@ -128,30 +132,30 @@ Run it, then delete the data directory, which is the lost disk:
 
 ```sh
 mix run write.exs
-rm -rf data-a
+rm -rf data-old
 ```
 
 ```text
 org-1: 50 rows, 641 bytes of text
 org-2: 50 rows, 641 bytes of text
 org-3: 50 rows, 641 bytes of text
-node A: stopping without a drain
+old node: stopping without a drain
 ```
 
-Expected result: the three summaries, and no `data-a` directory. Everything
+Expected result: the three summaries, and no `data-old` directory. Everything
 is now only in the bucket.
 
 ## 2. Start a new node on an empty directory
 
 A new node needs no restore command. It starts the instance with the same
 store and prefix, and a cell is restored by its first call. Save `read.exs`,
-which is node B and calls each cell until it answers:
+which starts the new node and calls each cell until it answers:
 
 ```elixir
 Code.require_file("common.exs", __DIR__)
 
 Disaster.log_events()
-{:ok, _} = Supervisor.start_link([Disaster.child("node-b", "data-b")], strategy: :one_for_one)
+{:ok, _} = Supervisor.start_link([Disaster.child("new-node", "data-new")], strategy: :one_for_one)
 
 cells = ["org-1", "org-2", "org-3"]
 
@@ -187,87 +191,69 @@ mix run read.exs
 
 ## 3. Wait for the leases
 
-Output of the run on 2026-11-16 (a laptop with other work running, so the
-times are not those of a quiet machine):
+The output has one block per cell. Values in angle brackets depend on the run:
 
 ```text
-06:31:41 org-1: unavailable, held by "node-a", lease ends in 7 s
-lease.acquire org-1 result=ok epoch=2 19 ms
-replication.restore org-1 result=ok txid=52 files=10
-cell.wake org-1 result=ok source=restore txid=53 471 ms trips=16
+<hh:mm:ss> org-1: unavailable, held by "old-node", lease ends in <s> s
+lease.acquire org-1 result=ok epoch=2
+replication.restore org-1 result=ok txid=<n> files=<n>
+cell.wake org-1 result=ok source=restore txid=<n>
 org-1 rows at the first answer: {:ok, 50}
-06:31:52 org-2: unavailable, held by "node-a", lease ends in 2 s
-lease.acquire org-2 result=ok epoch=2 7 ms
-replication.restore org-2 result=ok txid=52 files=10
-cell.wake org-2 result=ok source=restore txid=53 358 ms trips=16
-org-2 rows at the first answer: {:ok, 50}
-06:31:57 org-3: unavailable, held by "node-a", lease ends in 0 s
-lease.acquire org-3 result=ok epoch=2 8 ms
-replication.restore org-3 result=ok txid=52 files=45
-cell.wake org-3 result=ok source=restore txid=53 260 ms trips=51
-org-3 rows at the first answer: {:ok, 50}
-waited 19417 ms
 ```
 
-What it says:
+What it shows:
 
-- **The refusal.** The first call for `org-1` came about 10 s after node A
-  stopped, the time node B took to start, and was refused: the lease of node A
-  ran 7 s more. The new node did not take
-  it at once, because the lease of a node that may still be alive is not its to
-  take (design section 5). Each cell has its own lease, so each waits for its
-  own end: `org-2` and `org-3` were written a little later than `org-1`.
+- **The refusal.** The first call for a cell is refused while the lease of the
+  old node runs. The new node does not take a lease at once, because the lease
+  of a node that may still be alive is not its to take (design section 5). Each
+  cell has its own lease, so each waits for its own end.
 - **The wait is bounded.** It is the rest of `lease_ttl_ms` plus
-  `skew_margin_ms`: here 19.4 s from the first call to the last answer, which
-  is under 30 s + 2 s. Without a call, nothing happens: a lease is taken when a
-  call needs the cell.
+  `skew_margin_ms`: at most 32 s with the default settings. Without a call,
+  nothing happens: a lease is taken when a call needs the cell.
 - **The restore.** `source=restore` says the cell was built from the store.
-  `files=10` is the number of files applied (the newest snapshot, if there is
-  one, and the files after it), `trips` the store requests of the wake, and
-  `txid=53` the new head: the restored `txid=52` plus one empty file the wake
-  writes to fence the old owner. `org-3` applied 45 files because the compactor
-  had not merged them before node A stopped (it has `trips=51` against 16);
-  compaction makes a wake read fewer files
+  `files` is the number of files applied: the newest snapshot, if there is one,
+  and the files after it. The `txid` of the wake is the new head: the restored
+  head plus one empty file the wake writes to fence the old owner. A wake reads
+  more files when compaction has merged fewer of them
   ([how-to-speed-up-a-wake.md](how-to-speed-up-a-wake.md)).
-- **The epoch rose.** `epoch=2`: node A held epoch 1. A node of the old epoch
+- **The epoch rises.** `epoch=2`: the old node held epoch 1. An old-epoch node
   that comes back can no longer write: its next upload is fenced (design
   section 6).
 
 ## 4. Skip the wait with an early takeover
 
-If you know that node A is gone for good, for example because the machine was
-deleted, take its cells at once instead of waiting. `Alambique.lease/3` reads
-the lease without waking the cell, and `Alambique.take_over/4` replaces it. The
-epoch you pass makes two nodes that try it together take the cell once
-(design section 5.1). Node B, with `takeover.exs`:
+If you know that the old node is gone for good, for example because the machine
+was deleted, take its cells at once instead of waiting. `Alambique.lease/3`
+reads the lease without waking the cell, and `Alambique.take_over/4` replaces
+it. The epoch you pass makes two nodes that try it together take the cell once
+(design section 5.1). The new node runs `takeover.exs`:
 
 ```elixir
 Code.require_file("common.exs", __DIR__)
 
 Disaster.log_events()
-{:ok, _} = Supervisor.start_link([Disaster.child("node-b", "data-b")], strategy: :one_for_one)
+{:ok, _} = Supervisor.start_link([Disaster.child("new-node", "data-new")], strategy: :one_for_one)
 
 for cell <- ["org-1", "org-2", "org-3"] do
   {:ok, %{owner_id: owner_id, epoch: epoch, released: false}} = Alambique.lease(MyApp.Cells, cell)
-  started = System.monotonic_time(:millisecond)
   {:ok, _node} = Alambique.take_over(MyApp.Cells, cell, :node_lost, epoch: epoch)
-  IO.puts("take_over #{cell}: was #{owner_id} at epoch #{epoch}, done in #{System.monotonic_time(:millisecond) - started} ms")
+  IO.puts("take_over #{cell}: was #{owner_id} at epoch #{epoch}")
   IO.puts(Disaster.summary(cell))
 end
 
 IO.inspect(Alambique.drain(MyApp.Cells), label: "drain")
 ```
 
-Output of a second run on the same store, with a new prefix
-(`ALAMBIQUE_PREFIX=myapp2` for `write.exs` and `takeover.exs`), node B started
-right after the loss:
+To try it, run `write.exs` and `takeover.exs` with a prefix that no other run
+used, for example `ALAMBIQUE_PREFIX=myapp2`, and start the new node right after
+the loss. Expected output:
 
 ```text
-take_over org-1: was node-a at epoch 1, done in 737 ms
+take_over org-1: was old-node at epoch 1
 org-1: 50 rows, 641 bytes of text
-take_over org-2: was node-a at epoch 1, done in 161 ms
+take_over org-2: was old-node at epoch 1
 org-2: 50 rows, 641 bytes of text
-take_over org-3: was node-a at epoch 1, done in 161 ms
+take_over org-3: was old-node at epoch 1
 org-3: 50 rows, 641 bytes of text
 drain: {:ok, %{errors: [], hibernated: 3}}
 ```
@@ -281,20 +267,20 @@ serving ([how-to-operate-a-cell.md](how-to-operate-a-cell.md), section 5.1).
 
 Do all of these before you send traffic.
 
-1. **The rows match.** Each cell answered the count it had before the loss: 50
-   rows and 641 bytes of text. In production compare with what your
-   application knows, such as a counter in another database, because the
+1. **The rows match.** Each cell answers the count it had before the loss: 50
+   rows and 641 bytes of text in the rehearsal. In production compare with what
+   your application knows, such as a counter in another database, because the
    library has no other copy to compare with.
 
 2. **`source=restore`, not `source=empty`.** A wake that finds nothing in the
    store does not fail: it starts a new empty cell. A typo in the prefix gives
-   this, with no error. Starting node B as in `read.exs` with
-   `ALAMBIQUE_PREFIX=mapp` and calling `Disaster.summary("org-1")` gave:
+   this, with no error. Starting the new node as in `read.exs` with
+   `ALAMBIQUE_PREFIX=mapp` and calling `Disaster.summary("org-1")` gives:
 
    ```text
-   lease.acquire org-1 result=ok epoch=1 37 ms
+   lease.acquire org-1 result=ok epoch=1
    replication.restore org-1 result=ok txid=0 files=0
-   cell.wake org-1 result=ok source=empty txid=2 597 ms trips=7
+   cell.wake org-1 result=ok source=empty txid=<n>
    org-1: 0 rows, 0 bytes of text
    ```
 
@@ -315,68 +301,61 @@ Do all of these before you send traffic.
    Prefix:     myapp
    Frozen:     no
    Crashes:    none
-   Lease:      epoch 2, owner node-b, released
-   Head:       TXID 53, epoch 2, page size 4096
+   Lease:      epoch 2, owner new-node, released
+   Head:       TXID <n>, epoch 2
    Segments:
-     level 0: 53 files, TXID 1-53, 35.1 KiB
-     level 1: 6 files, TXID 1-48, 5.2 KiB
-   Snapshots:
-     none
+     level 0: <n> files, TXID 1-<n>
    ```
 
-   The epoch is one above the old one (`epoch 2`) and the head is one TXID
-   above the last the old node acknowledged (`53`, from `52`). The lease says
-   `released` here only because `read.exs` drained node B at its end.
+   The epoch is one above the old one (`epoch 2`), and the head is above the
+   last TXID the old node acknowledged. The lease reads `released` only because
+   `read.exs` drained the new node at its end.
 
 4. **The files are sound.** `Alambique.scrub/2` restores sampled cells into a
    temporary directory and runs SQLite's integrity check on them (design
-   section 6.1). Above, it checked one of the three cells:
+   section 6.1). It samples, so the result counts the sampled cells in `ok`,
+   `empty` and `failed`; check that `failed` is 0.
 
-   ```text
-   scrub: {:ok, %{ok: 1, empty: 0, failed: 0, cells: 1, failures: []}}
-   ```
-
-   It samples, so for a short list of important cells restore them yourself
-   and check the file with SQLite. This needs no node, and it uses the same
-   code as a wake:
+   For a short list of important cells, restore them yourself and check the
+   file with SQLite. This needs no node, and it uses the same code as a wake:
 
    ```sh
    mix alambique.restore org-1 check.db
    sqlite3 check.db "PRAGMA integrity_check; SELECT count(*), sum(length(body)) FROM notes;"
    ```
 
-   `/path/to/project` stands for the directory where you ran the task.
-
    ```text
-   Restored org-1 to /path/to/project/check.db: TXID 53, epoch 2, 11 files applied
+   Restored org-1 to /path/to/project/check.db: TXID <n>, epoch 2, <n> files applied
    ok
    50|641
    ```
 
+   `/path/to/project` stands for the directory where you ran the task.
+
 5. **Clean up the rehearsal.**
 
    ```sh
-   rm -rf data-b check.db
-   mise run seaweedfs:down
+   rm -rf data-new check.db
+   docker rm -f alambique-disaster-demo
    ```
 
    ```text
-   SeaweedFS removed
+   alambique-disaster-demo
    ```
 
 ## In production
 
 - **The old node may be alive but out of reach.** It keeps serving until its
-  lease deadline, `lease_ttl_ms - skew_margin_ms` after its last renewal,
-  28 s by default, and then stops (design section 5). A new node takes the
+  lease deadline, `lease_ttl_ms - skew_margin_ms` after its last renewal, which
+  is 28 s by default. Then it stops (design section 5). A new node takes the
   cell only after that, so two nodes never serve it together. Use the early
   takeover only when you know the old node is down.
-- **Expect a burst of wakes.** The first call to each cell
-  restores it. Many cells waking at once queue at `awake: [max_wakes:]` and
-  get `{:error, :overloaded}` past `wake_queue_ms`
-  ([how-to-size-a-node.md](how-to-size-a-node.md)). Callers should retry.
-  Large cells restore lazily, so their first answer does not wait for the
-  whole database ([how-to-speed-up-a-wake.md](how-to-speed-up-a-wake.md)).
+- **Expect a burst of wakes.** The first call to each cell restores it. Many
+  cells waking at once queue at `awake: [max_wakes:]` and get
+  `{:error, :overloaded}` past `wake_queue_ms` (default 500 ms, see
+  [cost-of-a-cell.md](cost-of-a-cell.md)). Callers should retry. Large
+  cells restore lazily, so their first answer does not wait for the whole
+  database ([how-to-speed-up-a-wake.md](how-to-speed-up-a-wake.md)).
 - **Put the new node in the router only when it is ready.** Start it with
   `join: false` and call `Alambique.join/1` after your own processes are up
   ([how-to-operate-a-cell.md](how-to-operate-a-cell.md), section 9).
@@ -394,7 +373,7 @@ Do all of these before you send traffic.
   prefix or the bucket is not the lost node's.
 - **The wake fails with `{:restore, reason}`.** A file in the chain is missing
   or damaged. Restore an earlier point with
-  `mix alambique.restore CELL file.db --at txid:N` and read the troubleshooting
+  `mix alambique.restore CELL file.db --at txid:N`, and read the troubleshooting
   list of [how-to-operate-a-cell.md](how-to-operate-a-cell.md). If the bucket
   is versioned, restore the versions of the missing objects first
   ([storage-compatibility.md](storage-compatibility.md)).
@@ -404,8 +383,8 @@ Do all of these before you send traffic.
 - **`{:error, {:data_dir_in_use, path}}`.** Another instance holds the
   directory: give the new node its own.
 - **The migrations differ from the lost node's.** A cell that is at a higher
-  schema version than the new code reads is refused; deploy the code of the lost
-  node, or one that reads that version
+  schema version than the new code reads is refused. Deploy the code of the lost
+  node, or code that reads that version
   ([how-to-roll-out-a-schema-change.md](how-to-roll-out-a-schema-change.md)).
 
 ## Next steps

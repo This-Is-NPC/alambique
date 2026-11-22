@@ -1,36 +1,50 @@
 # Documentation
 
+Each page answers one question. The pages are in reading order within each
+group. Users need only the first group; contributors read the second, which
+may also use the first.
+
+## For users
+
 | Page | Question it answers |
 | --- | --- |
-| [concepts.md](concepts.md) | What do cell, lease, epoch, segment and the other words mean? |
+| [concepts.md](concepts.md) | What do cell, lease, epoch and segment mean? |
+| [how-to-run-a-first-cell.md](how-to-run-a-first-cell.md) | How do I run a first cell against a local store? |
 | [how-to-call-cells.md](how-to-call-cells.md) | How do I start an instance and call cells from my application? |
-| [design.md](design.md) | How do cells, leases, replication, routing and the test kit work? |
-| [how-to-operate-a-cell.md](how-to-operate-a-cell.md) | How do I inspect, restore, freeze or move a cell, what do I do with one the instance froze for crashing the VM, how do I restart a node without failed calls, how do I check that the disk under the cells does not stall writes, and what do I do when the disk is full? |
-| [how-to-monitor-a-node.md](how-to-monitor-a-node.md) | Which events, calls and host metrics do I watch to know a node is healthy, and at what value does each need a person? |
-| [how-to-manage-the-bucket.md](how-to-manage-the-bucket.md) | What does Alambique delete from the bucket, which objects must no lifecycle rule touch, how do I change how long old data stays, and how many requests does a month cost? |
-| [how-to-recover-from-disaster.md](how-to-recover-from-disaster.md) | A node and its disk are lost and only the bucket is left: how do I bring its cells back on a new node, and what do I check? |
-| [how-to-configure-the-s3-store.md](how-to-configure-the-s3-store.md) | How do I point the S3 store at AWS or a compatible server, with static keys or with temporary credentials that renew? |
-| [how-to-swap-a-node.md](how-to-swap-a-node.md) | How do I replace one node by another that started beside it, with no cluster between them, and what do callers see meanwhile? |
-| [how-to-discover-nodes.md](how-to-discover-nodes.md) | How do nodes find each other through the store, so that my application can connect them? |
-| [how-to-size-a-node.md](how-to-size-a-node.md) | How much memory does a node need for N awake cells, and which `awake` options keep it from running out? What to set on a node with one or two CPUs? |
-| [how-to-speed-up-a-wake.md](how-to-speed-up-a-wake.md) | Why does the first call to a hibernated cell take long, how do I measure it for each user, which options change it, and what does a small node pay when many cells wake at once? |
-| [how-to-load-test.md](how-to-load-test.md) | How many commits, awake cells, wakes and cross-cell queries does one node carry in a CPU- and memory-limited container, and what does each unit cost? |
-| [how-to-size-storage.md](how-to-size-storage.md) | How many bytes does the store receive and keep for a cell that is written once in a while, what causes the difference from the data, and which options shrink it? |
-| [how-to-rewind-a-cell.md](how-to-rewind-a-cell.md) | How do I undo what a cell did after a point, without readers seeing a mixed state, and what do the change feed's consumers do about it? |
+| [storage-compatibility.md](storage-compatibility.md) | Which object stores pass the conditional-write tests? |
+| [how-to-discover-nodes.md](how-to-discover-nodes.md) | How do nodes find each other through the store? |
+| [how-to-swap-a-node.md](how-to-swap-a-node.md) | How do I replace a node with another one, and what do callers see meanwhile? |
+| [cost-of-a-cell.md](cost-of-a-cell.md) | What does one cell cost, and how many fit on my node? |
+| [how-to-speed-up-a-wake.md](how-to-speed-up-a-wake.md) | Why does the first call to a hibernated cell take long, and which options change it? |
+| [how-to-operate-a-cell.md](how-to-operate-a-cell.md) | How do I inspect, restore, freeze or move a cell, and handle a full or stalled disk? |
+| [how-to-monitor-a-node.md](how-to-monitor-a-node.md) | Which events, calls and host metrics show a node is healthy? |
+| [how-to-manage-the-bucket.md](how-to-manage-the-bucket.md) | What does Alambique delete from the bucket, and how do I change how long old data stays? |
+| [how-to-recover-from-disaster.md](how-to-recover-from-disaster.md) | How do I bring the cells back on a new node when only the bucket is left? |
+| [how-to-configure-the-s3-store.md](how-to-configure-the-s3-store.md) | How do I point the S3 store at AWS or a compatible server, with static or renewing credentials? |
+| [how-to-rewind-a-cell.md](how-to-rewind-a-cell.md) | How do I undo what a cell did after a point in time? |
 | [how-to-query-across-cells.md](how-to-query-across-cells.md) | How do I run read-only SQL over many cells without waking them? |
 | [how-to-read-replicas.md](how-to-read-replicas.md) | How do I serve the reads of a hot cell from other nodes with a bounded lag? |
-| [how-to-check-the-pipeline-model.md](how-to-check-the-pipeline-model.md) | How do I model-check pipelined commits, the lease and the fence with TLA+, and what does each check mean? |
-| [segment-format.md](segment-format.md) | What is in a replicated segment, how do replication and restore use it, and how is the format checked? |
-| [how-to-consume-the-change-feed.md](how-to-consume-the-change-feed.md) | How do I read the row changes of all cells, and resume where I stopped? |
+| [how-to-consume-the-change-feed.md](how-to-consume-the-change-feed.md) | How do I read the row changes of all cells and resume where I stopped? |
 | [how-to-roll-out-a-schema-change.md](how-to-roll-out-a-schema-change.md) | How do I change the schema while old and new code run together? |
+| [segment-format.md](segment-format.md) | What bytes does a replicated segment contain, and how is the format checked? |
 | [telemetry.md](telemetry.md) | Which telemetry events does Alambique emit, and with what data? |
-| [storage-compatibility.md](storage-compatibility.md) | Which object stores pass the conditional-write tests? |
-| [known-limitations.md](known-limitations.md) | What are the known limitations? |
-| [contributing.md](contributing.md) | How do I build, test and measure the project? |
+| [known-limitations.md](known-limitations.md) | Which known limitations and open defects affect me, and what is the workaround? |
 
-Recommended path: read the project [README](../README.md), then
-`concepts.md` and `how-to-call-cells.md`, then `design.md` sections 1 to 6 and
-the storage compatibility page. Operators continue with
-`how-to-operate-a-cell.md`, `how-to-swap-a-node.md` and `how-to-size-a-node.md`,
-then `how-to-monitor-a-node.md`, `how-to-manage-the-bucket.md` and
-`how-to-recover-from-disaster.md`.
+Recommended path for a first read: the project [README](../README.md), then
+`concepts.md`, `how-to-run-a-first-cell.md`, `how-to-call-cells.md` and
+`storage-compatibility.md`. Operators continue with `how-to-discover-nodes.md`,
+`how-to-swap-a-node.md`, `cost-of-a-cell.md`, `how-to-monitor-a-node.md`,
+`how-to-manage-the-bucket.md` and `how-to-recover-from-disaster.md`. Read
+`known-limitations.md` before you run a release in production.
+
+## For contributors
+
+| Page | Question it answers |
+| --- | --- |
+| [contributing.md](contributing.md) | How do I build, test and measure the project? |
+| [design.md](design.md) | How are the model, components, state and protocols built? |
+| [how-to-check-the-pipeline-model.md](how-to-check-the-pipeline-model.md) | How do I model-check pipelined commits, the lease and the fence with TLA+? |
+| [how-to-load-test.md](how-to-load-test.md) | How do I load-test one node in a limited container? |
+
+Start with [contributing.md](contributing.md), which lists the commands and the
+benchmarks, then read `design.md`. The TLA+ and load-test guides stand alone.

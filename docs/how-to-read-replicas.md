@@ -1,34 +1,27 @@
 # How to read a hot cell from other nodes
 
-**The question:** how do I serve the reads of a hot cell from the nodes that
-do not own it, accepting a bounded lag, so the owner does not answer every read
-and callers do not pay a hop to it?
+**The question:** how do I serve the reads of a cell from the nodes that do not
+own it, accepting a bounded lag, so the owner does not answer every read?
 
-This guide stands alone. The design and the proof of the bound are in
-[design.md](design.md), section 21. The output below comes from running these
-steps against `AlambiqueTestkit.MemoryStore` with two instances in one VM, an
-owner and a reader. The two instances cannot forward to each other in that
-setup, so a read that the reader sends to the owner answers `{:error,
-{:unavailable, "owner_node", _}}` there; in a cluster the owner answers it.
+This guide stands alone. The guarantee and its limits are in
+[design.md](design.md), section 21. Option defaults are in the documentation of
+the `Alambique` module, under `:replicas`.
 
-## Before you start
+## Prerequisites
 
 - An instance of Alambique on each node that reads (see the
-  [README](../README.md)), and a cell that is awake or asleep on some other
-  node. A node that owns the cell never keeps a replica: it answers from the
-  cell.
+  [README](../README.md)). A node that owns the cell never keeps a replica for
+  it: it answers from the cell.
 - Disk under the instance's `:data_dir` for the replicas
-  (`<data_dir>/read-replicas`, at most 1 GiB per node by default), and a few
-  store requests per second per replica (section "What it costs").
-- A bound you can live with. A read with `{:bounded, 500}` contains every write
-  whose caller was told it was done more than 500 ms before the read started. It
-  may miss newer ones, and two reads of one caller, one on the owner and one on
-  a replica, can see time go back by up to the bound.
+  (`<data_dir>/read-replicas`, at most 1 GiB per node by default).
+- A bound you can accept. A read with `consistency: {:bounded, 500}` contains
+  every write whose caller was told it was done more than 500 ms before the
+  read started. It may miss newer writes. Two reads by one caller, one answered
+  by the owner and one by a replica, can see time go back by up to the bound.
 
 ## 1. Turn replicas on in the instance
 
-Replicas are off unless the instance has the option. Start every node that
-reads with it:
+Replicas are off unless the instance has the `:replicas` option:
 
 ```elixir
 {Alambique,
@@ -39,16 +32,15 @@ reads with it:
  replicas: [max_cells: 32, poll_ms: 250, poll_max_ms: 5_000]}
 ```
 
-`replicas: []` takes every default. The options are in the `Alambique`
-module documentation under `:replicas`. Without the option, a bounded read goes
-to the owner and nothing looks for the switch of step 2.
+`replicas: []` takes every default. Without the option, a bounded read goes to
+the owner and never looks at the switch of step 2.
 
-Expected result: the instance starts; `<data_dir>/read-replicas` exists once a
-replica does.
+Expected result: the instance starts. `<data_dir>/read-replicas` exists once a
+replica has been built.
 
-## 2. Turn the switch on for the hot cells
+## 2. Turn the switch on for a cell
 
-A replica costs requests and disk on every node that reads the cell, so you
+A replica costs store requests and disk on every node that reads the cell, so
 choose the cells. The switch is an object in the store:
 
 ```elixir
@@ -60,8 +52,8 @@ Alambique.replicas(MyApp.Cells, "org-1")
 # {:ok, true}
 ```
 
-None of these wakes the cell. Nodes notice the switch within `marker_ttl_ms`
-(5 seconds by default).
+Setting the switch does not wake the cell. Nodes see the switch within
+`marker_ttl_ms` (5 seconds by default).
 
 ## 3. Read with a bound
 
@@ -70,49 +62,45 @@ Alambique.query(MyApp.Cells, "org-1", "SELECT body FROM notes", [],
   consistency: {:bounded, 500})
 ```
 
-The first read on a node finds no replica. The owner answers it, and the node
+The first read on a node has no replica. The owner answers it, and the node
 starts building a replica in the background:
 
 ```
-telemetry: [:alambique, :replica, :read] %{} %{reason: :no_replica, source: :owner, cell: "org-1"}
+telemetry: [:alambique, :replica, :read] %{} %{source: :owner, reason: :no_replica, cell: "org-1"}
 telemetry: [:alambique, :replica, :build] %{} %{result: :ok, cell: "org-1", txid: 3}
 ```
 
-The next reads are served from the replica:
+Later reads are served by the replica:
 
 ```
 {:ok, %{columns: ["body"], rows: [["hi"]]}}
 telemetry: [:alambique, :replica, :read] %{lag_ms: 82} %{source: :replica, cell: "org-1", txid: 3}
 ```
 
-`lag_ms` is how long ago the replica last confirmed that it had everything in
-the store. It is never above the bound. After a write on the owner, the replica
-shows it by the next poll (`poll_ms`, 250 ms by default, for a replica that is
-being read):
-
-```
-{:ok, %{columns: ["body"], rows: [["hi"], ["there"]]}}
-```
+`lag_ms` is how long ago the replica last confirmed that it held everything in
+the store. It is never above the bound. A write on the owner shows up on the
+replica at its next poll (`poll_ms`, 250 ms by default, for a replica that is
+being read).
 
 A node that owns the cell answers `consistency: {:bounded, _}` from the cell
-itself, as a strong read. `consistency: :strong` is the default and does not
-look at replicas. `execute/5` and `transaction/4` refuse the option with
-`{:error, :bad_option}`, and so does `query/5` when you combine `{:bounded, _}`
-with `verify_lease: true`.
+itself. `consistency: :strong` is the default and never uses replicas.
+`execute/5` and `transaction/4` refuse the option with `{:error, :bad_option}`,
+and so does `query/5` when `{:bounded, _}` is combined with `verify_lease: true`.
 
 ## 4. Choose what happens to a read that is too old
 
-When the replica last confirmed more than the bound ago (a slow store, a bound
-shorter than `poll_ms`), the instance option `on_stale` decides:
+When the replica last confirmed more than the bound ago (a slow store, or a bound
+shorter than `poll_ms`), the `:replicas` option `on_stale` decides:
 
-- `:refresh` (default): the read waits, the replica refreshes at once, and the
-  read is answered by the replica as soon as a refresh that started recently
-  enough finishes. If none does within `refresh_timeout_ms` (2 seconds), the
-  owner answers.
-- `:owner`: the owner answers at once. Choose it when a wait is worse than a hop.
+- `:refresh` (default): the read waits while the replica refreshes. The replica
+  answers once a refresh that started recently enough finishes. If none finishes
+  within `refresh_timeout_ms` (2 seconds by default), the owner answers.
+- `:owner`: the owner answers at once. Use it when waiting is worse than the
+  extra hop.
 
-The telemetry event says which side answered (`source`) and why the owner did
-(`reason`: `:stale`, `:timeout`, `:building`, `:no_replica`, ...).
+The telemetry event `[:alambique, :replica, :read]` says who answered (`source`)
+and, for the owner, why (`reason`): `:stale`, `:timeout`, `:building`,
+`:no_replica`, `:owner_here`, `:off` or `:placement`.
 
 ## 5. Turn it off
 
@@ -121,10 +109,9 @@ Alambique.replicas(MyApp.Cells, "org-1", false)
 # :ok
 ```
 
-Each replica reads the switch again every `marker_ttl_ms`. When it is gone, the
-replica stops and removes its file, so within `marker_ttl_ms` plus a poll
-(`poll_max_ms` if nobody reads it) the
-disk is back to what it was:
+Each node reads the switch again every `marker_ttl_ms`. When the switch is off,
+the replica stops and removes its file within `marker_ttl_ms` plus one poll
+(`poll_max_ms` when nobody reads it):
 
 ```
 telemetry: [:alambique, :replica, :stop] %{} %{reason: :marker_off, cell: "org-1"}
@@ -132,46 +119,48 @@ File.ls(".../read-replicas")
 # {:ok, []}
 ```
 
-A replica nobody reads for `idle_ms` (10 minutes) stops by itself. Moving a
-cell to another location (`Alambique.relocate/4`) stops its replicas and does
-not carry the switch: turn it on again for the new location.
+A replica that nobody reads for `idle_ms` (10 minutes by default) stops by
+itself. Moving a cell to another location with `Alambique.relocate/4` stops its
+replicas and does not carry the switch: turn it on again for the new location.
 
 ## What it costs
 
-With the defaults, about 12 store requests per second for each replica that is
-being read when nothing changes: a listing of the level-0 files, a listing of
-the snapshots and a read of the lease per poll, four times a second. A replica
-nobody reads polls less often, a quarter of the idle time up to `poll_max_ms`
-(5 seconds): about 0.6 requests per second after 20 seconds, until `idle_ms`
-stops it. The first read after a quiet period waits for one refresh, or goes to
-the owner with `on_stale: :owner`. Add one read per new segment. Each node that reads the cell pays this. The replica's file is a
-full copy of the database; `max_bytes` bounds the sum of the files on a node and
-a replica that would not fit is not built. The first replica of a cell costs a
-full restore.
+A replica polls the store every `poll_ms` while it is read, and less often when
+nobody reads it: the interval grows to a quarter of the idle time, up to
+`poll_max_ms`. A poll is a LIST of the level-0 files after the head, a LIST of
+the snapshots and a GET of the lease. New segments are read as they appear.
+Every node that reads the cell pays this. A replica file is a full copy of the
+database, and `max_bytes` bounds the sum of the files on one node: a replica that
+would not fit is not built. The first replica of a cell costs a full restore.
 
 ## Troubleshooting
 
-- **Every read goes to the owner.** Check the telemetry `reason`. `:off`: the
-  instance has no `:replicas` option. `:no_replica` for long: the switch is off
-  (`Alambique.replicas/2`), the node is at `max_cells` with every replica read
-  recently, the replica would pass `max_bytes`, or its build failed (look for
-  `[:alambique, :replica, :build]` with `result: :error` and for
-  `[:alambique, :replica, :stop]`). The node does not retry a refused cell for
-  `marker_ttl_ms`. `:owner_here`: the cell is awake on this node.
+- **Every read goes to the owner.** Read the `reason` of the telemetry event:
+  - `:off`: the instance has no `:replicas` option.
+  - `:no_replica` for a long time: the switch is off (`Alambique.replicas/2`),
+    the node is at `max_cells` with every replica read recently, the replica
+    would exceed `max_bytes`, or its build failed. Look for
+    `[:alambique, :replica, :build]` with `result: :error` and for
+    `[:alambique, :replica, :stop]`. After a refusal the node does not try
+    again for `marker_ttl_ms`.
+  - `:owner_here`: the cell is awake on this node.
 - **`:stale` or `:timeout` often.** The store takes longer than the bound to
-  answer a listing. Raise the bound or lower `poll_ms`; look at
-  `[:alambique, :replica, :refresh]` durations.
-- **A replica rebuilds repeatedly.** `[:alambique, :replica, :refresh]` with
-  `result: :rebuild` says why: a snapshot newer than the replica or a deleted
-  file means retention or compaction removed files the replica had not reached
-  (the replica was behind for longer than `deletion_grace_ms`).
-- **Writes through a replica.** There is no way: statements that would write
-  give `{:error, :read_only}`, and a replica never writes to the store.
+  answer. Raise the bound or lower `poll_ms`, and look at the durations of
+  `[:alambique, :replica, :refresh]`.
+- **A replica rebuilds again and again.** `[:alambique, :replica, :refresh]` with
+  `result: :rebuild` gives a `reason`. `:snapshot` means a snapshot newer than the
+  replica exists. `:vanished` means a file the replica still needed was deleted;
+  this can happen when the replica falls behind for longer than
+  `deletion_grace_ms`. `:gap` and `:segment` mean the chain of files does not
+  connect.
+- **Writes through a replica.** Not possible. Writes always go to the owner, so use
+  `Alambique.execute/5` or `Alambique.transaction/4`, and a replica never writes
+  to the store.
 
 ## Next steps
 
-- [design.md](design.md), section 21: the guarantee, what it does not promise,
-  and the limits.
+- [design.md](design.md), section 21: the guarantee, what it does not promise
+  and its limits.
 - [telemetry.md](telemetry.md): the replica events.
-- [how-to-query-across-cells.md](how-to-query-across-cells.md): reports over
-  many cells, which use a separate cache and always ask the store.
+- [how-to-query-across-cells.md](how-to-query-across-cells.md): reads over many
+  cells. Those use a separate cache and always check the store.

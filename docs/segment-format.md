@@ -1,20 +1,19 @@
 # Segment format
 
 This page records which file format Alambique replicates in, how it maps to
-transactions, and how replication and restore use it. Contributors read it
-before touching `native/alambique_nif` or `Alambique.Replication`.
+transactions, and how replication and restore use it.
 
-## Decision
+## Format
 
 Segments and snapshots are **LTX version 3**, the format of
 [superfly/ltx](https://github.com/superfly/ltx), the one Litestream v0.5
 writes. The files follow the specification of that repository, and the keys
 follow the layout of Litestream's S3 replica client. Litestream 0.5.18
-restores our replicas (see "Litestream compatibility"); the other direction
-does not work.
+restores Alambique's replicas (see "Litestream compatibility"). Alambique
+cannot apply files that Litestream writes.
 
 Followed exactly: upstream `main` at commit
-`f299ac5b951cdb69ed7a99e957b4ed66cba32560` (2026-09-10), files `README.md`,
+`f299ac5b951cdb69ed7a99e957b4ed66cba32560`, files `README.md`,
 `ltx.go`, `encoder.go`, `decoder.go`, `checksum.go` and `compactor.go`. The
 README of that commit says LTX files carry no version field and that versions
 2 and 3 share the `LTX1` magic; we write and read version 3 only.
@@ -46,15 +45,15 @@ reads the same files, and also files without the flag (checksums in header
 and trailer, as upstream writes them without `NoChecksum`), which the golden
 tests use.
 
-The current version compresses every page with LZ4 and has a page index, as
-described above. Integers are big-endian.
+Every page is compressed with LZ4, and the file has a page index, as described
+above. Integers are big-endian.
 
 **Database checksum.** `1 << 63 | xor(crc64_iso(be32(pgno) || page))` over
 every page except the lock page (the page at byte `0x40000000`). Replacing a
 page costs two page checksums, so the replicator tracks the checksum
 incrementally from a per-page CRC list (`Replicator` field `sums`, 8 bytes per
 page, kept in a native resource that a commit copies only where it changes
-it; design §15). An empty database has the checksum `1 << 63`.
+it). An empty database has the checksum `1 << 63`.
 
 **File checksum.** CRC-64/ISO over the header, every page frame header and
 size prefix as stored plus the *decompressed* page, the end marker, the page
@@ -124,7 +123,7 @@ limited to 8.
   next TXID and its pre-apply checksum equals the previous post-apply
   checksum), where upstream tolerates overlap. It verifies each input one page
   at a time and copies the compressed page blocks, so memory use is the
-  inputs plus the output rather than the decompressed database (design §12).
+  inputs plus the output rather than the decompressed database (see [cost-of-a-cell.md](cost-of-a-cell.md)).
 
 ### Verification against upstream
 
@@ -210,8 +209,8 @@ Go, Litestream or an external service.
      the specification's checksum cannot see (it covers sizes, not payload
      bytes); the test requires then that the decoded file is identical.
 
-Run it with `mise exec -- mix test test/ltx_format_test.exs`; it is part of
-`mise run test`.
+The format tests are part of the default suite; [contributing.md](contributing.md)
+shows how to run them alone.
 
 What this does not show: that the Go encoder and ours write the same bytes
 (they do not, see above), or the object metadata and key layout, which come
@@ -219,11 +218,11 @@ from reading Litestream's sources. The next section covers Litestream itself.
 
 ## Litestream compatibility
 
-`test/litestream_interop_test.exs` runs Litestream **v0.5.18** (pinned in
-`mise.toml`) against replicas that Alambique wrote to a local SeaweedFS:
-level-0 files, a checkpoint and a level-9 snapshot, built with
-`Replicator.sync/2` and `Replicator.snapshot/3`. Run it with
-`mise run test:litestream`; the default suite skips it.
+Alambique's interop tests run Litestream **v0.5.18** against replicas that
+Alambique wrote to a local SeaweedFS: level-0 files, a checkpoint and a level-9
+snapshot, built with `Replicator.sync/2` and `Replicator.snapshot/3`. The
+default suite skips them; [contributing.md](contributing.md) shows how to run
+them.
 
 Observed, with the exact command shape
 `litestream restore -o OUT [-txid HEX16] 's3://BUCKET/PREFIX/cells/CELL?endpoint=URL&force-path-style=true'`
@@ -334,7 +333,9 @@ cache that restore may replace.
 
 ## Crash points
 
-Named for `AlambiqueTestkit.CrashPoints`:
+Points on the replication, restore, compaction and retention path where a
+crash test can stop the process. The test kit arms them one at a time; see
+[contributing.md](contributing.md).
 
 | Point | Where |
 | --- | --- |

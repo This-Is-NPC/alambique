@@ -1,41 +1,30 @@
 # How to speed up the first call to a hibernated cell
 
-**The question:** the first call to a cell that hibernated takes hundreds of
-milliseconds and later calls take a few. Where does the time go, how do I
-measure it for each user, and what can I change?
+**The question:** why does the first call to a hibernated cell take longer than
+later calls, how do I measure the wake of each cell, and which settings shorten
+it?
 
 This guide stands alone. Design §7.2 explains why the wake is ordered as it is.
 
 ## What the time is
 
-A wake is a series of requests to the store. The time of the first call is
-about the number of requests that cannot start before the previous one ends,
-times the latency of one request. Local work (opening the file, applying the
-pages) is a few milliseconds for a few megabytes. With 25 ms per request, a
-mailbox of 5 MB with twelve commits after its last snapshot took:
+A wake is a series of requests to the store. A request that cannot start before
+the previous one ends adds its full latency to the wake. Requests that run
+together cost one latency between them. Local work (opening the file, applying
+the pages) adds to the time too.
 
-| Wake | p50 before | p50 after | p99 before | p99 after |
-| --- | --- | --- | --- | --- |
-| The local file is reused | 217 ms | 114 ms | 247 ms | 141 ms |
-| Full restore | 701 ms | 166 ms | 812 ms | 174 ms |
-| Lazy restore | 495 ms | 215 ms | 497 ms | 219 ms |
-
-(Measured by `mise run bench:wake -- 10`, 25 ms added to every request,
-including the first query, before the lease moved ahead of the reads; the
-table is in design §7.2.) The floor is now five
-round trips for a reused or fully restored file: the lease read, then the
-lease, then the freeze marker and the listing together, then the files, then
-the fence.
+Fewer requests, or requests that run together, make the wake faster. Design
+§7.2 has the order of the requests.
 
 ## Prerequisites
 
-- An instance on Alambique with `Telemetry` handlers for
+- An instance of Alambique with `Telemetry` handlers for
   `[:alambique, :cell, :wake]`.
-- To reproduce the numbers: this repository and `mise`.
+- Cells that you can hibernate and call, on the store you run in production.
 
 ## Steps
 
-1. Measure a wake for each cell. The wake event has the time and the requests:
+1. Measure the wake of each cell. The wake event has the time and the requests:
 
    ```elixir
    :telemetry.attach(
@@ -54,71 +43,68 @@ the fence.
    are listed in [telemetry.md](telemetry.md). A wake that makes many `:get`
    requests of `:segment` has a long chain after its last snapshot.
 
-2. Reproduce it with a fixed latency per request and a cell like yours:
+2. Time the first call after a hibernation, for each cell. Hibernate the cell,
+   then time a call that wakes it:
 
-   ```sh
-   ALAMBIQUE_BENCH_LATENCY=25 mise run bench:wake -- 10
+   ```elixir
+   :ok = Alambique.hibernate(MyApp.Cells, cell)
+   {micros, _result} = :timer.tc(fn -> Alambique.query(MyApp.Cells, cell, "SELECT 1") end)
    ```
 
-   The bench prints the requests of one wake in order, with the time each
-   began and ended, and then p50, p95 and p99 of the call that opens the
-   mailbox, for the three kinds of wake. `ALAMBIQUE_BENCH_TAIL` is the number
-   of commits after the last snapshot (default 12).
+   Repeat it for several wakes of each cell, and take the p50 and p99 of
+   `micros` for each `source` from step 1. The wake event of the same call has
+   its `duration` in native time units; convert it with
+   `System.convert_time_unit(duration, :native, :millisecond)`. The difference
+   between `micros` and the wake is the call outside the wake. The requests
+   cost the latency of your store, so measure on that store.
 
 3. Keep the chain after the last snapshot short. A wake reads every file after
-   the snapshot; they are read together, but a longer chain costs bandwidth and
-   decoding. The compaction defaults (a snapshot after 4096 TXIDs, or when the
-   level-0 bytes reach twice the last snapshot, or after seven days; merges of
-   eight files) do this; a lower `:snapshot_interval_txids` or `:snapshot_ratio`
-   for cells that change all day makes the chain after the snapshot shorter.
-   When many cells are written at once, the compactor takes the cells that
-   waited longest, and first, at once, any cell with
-   `compaction: [max_chain_segments:]` (default 256) uncompacted commits, with
-   `compaction: [urgent_concurrency:]` (default 4) more passes at a time while
-   one is over it. A pass that ends starts the next at once, and a cell that
-   reaches the cap starts its pass as soon as a slot is free. Lower the cap if
-   a busy node must wake cells quickly. A restore walks the merged files, not
-   every file in the listing: the listing of a busy cell has hundreds, and the
-   walk about the cap at most, plus what the cell commits while its pass runs
-   (design §9, "Chain cap"). Passes get longer when the node's CPU is
-   saturated, and the tail with them; if `[:alambique, :compaction, :pass]`
-   `duration` times the commits per second of a cell comes near the cap, raise
-   `compaction: [concurrency:]` or `urgent_concurrency:`, or lower the commit
-   rate of the node. How many files a slot folds: a pass folds about
-   `merge_concurrency * fanout` files for every round trip of a merge, which
-   is two with no held bytes (the `HEAD` with the `GET`s, then the `PUT`) and
-   one with them. At 25 ms per request that is about 640 files per second per
-   slot cold and 1 280 warm (measured on a cell of 1 000 files: about 450 and
-   970, design §9, "Parallel merges"). Compare that with the files the cells
-   write per second: the slots are `concurrency + urgent_concurrency` (2 + 4)
-   and a cell has one pass at a time, so one cell that commits faster than a
-   slot folds is never caught up whatever the other settings. Raise
-   `concurrency` or `urgent_concurrency` only when the node's commits per
-   second come near the files per second of the slots it can use, and watch
-   `[:alambique, :compactor, :tick]` and the `tail` of the hibernation: the
-   defaults were not changed with the faster merges, because no measurement
-   with many cells shows them short. Each slot adds up to
-   `merge_concurrency * (fanout + 1)` requests to the store's pool.
-   The merges of one pass run `compaction: [merge_concurrency:]`
-   (default 4) at a time, each asking for the predecessor and its eight inputs
-   together: against a store at 25 ms per request, a cold chain of 1 000 files
-   is merged in 2.2 s, against 13.1 s one merge at a time with two waves of
-   reads (design §9, "Parallel merges"). A pass has up to
-   `merge_concurrency * (fanout + 1)` requests in flight, so keep it below the
-   store's `pool_size` divided by the cells that compact together. A node that hands a cell over on purpose (`hibernate/3`, `drain/2`, a
-   stop) compacts its tail first when it has `compaction: [release_min_tail:]`
-   (default 32) level-0 files or more, for at most `compaction: [release_deadline_ms:]`
-   (default 3 000), so the next node reads a short chain. So does a cell that
-   hibernates for being idle or because another cell needs the room;
-   `compaction: [release_on:]` lists the reasons (default `:request`,
-   `:shutdown`, `:evict` and `:idle`; add `:frozen`, or leave `:idle` out on a
-   node with many idle hibernations and a slow store, design §9, "Which
-   releases compact"). `Alambique.move/4` and
-   `hibernate/3` take `release_deadline_ms:` to give one call more or less; it
-   replaces the default for that call and stays under the call's `:timeout` less
-   `compaction: [release_reserve_ms:]`.
-   `[:alambique, :cell, :wake]` reports `store_time` (the time of the store
-   requests, summed) and `reductions` to tell a slow store from a starved node.
+   the snapshot. The files are read together, but a longer chain costs
+   bandwidth and decoding. The compaction defaults do this: a snapshot after
+   4096 TXIDs, when the level-0 bytes reach twice the last snapshot, or after
+   seven days, and merges of eight files. For a cell that changes all day, a
+   lower `:snapshot_interval_txids` or `:snapshot_ratio` makes the chain after
+   the snapshot shorter.
+
+   The compactor works on the cells that waited longest. A cell with
+   `compaction: [max_chain_segments:]` (default 256) uncompacted commits goes
+   first, and `compaction: [urgent_concurrency:]` (default 4) passes run at a
+   time while one is over that cap. Lower the cap if a busy node must wake
+   cells quickly. A restore walks the merged files, not every file in the
+   listing, so the walk stays near the cap plus the commits made during a pass
+   (design §9, "Background compactor").
+
+   A pass folds about `merge_concurrency * fanout` files per round trip of a
+   merge. The slots are `compaction: [concurrency:]` (default 2) plus
+   `urgent_concurrency`, and one cell has one pass at a time. A cell that
+   commits faster than a slot folds is never caught up, whatever the other
+   settings. Raise `concurrency` or `urgent_concurrency` only when the commits
+   per second of the node come near the files per second of the slots it can
+   use. Each slot adds up to `merge_concurrency * (fanout + 1)` requests to the
+   store's pool, so keep the in-flight requests below the store's `pool_size`
+   divided by the cells that compact together (design §9, "Parallel merges";
+   `pool_size` is in [how-to-configure-the-s3-store.md](how-to-configure-the-s3-store.md)).
+
+   Passes get longer when the node's CPU is saturated, and the tail with them.
+   If the `duration` of `[:alambique, :compaction, :pass]`, times the commits
+   per second of a cell, comes near the cap, raise `concurrency` or
+   `urgent_concurrency`, or lower the commit rate of the node.
+
+   A node that hands a cell over on purpose (`hibernate/3`, `drain/2`, a stop)
+   compacts the tail first when the tail has `compaction: [release_min_tail:]`
+   level-0 files (default 32) or more, for at most
+   `compaction: [release_deadline_ms:]` (default 3 000). The next node then
+   reads a short chain. A cell that hibernates for being idle, or because
+   another cell needs the room, does the same for the reasons in
+   `compaction: [release_on:]` (default `:request`, `:shutdown`, `:evict` and
+   `:idle`). Add `:frozen` to the list, or leave `:idle` out on a node with
+   many idle hibernations and a slow store (design §9, "Release
+   compaction"). `Alambique.move/4` and `hibernate/3` take `release_deadline_ms:`
+   to change the deadline for one call. The value must stay under the call's
+   `:timeout` less `compaction: [release_reserve_ms:]`.
+
+   The wake event also reports `store_time` (the time of the store requests,
+   summed) and `reductions`. Use them to tell a slow store from a starved node.
 
 4. Keep a local file when you can. A node that hibernated the cell last reuses
    its file and reads only the head of the chain. `local_cache.max_bytes`
@@ -126,214 +112,127 @@ the fence.
 
 5. Choose lazy or full restore for the size of your cells. The first query of a
    lazy cell waits for the pages it reads, one request each time the query
-   needs a page that is not there, so a query that reads many places costs more
-   than a full download of a few megabytes. `lazy_restore: [min_bytes:]`
-   (default 4 MiB) is the size under which a cell is downloaded whole. Raise it
-   to the size of a typical mailbox if the first query reads most of it.
-   `lazy_restore: [verify_bytes:]` (default 1 MiB) is the size under which a
-   file is read whole and checked against its file checksum before any page of
-   it is used; a miss on such a file reads the whole file, not 16 pages. Set it
-   to 0 to read frames only and rely on the database checksum at the end of the
-   download, or raise it to check larger files.
-   `lazy_restore: [verify_writes:]` (default `true`) makes the first write
-   after a lazy wake wait until the whole file is downloaded and its checksum
-   matched; reads do not wait (see `verify_reads` below). Measured on a 297 MB cell (`mise run
-   bench:lazy 256`, one run on a loaded laptop), a write took 210 ms to
-   acknowledge without the wait and 1.37 s with it (memory store), and 1.86 s
-   against 3.71 s with 20 ms added to each request. The wait is roughly the
-   time the download takes. Set it to `false` only if first-write latency
-   matters more than protection from a damaged object: the cell then
-   acknowledges writes whose checksums derive from pages nobody verified yet
-   (design section 16).
-   `lazy_restore: [verify_reads: true]` (default `false`) makes the reads of
-   the owner wait the same way. A read that does not wait and finds a page
-   missing holds a dirty IO scheduler until the page arrives, for up to
-   `op_timeout_ms` plus one second, and on a node with one or two schedulers
-   that stalls every commit and read of the node
-   ([how-to-size-a-node.md](how-to-size-a-node.md)). With the option on the
-   first reads of a lazy wake take as long as the download, so the rule below
-   applies to them too. Replica reads and `Alambique.Query` are not affected:
-   they read their own downloaded copy.
+   needs a page that is not there. A query that reads many places can cost more
+   than downloading the whole cell.
+
+   - `lazy_restore: [min_bytes:]` (default 4 MiB) is the size under which a cell
+     is downloaded whole. Raise it to the size of a typical cell if the first
+     query reads most of it.
+   - `lazy_restore: [verify_bytes:]` (default 1 MiB) is the size under which a
+     file is read whole and checked against its file checksum before any page of
+     it is used. A miss on such a file reads the whole file, not 16 pages. Set it
+     to 0 to read frames only and rely on the database checksum at the end of the
+     download, or raise it to check larger files.
+   - `lazy_restore: [verify_writes:]` (default `true`) makes the first write
+     after a lazy wake wait until the whole file is downloaded and its checksum
+     matched. Set it to `false` only if first-write latency matters more than
+     protection from a damaged object: the cell then acknowledges writes whose
+     checksums derive from pages nobody verified yet (design section 16).
+   - `lazy_restore: [verify_reads: true]` (default `false`) makes the reads of
+     the owner wait the same way. A read that does not wait and finds a page
+     missing holds a dirty IO scheduler until the page arrives, for up to
+     `op_timeout_ms` plus one second. On a node with one or two schedulers, that
+     stalls every commit and read of the node. With the option on, the
+     first reads of a lazy wake take as long as the download, so the rule below
+     applies to them too. Replica reads and `Alambique.Query` are not affected:
+     they read their own downloaded copy.
+
    **Rule:** the download time of your largest cell must stay under
-   `call_timeout_ms` (default 15 000 ms) or under the caller's deadline, or the
-   first writes (and, with `verify_reads`, reads) after a lazy wake time out. From the figures above, the memory
-   store delivers about 217 MB/s (297 MB in 1.37 s) and 80 MB/s with 20 ms per
-   request (297 MB in 3.71 s). At the default 15 s that is about 3.2 GB and
-   1.2 GB. A real store is slower than the in-memory one, so measure yours with
-   `mise run bench:lazy` and divide `call_timeout_ms` by the time per MB.
+   `call_timeout_ms` (default 15 000 ms) or under the caller's deadline. Otherwise
+   the first writes (and, with `verify_reads`, the first reads) after a lazy
+   wake time out. Measure the download time of a cell of your size with the
+   `duration` of `[:alambique, :replication, :hydrate]`, which runs from the lazy
+   wake to the last page. Use a cell of that size (for example, one filled with
+   `Alambique.execute/4`), hibernate it, call it, and read the event. Convert the
+   duration with `System.convert_time_unit/3`, and check that it fits in the
+   timeout. The throughput of a store with latency is much lower than that of
+   memory, so measure your own store.
+
    `[:alambique, :cell, :writes_released]` reports how long the first writes
    waited (`wait_ms`) and how many there were (`count`; reads count with
    `verify_reads`).
 
 6. Check `restore: [fetch_concurrency:]` (default 16) and
    `restore: [max_inflight_bytes:]` (default 64 MiB). A full restore reads the
-   files of the chain `fetch_concurrency` at a time and holds at most
+   files of the chain `fetch_concurrency` at a time, and holds at most
    `max_inflight_bytes` of them before it applies them. A store that limits
-   concurrent requests may need a lower `fetch_concurrency`; a chain larger
-   than `max_inflight_bytes` that you restore in full (`lazy_restore: false`)
-   is read ahead as the restore frees room, and each file larger than the
-   limit is read alone and costs one more request, for its size. Do not set
-   `fetch_concurrency: 1` to save memory: it costs one round trip per file
-   (table below), and the memory it saves is at most
-   `fetch_concurrency × edge_bytes`, 1 MiB at the defaults.
+   concurrent requests may need a lower `fetch_concurrency`. A chain larger
+   than `max_inflight_bytes` is read ahead as the restore frees room, and each
+   file larger than the limit is read alone, which costs one more request.
+   Keep `fetch_concurrency` at 16 unless the store limits it. Setting it to 1
+   to save memory costs one round trip per file, while the memory it saves is
+   at most `fetch_concurrency × edge_bytes` (1 MiB at the defaults).
 
-### What the two options cost
+## Many wakes at once
 
-`mise run bench:restore-concurrency` restores a cell whose chain has 800
-segments (3.0 MB in all, about 3.8 KB each, no compaction) from the in-memory
-store with 25 ms added to every request. Median of three runs, full restore,
-seconds, before and after the read ahead refilled as the walk gave budget back
-(design §6.3):
+A full restore makes about one store request per file of its chain, and
+`fetch_concurrency` of them run at a time. Its time is therefore about the
+number of files divided by `fetch_concurrency`, times the latency of one
+request. A cell with a long chain is the slowest wake of a burst, and its
+latency is bounded by its requests, not by the other restores beside it.
 
-| `fetch_concurrency` | 64 MiB, before | 64 MiB, after | 2.4 MiB, before | 2.4 MiB, after |
-| ------------------: | -------------: | ------------: | --------------: | -------------: |
-|                   1 |          21.11 |         20.86 |           21.02 |          20.86 |
-|                   2 |          10.77 |         10.54 |           16.12 |          10.48 |
-|                   4 |           5.49 |          5.40 |           13.78 |           5.29 |
-|                   8 |           2.93 |          2.76 |           12.57 |           2.77 |
-|                  16 |           1.59 |          1.45 |           11.92 |           1.45 |
+To see how a burst of restores takes, read the `duration` and the `requests` of
+their wake events (step 1). A full restore makes one `{:get, :segment}` or
+`{:get, :merged}` request per file of its chain, so the requests show the chain
+length. To compare `restore: [fetch_concurrency:]` or `max_inflight_bytes`, set
+the option on a test node, wake a cell with a chain of the length you expect, and
+read the same event for each setting.
 
-Time falls with the concurrency, about 14 times from 1 to 16, and a budget
-smaller than the chain costs nothing more: the read ahead takes the weight the
-walk gives back for the next files. Before, it stopped at the first file that
-did not fit and the walk read the rest one at a time. Keep the default of 16 on
-small nodes: the memory it adds is bounded (`fetch_concurrency × edge_bytes`,
-and a file smaller than `edge_bytes` weighs its own size). A file larger than
-`max_inflight_bytes` still ends the read ahead and is read alone; compaction
-(design §9) shortens the chain.
-
-## Many wakes at once on a small node
-
-`mise run bench:restore-concurrency` with `ALAMBIQUE_BENCH_CELLS="112 164 300
-500 830"` restores those cells, cycled over `ALAMBIQUE_BENCH_RESTORES` restores
-at once (1, 4, 12 and 14 by default). The runs below pin the VM to one CPU
-(`ELIXIR_ERL_OPTIONS="+S 1:1 +SDcpu 1:1 +SDio 1" taskset -c 3`) and add 25 ms
-to every request. Seconds, median of three runs; the longest restore is the
-830-segment chain.
-
-In-memory store, `fetch_concurrency: 16`, 2.4 MiB of budget:
-
-| restores at once | median | longest |
-| ---------------: | -----: | ------: |
-|                1 |   0.22 |    0.22 |
-|                4 |   0.61 |    0.97 |
-|               12 |   0.58 |    1.46 |
-|               14 |   0.59 |    1.47 |
-
-SeaweedFS (`ALAMBIQUE_BENCH_STORE=seaweedfs`, after `mise run seaweedfs:up`;
-`bench/delay_proxy.exs` adds the 25 ms on another CPU). The S3 store with
-Finch's pool of 50 connections (`ALAMBIQUE_BENCH_POOL_SIZE=50`), and with its
-default of 256:
-
-| `fetch_concurrency` | restores | pool 50, longest | pool 256, longest | pool 256, median |
-| ------------------: | -------: | ---------------: | ----------------: | ---------------: |
-|                  16 |        1 |             0.36 |              0.36 |             0.36 |
-|                  16 |       12 |             3.5  |              2.2  |              1.1 |
-|                  16 |       14 |             3.8  |              2.4  |              1.3 |
-|                   1 |        1 |                - |              3.3  |              3.3 |
-|                   1 |       12 |                - |             24    |              9.1 |
-
-The longest is bounded by its latency: 830 requests, 16 at a time, 25 ms each
-is 1.3 s however many restores run beside it, and 21 s with
-`fetch_concurrency: 1`. The 12 restores need 1.75 s of CPU in all against
-SeaweedFS and 0.3 s against memory: the S3 client costs more than the walk.
-If a wake on a small node takes seconds, look at the requests first: a store
-that answers in 100 ms makes that chain 5 s. Keep `fetch_concurrency` at 16,
-and size `pool_size` (design §6.3) for the wakes you expect at once.
+If a wake takes seconds, look at its requests first. At a concurrency of 1, a
+chain of N files costs N round trips, so the time grows with the chain. Keep
+`fetch_concurrency` at 16 unless the store limits it. Check that `pool_size`
+covers the requests of the wakes you expect at once
+([how-to-configure-the-s3-store.md](how-to-configure-the-s3-store.md)).
 Compaction (design §9) shortens the chain, and so the wake.
 
 ## A node swap under load
 
-The numbers of this section were measured before a node compacted its tail at
-the release of the lease (version 0.8.0).
+When a runtime swaps a node, the new node wakes each cell from the store, and
+each wake reads the chain that the old node left. To check that the chains stay
+short during a swap:
 
-`mise run bench:swap` (after `mise run seaweedfs:up`) writes 12 cells at 8
-commits per second each for 90 s, with the compactor at its defaults, to
-SeaweedFS behind a 25 ms proxy, from a VM pinned to one CPU. It then restores
-all 12 cells at once on a new VM pinned to another CPU, with
-`fetch_concurrency: 16` and `max_inflight_bytes: 2516582`, the way a runtime
-swaps nodes. The cells end with about 790-815 files in the listing. The table
-gives, over three interleaved runs of each variant on one dataset, the range of
-the longest wake and of the median wake of the 12 cells, and of the median
-count of GETs per wake. "Before" is the restore without
-the reuse of the heads of a lazy attempt (design §6.3).
+1. Note the files of a cell before the drain. `mix alambique.inspect org-1 --no-sizes`
+   prints the number of files of each level.
+2. After the swap, read the `requests` of the wake event of that cell (step 1).
+   A chain of N files costs about N `{:get, :segment}` and `{:get, :merged}`
+   requests. A wake that makes more GETs than its chain has files is a
+   regression to look into.
+3. The cells end the drain with the tail compacted at release (step 3). A swap
+   reads that short tail. If the wakes read long chains, check the `compaction`
+   field of the hibernate event of the old node: `deadline`, `deadline_error` or
+   `error` means the release compaction did not finish.
 
-| Dataset (chain a restore walks) | Restore | longest wake | median wake | `{:get, :segment}` | `{:get, :merged}` |
-| --- | --- | ---: | ---: | ---: | ---: |
-| Compactor at its defaults (14-27 files) | before | 0.35-0.37 s | 0.34-0.37 s | 8-16 | 24 |
-| | after | 0.32-0.36 s | 0.32-0.36 s | 5-9 | 12 |
-| Compactor lagging, `interval_ms` 1 h (176-196 files) | before | 1.53-1.63 s | 1.51-1.60 s | 344-352 | 24 |
-| | after | 1.02-1.05 s | 1.01-1.03 s | 173-177 | 12 |
+## A node swap with a saturated writer
 
-Before, a lazy restore read the head of every file to size the chain, found it
-smaller than `lazy_restore: [min_bytes:]`, and read every file again: two GETs
-per file. The wake of a chain of 190 files made 370 requests. The restore now
-makes about one per file (one more for each file larger than `edge_bytes`).
-`{:get, :segment}` and
-`{:get, :merged}` in the wake event (telemetry.md) show it: they are the
-requests of the wake, and a chain of N small files costs about N of them.
+The writing node can also run an app that uses all its CPU. Then the compactor
+runs slower, the release compaction can reach its deadline, and the wakes after
+a swap read longer chains.
 
-### A node swap with a saturated writer
-
-Two more variables of `mise run bench:swap` make the writing VM look like a
-node that also runs an app. `ALAMBIQUE_BENCH_SWAP_RATE=30` raises the commits
-per cell (the default 8 is lighter than a busy cell), and
-`ALAMBIQUE_BENCH_SWAP_WRITER_BURN=2 ALAMBIQUE_BENCH_SWAP_WRITER_BURN_DIRTY=4`
-start busy loops in the writing VM, on its normal and on its dirty CPU
-scheduler, so that it has no CPU to spare. `ALAMBIQUE_BENCH_SWAP_OPEN=1` starts
-a commit every `1 / RATE` seconds whatever the earlier ones did, as clients
-do; the cell then groups them, so its files are fewer and larger. The write
-phase prints, for each cell, its passes (count, total and longest time), the
-longest tail of its row in the compactor (sampled every 100 ms), and
-how many samples found a cell at the cap with fewer passes running than the
-slots allow. The restore phase prints an `AUDIT` line for each wake: the
-level-0 and merged files its chain had, read from the store before the wake,
-next to the `{:get, :segment}` and `{:get, :merged}` of the wake. They are
-equal in every wake measured: a chain of N files costs N GETs.
-
-Measured on a shared laptop, before the release compacted the tail (so the wake
-columns are the chain at the stop; `release_deadline_ms: 0` gives the same),
-at load average 4 to 8, with 36 s of writes, 12 cells, a 25 ms proxy and the
-writer pinned to one CPU, one run of each, before and after the
-compactor started passes as slots free. The tail is the longest `last - first +
-1` a cell's row had; the wake columns are those of the 12 wakes after the writer
-stopped, which depend on how long before the stop each cell's last pass
-started, and so vary more than the tail does:
-
-| Writer | Compactor | Tail of a row | Samples at the cap with fewer than 6 passes | Longest wake | Level-0 GETs of a wake (median, most) |
-| --- | --- | ---: | ---: | ---: | ---: |
-| 30 commits/s, busy loops | before | 159-310 | 68 of 70 | 0.44 s | 18, 107 |
-| | after | 92-113 | none at the cap | 0.37 s | 39, 67 |
-| 30 commits/s | before | 283-336 | 97 of 109 | 0.53 s | 46, 49 |
-| | after | 141-228 | none at the cap | 0.64 s | 32, 68 |
-| 8 commits/s (default) | before | 41-61 | none at the cap | 0.27 s | 7, 8 |
-| | after | 42-50 | none at the cap | 0.25 s | 7, 15 |
-
-The tails above the cap of 256 are gone, and they are bounded by what a cell
-commits while its pass runs (design §9). A wake after a swap still reads the
-commits since the last pass of each cell; shortening that is the job of
-compacting at the release of the lease. With it (commit 96b4bb6, 30 commits/s,
-30 s, busy loops `BURN=2`, `BURN_DIRTY=4`, load average 5 to 12), four of 12
-cells reached the release with tails of 208 to 250 files and were cut by the
-3 s deadline; the worst wake read 66 level-0 and 29 merged files (95 walked)
-in 0.37 s, and every wake of 5 runs took 0.41 s at most. Without the busy
-loops (3 runs) a wake read 31 level-0 files at most and the stop took 1.2 to
-1.3 s. A saturated CPU can cut the release compaction: see design §9, "Limit:
-a saturated CPU", and raise `release_deadline_ms` if it matters.
+- Watch the duration of `[:alambique, :compaction, :pass]`, times the commits
+  per second of a cell. A pass that gets near the cap of
+  `compaction: [max_chain_segments:]` means the compactor does not keep up.
+- A cell that stays at the cap while its compaction slots are free means the
+  compactor is behind. Lower the commit rate, or raise `compaction: [concurrency:]`.
+- A saturated CPU can cut the release compaction short, because its deadline
+  runs out first. Raise `compaction: [release_deadline_ms:]` if the wakes after a
+  swap read long chains (design §9, "Release compaction").
 
 ## Troubleshooting
 
 - *`trips` is high but `duration` is low.* The requests ran together. Compare
-  `duration` with the latency of one request: a wake that takes four or five
-  times that is at the floor of its design (design §7.2).
+  `duration` with the latency of one request. The wake waited for about one
+  latency per run of requests that could not start early.
 - *A lazy wake's first query is slower than a full one.* The query reads many
   pages; see step 5.
-- *`requests` has `{:list, :listing}` more than once.* A restore lists once;
-  a second listing means the wake restored again after losing the fence to a
+- *`requests` has `{:list, :listing}` more than once.* A restore lists once.
+  A second listing means the wake restored again after losing the fence to a
   previous owner (`:txid_taken`), which is rare and correct.
+- *`store_time` is far below `duration`.* The wake waited for the CPU or the
+  disk, not for the store. Check the CPU of the node first.
 
 ## Next steps
 
 - [telemetry.md](telemetry.md), cell events, for every field of the wake event.
 - Design §7.2 and §16 for the order of the requests and the lazy restore.
-- [how-to-size-a-node.md](how-to-size-a-node.md) for the memory of awake cells.
+- [cost-of-a-cell.md](cost-of-a-cell.md) for the memory and the store cost of
+  one awake cell.
