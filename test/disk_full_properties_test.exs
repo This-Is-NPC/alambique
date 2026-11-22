@@ -2,7 +2,7 @@ defmodule Alambique.DiskFullPropertiesTest do
   @moduledoc """
   Whatever the sizes of the writes against a disk that fills up, each answer is
   `:ok` or `{:error, :disk_full}` and nothing else, and the cell holds exactly
-  the writes it acknowledged, also after it hibernates and wakes (design §6.4).
+  the writes it acknowledged, also after it hibernates and wakes (design §6.2).
   """
   use ExUnit.Case, async: false
   use ExUnitProperties

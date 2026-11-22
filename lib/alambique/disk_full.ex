@@ -1,6 +1,6 @@
 defmodule Alambique.DiskFull do
   @moduledoc false
-  # A full local disk is `:disk_full` for the caller (design §6.4), whatever
+  # A full local disk is `:disk_full` for the caller (design §6.2), whatever
   # step hit it. SQLite and the native library already report it by code
   # (`SQLITE_FULL`, `ENOSPC`, `EDQUOT`); the file operations of Elixir give the
   # POSIX atoms. A step that wraps the reason of the step below it

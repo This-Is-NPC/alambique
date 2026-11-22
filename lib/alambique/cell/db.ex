@@ -22,7 +22,7 @@ defmodule Alambique.Cell.Db do
   callers take from `script_timeout_ms/1`), and
   `cache_kib:`, the page cache of the connection in KiB (SQLite's default
   when absent): the cache is the largest part of an awake cell's memory
-  (design §12).
+  (docs/cost-of-a-cell.md).
   """
   @spec open(Path.t(), keyword) :: {:ok, Sqlite.conn()} | {:error, term}
   def open(path, opts \\ []) do

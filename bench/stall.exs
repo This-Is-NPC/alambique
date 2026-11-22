@@ -1,4 +1,4 @@
-# Stalls of the write path under steady load (design section 12).
+# Stalls of the write path under steady load (docs/cost-of-a-cell.md).
 #
 #   mise run bench:stall                 # 60 s per rate, in-memory store
 #   mise run bench:stall -- 30           # seconds per rate
