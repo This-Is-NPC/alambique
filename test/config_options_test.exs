@@ -75,6 +75,44 @@ defmodule Alambique.ConfigOptionsTest do
     end
   end
 
+  test "awake.idle_cache_after_ms is off by default and must be below idle_timeout_ms", ctx do
+    on = base(ctx, idle_timeout_ms: 1_000, awake: [idle_cache_after_ms: 999, idle_cache_kib: 0])
+    assert %{idle_cache_after_ms: 999, idle_cache_kib: 0} = Alambique.Config.build(on).awake
+
+    for {bad, message} <- [
+          {1_000, ~r/less than :idle_timeout_ms/},
+          {5_000, ~r/less than :idle_timeout_ms/},
+          {0, ~r/idle_cache_after_ms must be nil or a positive/},
+          {-1, ~r/idle_cache_after_ms must be nil or a positive/},
+          {:soon, ~r/idle_cache_after_ms must be nil or a positive/}
+        ] do
+      assert_raise ArgumentError, message, fn ->
+        Alambique.Config.build(
+          base(ctx, idle_timeout_ms: 1_000, awake: [idle_cache_after_ms: bad])
+        )
+      end
+    end
+  end
+
+  test "awake.idle_cache_kib is a non-negative integer below cache_kib when the shrink is on",
+       ctx do
+    for bad <- [-1, 1.5, :small] do
+      assert_raise ArgumentError, ~r/idle_cache_kib must be a non-negative integer/, fn ->
+        Alambique.Config.build(base(ctx, awake: [idle_cache_kib: bad]))
+      end
+    end
+
+    for kib <- [512, 600] do
+      assert_raise ArgumentError, ~r/idle_cache_kib must be less than :cache_kib/, fn ->
+        Alambique.Config.build(base(ctx, awake: [idle_cache_after_ms: 10, idle_cache_kib: kib]))
+      end
+    end
+
+    # Off: the pair is not checked against each other.
+    assert Alambique.Config.build(base(ctx, awake: [idle_cache_kib: 600])).awake.idle_cache_kib ==
+             600
+  end
+
   test "the statement limit is the dirty IO schedulers minus two, at least two slots" do
     # 1 thread: statements queue anyway; 2 to 4: reads use both threads.
     limits = for dio <- 1..10, do: Alambique.Config.default_statement_slots(dio)
@@ -107,6 +145,8 @@ defmodule Alambique.ConfigOptionsTest do
              max_wakes: 256,
              max_pending: 10_000,
              cache_kib: 512,
+             idle_cache_after_ms: nil,
+             idle_cache_kib: 64,
              wake_queue_ms: 500,
              max_wake_queue: 1_024,
              max_bytes: nil
@@ -270,6 +310,8 @@ defmodule Alambique.ConfigOptionsTest do
              max_wakes: 3,
              max_pending: 9,
              cache_kib: 64,
+             idle_cache_after_ms: nil,
+             idle_cache_kib: 64,
              wake_queue_ms: 40,
              max_wake_queue: 5,
              max_bytes: 5_000_000

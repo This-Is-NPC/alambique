@@ -113,6 +113,16 @@ It caps the memory an awake cell takes for its database pages, and a cell with
 a smaller database holds less. The figures are with 512 and with 256 (sections
 1 to 3).
 
+**`awake: [idle_cache_after_ms: ..., idle_cache_kib: ...]`.** Off by default
+(`idle_cache_after_ms: nil`). When set, an awake cell with no call for
+`idle_cache_after_ms` lowers its page cache to `idle_cache_kib` (default 64),
+and the next call restores `cache_kib`. SQLite's page cache is one pool for the
+whole process, so the shrunk cell lowers what the awake cells may hold in total
+by `cache_kib - idle_cache_kib`; the pages freed are the least recently used
+ones of the node, not necessarily the cell's own. The cost is cold pages: the
+first call after a shrink reads its pages again. `idle_cache_after_ms` must be
+below `idle_timeout_ms`. No figures yet.
+
 **Dirty IO schedulers and `sql: [max_concurrent_statements:]`.** The statements
 of callers run on the dirty IO schedulers, which the node's commits share. The
 number of these schedulers is the VM's `:dirty_io_schedulers`, set with `+SDio`.

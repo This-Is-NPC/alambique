@@ -24,6 +24,9 @@ defmodule Alambique.Cell.State do
     :hydrator,
     :hydrator_marker,
     :last_active,
+    # Idle cache shrink: `nil` (off), the ref of the `:idle_cache` timer, or
+    # `:shrunk` while the page cache holds the smaller limit.
+    :idle_cache,
     # Marker of work in flight (design §10), `nil` when quarantine is off.
     :inflight,
     # Set by `Alambique.take_over/4`: `%{reason, epoch}`, and `previous` (the
