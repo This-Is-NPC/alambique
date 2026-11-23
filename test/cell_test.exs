@@ -75,6 +75,108 @@ defmodule Alambique.CellTest do
     end
   end
 
+  describe "idle page cache" do
+    # The module is not async: SQLite's page cache is one pool for the whole
+    # process, so a lowered limit evicts the least recently used pages of any
+    # connection, and the memory assertions need no other live cell.
+    @fill "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 4000) " <>
+            "INSERT INTO t SELECT n, hex(randomblob(100)) FROM c"
+    @scan "SELECT count(v) FROM t"
+
+    # Reads the connection from the test process: a call would restore the cache.
+    defp conn(inst, cell),
+      do: :sys.get_state(Alambique.Cell.whereis(Alambique.Config.fetch!(inst), cell)).conn
+
+    defp cache_size(conn) do
+      {:ok, %{rows: [[kib]]}} = Alambique.Sqlite.run(conn, "PRAGMA cache_size", [])
+      kib
+    end
+
+    defp cache_used(conn) do
+      {:ok, %{cache_used: bytes}} = Alambique.Sqlite.memory(conn)
+      bytes
+    end
+
+    defp filled(ctx, awake) do
+      inst = start_instance(ctx, migrations: @schema, awake: awake, idle_timeout_ms: 60_000)
+      cell = unique_cell()
+      assert {:ok, _} = Alambique.execute(inst, cell, @fill)
+      assert {:ok, %{rows: [[4000]]}} = Alambique.query(inst, cell, @scan)
+      {inst, cell}
+    end
+
+    test "an idle cell lowers its cache, the next call restores it, and it shrinks again",
+         ctx do
+      {inst, cell} = filled(ctx, cache_kib: 512, idle_cache_after_ms: 50, idle_cache_kib: 16)
+      conn = conn(inst, cell)
+      before = cache_used(conn)
+      assert before > 300_000
+
+      eventually(fn -> cache_size(conn) == -16 end)
+      assert cache_used(conn) < before / 2
+
+      assert {:ok, %{rows: [[4000]]}} = Alambique.query(inst, cell, @scan)
+      assert cache_size(conn) == -512
+
+      eventually(fn -> cache_size(conn) == -16 end)
+    end
+
+    test "a cell called more often than idle_cache_after_ms keeps its cache", ctx do
+      {inst, cell} = filled(ctx, cache_kib: 512, idle_cache_after_ms: 200, idle_cache_kib: 16)
+      conn = conn(inst, cell)
+
+      for _ <- 1..12 do
+        assert {:ok, _} = Alambique.query(inst, cell, @scan)
+        assert cache_size(conn) == -512
+        Process.sleep(50)
+      end
+
+      # The timer chain survived the calls.
+      eventually(fn -> cache_size(conn) == -16 end)
+    end
+
+    test "nothing is armed or lowered unless idle_cache_after_ms is set", ctx do
+      {inst, cell} = filled(ctx, cache_kib: 512)
+      pid = Alambique.Cell.whereis(Alambique.Config.fetch!(inst), cell)
+
+      assert %{idle_cache: nil, conn: conn} = :sys.get_state(pid)
+      assert {:ok, %{rows: [[4000]]}} = Alambique.query(inst, cell, @scan)
+      assert %{idle_cache: nil} = :sys.get_state(pid)
+      assert cache_size(conn) == -512
+    end
+
+    test "the cell still hibernates at idle_timeout_ms", ctx do
+      inst =
+        start_instance(ctx,
+          migrations: @schema,
+          idle_timeout_ms: 300,
+          awake: [idle_cache_after_ms: 50]
+        )
+
+      cell = unique_cell()
+      assert {:ok, _} = put(inst, cell, 1)
+      conn = conn(inst, cell)
+      eventually(fn -> cache_size(conn) == -64 end)
+      assert {_, %{reason: :idle}} = await_event([:alambique, :cell, :hibernate], cell)
+    end
+
+    test "the admission total drops after the shrink", ctx do
+      {inst, cell} =
+        filled(ctx,
+          cache_kib: 512,
+          idle_cache_after_ms: 50,
+          idle_cache_kib: 16,
+          max_bytes: 1_000_000_000
+        )
+
+      config = Alambique.Config.fetch!(inst)
+      before = Alambique.Admission.bytes(config)
+      assert before > 300_000
+      eventually(fn -> Alambique.Admission.bytes(config) < before / 2 end)
+      assert cell
+    end
+  end
+
   describe "lifecycle" do
     test "a cell wakes empty, serves reads and writes, and hibernates", ctx do
       inst = start_instance(ctx, migrations: @schema)

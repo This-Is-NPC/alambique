@@ -256,7 +256,18 @@ defmodule Alambique do
       caller gave up before the cell reached it is not run). The memory of the awake
       cells is bounded by `:cache_kib` (page cache of each cell's SQLite
       connection, `PRAGMA cache_size`, default 512 KiB; SQLite's own default
-      is 2 000) and by `:max_bytes` (default `nil`, no budget). With a
+      is 2 000) and by `:max_bytes` (default `nil`, no budget).
+      `:idle_cache_after_ms` (default `nil`, off; when set, a positive integer
+      below `:idle_timeout_ms`) makes an awake cell that has had no call for
+      that long lower its page cache to `:idle_cache_kib` (default 64, `0`
+      keeps no page; below `:cache_kib` when the shrink is on). The next call
+      gives it `:cache_kib` back. SQLite's page cache is one pool for the
+      whole process, so a shrunk cell lowers what the awake cells may hold in
+      total by `:cache_kib - :idle_cache_kib`, and the pages freed are the
+      least recently used ones of the node, not necessarily its own. The cost
+      is cold pages: the first call after a shrink reads its pages again, and
+      a cell called a little less often than `:idle_cache_after_ms` meets a
+      cold cache on every call. With a
       budget, every awake cell reports what its connection holds (page cache,
       schema and prepared statements) after each call and message; a call
       that would wake a cell while the total is at or over `:max_bytes`

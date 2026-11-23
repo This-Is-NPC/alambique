@@ -67,6 +67,7 @@ defmodule Alambique.Config do
     checkpoint_deadline_ms: 10_000,
     budget_interval_ms: 1_000
   ]
+  @idle_cache_kib 64
   @awake_defaults [
     max_cells: 20_000,
     max_wakes: 256,
@@ -324,6 +325,8 @@ defmodule Alambique.Config do
             max_wakes: pos_integer,
             max_pending: pos_integer,
             cache_kib: pos_integer,
+            idle_cache_after_ms: pos_integer | nil,
+            idle_cache_kib: non_neg_integer,
             wake_queue_ms: pos_integer,
             max_wake_queue: pos_integer,
             max_bytes: pos_integer | nil
@@ -411,6 +414,7 @@ defmodule Alambique.Config do
       do: bad!(":after_ack must be a function of (cell, txid)")
 
     op_timeout = pos_int!(opts, :op_timeout_ms)
+    idle_timeout = pos_int!(opts, :idle_timeout_ms)
     feed = feed!(opts[:feed])
     query = query!(opts[:query])
     migrations = migrations!(opts[:migrations])
@@ -427,7 +431,7 @@ defmodule Alambique.Config do
       ttl_ms: ttl,
       renew_jitter: jitter,
       skew_margin_ms: skew,
-      idle_timeout_ms: pos_int!(opts, :idle_timeout_ms),
+      idle_timeout_ms: idle_timeout,
       op_timeout_ms: op_timeout,
       call_timeout_ms: pos_int!(opts, :call_timeout_ms),
       hint_limit: pos_int!(opts, :hint_limit),
@@ -452,7 +456,7 @@ defmodule Alambique.Config do
       routing: options!(:routing, opts[:routing], @routing_defaults),
       wake: wake!(opts[:wake]),
       wal: wal!(opts[:wal]),
-      awake: awake!(opts[:awake]),
+      awake: awake!(opts[:awake], idle_timeout),
       relocate: options!(:relocate, opts[:relocate], @relocate_defaults),
       rewind: rewind!(opts[:rewind]),
       schema: schema!(opts[:schema], op_timeout),
@@ -1136,22 +1140,51 @@ defmodule Alambique.Config do
 
   # `max_bytes: nil` (the default) leaves the memory of the awake cells
   # unbounded; `max_wake_queue: nil` is four times `max_wakes`.
-  defp awake!(opts) do
+  defp awake!(opts, idle_timeout_ms) do
     opts =
-      checked_keyword!(:awake, opts, [:max_bytes, :max_wake_queue | Keyword.keys(@awake_defaults)])
+      checked_keyword!(:awake, opts, [
+        :max_bytes,
+        :max_wake_queue,
+        :idle_cache_after_ms,
+        :idle_cache_kib | Keyword.keys(@awake_defaults)
+      ])
 
     {max_bytes, rest} = Keyword.pop(opts, :max_bytes)
     {queue, rest} = Keyword.pop(rest, :max_wake_queue)
+    {idle_after, rest} = Keyword.pop(rest, :idle_cache_after_ms)
+    {idle_kib, rest} = Keyword.pop(rest, :idle_cache_kib, @idle_cache_kib)
+
+    unless is_integer(idle_kib) and idle_kib >= 0,
+      do: bad!(":awake :idle_cache_kib must be a non-negative integer")
 
     for {key, value} <- [max_bytes: max_bytes, max_wake_queue: queue],
         not (is_nil(value) or (is_integer(value) and value > 0)),
         do: bad!(":awake #{inspect(key)} must be nil or a positive integer")
 
     awake = options!(:awake, rest, @awake_defaults)
+    idle_cache!(awake, idle_after, idle_kib, idle_timeout_ms)
 
     awake
+    |> Map.put(:idle_cache_kib, idle_kib)
+    |> Map.put(:idle_cache_after_ms, idle_after)
     |> Map.put(:max_bytes, max_bytes)
     |> Map.put(:max_wake_queue, queue || 4 * awake.max_wakes)
+  end
+
+  # `idle_cache_after_ms: nil` (the default) keeps the full page cache until the
+  # cell hibernates; a value that is not below `idle_timeout_ms` would never
+  # shrink it.
+  defp idle_cache!(_awake, nil, _kib, _idle_timeout_ms), do: :ok
+
+  defp idle_cache!(awake, after_ms, kib, idle_timeout_ms) do
+    unless is_integer(after_ms) and after_ms > 0,
+      do: bad!(":awake :idle_cache_after_ms must be nil or a positive integer")
+
+    if after_ms >= idle_timeout_ms,
+      do: bad!(":awake :idle_cache_after_ms must be less than :idle_timeout_ms")
+
+    if kib >= awake.cache_kib,
+      do: bad!(":awake :idle_cache_kib must be less than :cache_kib")
   end
 
   # `max_bytes: nil` turns the size limit of a rewind off.

@@ -30,6 +30,7 @@ defmodule Alambique.Cell do
     Inflight,
     Lease,
     Membership,
+    Sqlite,
     Telemetry,
     Tx
   }
@@ -297,8 +298,26 @@ defmodule Alambique.Cell do
     :atomics.put(state.load, 3, state.last_active)
     wal_size(state)
     track(state)
-    state
+    arm_idle_cache(state)
   end
+
+  # The shrink timer carries its ref, so a message that was already queued
+  # when the timer was replaced is ignored.
+  defp arm_idle_cache(%State{config: %{awake: %{idle_cache_after_ms: nil}}} = state), do: state
+
+  defp arm_idle_cache(state),
+    do: arm_idle_cache(state, state.config.awake.idle_cache_after_ms)
+
+  defp arm_idle_cache(state, ms),
+    do: %{state | idle_cache: :erlang.start_timer(ms, self(), :idle_cache)}
+
+  # The first call after a shrink gives the cache its full limit back.
+  defp restore_cache(%State{idle_cache: :shrunk} = state) do
+    Sqlite.execute(state.conn, "PRAGMA cache_size = -#{state.config.awake.cache_kib}")
+    arm_idle_cache(state)
+  end
+
+  defp restore_cache(state), do: state
 
   @doc false
   # A third of the TTL, spread by `lease_renew_jitter` so that cells woken
@@ -424,7 +443,7 @@ defmodule Alambique.Cell do
     do: Admission.track(state.config, self(), state.conn)
 
   defp call(request, from, state) do
-    state = %{state | last_active: System.monotonic_time(:millisecond)}
+    state = restore_cache(%{state | last_active: System.monotonic_time(:millisecond)})
     :atomics.put(state.load, 3, state.last_active)
 
     if State.lease_valid?(state) do
@@ -717,6 +736,23 @@ defmodule Alambique.Cell do
           {:ok, state, _released} -> {:stop, :normal, %{state | mode: :stopped}}
           {:stop, reason, state} -> stop_serving(state, reason)
         end
+    end
+  end
+
+  defp info({:timeout, ref, :idle_cache}, %State{mode: :serving, idle_cache: ref} = state) do
+    after_ms = state.config.awake.idle_cache_after_ms
+    elapsed = System.monotonic_time(:millisecond) - state.last_active
+
+    cond do
+      elapsed < after_ms ->
+        {:noreply, arm_idle_cache(state, after_ms - elapsed)}
+
+      not idle?(state) or :atomics.get(state.load, 2) != 0 ->
+        {:noreply, arm_idle_cache(state)}
+
+      true ->
+        Sqlite.execute(state.conn, "PRAGMA cache_size = -#{state.config.awake.idle_cache_kib}")
+        {:noreply, %{state | idle_cache: :shrunk}}
     end
   end
 
