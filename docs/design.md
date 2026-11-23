@@ -324,8 +324,12 @@ cells without waking them.
 
 - **Capture.** Triggers write each change into `_alambique_feed` in the
   same transaction, so a rollback leaves none. `feed: [tables: ...,
-  other_tables: ...]` selects the captured tables and columns. Nodes of
-  one instance must agree on these values.
+  other_tables: ...]` selects the captured tables, columns and, with
+  `ops:`, operations (a filter on the record's op, so a key change is a
+  delete plus an insert, each kept if listed; a trigger without statements
+  is not created). Nodes of one instance must agree on these values; they
+  are not compared, and the node that wakes a cell regenerates its
+  triggers to its own selection.
 - **Record.** `{cell, table, key, op, values, position}`. The position is
   `{txid, n}`: the batch TXID and the index of the change in it.
 - **Publication.** After a batch is acknowledged, a sender writes one

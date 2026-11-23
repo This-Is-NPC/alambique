@@ -41,10 +41,16 @@ defmodule Alambique.Feed.Capture do
   is captured whole (`:capture`), not at all (`:skip`), without some columns
   (`{:omit, columns}`) or as its key plus some columns (`{:only, columns}`).
   `tables` says it for the tables by name and `other_tables` for the rest.
+  `{:ops, ops, what}` captures `what` (`:capture` or an omit/only pair) only
+  for the changes whose record has one of the operations `ops`; a selection
+  of all three operations is written without it.
   """
+  @type what :: :capture | {:omit | :only, [String.t()]}
+  @type spec :: :capture | :skip | {:omit | :only, [String.t()]} | {:ops, [op, ...], what}
+  @type op :: :insert | :update | :delete
   @type select :: %{
           required(:internal_prefixes) => [String.t()],
-          required(:tables) => %{String.t() => :capture | :skip | {:omit | :only, [String.t()]}},
+          required(:tables) => %{String.t() => spec},
           required(:other_tables) => :capture | :skip,
           optional(atom) => term
         }
@@ -246,28 +252,55 @@ defmodule Alambique.Feed.Capture do
   end
 
   defp triggers(table, %{columns: columns, key: key}, spec) do
+    {what, ops} = split(spec)
     base = @trigger_prefix <> table
     insert = "INSERT INTO #{@feed} (txid, ts, tbl, op, key, vals)"
     pending = "(SELECT txid FROM #{@pending}), #{@pending_time}"
     name = literal(table)
     changed = key_changed(key)
-    captured = captured(columns, key, spec)
+    captured = captured(columns, key, what)
     new = "#{key_json(key, "new")}, #{values_json(captured, "new")}"
 
+    # A key change is a delete plus an insert; any other update is an update.
+    # Each statement is emitted only if its record op is listed.
+    update_body =
+      [
+        :delete in ops and
+          "#{insert} SELECT #{pending}, #{name}, 'delete', #{key_json(key, "old")}, NULL WHERE #{changed};",
+        case {:insert in ops, :update in ops} do
+          {true, true} ->
+            "#{insert} VALUES (#{pending}, #{name}, CASE WHEN #{changed} THEN 'insert' ELSE 'update' END, #{new});"
+
+          {true, false} ->
+            "#{insert} SELECT #{pending}, #{name}, 'insert', #{new} WHERE #{changed};"
+
+          {false, true} ->
+            "#{insert} SELECT #{pending}, #{name}, 'update', #{new} WHERE NOT (#{changed});"
+
+          {false, false} ->
+            false
+        end
+      ]
+      |> Enum.filter(& &1)
+      |> Enum.join("\n")
+
     [
-      {"_i", "INSERT", "", "#{insert} VALUES (#{pending}, #{name}, 'insert', #{new});"},
-      {"_u", "UPDATE", update_when(spec, captured, key),
-       """
-       #{insert} SELECT #{pending}, #{name}, 'delete', #{key_json(key, "old")}, NULL WHERE #{changed};
-       #{insert} VALUES (#{pending}, #{name}, CASE WHEN #{changed} THEN 'insert' ELSE 'update' END, #{new});
-       """},
-      {"_d", "DELETE", "",
-       "#{insert} VALUES (#{pending}, #{name}, 'delete', #{key_json(key, "old")}, NULL);"}
+      :insert in ops and
+        {"_i", "INSERT", "", "#{insert} VALUES (#{pending}, #{name}, 'insert', #{new});"},
+      update_body != "" and
+        {"_u", "UPDATE", update_when(what, captured, key, ops, changed), update_body <> "\n"},
+      :delete in ops and
+        {"_d", "DELETE", "",
+         "#{insert} VALUES (#{pending}, #{name}, 'delete', #{key_json(key, "old")}, NULL);"}
     ]
+    |> Enum.filter(& &1)
     |> Enum.map(fn {suffix, event, condition, body} ->
       "CREATE TRIGGER #{ident(base <> suffix)} AFTER #{event} ON #{ident(table)}#{condition} BEGIN #{body} END;\n"
     end)
   end
+
+  defp split({:ops, ops, what}), do: {what, ops}
+  defp split(what), do: {what, [:insert, :update, :delete]}
 
   # The key columns are always captured, with the columns the selection keeps,
   # in declaration order. A column the table does not have is ignored.
@@ -283,10 +316,12 @@ defmodule Alambique.Feed.Capture do
   end
 
   # A table that leaves columns out skips an update that changes only those:
-  # the record would repeat the last one.
-  defp update_when(:capture, _captured, _key), do: ""
+  # the record would repeat the last one. A table that captures only deletes
+  # needs the update trigger just for a key change.
+  defp update_when(:capture, _captured, _key, [:delete], changed), do: " WHEN #{changed}"
+  defp update_when(:capture, _captured, _key, _ops, _changed), do: ""
 
-  defp update_when(_spec, captured, key) do
+  defp update_when(_what, captured, key, _ops, _changed) do
     changes = Enum.map(captured, &"old.#{ident(&1)} IS NOT new.#{ident(&1)}")
     changes = if key == :rowid, do: ["old.rowid IS NOT new.rowid" | changes], else: changes
     " WHEN " <> Enum.join(changes, " OR ")
