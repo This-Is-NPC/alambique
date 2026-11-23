@@ -255,7 +255,7 @@ defmodule Alambique.Config do
             stop_publish_ms: non_neg_integer,
             shards: pos_integer,
             internal_prefixes: [String.t()],
-            tables: %{String.t() => :capture | :skip | {:omit | :only, [String.t()]}},
+            tables: %{String.t() => Alambique.Feed.Capture.spec()},
             other_tables: :capture | :skip,
             max_object_bytes: pos_integer
           },
@@ -711,17 +711,57 @@ defmodule Alambique.Config do
   defp table_spec!(_name, true), do: :capture
   defp table_spec!(_name, false), do: :skip
 
-  defp table_spec!(name, [{kind, columns}]) when kind in [:omit, :only] do
+  defp table_spec!(name, [{_, _} | _] = opts) when length(opts) <= 2 do
+    keys = Enum.map(opts, &elem(&1, 0))
+    selection = Keyword.take(opts, [:omit, :only])
+
+    if keys != Enum.uniq(keys) or
+         length(opts) != length(selection) + length(Keyword.take(opts, [:ops])) or
+         length(selection) > 1,
+       do: spec_error!(name)
+
+    what =
+      case selection do
+        [] -> :capture
+        [{kind, columns}] -> columns!(name, kind, columns)
+      end
+
+    case Keyword.fetch(opts, :ops) do
+      :error -> what
+      {:ok, ops} -> with_ops(what, ops!(name, ops))
+    end
+  end
+
+  defp table_spec!(name, _spec), do: spec_error!(name)
+
+  defp columns!(name, kind, columns) do
     unless is_list(columns) and Enum.all?(columns, &name_ok?/1),
       do: bad!(":feed tables #{inspect(name)}: #{kind} must be a list of column names")
 
     {kind, columns |> Enum.uniq() |> Enum.sort()}
   end
 
-  defp table_spec!(name, _spec),
+  # A selection of all three operations is the one without `ops`.
+  defp ops!(name, ops) do
+    cond do
+      ops == [] ->
+        bad!(":feed tables #{inspect(name)}: ops must not be empty, use false to capture nothing")
+
+      is_list(ops) and Enum.all?(ops, &(&1 in [:insert, :update, :delete])) ->
+        ops |> Enum.uniq() |> Enum.sort()
+
+      true ->
+        bad!(":feed tables #{inspect(name)}: ops must be a list of :insert, :update or :delete")
+    end
+  end
+
+  defp with_ops(what, [:delete, :insert, :update]), do: what
+  defp with_ops(what, ops), do: {:ops, ops, what}
+
+  defp spec_error!(name),
     do:
       bad!(
-        ":feed tables #{inspect(name)} must be true, false, [omit: columns] or [only: columns]"
+        ":feed tables #{inspect(name)} must be true, false, or a list of ops: and one of omit: or only:"
       )
 
   defp name_ok?(name), do: is_binary(name) and name != "" and String.valid?(name)

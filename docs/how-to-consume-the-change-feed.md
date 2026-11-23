@@ -192,6 +192,7 @@ can be left out of both:
    tables: %{
      "messages" => [omit: ["body"]],    # every column but these
      "audit" => [only: ["kind", "at"]], # the key and these columns
+     "events" => [ops: [:insert]],      # inserts only, whole row
      "attachments" => false             # no record at all
    }
  ]}
@@ -209,9 +210,24 @@ can be left out of both:
 - The triggers never read an omitted column, so it is not written to the
   `_alambique_feed` rows, the cell's segments or the feed objects.
 - An `UPDATE` that changes only omitted columns leaves no record.
+- `ops:` limits a table to some operations: a non-empty list of `:insert`,
+  `:update` and `:delete`. It stands alone (`[ops: [:insert]]`, whole row) or
+  goes with one of `omit:` or `only:`
+  (`[ops: [:insert], omit: ["body"]]`). Without it all three are captured.
+  Use it to keep a mass delete, such as a retention prune, out of the feed:
+  with `[ops: [:insert, :update]]` a `DELETE` on the table leaves no record
+  and runs no trigger. An empty list is an error; use `false` instead.
+- `ops:` filters the operation of the **record**. A key-changing `UPDATE` is
+  a `delete` of the old key and an `insert` of the new one, so each is kept
+  only if listed: `[ops: [:insert]]` keeps the `insert` of the new key and
+  drops the `delete`; `[ops: [:update]]` leaves no record for it. A table
+  that drops deletes does not tell a consumer that a row is gone, so use it
+  only when the consumer does not need that.
 - Changing a value on a cell that exists regenerates its triggers the next time
   the cell wakes. Records already published stay. Give every node the same
-  value.
+  value. Nodes do not compare their values: the node that wakes a cell
+  regenerates the triggers to its own value, so the records follow the node
+  that owns the cell at that moment.
 
 ## 8. Handle a rewind
 

@@ -341,6 +341,14 @@ defmodule Alambique.ConfigOptionsTest do
       {[feed: [tables: %{"a" => [omit: "body"]}]], ~r/omit must be a list/},
       {[feed: [tables: %{"a" => [only: [:body]]}]], ~r/only must be a list/},
       {[feed: [tables: %{"a" => [omit: ["b"], only: ["c"]]}]], ~r/must be true, false/},
+      {[feed: [tables: %{"a" => [ops: []]}]], ~r/ops must not be empty, use false/},
+      {[feed: [tables: %{"a" => [ops: :insert]}]], ~r/ops must be a list/},
+      {[feed: [tables: %{"a" => [ops: [:insert, :drop]]}]], ~r/ops must be a list/},
+      {[feed: [tables: %{"a" => [ops: [:insert], ops: [:update]]}]], ~r/must be true, false/},
+      {[feed: [tables: %{"a" => [ops: [:insert], omit: ["b"], only: ["c"]]}]],
+       ~r/must be true, false/},
+      {[feed: [tables: %{"a" => [ops: [:insert], extra: 1]}]], ~r/must be true, false/},
+      {[feed: [tables: %{"a" => [ops: [:insert], omit: "b"]}]], ~r/omit must be a list/},
       {[feed: [other_tables: :some]], ~r/other_tables/},
       {[feed: [compression: 6]], ~r/compression/},
       {[feed: [max_object_bytes: 0]], ~r/max_object_bytes/},
@@ -399,7 +407,11 @@ defmodule Alambique.ConfigOptionsTest do
               "m" => [omit: ["z", "body", "z"]],
               "k" => [only: ["b", "a"]],
               "p" => false,
-              "q" => true
+              "q" => true,
+              "o" => [ops: [:insert]],
+              "r" => [omit: ["b"], ops: [:delete, :insert, :insert]],
+              "s" => [ops: [:update, :insert, :delete]],
+              "t" => [only: ["b"], ops: [:insert, :update, :delete]]
             },
             other_tables: :skip
           ]
@@ -410,7 +422,11 @@ defmodule Alambique.ConfigOptionsTest do
              "m" => {:omit, ["body", "z"]},
              "k" => {:only, ["a", "b"]},
              "p" => :skip,
-             "q" => :capture
+             "q" => :capture,
+             "o" => {:ops, [:insert], :capture},
+             "r" => {:ops, [:delete, :insert], {:omit, ["b"]}},
+             "s" => :capture,
+             "t" => {:only, ["b"]}
            }
 
     assert feed.other_tables == :skip

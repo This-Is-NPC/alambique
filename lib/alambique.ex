@@ -481,8 +481,17 @@ defmodule Alambique do
       columns of the key are always captured. An omitted column is never
       written to the cell's feed table and is absent from the record's
       `values`. An `UPDATE` that changes only omitted columns leaves no
-      record. Names the table lacks are ignored. Use the same value on every
-      node, as for `:internal_prefixes`.
+      record. Names the table lacks are ignored. `ops: operations` (with
+      `:insert`, `:update` and `:delete`) limits the records to those
+      operations, alone or with one of `omit:` or `only:`: `[ops: [:insert]]`
+      leaves no record, and costs no trigger, for a mass delete such as a
+      retention prune. The filter is on the operation of the record: a
+      change of the key is a `:delete` plus an `:insert`, so `[ops: [:insert]]`
+      keeps the `:insert` of the new key and drops the `:delete` of the old.
+      An empty list is an error (use `false`). Use the same value on every
+      node, as for `:internal_prefixes`. Nodes are not compared: the node that
+      wakes a cell regenerates its triggers to its own value, so the records
+      follow the node that owns the cell at that moment.
     * `:max_object_bytes` - the most an object may inflate to when it
       is read (default 268 435 456); a larger one is rejected.
     * `:other_tables` - what the feed captures of a table `:tables` does not

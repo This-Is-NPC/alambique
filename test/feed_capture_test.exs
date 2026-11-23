@@ -266,6 +266,158 @@ defmodule Alambique.FeedCaptureTest do
       assert Capture.current?(conn, select(tables: %{"parts" => :capture}))
     end
 
+    defp ops(ops, what \\ :capture), do: {:ops, ops, what}
+
+    defp mass_delete(conn) do
+      :ok =
+        Db.writable_script(
+          conn,
+          """
+          INSERT INTO messages VALUES (1, 'a', 0, 'x'), (2, 'b', 0, 'y'), (3, 'c', 0, 'z');
+          INSERT INTO loose VALUES ('p', 'q'), ('r', 's'), ('t', 'u');
+          DELETE FROM messages;
+          DELETE FROM loose
+          """
+        )
+
+      for {tbl, op, _, _} <- captured(conn), do: {tbl, op}
+    end
+
+    test "ops: [:insert] captures inserts only: deletes cost no row, other tables are untouched" do
+      conn = fresh(select(tables: %{"messages" => ops([:insert])}))
+
+      assert mass_delete(conn) ==
+               List.duplicate({"messages", "insert"}, 3) ++
+                 List.duplicate({"loose", "insert"}, 3) ++ List.duplicate({"loose", "delete"}, 3)
+
+      # No delete trigger: a mass delete runs no trigger body.
+      assert {:ok, %{rows: [["_alambique_feed_t_messages_i"], ["_alambique_feed_t_messages_u"]]}} =
+               Db.run(
+                 conn,
+                 "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND tbl_name = 'messages'",
+                 []
+               )
+    end
+
+    test "ops: [:update] has no insert and no delete trigger" do
+      conn = fresh(select(tables: %{"messages" => ops([:update])}))
+
+      assert {:ok, %{rows: [["_alambique_feed_t_messages_u"]]}} =
+               Db.run(
+                 conn,
+                 "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND tbl_name = 'messages'",
+                 []
+               )
+    end
+
+    test "ops: [:insert, :update] captures inserts and updates, not deletes" do
+      conn = fresh(select(tables: %{"messages" => ops([:insert, :update])}))
+
+      :ok =
+        Db.writable_script(
+          conn,
+          "INSERT INTO messages VALUES (1, 'a', 0, 'x'); UPDATE messages SET flags = 1; UPDATE messages SET id = 2; DELETE FROM messages"
+        )
+
+      assert for({t, op, k, _} <- captured(conn), do: {t, op, k["id"]}) == [
+               {"messages", "insert", 1},
+               {"messages", "update", 1},
+               {"messages", "insert", 2}
+             ]
+    end
+
+    test "a key change under each filter emits only the statements whose op is listed" do
+      script = """
+      INSERT INTO labels VALUES (1, 'inbox', 'x');
+      UPDATE labels SET message_id = 2;
+      UPDATE labels SET secret = 'y'
+      """
+
+      for {list, expected} <- [
+            {[:insert], ["insert", "insert"]},
+            {[:update], ["update"]},
+            {[:delete], ["delete"]},
+            {[:insert, :delete], ["insert", "delete", "insert"]},
+            {[:update, :delete], ["delete", "update"]},
+            {[:insert, :update], ["insert", "insert", "update"]}
+          ] do
+        conn = fresh(select(tables: %{"labels" => ops(list)}))
+        :ok = Db.writable_script(conn, script)
+        assert Enum.map(captured(conn), &elem(&1, 1)) == expected, inspect(list)
+      end
+    end
+
+    test "ops combine with omit and only" do
+      conn = fresh(select(tables: %{"messages" => ops([:insert, :delete], {:omit, ["body"]})}))
+
+      :ok =
+        Db.writable_script(
+          conn,
+          "INSERT INTO messages VALUES (1, 'a', 0, 'SECRET'); UPDATE messages SET flags = 1; DELETE FROM messages"
+        )
+
+      assert captured(conn) == [
+               {"messages", "insert", %{"id" => 1}, %{"id" => 1, "subject" => "a", "flags" => 0}},
+               {"messages", "delete", %{"id" => 1}, nil}
+             ]
+
+      conn = fresh(select(tables: %{"messages" => ops([:update], {:only, ["subject"]})}))
+
+      :ok =
+        Db.writable_script(
+          conn,
+          "INSERT INTO messages VALUES (1, 'a', 0, 'x'); UPDATE messages SET body = 'y'; UPDATE messages SET subject = 'b'"
+        )
+
+      assert [{"messages", "update", %{"id" => 1}, %{"id" => 1, "subject" => "b"}}] =
+               captured(conn)
+    end
+
+    test "ops change the fingerprint, and a selection without them keeps the old triggers" do
+      conn = fresh(Capture.everything())
+      before = triggers_sql(conn)
+
+      assert Capture.current?(conn, select(tables: %{"messages" => :capture}))
+      refute Capture.current?(conn, select(tables: %{"messages" => ops([:insert])}))
+      refute Capture.current?(conn, select(tables: %{"messages" => ops([:delete])}))
+
+      # The same selection, written with and without `ops`, gives the same SQL.
+      :ok = Db.script(conn, "BEGIN;")
+      :ok = Capture.install(conn, select(tables: %{"messages" => :capture}))
+      :ok = Db.script(conn, "COMMIT;")
+      assert triggers_sql(conn) == before
+    end
+
+    test "after a different selection the triggers follow it" do
+      conn = fresh(select(tables: %{"messages" => ops([:insert])}))
+      later = select(tables: %{"messages" => ops([:insert, :delete])})
+      refute Capture.current?(conn, later)
+
+      :ok = Db.script(conn, "BEGIN;")
+      :ok = Capture.install(conn, later)
+      :ok = Db.script(conn, "COMMIT;")
+      assert Capture.current?(conn, later)
+
+      :ok =
+        Db.writable_script(
+          conn,
+          "INSERT INTO messages VALUES (1, 'a', 0, 'x'); DELETE FROM messages"
+        )
+
+      assert Enum.map(captured(conn), &elem(&1, 1)) == ["insert", "delete"]
+    end
+
+    defp triggers_sql(conn) do
+      {:ok, %{rows: rows}} =
+        Db.run(
+          conn,
+          "SELECT name, sql FROM sqlite_schema WHERE type = 'trigger' ORDER BY name",
+          []
+        )
+
+      rows
+    end
+
     test "a column the table lacks is ignored" do
       conn = fresh(select(tables: %{"messages" => {:omit, ["nope"]}}))
       :ok = Db.writable_script(conn, "INSERT INTO messages VALUES (1, 's', 0, 'b')")

@@ -90,6 +90,30 @@ defmodule Alambique.FeedTest do
              ]
     end
 
+    test "a table that lists only inserts publishes no delete, others still do", ctx do
+      inst =
+        start_instance(ctx,
+          migrations: @schema,
+          feed: [tables: %{"notes" => [ops: [:insert]]}]
+        )
+
+      cell = unique_cell()
+
+      for id <- 1..3 do
+        exec(inst, cell, "INSERT INTO notes VALUES (?, 'a')", [id])
+        exec(inst, cell, "INSERT INTO loose VALUES ('x', ?)", [id])
+      end
+
+      exec(inst, cell, "DELETE FROM notes")
+      exec(inst, cell, "DELETE FROM loose")
+
+      records = records(ctx, 9)
+      assert length(records) == 9
+      assert Enum.count(records, &(&1.table == "notes" and &1.op == :insert)) == 3
+      assert Enum.count(records, &(&1.table == "notes" and &1.op == :delete)) == 0
+      assert Enum.count(records, &(&1.table == "loose" and &1.op == :delete)) == 3
+    end
+
     test "changing a primary key is a delete of the old key and an insert of the new", ctx do
       inst = start_instance(ctx, migrations: @schema)
       cell = unique_cell()
