@@ -5,13 +5,17 @@ defmodule Alambique.FeedOrderTest do
 
   The test pins the interleaving that broke it: a batch published late, then
   a batch stamped earlier whose acknowledgement came after the queue emptied.
-  The property drives commits, held uploads and the clock at random.
+  The property drives commits, held uploads, feed puts that fail or lose their
+  acknowledgement, and the clock at random. Every write answer is kept; once the
+  puts are released, the feed holds the rows the store restores, each once,
+  and the first record of each is in the order of the keys.
   """
   use ExUnit.Case, async: false
   use ExUnitProperties
 
   import Alambique.CellHelpers
 
+  alias Alambique.Feed
   alias Alambique.Feed.Keys
   alias AlambiqueTestkit.{GatedStore, ManualClock}
 
@@ -37,8 +41,11 @@ defmodule Alambique.FeedOrderTest do
     )
   end
 
-  defp exec(inst, cell, n),
-    do: {:ok, _} = Alambique.execute(inst, cell, "INSERT INTO log VALUES (#{n})")
+  # Returns `n` once the write is acknowledged.
+  defp exec(inst, cell, n) do
+    assert {:ok, _} = Alambique.execute(inst, cell, "INSERT INTO log VALUES (#{n})")
+    n
+  end
 
   defp held(ctx, kind) do
     pattern = if kind == :feed, do: "/feed/", else: ".ltx"
@@ -127,13 +134,34 @@ defmodule Alambique.FeedOrderTest do
     tasks
   end
 
+  # The held put of a feed object fails, or lands and its caller gets an error.
+  defp step(ctx, _inst, _cell, {:spoil, answer}, tasks) do
+    case held(ctx, :feed) do
+      [key | _] when answer == :fail -> GatedStore.fail(ctx.gate, key)
+      [key | _] -> GatedStore.lose_ack(ctx.gate, key)
+      [] -> :ok
+    end
+
+    tasks
+  end
+
   defp op do
     one_of([
       constant(:commit),
       tuple({constant(:clock), integer(-40..60)}),
-      tuple({constant(:land), member_of([:segment, :feed])})
+      tuple({constant(:land), member_of([:segment, :feed])}),
+      tuple({constant(:spoil), member_of([:fail, :lose_ack])})
     ])
   end
+
+  # The records of the cell on the feed, in the order of the objects.
+  defp feed_records(ctx, prefix, cell) do
+    reader = Feed.ctx(store: ctx.store, prefix: prefix, settle_ms: 0)
+    {:ok, records, _} = Feed.read(reader, nil, 10_000)
+    Enum.filter(records, &(&1.cell == cell))
+  end
+
+  defp feed_ids(records), do: records |> Enum.uniq_by(& &1.id) |> Enum.map(& &1.key["id"])
 
   property "keys follow the commit order whatever the delays and the clock", ctx do
     check all(
@@ -143,21 +171,31 @@ defmodule Alambique.FeedOrderTest do
             max_shrinking_steps: 0
           ) do
       prefix = "order#{System.unique_integer([:positive])}"
-      inst = start(ctx, prefix, window_ms: window_ms)
+      feed = [window_ms: window_ms, publish_retry_ms: 10, publish_retry_max_ms: 40]
+      inst = start(ctx, prefix, feed)
       cell = unique_cell()
-      exec(inst, cell, 0)
+      first = exec(inst, cell, 0)
       eventually(fn -> feed_keys(ctx, prefix) != [] end)
       GatedStore.hold(ctx.gate, ~r{/feed/})
       GatedStore.hold(ctx.gate, ~r{\.ltx$})
 
       tasks = Enum.reduce(ops, [], &step(ctx, inst, cell, &1, &2))
-      commits = length(tasks) + 1
 
       GatedStore.open(ctx.gate)
-      Enum.each(tasks, &Task.await/1)
-      eventually(fn -> length(feed_keys(ctx, prefix)) == commits end)
+      written = Enum.sort([first | await_all(tasks)])
 
-      txids = txids_by_key(ctx, prefix, cell)
+      # A lost acknowledgement may leave an object that a later put repeats.
+      eventually(fn -> written == Enum.sort(feed_ids(feed_records(ctx, prefix, cell))) end)
+
+      rows = durable_rows(ctx, cell, "SELECT id FROM log ORDER BY id", prefix)
+      assert List.flatten(rows) == written, "the store does not hold the acknowledged writes"
+
+      records = ctx |> feed_records(prefix, cell) |> Enum.uniq_by(& &1.id)
+      assert length(records) == length(written), "a row has two records on the feed"
+      positions = Enum.map(records, & &1.position)
+      assert positions == Enum.sort(positions), "first records out of the order of the keys"
+
+      txids = ctx |> txids_by_key(prefix, cell) |> Enum.uniq()
       assert txids == Enum.sort(txids)
       stop_supervised!(inst)
     end
