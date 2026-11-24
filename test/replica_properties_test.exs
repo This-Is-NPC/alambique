@@ -12,7 +12,9 @@ defmodule Alambique.ReplicaPropertiesTest do
     * R-bound: a read started at `q` with bound `B` contains every write
       acknowledged before `q - B - margin` (and nothing nobody wrote). Owner
       killed, takeovers, rewinds and store latency are part of the run.
-    * R-readonly: no statement sent to a replica changes its file or the store.
+    * R-readonly: no statement sent to a replica changes its file or the store;
+      each is answered as the read path answers it (a write is `:read_only`, a
+      value past the result cap `:result_too_large`).
     * R-bounds: more cells than `max_cells`, or bigger than `max_bytes`: the
       limits hold at every step.
     * R-switch: turning the switch off stops the replicas and removes their
@@ -263,66 +265,97 @@ defmodule Alambique.ReplicaPropertiesTest do
 
   # R-readonly
 
+  # Every statement comes with what the replica must answer.
   defp statement do
     one_of([
-      member_of([
-        "INSERT INTO t (n) VALUES (100)",
-        "REPLACE INTO t (n) VALUES (1)",
-        "UPDATE t SET v = x'00'",
-        "DELETE FROM t",
-        "DROP TABLE t",
-        "CREATE TABLE u (x)",
-        "CREATE INDEX i ON t (v)",
-        "ALTER TABLE t ADD COLUMN w",
-        "ATTACH DATABASE ':memory:' AS m",
-        "ATTACH DATABASE '/tmp/alambique-replica-attach.db' AS m",
-        "DETACH DATABASE m",
-        "PRAGMA user_version = 9",
-        "PRAGMA query_only = OFF",
-        "PRAGMA journal_mode = DELETE",
-        "PRAGMA wal_checkpoint(TRUNCATE)",
-        "PRAGMA writable_schema = ON",
-        "PRAGMA page_size = 512",
-        "PRAGMA locking_mode = EXCLUSIVE",
-        "PRAGMA synchronous = OFF",
-        "PRAGMA cache_size = 5",
-        "PRAGMA mmap_size = 1048576",
-        "VACUUM",
-        "VACUUM INTO '/tmp/alambique-replica-vacuum.db'",
-        "ANALYZE",
-        "REINDEX",
-        "BEGIN",
-        "BEGIN IMMEDIATE",
-        "COMMIT",
-        "ROLLBACK",
-        "SAVEPOINT s",
-        "RELEASE s",
-        "WITH x AS (SELECT 1) DELETE FROM t",
-        "SELECT 1; DELETE FROM t",
-        "SELECT writefile('/tmp/alambique-replica-write', 'x')",
-        "SELECT load_extension('x')",
-        "PRAGMA integrity_check",
-        "PRAGMA user_version",
-        "SELECT count(*) FROM t",
-        "SELECT * FROM sqlite_master"
-      ]),
-      map(string(:printable, max_length: 40), & &1)
+      map(
+        member_of([
+          "INSERT INTO t (n) VALUES (100)",
+          "REPLACE INTO t (n) VALUES (1)",
+          "UPDATE t SET v = x'00'",
+          "DELETE FROM t",
+          "DROP TABLE t",
+          "CREATE TABLE u (x)",
+          "CREATE INDEX i ON t (v)",
+          "ALTER TABLE t ADD COLUMN w",
+          "ATTACH DATABASE ':memory:' AS m",
+          "ATTACH DATABASE '/tmp/alambique-replica-attach.db' AS m",
+          "DETACH DATABASE m",
+          "PRAGMA user_version = 9",
+          "PRAGMA query_only = OFF",
+          "PRAGMA journal_mode = DELETE",
+          "PRAGMA wal_checkpoint(TRUNCATE)",
+          "PRAGMA writable_schema = ON",
+          "PRAGMA page_size = 512",
+          "PRAGMA locking_mode = EXCLUSIVE",
+          "PRAGMA synchronous = OFF",
+          "PRAGMA cache_size = 5",
+          "PRAGMA mmap_size = 1048576",
+          "VACUUM",
+          "VACUUM INTO '/tmp/alambique-replica-vacuum.db'",
+          "ANALYZE",
+          "REINDEX",
+          "BEGIN",
+          "BEGIN IMMEDIATE",
+          "COMMIT",
+          "ROLLBACK",
+          "SAVEPOINT s",
+          "RELEASE s",
+          "WITH x AS (SELECT 1) DELETE FROM t"
+        ]),
+        &{:refused, &1}
+      ),
+      map(
+        member_of([
+          "PRAGMA user_version",
+          "SELECT count(*) FROM t",
+          "SELECT * FROM sqlite_master"
+        ]),
+        &{:reads, &1}
+      ),
+      # A value as big as the result cap is built, one byte more is refused.
+      map(member_of([-1, 0, 1, 2, 1_000, 100_000_000]), &{:blob, &1}),
+      map(
+        member_of([
+          "SELECT 1; DELETE FROM t",
+          "SELECT writefile('/tmp/alambique-replica-write', 'x')",
+          "SELECT load_extension('x')",
+          "PRAGMA integrity_check"
+        ]),
+        &{:unchecked, &1}
+      ),
+      map(string(:printable, max_length: 40), &{:unchecked, &1})
     ])
   end
 
+  defp attempt({:blob, delta}, cap) do
+    sql = "SELECT length(zeroblob(#{cap + delta}))"
+    {sql, if(delta <= 0, do: {:rows, [[cap + delta]]}, else: :too_large)}
+  end
+
+  defp attempt({:reads, "SELECT count(*) FROM t" = sql}, _cap), do: {sql, {:rows, [[3]]}}
+  defp attempt({expected, sql}, _cap), do: {sql, expected}
+
+  defp fits?(:refused, answer), do: answer == {:error, :read_only}
+  defp fits?(:too_large, answer), do: answer == {:error, :result_too_large}
+  defp fits?({:rows, rows}, answer), do: match?({:ok, %{rows: ^rows}}, answer)
+  defp fits?(:reads, answer), do: match?({:ok, %{rows: rows}} when is_list(rows), answer)
+  defp fits?(:unchecked, _answer), do: true
+
   property "R-readonly: no statement changes the replica or the store", ctx do
     check all(
-            sqls <- list_of(statement(), min_length: 3, max_length: 12),
+            statements <- list_of(statement(), min_length: 3, max_length: 12),
             max_runs: 10,
             max_shrinking_steps: 0
           ) do
-      run_readonly(ctx, sqls)
+      run_readonly(ctx, statements)
     end
   end
 
-  defp run_readonly(ctx, sqls) do
+  defp run_readonly(ctx, statements) do
     w = world(ctx)
     cell = "ro#{w.tag}"
+    cap = Config.fetch!(w.r).sql.max_result_bytes
 
     try do
       for n <- 1..3, do: {:ok, _} = insert(w.o, cell, n, "blob#{n}")
@@ -333,14 +366,20 @@ defmodule Alambique.ReplicaPropertiesTest do
       before = {File.read!(file), AuditStore.puts(w.audit), AuditStore.deletes(w.audit)}
       stored = durable_rows(ctx, cell, "SELECT n FROM t ORDER BY n", w.prefix)
 
-      for sql <- sqls do
-        _ = bounded(w, cell, 60_000, sql)
+      for statement <- statements do
+        {sql, expected} = attempt(statement, cap)
+        answer = bounded(w, cell, 60_000, sql)
+
+        assert fits?(expected, answer),
+               "#{inspect(sql)} answered #{inspect(answer)}, expected #{inspect(expected)}"
 
         assert {File.read!(file), AuditStore.puts(w.audit), AuditStore.deletes(w.audit)} == before,
                "#{inspect(sql)} changed the replica file or wrote to the store"
+
+        assert {:ok, %{rows: [[1], [2], [3]]}} = bounded(w, cell, 60_000),
+               "the replica does not answer as before after #{inspect(sql)}"
       end
 
-      assert {:ok, %{rows: [[1], [2], [3]]}} = bounded(w, cell, 60_000)
       assert durable_rows(ctx, cell, "SELECT n FROM t ORDER BY n", w.prefix) == stored
     after
       File.rm("/tmp/alambique-replica-vacuum.db")
