@@ -2,12 +2,18 @@ defmodule Alambique.Cell.Sql do
   @moduledoc false
   # Splits a SQL script into statements, so a migration can run each one
   # through `Alambique.Tx` (design §13). Semicolons inside quotes, comments and
-  # trigger bodies do not end a statement.
+  # trigger bodies do not end a statement. It is not a safety gate: each piece
+  # goes to SQLite alone, which refuses text after the first statement.
 
   # A word as SQLite tokenizes it: letters, digits, `_`, `$` and every byte of
-  # a UTF-8 character; a variable (`:a`, `@a`, `#a`) is one word too. A keyword
-  # inside one is not a keyword. Matched as bytes (no `u` flag).
-  @word ~r/\A[:@#]?[A-Za-z0-9_$\x80-\xff]+/
+  # a UTF-8 character; a variable (`:a`, `@a`, `$a`, `#a`) is one word too,
+  # and `::` may join the parts of a variable. A keyword inside one is not a
+  # keyword. Matched as bytes (no `u` flag).
+  @word ~r/\A(?:[:@$]?(?:[A-Za-z0-9_$\x80-\xff]|::)+|#[A-Za-z0-9_$\x80-\xff]+)/
+
+  # The UTF-8 byte order mark: SQLite reads it as a blank wherever a token
+  # could start.
+  @bom <<0xEF, 0xBB, 0xBF>>
 
   defguardp word_start(c)
             when c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c in [?_, ?$, ?:, ?@, ?#] or
@@ -16,7 +22,7 @@ defmodule Alambique.Cell.Sql do
   @spec split(String.t()) :: [String.t()]
   def split(sql), do: scan(sql, [], new(), [])
 
-  defp new, do: %{words: [], body: false, cases: 0, done: false}
+  defp new, do: %{words: [], body: false, after_semi: false, done: false}
 
   # `current` is the reversed iodata of the statement being read.
   defp scan("", current, _st, acc), do: finish(current, acc) |> Enum.reverse()
@@ -33,26 +39,29 @@ defmodule Alambique.Cell.Sql do
 
   defp scan(<<q, rest::binary>>, cur, st, acc) when q in [?', ?", ?`] do
     {quoted, rest} = quoted(rest, q, [<<q>>])
-    scan(rest, [quoted | cur], st, acc)
+    scan(rest, [quoted | cur], %{st | after_semi: false}, acc)
   end
 
   defp scan(<<?[, rest::binary>>, cur, st, acc) do
     {text, rest} = take_until(rest, "]")
-    scan(rest, [["[", text] | cur], st, acc)
+    scan(rest, [["[", text] | cur], %{st | after_semi: false}, acc)
   end
 
   defp scan(<<?;, rest::binary>>, cur, st, acc) do
     if st.words |> Enum.take(3) |> trigger?() and not st.done do
-      scan(rest, [";" | cur], st, acc)
+      scan(rest, [";" | cur], %{st | after_semi: st.body}, acc)
     else
       scan(rest, [], new(), finish([";" | cur], acc))
     end
   end
 
+  defp scan(<<@bom, rest::binary>>, cur, st, acc), do: scan(rest, [@bom | cur], st, acc)
+
   defp scan(<<c, _::binary>> = sql, cur, st, acc) when word_start(c) do
     case Regex.run(@word, sql) do
       [word] ->
         rest = binary_part(sql, byte_size(word), byte_size(sql) - byte_size(word))
+        {word, rest} = variable_arguments(word, rest)
         scan(rest, [word | cur], track(st, String.downcase(word)), acc)
 
       nil ->
@@ -61,20 +70,40 @@ defmodule Alambique.Cell.Sql do
     end
   end
 
-  defp scan(<<c, rest::binary>>, cur, st, acc), do: scan(rest, [<<c>> | cur], st, acc)
+  defp scan(<<c, rest::binary>>, cur, st, acc) when c in [?\s, ?\t, ?\n, ?\f, ?\r],
+    do: scan(rest, [<<c>> | cur], st, acc)
+
+  defp scan(<<c, rest::binary>>, cur, st, acc),
+    do: scan(rest, [<<c>> | cur], %{st | after_semi: false}, acc)
+
+  # `$a(...)`, `:a(...)` and `@a(...)` are one variable up to the `)`, which a
+  # blank before it spoils (SQLite then reads the `(` apart).
+  defp variable_arguments(<<v, _::binary>> = word, <<?(, _::binary>> = text)
+       when v in [?$, ?:, ?@] and byte_size(word) > 1 do
+    case Regex.run(~r/\A\(([^)\s]*)\)/, text) do
+      [args | _] ->
+        {word <> args, binary_part(text, byte_size(args), byte_size(text) - byte_size(args))}
+
+      nil ->
+        {word, text}
+    end
+  end
+
+  defp variable_arguments(word, rest), do: {word, rest}
 
   # Words of the statement so far, to know whether it is a trigger and where
-  # its BEGIN ... END body ends (CASE ... END inside it does not).
+  # its BEGIN ... END body ends: an `END` that starts a statement of the body
+  # (after a `;`). Any other `end` is a CASE's or an identifier's.
   defp track(st, word) do
     st = %{st | words: st.words ++ [word]}
     trigger? = st.words |> Enum.take(3) |> trigger?()
+    ends? = st.after_semi and word == "end"
+    st = %{st | after_semi: false}
 
     cond do
       not trigger? -> %{st | words: Enum.take(st.words, 3)}
       word == "begin" -> %{st | body: true}
-      word == "case" and st.body -> %{st | cases: st.cases + 1}
-      word == "end" and st.body and st.cases > 0 -> %{st | cases: st.cases - 1}
-      word == "end" and st.body -> %{st | done: true}
+      ends? -> %{st | done: true}
       true -> %{st | words: Enum.take(st.words, 3)}
     end
   end
@@ -92,6 +121,7 @@ defmodule Alambique.Cell.Sql do
   defp blank?(text) do
     text
     |> String.replace(~r/--[^\n]*|\/\*.*?(?:\*\/|\z)/s, "")
+    |> String.replace(@bom, "")
     |> String.trim()
     |> String.trim(";")
     |> String.trim() == ""
