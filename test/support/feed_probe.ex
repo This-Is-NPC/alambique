@@ -41,7 +41,8 @@ defmodule Alambique.FeedProbe do
     GatedStore.hold(gate, ~r{/feed/})
     state = state |> write.() |> write.()
 
-    [first | _] = eventually(fn -> GatedStore.held(gate) != [] and GatedStore.held(gate) end)
+    mine = fn -> Enum.filter(GatedStore.held(gate), &String.ends_with?(&1, cell)) end
+    [first | _] = eventually(fn -> mine.() != [] and mine.() end)
 
     before = published(inst, cell) || 0
     GatedStore.release(gate, first)
