@@ -557,6 +557,18 @@ defmodule Alambique.SqliteTest do
       assert :ok = Sqlite.execute(conn, "BEGIN; ROLLBACK")
     end
 
+    test "a checkpoint is refused while a transaction of the library is open", %{conn: conn} do
+      {:ok, _} = Sqlite.run(conn, "PRAGMA journal_mode = WAL", [])
+      {:ok, token} = Sqlite.begin_transaction(conn)
+      :ok = Sqlite.execute(conn, "INSERT INTO u VALUES (1)")
+
+      assert {:error, :not_authorized} = Sqlite.checkpoint(conn)
+      assert {:ok, :transaction} = Sqlite.transaction_status(conn)
+
+      assert :ok = Sqlite.finish_transaction(conn, token, :commit)
+      assert :ok = Sqlite.checkpoint(conn)
+    end
+
     test "a transaction that SQLite ended is not committed, and a rollback of it is ok", %{
       conn: conn
     } do
