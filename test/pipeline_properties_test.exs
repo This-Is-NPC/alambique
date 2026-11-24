@@ -19,6 +19,13 @@ defmodule Alambique.PipelinePropertiesTest do
       Puts that landed and were not acknowledged, puts that never landed, and
       stops by takeover, fence and lease expiry exercise it.
 
+  Beyond the end state, every acknowledgement is checked when it is given: the
+  segment of its TXID is already in the store, so a caller is never answered
+  while its put is held, failed or behind a held put. A write that nothing
+  holds back is acknowledged: the waits are bounded, so a cell that never
+  answers fails the property at once. A put that fails once the lease ended
+  stops the cell and is not retried.
+
   Each property runs at depth 1 as the control and at depth 4.
   """
   use ExUnit.Case, async: false
@@ -26,7 +33,7 @@ defmodule Alambique.PipelinePropertiesTest do
 
   import Alambique.CellHelpers
 
-  alias Alambique.{Cell, Config}
+  alias Alambique.{AckGuard, Cell, Config}
   alias Alambique.Replication.Keys
   alias AlambiqueTestkit.{CrashPoints, GatedStore, ManualClock, MemoryStore}
 
@@ -58,6 +65,7 @@ defmodule Alambique.PipelinePropertiesTest do
       {1, constant(:kill)},
       {2, constant(:take_over)},
       {1, constant(:expire)},
+      {1, constant(:fail_expired)},
       {2, constant(:recover)}
     ])
   end
@@ -95,11 +103,16 @@ defmodule Alambique.PipelinePropertiesTest do
       # The gate fails puts on purpose; an open breaker would hold later uploads
       # back for its cool-down, past the wait of `GatedStore.await/3`.
       breaker: [failures: 1_000_000],
+      # A failed put reaches the cell, which retries it after a short backoff.
+      retry: [max_attempts: 1],
+      upload: [retry_backoff_ms: 5, retry_backoff_max_ms: 20],
       compaction: false,
       clock: {ManualClock, ManualClock.config(clock, 0)}
     ]
 
     x = start_instance(%{ctx | store: gated}, [name: :"x#{tag}"] ++ opts)
+    guard = AckGuard.attach({MemoryStore, ctx.store_config}, prefix, &(&1 == cell))
+    capture([[:alambique, :cell, :upload_retry]])
 
     y =
       start_instance(
@@ -121,7 +134,9 @@ defmodule Alambique.PipelinePropertiesTest do
       acked: MapSet.new(),
       refused: MapSet.new(),
       attempted: MapSet.new([0]),
-      rows: MapSet.new()
+      rows: MapSet.new(),
+      guard: guard,
+      expired?: false
     }
 
     try do
@@ -130,6 +145,7 @@ defmodule Alambique.PipelinePropertiesTest do
       world = finish(world)
       verify(world)
     after
+      AckGuard.detach(guard)
       CrashPoints.reset()
       GenServer.stop(gate)
       for name <- [x, y], do: stop_supervised(name)
@@ -140,16 +156,25 @@ defmodule Alambique.PipelinePropertiesTest do
   # Gives `x` an awake cell (its first batches land at once), then holds its puts.
   defp wake(w) do
     GatedStore.open(w.gate)
-    w = sync_write(w, w.x, 0)
+    w = sync_write(w, w.x, 0, :ok)
     GatedStore.hold(w.gate, ~r{/0000/})
     w
   end
 
-  defp sync_write(w, inst, n) do
+  # With `expect` `:ok` nothing stands in the way of the write, so its answer
+  # must be `{:ok, _}`; `:expired` also allows `:lease_expired`, the answer of
+  # an awake cell whose lease ended.
+  defp sync_write(w, inst, n, expect) do
     w = %{w | attempted: MapSet.put(w.attempted, n)}
+    answer = Alambique.execute(inst, w.cell, "INSERT INTO t (n) VALUES (?)", [n], timeout: 5_000)
 
-    case Alambique.execute(inst, w.cell, "INSERT INTO t (n) VALUES (?)", [n], timeout: 5_000) do
-      {:ok, _} = answer -> answered(w, n, answer)
+    ok? =
+      match?({:ok, _}, answer) or (expect == :expired and answer == {:error, :lease_expired})
+
+    assert expect == :any or ok?, "write #{n} was answered #{inspect(answer)}"
+
+    case answer do
+      {:ok, _} -> answered(w, n, answer)
       {:error, reason} when reason in [:fenced, :lease_lost, :lease_expired] -> refuse(w, n)
       {:error, _} -> w
     end
@@ -183,6 +208,7 @@ defmodule Alambique.PipelinePropertiesTest do
 
       pid ->
         before = length((pipe(pid) || %{queue: []}).queue)
+        first = w.seq + 1
 
         w =
           Enum.reduce(1..count, w, fn _, w ->
@@ -201,7 +227,11 @@ defmodule Alambique.PipelinePropertiesTest do
           GatedStore.await(w.gate, key(w, List.last(queue).txid))
         end
 
-        collect(w)
+        # Every put of the owner is held: nobody may have been answered.
+        w = collect(w)
+        early = MapSet.intersection(w.acked, MapSet.new(first..w.seq))
+        assert MapSet.size(early) == 0, "writes #{inspect(early)} were answered with puts held"
+        w
     end
   end
 
@@ -253,17 +283,45 @@ defmodule Alambique.PipelinePropertiesTest do
     case Alambique.take_over(w.y, w.cell, :test, timeout: 5_000) do
       {:ok, _} ->
         n = w.seq + 1
-        sync_write(%{w | seq: n}, w.y, n)
+        expect = if w.expired?, do: :expired, else: :ok
+        sync_write(%{w | seq: n, expired?: false}, w.y, n, expect)
 
       {:error, _} ->
         w
     end
   end
 
+  # The lease ends while a put is held, then the put fails: the cell stops,
+  # answers its callers and does not put again.
+  defp step(:fail_expired, w) do
+    with pid when is_pid(pid) <- owner(w),
+         %{queue: queue} when queue != [] <- pipe(pid),
+         keys = for(batch <- queue, do: key(w, batch.txid)),
+         [key | _] <- Enum.filter(GatedStore.held(w.gate), &(&1 in keys)) do
+      drain([:alambique, :cell, :upload_retry], w.cell)
+      mon = Process.monitor(pid)
+      ManualClock.advance(w.clock, 25_000)
+      GatedStore.fail(w.gate, key)
+
+      receive do
+        {:DOWN, ^mon, _, _, _} -> :ok
+      after
+        5_000 -> flunk("the cell kept a failed put after its lease ended")
+      end
+
+      assert drain([:alambique, :cell, :upload_retry], w.cell) == [],
+             "the cell retried a put after its lease ended"
+
+      collect(%{w | expired?: true})
+    else
+      _ -> collect(w)
+    end
+  end
+
   # The lease of every owner ends: the next call of the old owner stops it.
   defp step(:expire, w) do
     ManualClock.advance(w.clock, 25_000)
-    w
+    %{w | expired?: true}
   end
 
   defp step(:recover, w), do: recover(w)
@@ -287,17 +345,23 @@ defmodule Alambique.PipelinePropertiesTest do
     CrashPoints.reset()
     Alambique.hibernate(w.y, w.cell, timeout: 5_000)
     n = w.seq + 1
-    w = sync_write(%{w | seq: n}, w.x, n)
+    w = sync_write(%{w | seq: n}, w.x, n, :ok)
     GatedStore.hold(w.gate, ~r{/0000/})
     w
   end
 
-  # Waits for the answers of every write sent.
+  # Waits for the answers of every write sent, now that no put is held: a cell
+  # that is alive answers each one.
   defp settle(w) do
+    deadline = System.monotonic_time(:millisecond) + 10_000
+
     Enum.reduce(w.reqs, %{w | reqs: []}, fn {n, req}, w ->
-      case :gen_server.wait_response(req, 5_000) do
+      left = max(deadline - System.monotonic_time(:millisecond), 0)
+
+      case :gen_server.wait_response(req, left) do
         {:reply, answer} -> answered(w, n, answer)
-        _ -> w
+        {:error, _} -> w
+        :timeout -> flunk("write #{n} was never answered although every put could land")
       end
     end)
   end
@@ -329,6 +393,9 @@ defmodule Alambique.PipelinePropertiesTest do
       |> durable_rows(w.cell, "SELECT n FROM t", w.prefix)
       |> List.flatten()
       |> MapSet.new()
+
+    assert AckGuard.violations(w.guard) == [],
+           "acknowledged before the put landed: #{inspect(AckGuard.violations(w.guard))}"
 
     missing = MapSet.difference(w.acked, rows)
     assert MapSet.size(missing) == 0, "acknowledged writes #{inspect(missing)} are not durable"
