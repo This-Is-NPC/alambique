@@ -5,7 +5,9 @@ defmodule Alambique.MovedCleanupPropertiesTest do
   no object of a location is deleted before `moved_at_ms + moved_grace_ms +
   skew_margin_ms`, whatever restarted meanwhile, no cleanup touches the data
   of the live location, and once the grace passed every location the cell
-  left is cleaned without anyone asking for it.
+  left is cleaned without anyone asking for it. A move to a location the cell
+  never left succeeds, and the cell then serves from it with its rows; a move
+  back is done or refused by name until the old cleanup is over.
   """
   use ExUnit.Case, async: false
   use ExUnitProperties
@@ -70,7 +72,8 @@ defmodule Alambique.MovedCleanupPropertiesTest do
       ctx = %{inst: inst, base: base, opts: opts, locations: locations, world: world}
 
       try do
-        final = Enum.reduce(ops, %{writes: 0}, &step(&1, &2, ctx))
+        start = %{writes: 0, at: "a", left: MapSet.new()}
+        final = Enum.reduce(ops, start, &step(&1, &2, ctx))
         settle(final, ctx)
       after
         stop_supervised(inst)
@@ -86,8 +89,25 @@ defmodule Alambique.MovedCleanupPropertiesTest do
 
   defp step(:move, model, ctx) do
     {:ok, here} = Alambique.Placement.locate(Config.fetch!(ctx.inst), @cell, fresh: true)
-    # Refusals (not cleaned yet, settling) are part of the scenario.
-    _ = Alambique.relocate(ctx.inst, @cell, Enum.find(ctx.locations, &(&1.id != here.id)))
+    target = Enum.find(ctx.locations, &(&1.id != here.id))
+    back? = target.id in model.left
+
+    model =
+      case Alambique.relocate(ctx.inst, @cell, target) do
+        {:ok, %Location{id: id}} when id == target.id ->
+          %{model | at: id, left: MapSet.put(model.left, here.id)}
+
+        # A cell that moves back meets the cleanup of what it left.
+        {:error, :destination_not_cleaned} when back? ->
+          model
+
+        {:error, {:destination_settling, _ready_at_ms}} when back? ->
+          model
+
+        other ->
+          flunk("moving to #{target.id} (back: #{back?}) answered #{inspect(other)}")
+      end
+
     verify(model, ctx)
   end
 
@@ -110,6 +130,10 @@ defmodule Alambique.MovedCleanupPropertiesTest do
   # The data of the cell is intact, and a location the cell left still holds
   # its objects while the grace runs.
   defp verify(model, ctx) do
+    assert {:ok, %{id: at}} =
+             Alambique.Placement.locate(Config.fetch!(ctx.inst), @cell, fresh: true)
+
+    assert at == model.at
     assert {:ok, %{rows: rows}} = Alambique.query(ctx.inst, @cell, "SELECT n FROM t ORDER BY n")
     assert List.flatten(rows) == Enum.to_list(0..(model.writes - 1)//1)
 
