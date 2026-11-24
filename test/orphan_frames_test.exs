@@ -160,6 +160,38 @@ defmodule Alambique.OrphanFramesTest do
         refute unreplicated?(c)
       end
 
+      test "the pragma after a commit of no frames fails: the cell stops", %{c: c} do
+        # A write that cleans the feed rows of the batches published has frames;
+        # the next one, with nothing left to clean, has none.
+        noop = "UPDATE t SET n = n WHERE n = 99"
+        assert {:ok, _} = Alambique.execute(c.inst, c.cell, noop)
+
+        assert eventually(fn ->
+                 state = :sys.get_state(pid(c))
+                 state.feed_published == state.feed_cleaned and not unreplicated?(c)
+               end)
+
+        old = pid(c)
+
+        Alambique.Fault.install(fn
+          :db_before_commit, %{conn: conn} -> Native.fail_next_query_only(conn)
+          _, _ -> :ok
+        end)
+
+        on_exit(&Alambique.Fault.uninstall/0)
+        result = Alambique.execute(c.inst, c.cell, noop)
+        Alambique.Fault.uninstall()
+
+        assert result == {:error, {:query_only, "injected"}}
+        assert eventually(fn -> not Process.alive?(old) end)
+        assert asleep?(c)
+        assert store(c) == [0, 1]
+        assert rows(c) == [0, 1]
+        assert feed_keys(c, 1) == [0, 1]
+        assert {:ok, _} = Alambique.execute(c.inst, c.cell, "INSERT INTO t VALUES (8)")
+        assert store(c) == [0, 1, 8]
+      end
+
       test "a freeze puts the cell to sleep with what the store holds", %{c: c} do
         orphan(c, 5)
         _ = Alambique.freeze(c.inst, c.cell)

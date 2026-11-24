@@ -608,9 +608,12 @@ defmodule Alambique.Cell do
         foreign_write(state, from, {fun, ms, isolated?}, retried?)
 
       {:error, reason} = error ->
-        if Sqlite.wal_advanced?(state.conn),
-          do: orphaned_write(state, from, reason),
-          else: {:reply, error, state}
+        cond do
+          Sqlite.wal_advanced?(state.conn) -> orphaned_write(state, from, reason)
+          # A commit of no frames whose `query_only` failed.
+          Db.fatal?(reason) -> stop_serving(state, reason, error)
+          true -> {:reply, error, state}
+        end
     end
   end
 
