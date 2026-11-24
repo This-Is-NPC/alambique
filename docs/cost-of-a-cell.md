@@ -121,7 +121,15 @@ whole process, so the shrunk cell lowers what the awake cells may hold in total
 by `cache_kib - idle_cache_kib`; the pages freed are the least recently used
 ones of the node, not necessarily the cell's own. The cost is cold pages: the
 first call after a shrink reads its pages again. `idle_cache_after_ms` must be
-below `idle_timeout_ms`. No figures yet.
+below `idle_timeout_ms`.
+
+`idle_gc` (default `true`) makes the cell also collect its own garbage when the
+shrink happens. It returns the garbage of the last calls: a cell that ran one
+large transaction holds about 1.5 MiB while idle, and about 14 KiB after the
+collection. The cost is one collection of the cell process at that moment, with
+no measurable cost on the next call. It does nothing while `idle_cache_after_ms`
+is `nil`; with `idle_gc: false` the cell shrinks its cache and keeps the
+garbage. No figures yet.
 
 **Dirty IO schedulers and `sql: [max_concurrent_statements:]`.** The statements
 of callers run on the dirty IO schedulers, which the node's commits share. The

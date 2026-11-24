@@ -752,6 +752,8 @@ defmodule Alambique.Cell do
 
       true ->
         Sqlite.execute(state.conn, "PRAGMA cache_size = -#{state.config.awake.idle_cache_kib}")
+        # The garbage of the last calls would stay for as long as the cell is idle.
+        if state.config.awake.idle_gc, do: :erlang.garbage_collect()
         {:noreply, %{state | idle_cache: :shrunk}}
     end
   end

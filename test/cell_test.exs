@@ -160,6 +160,46 @@ defmodule Alambique.CellTest do
       assert {_, %{reason: :idle}} = await_event([:alambique, :cell, :hibernate], cell)
     end
 
+    test "an idle cell collects the garbage of its last calls", ctx do
+      inst =
+        start_instance(ctx,
+          migrations: @schema,
+          awake: [cache_kib: 512, idle_cache_after_ms: 300, idle_cache_kib: 16],
+          idle_timeout_ms: 60_000
+        )
+
+      cell = unique_cell()
+      assert {:ok, _} = Alambique.execute(inst, cell, @fill)
+      assert {:ok, %{rows: rows}} = Alambique.query(inst, cell, "SELECT n, v FROM t")
+      assert length(rows) == 4000
+      pid = Alambique.Cell.whereis(Alambique.Config.fetch!(inst), cell)
+      {:memory, before} = Process.info(pid, :memory)
+      assert before > 1_000_000
+
+      eventually(fn -> elem(Process.info(pid, :memory), 1) < 200_000 end)
+    end
+
+    test "idle_gc: false shrinks the cache but keeps the garbage", ctx do
+      inst =
+        start_instance(ctx,
+          migrations: @schema,
+          awake: [cache_kib: 512, idle_cache_after_ms: 300, idle_cache_kib: 16, idle_gc: false],
+          idle_timeout_ms: 60_000
+        )
+
+      cell = unique_cell()
+      assert {:ok, _} = Alambique.execute(inst, cell, @fill)
+      assert {:ok, %{rows: rows}} = Alambique.query(inst, cell, "SELECT n, v FROM t")
+      assert length(rows) == 4000
+      pid = Alambique.Cell.whereis(Alambique.Config.fetch!(inst), cell)
+      {:memory, before} = Process.info(pid, :memory)
+      assert before > 1_000_000
+
+      conn = conn(inst, cell)
+      eventually(fn -> cache_size(conn) == -16 end)
+      assert elem(Process.info(pid, :memory), 1) > 1_000_000
+    end
+
     test "the admission total drops after the shrink", ctx do
       {inst, cell} =
         filled(ctx,
