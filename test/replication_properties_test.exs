@@ -3,15 +3,23 @@ defmodule Alambique.ReplicationPropertiesTest do
   Invariant R1 (design §6): after any crash, restore yields the state of the
   last acknowledged batch, or of a later batch whose segment landed, and
   never a mix.
+
+  Invariant R2: an object written by an owner of an older epoch is never part
+  of the restored chain. Restore ignores it when it is a tail, names it when
+  it is not, and a store that fails requests gives an error, never another
+  state.
   """
   use ExUnit.Case, async: false
   use ExUnitProperties
 
+  import Alambique.CompactionHelpers,
+    only: [setup_world: 0, new_owner: 2, take_over: 4, write: 3, history: 3, restore: 2, cell: 0]
+
   import Alambique.ReplicationHelpers
 
   alias Alambique.Replication
-  alias Alambique.Replication.{Native, Replicator}
-  alias AlambiqueTestkit.{CrashPoints, MemoryStore}
+  alias Alambique.Replication.{Keys, Native, Replicator}
+  alias AlambiqueTestkit.{CrashPoints, HostileStore, MemoryStore}
 
   @crash_points [
     :repl_before_capture,
@@ -175,5 +183,116 @@ defmodule Alambique.ReplicationPropertiesTest do
           ) do
       run(commands, restore_crash?)
     end
+  end
+
+  # R2
+
+  defp rival_command_gen do
+    tuple({member_of([:owner, :stale]), integer(1..30), member_of([10, 200, 1500, 5000])})
+  end
+
+  property "R2: an object of an older epoch is not part of the restored chain" do
+    check all(
+            steps <- integer(1..5),
+            commands <- list_of(rival_command_gen(), min_length: 1, max_length: 8),
+            stale_last? <- boolean(),
+            reach <- member_of([nil, 16, 17, 18]),
+            ops <- uniq_list_of(member_of([:get, :head, :list]), min_length: 1, max_length: 3),
+            times <- integer(1..4),
+            max_runs: 30
+          ) do
+      commands = if stale_last?, do: commands ++ [{:stale, 1, 100}], else: commands
+      rivals(steps, commands, reach, ops, times)
+    end
+  end
+
+  # The owner of epoch 1 writes `steps` TXIDs and is taken over by an owner of
+  # epoch 2. Then the new owner writes and the old one keeps uploading, in any
+  # order. An old object stays at the TXID after the head when the new owner
+  # has not reached it. A further object at `reach` TXIDs past the head is
+  # still a tail up to 16 and makes the old object an error from 17.
+  defp rivals(steps, commands, reach, ops, times) do
+    env = setup_world()
+
+    try do
+      old = history(env, new_owner(env, "a.db"), steps)
+      new = take_over(env, "b.db", 2, old.dumps)
+
+      {new, old} =
+        Enum.reduce(commands, {new, old}, fn command, {new, old} ->
+          rival_step(command, env, new, old)
+        end)
+
+      head = new.state.txid
+      lingering? = old.state.txid > head
+      if lingering? and reach, do: put_stale(env, head + reach)
+
+      expected =
+        if lingering? and reach in [17, 18] do
+          object = Keys.segment(env.ctx.prefix, cell(), 0, head + 1, head + 1)
+          {:error, {:epoch_regression, object, 1, 2}}
+        else
+          {:ok, head, new.dumps[head]}
+        end
+
+      hostile = HostileStore.config(env.cfg)
+      faulty = %{env | ctx: %{env.ctx | store: {HostileStore, hostile}}}
+      HostileStore.fail(hostile, ops, times)
+      answer = restore(faulty, :latest)
+      assert_rival_answer(answer, expected, HostileStore.delivered(hostile) > 0)
+
+      HostileStore.heal(hostile)
+      assert_rival_answer(restore(faulty, :latest), expected, false)
+      assert_rival_answer(restore(env, :latest), expected, false)
+
+      if match?({:ok, _, _}, expected),
+        do: assert({:ok, %{txid: ^head, epoch: 2}} = Replication.head(env.ctx, cell()))
+
+      Alambique.Sqlite.close(old.conn)
+      Alambique.Sqlite.close(new.conn)
+    after
+      GenServer.stop(env.pid)
+      File.rm_rf(env.dir)
+    end
+  end
+
+  defp rival_step({:owner, k, n}, env, new, old) do
+    {:ok, new} = write(env, new, [{:put, k, n}])
+    {new, old}
+  end
+
+  # The old owner commits and uploads at the TXID after the highest it knows
+  # of, or after the new owner's head when that is further.
+  defp rival_step({:stale, k, n}, env, new, old) do
+    safe_op(old.conn, {:put, k, n})
+    state = %{old.state | txid: max(old.state.txid, new.state.txid)}
+
+    case Replicator.sync(state, env.ctx) do
+      {:ok, next} -> {new, %{old | state: next}}
+      {:error, _} -> {new, old}
+    end
+  end
+
+  defp put_stale(env, txid) do
+    key = Keys.segment(env.ctx.prefix, cell(), 0, txid, txid)
+    {:ok, _} = env.mod.put(env.cfg, key, "x", :none, %{"epoch" => "1"})
+  end
+
+  # A failed request may fail the restore; otherwise the answer is the one the
+  # chain of the new owner gives.
+  defp assert_rival_answer({:ok, result, dump}, {:ok, head, expected}, _faulted?) do
+    assert result.txid == head
+    assert result.epoch == 2
+    assert dump == expected
+  end
+
+  defp assert_rival_answer(answer, answer, _faulted?), do: :ok
+  defp assert_rival_answer({:error, _}, _expected, true), do: :ok
+
+  defp assert_rival_answer(answer, expected, faulted?) do
+    flunk(
+      "restore answered #{inspect(answer)}, expected #{inspect(expected)} " <>
+        "(a request failed: #{faulted?})"
+    )
   end
 end
