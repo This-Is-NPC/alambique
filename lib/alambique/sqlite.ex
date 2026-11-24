@@ -122,7 +122,8 @@ defmodule Alambique.Sqlite do
   close or after a commit, and the pragmas that would checkpoint, turn
   automatic checkpoints on or leave WAL mode are refused when a statement is
   prepared (design §6). `{:error, :busy}` when a reader kept it from
-  finishing.
+  finishing, and `{:error, :not_authorized}` while the transaction of
+  `begin_transaction/1` is open.
   """
   @spec checkpoint(conn) :: :ok | {:error, term}
   def checkpoint(conn), do: Native.sqlite_checkpoint(conn)

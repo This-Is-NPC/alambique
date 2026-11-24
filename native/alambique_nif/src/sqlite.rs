@@ -1226,13 +1226,17 @@ fn interrupt(conn: &Conn) {
 
 /// Copies every WAL frame into the database file and truncates the WAL
 /// (`SQLITE_CHECKPOINT_TRUNCATE`): `:ok`, or `{:error, :busy}` when a reader
-/// kept it from finishing.
+/// kept it from finishing. `{:error, :not_authorized}` while the transaction
+/// of the library is open: its frames must reach a batch from the WAL.
 #[rustler::nif(schedule = "DirtyIo")]
 fn sqlite_checkpoint<'a>(env: Env<'a>, conn: ResourceArc<Conn>) -> Term<'a> {
     let _t = crate::stats::SQLITE_CALLS.time();
     reply(
         env,
         with_db(&conn, |db| {
+            if conn.control.expect_txn.load(Relaxed) != 0 {
+                return Err(Failure::Denied);
+            }
             let (mut log, mut done) = (0, 0);
             // SAFETY: `db` is live (`with_db`); the out pointers are locals.
             let rc = unsafe {
