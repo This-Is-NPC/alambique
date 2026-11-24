@@ -97,6 +97,18 @@ defmodule Alambique.FeedBatchingPropertiesTest do
     {_, config} = run.ctx.store
     MemoryStore.clear(config)
     GatedStore.open(run.gate)
+
+    # A fault may have opened a breaker: nothing is put while it is open.
+    for inst <- Map.get(run, :insts, %{inst: run[:inst]}) |> Map.values() do
+      eventually(
+        fn ->
+          Enum.all?(Alambique.breaker_status(inst), fn {_, s} ->
+            s.state != :open and s.feed.state != :open
+          end)
+        end,
+        15_000
+      )
+    end
   end
 
   # Waits until the feed holds the rows of the cell's acknowledged writes.
@@ -192,7 +204,7 @@ defmodule Alambique.FeedBatchingPropertiesTest do
             put_ms <- member_of([0, 0, 15]),
             limit <- integer(1..6),
             max_runs: 25,
-            max_shrinking_steps: 0
+            max_shrinking_steps: 200
           ) do
       :counters.add(runs, 1, 1)
       prefix = "batching-#{:counters.get(runs, 1)}-#{System.unique_integer([:positive])}"
@@ -388,6 +400,7 @@ defmodule Alambique.FeedBatchingPropertiesTest do
     ])
   end
 
+  @tag timeout: 300_000
   property "a stop publishes every acknowledged commit, whatever the linger", ctx do
     runs = :counters.new(1, [])
 
