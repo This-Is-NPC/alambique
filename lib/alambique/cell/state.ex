@@ -66,7 +66,14 @@ defmodule Alambique.Cell.State do
     feed_pid: nil,
     feed_sent: 0,
     feed_backlog: 0,
-    feed_capped: false
+    feed_capped: false,
+    # The `:feed_cleanup` timer (`nil` when none is armed) and the failed
+    # cleanups since the last one that committed.
+    feed_cleanup: nil,
+    feed_cleanup_failures: 0,
+    # A commit that no caller waits for (the feed cleanup) whose batch is not
+    # encoded yet.
+    unsent: false
   ]
 
   @type t :: %__MODULE__{}

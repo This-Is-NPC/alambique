@@ -670,7 +670,28 @@ defmodule Alambique.Cell do
   end
 
   defp info({:feed_published, pid, txid, time, count}, %State{mode: :serving} = state),
-    do: {:noreply, Publisher.published(state, pid, txid, time, count)}
+    do: {:noreply, state |> Publisher.published(pid, txid, time, count) |> arm_cleanup()}
+
+  defp info({:timeout, ref, :feed_cleanup}, %State{mode: :serving, feed_cleanup: ref} = state) do
+    state = %{state | feed_cleanup: nil}
+
+    cond do
+      not Publisher.cleanup_due?(state) ->
+        {:noreply, state}
+
+      (wait = cleanup_quiet_left(state)) > 0 ->
+        {:noreply, arm_cleanup(state, wait)}
+
+      not cleanup_ready?(state) ->
+        {:noreply, arm_cleanup(state, state.config.feed.cleanup_after_ms)}
+
+      true ->
+        case cleanup(state) do
+          {:ok, state} -> {:noreply, state}
+          {:stop, reason, state} -> stop_serving(state, reason)
+        end
+    end
+  end
 
   defp info({:EXIT, pid, _reason}, %State{mode: :serving, feed_pid: pid} = state),
     do: {:noreply, Publisher.sender_down(state, pid)}
@@ -751,10 +772,13 @@ defmodule Alambique.Cell do
         {:noreply, arm_idle_cache(state)}
 
       true ->
-        Sqlite.execute(state.conn, "PRAGMA cache_size = -#{state.config.awake.idle_cache_kib}")
-        # The garbage of the last calls would stay for as long as the cell is idle.
-        if state.config.awake.idle_gc, do: :erlang.garbage_collect()
-        {:noreply, %{state | idle_cache: :shrunk}}
+        # The published rows go first: the cleanup reads pages that the shrink
+        # would drop and leaves garbage that the collection would not see. Rows
+        # that remain (a bounded cleanup, a failure) postpone the shrink.
+        case cleanup_if_due(state) do
+          {:ok, state} -> shrink_or_wait(state)
+          {:stop, reason, state} -> stop_serving(state, reason)
+        end
     end
   end
 
@@ -781,6 +805,87 @@ defmodule Alambique.Cell do
 
   defp info(_message, state), do: {:noreply, state}
 
+  # Feed cleanup (design §13)
+
+  # The published rows are removed in a transaction of the cell's own, sent as
+  # a batch through `flush/1` like any commit, so the depth of the pipeline
+  # and the order of the batches apply to it.
+  defp cleanup_if_due(state) do
+    if Publisher.cleanup_due?(state) and cleanup_ready?(state),
+      do: cleanup(state),
+      else: {:ok, state}
+  end
+
+  defp cleanup(state) do
+    case Publisher.cleanup(state) do
+      {:ok, state} ->
+        Fault.point(:feed_after_cleanup, %{cell: state.id, txid: state.repl.txid})
+
+        # Rows left by a bounded cleanup follow at once.
+        case flush(%{state | unsent: true, feed_cleanup_failures: 0}) do
+          {:ok, state} -> {:ok, arm_cleanup(state, 0)}
+          {:stop, _reason, _state} = stop -> stop
+        end
+
+      {:error, state} ->
+        %{retry_backoff_max_ms: max} = state.config.upload
+        base = state.config.feed.cleanup_after_ms
+        failures = state.feed_cleanup_failures
+        delay = min(base * Integer.pow(2, min(failures, 20)), max(max, base))
+        {:ok, arm_cleanup(%{state | feed_cleanup_failures: failures + 1}, delay)}
+    end
+  end
+
+  # What a cleanup needs besides the rows: a cell that answers, with a valid
+  # lease and a complete file, and a pipeline that takes a batch. The idle
+  # modes also want no call waiting or uploading.
+  defp cleanup_ready?(state) do
+    state.mode == :serving and State.lease_valid?(state) and not Hydration.hydrating?(state) and
+      if state.config.feed.cleanup == :after_publish,
+        do: not Pipe.full?(state.pipe),
+        else: idle?(state) and :atomics.get(state.load, 2) == 0
+  end
+
+  # Quiet time the idle modes still wait for; `:after_publish` waits for none.
+  defp cleanup_quiet_left(%State{config: %{feed: %{cleanup: :after_publish}}}), do: 0
+
+  defp cleanup_quiet_left(state) do
+    elapsed = System.monotonic_time(:millisecond) - state.last_active
+    max(state.config.feed.cleanup_after_ms - elapsed, 0)
+  end
+
+  # A published batch has rows to remove. The timer carries its ref, so a
+  # message that was already queued when the timer was replaced is ignored.
+  defp arm_cleanup(%State{feed_cleanup: nil} = state) do
+    delay =
+      if state.config.feed.cleanup == :after_publish,
+        do: 0,
+        else: state.config.feed.cleanup_after_ms
+
+    arm_cleanup(state, delay)
+  end
+
+  defp arm_cleanup(state), do: state
+
+  defp arm_cleanup(%State{feed_cleanup: nil} = state, ms) do
+    if Publisher.cleanup_due?(state),
+      do: %{state | feed_cleanup: :erlang.start_timer(ms, self(), :feed_cleanup)},
+      else: state
+  end
+
+  defp arm_cleanup(state, _ms), do: state
+
+  defp shrink_or_wait(state) do
+    if Publisher.cleanup_due?(state) do
+      {:noreply, arm_idle_cache(state)}
+    else
+      Sqlite.execute(state.conn, "PRAGMA cache_size = -#{state.config.awake.idle_cache_kib}")
+      # The garbage of the last calls would stay for as long as the cell is idle.
+      if state.config.awake.idle_gc, do: :erlang.garbage_collect()
+      {:noreply, %{state | idle_cache: :shrunk}}
+    end
+  end
+
   # One attempt: the cell cannot serve while it waits, and a retry that ran to
   # the end of the lease would leave no time for the renewal. A failed check
   # counts as not frozen; the next renewal looks again.
@@ -804,7 +909,7 @@ defmodule Alambique.Cell do
 
   # Encodes the pending commits as the next batch. A full pipeline defers the
   # flush to the next acknowledgement: the commits meanwhile grow the batch.
-  defp flush(%State{pending: []} = state), do: {:ok, state}
+  defp flush(%State{pending: [], unsent: false} = state), do: {:ok, state}
 
   defp flush(state) do
     if Pipe.full?(state.pipe),
@@ -813,7 +918,7 @@ defmodule Alambique.Cell do
   end
 
   # Like `flush/1`, but waits for a free slot.
-  defp flush_now(%State{pending: []} = state), do: {:ok, state}
+  defp flush_now(%State{pending: [], unsent: false} = state), do: {:ok, state}
 
   defp flush_now(state) do
     if Pipe.full?(state.pipe) do
@@ -832,7 +937,7 @@ defmodule Alambique.Cell do
 
     case Replicator.encode(state.repl, state.repl_ctx, :batch, deadline: deadline) do
       :none ->
-        release(%{state | pending: []}, items)
+        release(%{state | pending: [], unsent: false}, items)
 
       {:ok, repl, up} ->
         ref = make_ref()
@@ -855,7 +960,7 @@ defmodule Alambique.Cell do
         }
 
         pipe = %{Pipe.push(state.pipe, batch) | flush_wanted: false}
-        {:ok, %{state | repl: repl, pending: [], pipe: pipe}}
+        {:ok, %{state | repl: repl, pending: [], unsent: false, pipe: pipe}}
 
       {:error, reason} ->
         {:stop, {:sync_failed, reason}, state}

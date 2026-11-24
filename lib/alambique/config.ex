@@ -145,6 +145,8 @@ defmodule Alambique.Config do
 
   @list_cells_defaults [page_size: 100, max_limit: 1_000, timeout_ms: nil]
 
+  @feed_cleanups [:in_write, :idle, :after_publish, :idle_or_write]
+
   @feed_defaults [
     window_ms: 10_000,
     retention_ms: 604_800_000,
@@ -155,6 +157,9 @@ defmodule Alambique.Config do
     object_batches: 1,
     linger_ms: 0,
     stop_publish_ms: 5_000,
+    cleanup: :idle_or_write,
+    cleanup_after_ms: 1_000,
+    cleanup_rows: nil,
     shards: Alambique.Feed.Keys.default_shards(),
     internal_prefixes: [],
     tables: %{},
@@ -254,6 +259,9 @@ defmodule Alambique.Config do
             object_batches: pos_integer,
             linger_ms: non_neg_integer,
             stop_publish_ms: non_neg_integer,
+            cleanup: :in_write | :idle | :after_publish | :idle_or_write,
+            cleanup_after_ms: pos_integer,
+            cleanup_rows: pos_integer | nil,
             shards: pos_integer,
             internal_prefixes: [String.t()],
             tables: %{String.t() => Alambique.Feed.Capture.spec()},
@@ -416,7 +424,7 @@ defmodule Alambique.Config do
 
     op_timeout = pos_int!(opts, :op_timeout_ms)
     idle_timeout = pos_int!(opts, :idle_timeout_ms)
-    feed = feed!(opts[:feed])
+    feed = feed!(opts[:feed], idle_timeout)
     query = query!(opts[:query])
     migrations = migrations!(opts[:migrations])
 
@@ -647,11 +655,11 @@ defmodule Alambique.Config do
   # for the feed, and `Alambique.Feed` reads an empty one. The empty prefix
   # makes every table internal to the capture. `:feed_host_prefixes` stays the
   # host's own list, which rewinds carry over.
-  defp feed!(false) do
-    %{feed!([]) | retention_ms: nil, internal_prefixes: [""]}
+  defp feed!(false, idle_timeout) do
+    %{feed!([], idle_timeout) | retention_ms: nil, internal_prefixes: [""]}
   end
 
-  defp feed!(feed) do
+  defp feed!(feed, idle_timeout) do
     unless Keyword.keyword?(feed), do: bad!(":feed must be a keyword list")
 
     case Keyword.keys(feed) -- Keyword.keys(@feed_defaults) do
@@ -659,6 +667,7 @@ defmodule Alambique.Config do
       unknown -> bad!("unknown :feed options #{inspect(unknown)}")
     end
 
+    given = feed
     feed = Keyword.merge(@feed_defaults, feed)
     retention = feed[:retention_ms]
 
@@ -681,6 +690,16 @@ defmodule Alambique.Config do
     unless is_integer(stop_publish) and stop_publish >= 0,
       do: bad!(":feed stop_publish_ms must be a non-negative integer")
 
+    cleanup = feed[:cleanup]
+
+    unless cleanup in @feed_cleanups,
+      do: bad!(":feed cleanup must be one of #{inspect(@feed_cleanups)}")
+
+    rows = feed[:cleanup_rows]
+
+    unless rows == nil or (is_integer(rows) and rows > 0),
+      do: bad!(":feed cleanup_rows must be nil or a positive integer")
+
     %{
       window_ms: pos_int!(feed, :window_ms),
       retention_ms: retention,
@@ -691,12 +710,30 @@ defmodule Alambique.Config do
       object_batches: feed[:object_batches],
       linger_ms: linger,
       stop_publish_ms: stop_publish,
+      cleanup: cleanup,
+      cleanup_after_ms: cleanup_after!(feed, given, idle_timeout),
+      cleanup_rows: rows,
       shards: shards!(feed),
       internal_prefixes: internal_prefixes!(feed[:internal_prefixes]),
       tables: tables!(feed[:tables]),
       other_tables: other_tables!(feed[:other_tables]),
       max_object_bytes: pos_int!(feed, :max_object_bytes)
     }
+  end
+
+  # A value that is not given is `cleanup_after_ms`'s default, kept below an
+  # `idle_timeout_ms` that is shorter; a value that is given must be below it.
+  defp cleanup_after!(feed, given, idle_timeout) do
+    if Keyword.has_key?(given, :cleanup_after_ms) do
+      after_ms = pos_int!(feed, :cleanup_after_ms)
+
+      if after_ms >= idle_timeout,
+        do: bad!(":feed cleanup_after_ms must be less than :idle_timeout_ms")
+
+      after_ms
+    else
+      min(feed[:cleanup_after_ms], max(idle_timeout - 1, 1))
+    end
   end
 
   defp other_tables!(value) when value in [:capture, :skip], do: value

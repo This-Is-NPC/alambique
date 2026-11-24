@@ -481,6 +481,25 @@ defmodule Alambique do
       valid waits for its publisher to put the batches it holds, ignoring
       `:linger_ms` (default 5 000; 0 turns it off). What is not published in
       time stays in the cell's file for the next owner.
+    * `:cleanup` - when the rows of published batches leave the cell's file
+      (default `:idle_or_write`). `:in_write`: in the next write of a caller,
+      which then pays the delete, the pages it dirties and a larger upload.
+      `:idle`: in a transaction of the cell's own, uploaded as a batch, once
+      the cell has had no call, reads included, for `:cleanup_after_ms`; a
+      write never removes them, so under constant load they stay until a quiet
+      time. `:after_publish`: in such a transaction as soon as the publication
+      is acknowledged and the pipeline has room, also under load, at the cost
+      of one more batch per published batch. `:idle_or_write`: as `:idle`, and
+      a write that finds rows waiting removes them as `:in_write` does, which
+      bounds the table under constant load. A cell removes the published rows
+      before it shrinks its page cache (`:idle_cache_after_ms`). A cleanup that
+      fails is tried again at growing intervals; it never stops the cell.
+    * `:cleanup_after_ms` - time without a call before the idle modes clean
+      (default 1 000, a positive integer below `:idle_timeout_ms`; without a
+      value, one less than a shorter `:idle_timeout_ms`).
+    * `:cleanup_rows` - rows one cleanup removes at most (default `nil`, all).
+      A batch is never cut: one with more rows goes whole. What is left is
+      removed by the next cleanup, which follows at once.
     * `:shards` - prefixes the feed of each location is spread over (default
       16, at most 1 000). It is fixed for as long as the feed exists: consumers
       must use the same value, and a cell changes shard when it changes.
