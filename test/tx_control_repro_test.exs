@@ -219,55 +219,6 @@ defmodule Alambique.TxControlReproTest do
       end
     end
 
-    test "COMMIT with the local file kept: the row survives a kill", env do
-      env = boot(env)
-
-      obs =
-        observe(
-          env,
-          fn tx ->
-            {:ok, _} = ins(tx, 1)
-            Tx.execute(tx, "COMMIT")
-          end,
-          wipe: false
-        )
-
-      check(obs)
-    end
-
-    test "COMMIT: hibernate and wake from the store keep what a reader saw", env do
-      env = boot(env)
-
-      obs =
-        observe(
-          env,
-          fn tx ->
-            {:ok, _} = ins(tx, 1)
-            Tx.execute(tx, "COMMIT")
-          end,
-          hibernate: true
-        )
-
-      check(obs)
-    end
-
-    test "COMMIT: hibernate with the local file kept", env do
-      env = boot(env)
-
-      obs =
-        observe(
-          env,
-          fn tx ->
-            {:ok, _} = ins(tx, 1)
-            Tx.execute(tx, "COMMIT")
-          end,
-          hibernate: true,
-          wipe: false
-        )
-
-      check(obs)
-    end
-
     test "COMMIT is refused, and the rows of the function stay a write in flight", env do
       env = boot(env)
       test = self()
@@ -370,6 +321,76 @@ defmodule Alambique.TxControlReproTest do
                {2, :insert}
              ],
              inspect(records)
+    end
+  end
+
+  # The function commits behind the library's back and the store holds its
+  # puts. Under `:stop` the cell stops at once and answers the error; under
+  # `:replicate` it parks the write, so the caller and the reads wait for the
+  # batch, which `GatedStore.open/1` lets through.
+  describe "H2: a transaction committed behind the library's back, then the cell goes away" do
+    for wipe <- [true, false] do
+      kept = if wipe, do: "the local file deleted", else: "the local file kept"
+
+      test "stop: the cell stops itself, #{kept}: no row anywhere", env do
+        env = boot(env, sql: [orphan_frames: :stop])
+        %{path: path} = wal(env)
+        {task, result} = written = write(env, &lifted/1)
+
+        # The caller is told it failed, at once.
+        assert result == {:error, :transaction_ended}
+        eventually(fn -> Alambique.owner(env.inst, env.cell) == :none end)
+        if unquote(wipe), do: File.rm_rf!(Path.dirname(path))
+        GatedStore.open(env.gate)
+
+        # The next wake, a read from another process, and the store agree.
+        assert {[], _us} = read(env)
+        assert store_ids(env) == []
+        {:ok, _} = Alambique.execute(env.inst, env.cell, "INSERT INTO t VALUES (2)")
+        assert 1 not in Enum.map(feed(env, 2), &elem(&1, 0))
+        Task.shutdown(task, 100)
+        finish(env, written)
+      end
+
+      test "replicate, kill, #{kept}: nothing was told committed, wake serves the store", env do
+        env = boot(env, sql: [orphan_frames: :replicate])
+        {_, result} = written = write(env, &lifted/1)
+
+        # Parked behind the held put: not answered, invisible to reads, in
+        # flight, not in the store.
+        assert result == :blocked
+        assert read(env) == :blocked
+        # The batch is encoded and its put is held.
+        assert %{in_flight: true} = wal(env)
+        assert store_ids(env) == []
+
+        woken = kill(env, unquote(wipe))
+        finish(env, written)
+        stored = store_ids(env)
+
+        # The caller got no answer. Whatever the store holds is what the wake
+        # serves, and a row it holds is on the feed once.
+        assert woken == stored
+        {:ok, _} = Alambique.execute(env.inst, env.cell, "INSERT INTO t VALUES (2)")
+        keys = feed(env, 2) |> Enum.map(&elem(&1, 0)) |> Enum.filter(&(&1 == 1))
+        assert keys == if(1 in stored, do: [1], else: [])
+      end
+
+      test "replicate, hibernate, #{kept}: the row is durable and the caller is told so", env do
+        env = boot(env, sql: [orphan_frames: :replicate])
+        {task, result} = written = write(env, &lifted/1)
+        assert result == :blocked
+        assert read(env) == :blocked
+
+        {hibernated, stored, woken} = hibernate(env, unquote(wipe))
+        answer = Task.yield(task, 5_000)
+        finish(env, written)
+
+        assert hibernated == :ok
+        assert answer == {:ok, {:error, {:committed, :transaction_ended}}}
+        assert stored == [1] and woken == [1]
+        assert [{1, :insert}] = for({n, op, _} <- feed(env, 1), n > 0, do: {n, op})
+      end
     end
   end
 
