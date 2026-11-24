@@ -226,6 +226,7 @@ defmodule Alambique.LeasePropertiesTest do
       {:acquire, lease} -> [lease]
       {:renew, _old, new} -> [new]
       {:release, _lease} -> []
+      {kind, _lease} when kind in [:plain, :taken] -> []
     end)
   end
 
