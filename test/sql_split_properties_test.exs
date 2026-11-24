@@ -115,4 +115,47 @@ defmodule Alambique.Cell.SqlSplitPropertiesTest do
       end
     end
   end
+
+  # Words SQLite reads as one identifier, with the keywords the splitter
+  # tracks inside them.
+  defp identifier do
+    gen all(
+          head <- member_of(["a", "x", "é", "_", "ü"]),
+          parts <-
+            list_of(member_of(["case", "end", "begin", "$", "é", "_", "1", "CASE", "End"]),
+              min_length: 1,
+              max_length: 4
+            )
+        ) do
+      head <> Enum.join(parts)
+    end
+  end
+
+  property "a keyword inside an identifier is no keyword, and SQLite takes each piece" do
+    check all(
+            idents <- list_of(identifier(), min_length: 1, max_length: 4),
+            smuggle <- boolean(),
+            max_runs: 300
+          ) do
+      triggers =
+        for {id, i} <- Enum.with_index(idents) do
+          "CREATE TRIGGER g#{i} AFTER INSERT ON a BEGIN SELECT 1 AS #{id}; SELECT 2 AS #{id}; END"
+        end
+
+      statements =
+        if smuggle, do: triggers ++ ["COMMIT", "INSERT INTO a VALUES (1)"], else: triggers
+
+      assert Sql.split(Enum.join(statements, "; ")) ==
+               Enum.map(Enum.drop(statements, -1), &(&1 <> ";")) ++ [List.last(statements)]
+
+      {:ok, conn} = Alambique.Sqlite.open(":memory:")
+      :ok = Alambique.Sqlite.execute(conn, "CREATE TABLE a (x)")
+
+      for statement <- triggers do
+        assert :ok = Alambique.Sqlite.execute(conn, statement)
+      end
+
+      Alambique.Sqlite.close(conn)
+    end
+  end
 end

@@ -4,7 +4,14 @@ defmodule Alambique.Cell.Sql do
   # through `Alambique.Tx` (design §13). Semicolons inside quotes, comments and
   # trigger bodies do not end a statement.
 
-  @word ~r/\A[A-Za-z_][A-Za-z0-9_]*/
+  # A word as SQLite tokenizes it: letters, digits, `_`, `$` and every byte of
+  # a UTF-8 character; a variable (`:a`, `@a`, `#a`) is one word too. A keyword
+  # inside one is not a keyword. Matched as bytes (no `u` flag).
+  @word ~r/\A[:@#]?[A-Za-z0-9_$\x80-\xff]+/
+
+  defguardp word_start(c)
+            when c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c in [?_, ?$, ?:, ?@, ?#] or
+                   c >= 0x80
 
   @spec split(String.t()) :: [String.t()]
   def split(sql), do: scan(sql, [], new(), [])
@@ -42,10 +49,16 @@ defmodule Alambique.Cell.Sql do
     end
   end
 
-  defp scan(<<c, _::binary>> = sql, cur, st, acc) when c in ?a..?z or c in ?A..?Z or c == ?_ do
-    [word] = Regex.run(@word, sql)
-    rest = binary_part(sql, byte_size(word), byte_size(sql) - byte_size(word))
-    scan(rest, [word | cur], track(st, String.downcase(word)), acc)
+  defp scan(<<c, _::binary>> = sql, cur, st, acc) when word_start(c) do
+    case Regex.run(@word, sql) do
+      [word] ->
+        rest = binary_part(sql, byte_size(word), byte_size(sql) - byte_size(word))
+        scan(rest, [word | cur], track(st, String.downcase(word)), acc)
+
+      nil ->
+        <<c, rest::binary>> = sql
+        scan(rest, [<<c>> | cur], st, acc)
+    end
   end
 
   defp scan(<<c, rest::binary>>, cur, st, acc), do: scan(rest, [<<c>> | cur], st, acc)
