@@ -1,4 +1,4 @@
-defmodule Alambique.TxControlReproTest do
+defmodule Alambique.TxControlEndedTransactionTest do
   @moduledoc """
   A transaction function that ends its own transaction (COMMIT, ROLLBACK, a
   conflict or a timeout that rolls back, a smuggled script) must not leave
@@ -194,7 +194,7 @@ defmodule Alambique.TxControlReproTest do
 
   defp check(obs), do: assert(violations(obs) == [], inspect(obs, pretty: true))
 
-  describe "COMMIT ends the transaction (H1, H2)" do
+  describe "COMMIT ends the transaction" do
     for {name, sql} <- [
           plain: "COMMIT",
           mixed_case: "cOmMiT",
@@ -263,7 +263,7 @@ defmodule Alambique.TxControlReproTest do
       assert ids(rows) == [] and store_ids(env) == []
     end
 
-    test "H3: a later acknowledged write does not carry the row to the store", env do
+    test "a later acknowledged write does not carry the row to the store", env do
       env = boot(env)
       {task, _} = written = write(env, &lifted/1)
 
@@ -277,7 +277,7 @@ defmodule Alambique.TxControlReproTest do
       assert stored == [2]
     end
 
-    test "H4: a cut never includes a row of a write that failed", env do
+    test "a cut never includes a row of a write that failed", env do
       env = boot(env)
       written = write(env, &lifted/1)
       position = Alambique.position(env.inst, env.cell, timeout: 2_000)
@@ -290,7 +290,7 @@ defmodule Alambique.TxControlReproTest do
       assert 1 not in stored
     end
 
-    test "H5: the row is not published; with :replicate it is, once", env do
+    test "the row is not published; with :replicate it is, once", env do
       env = boot(env)
       written = write(env, &lifted/1)
 
@@ -304,7 +304,7 @@ defmodule Alambique.TxControlReproTest do
       assert Enum.sort(for {n, op, _} <- records, n > 0, do: {n, op}) == [{2, :insert}]
     end
 
-    test "H5: with orphan_frames: :replicate the row is published once", env do
+    test "with orphan_frames: :replicate the row is published once", env do
       env = boot(env, sql: [orphan_frames: :replicate])
       written = write(env, &lifted/1)
 
@@ -328,7 +328,7 @@ defmodule Alambique.TxControlReproTest do
   # puts. Under `:stop` the cell stops at once and answers the error; under
   # `:replicate` it parks the write, so the caller and the reads wait for the
   # batch, which `GatedStore.open/1` lets through.
-  describe "H2: a transaction committed behind the library's back, then the cell goes away" do
+  describe "a transaction committed behind the library's back, then the cell goes away" do
     for wipe <- [true, false] do
       kept = if wipe, do: "the local file deleted", else: "the local file kept"
 
@@ -394,8 +394,8 @@ defmodule Alambique.TxControlReproTest do
     end
   end
 
-  describe "other ways to end the transaction (R1-R4)" do
-    test "R1: ROLLBACK, then an insert that autocommits", env do
+  describe "other ways to end the transaction" do
+    test "ROLLBACK, then an insert that autocommits", env do
       env = boot(env)
 
       obs =
@@ -408,7 +408,7 @@ defmodule Alambique.TxControlReproTest do
       check(obs)
     end
 
-    test "R2: INSERT OR ROLLBACK on a conflict, then an insert", env do
+    test "INSERT OR ROLLBACK on a conflict, then an insert", env do
       env = boot(env)
 
       obs =
@@ -421,7 +421,7 @@ defmodule Alambique.TxControlReproTest do
       check(obs)
     end
 
-    test "R3: a trigger with RAISE(ROLLBACK), then an insert", env do
+    test "a trigger with RAISE(ROLLBACK), then an insert", env do
       env = boot(env)
 
       obs =
@@ -434,7 +434,7 @@ defmodule Alambique.TxControlReproTest do
       check(obs)
     end
 
-    test "R4: a statement timeout on a writing statement, then an insert", env do
+    test "a statement timeout on a writing statement, then an insert", env do
       env = boot(env, sql: [statement_timeout_ms: 300])
 
       obs =
@@ -448,7 +448,7 @@ defmodule Alambique.TxControlReproTest do
     end
   end
 
-  describe "R5: several statements in one Tx.execute" do
+  describe "several statements in one Tx.execute" do
     test "none is silently dropped", env do
       env = boot(env)
       test = self()
@@ -478,7 +478,7 @@ defmodule Alambique.TxControlReproTest do
     end
   end
 
-  describe "R6: Tx.script smuggles statements past the splitter" do
+  describe "Tx.script smuggles statements past the splitter" do
     # The script is refused as not DDL, so the INSERT never runs.
     for {name, ident} <- [dollar: "a$case", utf8: "écase"] do
       test "#{name} identifier containing case hides COMMIT and an INSERT", env do
@@ -546,7 +546,7 @@ defmodule Alambique.TxControlReproTest do
     end
   end
 
-  describe "R7: a migration function that issues COMMIT" do
+  describe "a migration function that issues COMMIT" do
     defmodule Mig do
       @moduledoc false
       def set(list), do: :persistent_term.put({__MODULE__, :list}, list)
@@ -649,7 +649,7 @@ defmodule Alambique.TxControlReproTest do
     end
   end
 
-  describe "R9: virtual tables" do
+  describe "virtual tables" do
     test "FTS5 and rtree: a write through the transaction is a normal write", env do
       env = boot(env)
 

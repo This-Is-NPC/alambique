@@ -1,8 +1,10 @@
-defmodule Alambique.TxControlReviewTest do
+defmodule Alambique.TxControlFailedWriteTest do
   @moduledoc """
-  Reproduces the defects a review listed against the transaction-control
-  work. Each test asserts the correct behaviour, so a failing test is a
-  defect that is still there.
+  What a failed or refused write leaves in the store, in a cut and in the
+  feed (design §15): where the splitter ends a statement, a NUL byte, frames
+  that no write carries while a batch is in flight or the cell is idle, a
+  feed cleanup behind them, a checkpoint with a deadline, and the pragma
+  that follows the commit.
   """
   use ExUnit.Case, async: false
   use ExUnitProperties
@@ -65,8 +67,8 @@ defmodule Alambique.TxControlReviewTest do
     assert unreplicated?(c)
   end
 
-  # A write function that ends the transaction behind the library's back, as
-  # the original defect did, when it returns.
+  # A write function that ends the transaction behind the library's back when
+  # it returns.
   defp ending(n) do
     fn tx ->
       {:ok, _} = ins(tx, n)
@@ -121,10 +123,10 @@ defmodule Alambique.TxControlReviewTest do
   end
 
   # ----------------------------------------------------------------------
-  # D1: the splitter and TCL-style variables
+  # the splitter and TCL-style variables
   # ----------------------------------------------------------------------
 
-  describe "D1: variable tokens" do
+  describe "variable tokens" do
     test "the bundled SQLite reads $a(') as one variable (not compiled out)" do
       {:ok, conn} = Sqlite.open(":memory:")
       {:ok, %{rows: opts}} = Sqlite.run(conn, "PRAGMA compile_options", [])
@@ -188,7 +190,7 @@ defmodule Alambique.TxControlReviewTest do
   end
 
   # ----------------------------------------------------------------------
-  # D1b: other splitter inputs, against SQLite's own boundaries
+  # other splitter inputs, against SQLite's own boundaries
   # ----------------------------------------------------------------------
 
   defp scratch do
@@ -278,7 +280,7 @@ defmodule Alambique.TxControlReviewTest do
     escaped_quote: "SELECT 'a''; b'; SELECT 2"
   ]
 
-  describe "D1b: Sql.split against SQLite's statement boundaries" do
+  describe "Sql.split against SQLite's statement boundaries" do
     for {name, sql} <- @cases do
       test "#{name}" do
         conn = scratch()
@@ -345,10 +347,10 @@ defmodule Alambique.TxControlReviewTest do
   end
 
   # ----------------------------------------------------------------------
-  # D6: NUL byte in the text
+  # NUL byte in the text
   # ----------------------------------------------------------------------
 
-  describe "D6: a NUL byte" do
+  describe "a NUL byte" do
     test "Alambique.execute does not drop the text after it silently", env do
       c = boot(env)
 
@@ -434,10 +436,10 @@ defmodule Alambique.TxControlReviewTest do
   end
 
   # ----------------------------------------------------------------------
-  # D2: a failed write that leaves frames while a batch is in flight
+  # a failed write that leaves frames while a batch is in flight
   # ----------------------------------------------------------------------
 
-  describe "D2: the backstop with a batch in flight" do
+  describe "the backstop with a batch in flight" do
     for isolated <- [false, true] do
       test ":stop, isolated: #{isolated}: the cell stops and the row of the failed write is gone",
            env do
@@ -598,7 +600,7 @@ defmodule Alambique.TxControlReviewTest do
     end
   end
 
-  describe "D2: an idle cell (the backstop applies)" do
+  describe "an idle cell (the backstop applies)" do
     for isolated <- [false, true] do
       test "isolated: #{isolated}: a failed write stops the cell and its row is gone", env do
         c = boot(env, sql: [orphan_frames: :stop])
@@ -625,7 +627,7 @@ defmodule Alambique.TxControlReviewTest do
   end
 
   # ----------------------------------------------------------------------
-  # D3: the idle feed cleanup carries orphans
+  # the idle feed cleanup carries orphans
   # ----------------------------------------------------------------------
 
   defp cleanup_settled?(c) do
@@ -639,7 +641,7 @@ defmodule Alambique.TxControlReviewTest do
     :exit, _ -> true
   end
 
-  describe "D3: idle feed cleanup" do
+  describe "idle feed cleanup" do
     for mode <- [:stop, :replicate] do
       test "orphan then idle cleanup then position (#{mode})", env do
         mode = String.to_existing_atom(unquote(Atom.to_string(mode)))
@@ -701,10 +703,10 @@ defmodule Alambique.TxControlReviewTest do
   end
 
   # ----------------------------------------------------------------------
-  # D4: :replicate misattributes an ordinary rollback
+  # :replicate misattributes an ordinary rollback
   # ----------------------------------------------------------------------
 
-  describe "D4: :replicate and an older orphan" do
+  describe ":replicate and an older orphan" do
     test "a constraint failure is not answered as committed", env do
       c = boot(env, sql: [orphan_frames: :replicate])
       {:ok, _} = Alambique.execute(c.inst, c.cell, "INSERT INTO t VALUES (1)")
@@ -719,10 +721,10 @@ defmodule Alambique.TxControlReviewTest do
   end
 
   # ----------------------------------------------------------------------
-  # D7: the checkpoint deadline under :replicate
+  # the checkpoint deadline under :replicate
   # ----------------------------------------------------------------------
 
-  describe "D7: drain_within" do
+  describe "drain_within" do
     test "checkpoint with an orphan under :replicate answers :busy at its deadline", env do
       c = boot(env, gated: true, sql: [orphan_frames: :replicate])
       orphan(c, 5)
@@ -761,10 +763,10 @@ defmodule Alambique.TxControlReviewTest do
   end
 
   # ----------------------------------------------------------------------
-  # The weakened assertions of test/tx_control_repro_test.exs, restored
+  # A write whose transaction was ended behind the library's back
   # ----------------------------------------------------------------------
 
-  describe "restored assertions (H3, H4, H5, R5)" do
+  describe "a write whose transaction was ended behind the library's back" do
     # A write function that ends its transaction behind the library's back
     # while every put is held: the caller must be answered at once, the cell
     # must have stopped, and nothing that the write made may reach the store,
@@ -785,7 +787,7 @@ defmodule Alambique.TxControlReviewTest do
       {c, old, result, written}
     end
 
-    test "H3: a later acknowledged write does not carry the frames of a failed write", env do
+    test "a later acknowledged write does not carry the frames of a failed write", env do
       {c, old, result, written} = ended_write(env)
 
       assert result == {:error, :transaction_ended}
@@ -800,7 +802,7 @@ defmodule Alambique.TxControlReviewTest do
       refute unreplicated?(c)
     end
 
-    test "H4: a cut never includes a row of a write that failed", env do
+    test "a cut never includes a row of a write that failed", env do
       {c, old, result, written} = ended_write(env)
 
       assert result == {:error, :transaction_ended}
@@ -818,7 +820,7 @@ defmodule Alambique.TxControlReviewTest do
       assert local_ids(c) == [0]
     end
 
-    test "H4: a row committed outside any write is no part of a cut", env do
+    test "a row committed outside any write is no part of a cut", env do
       c = boot(env)
       old = pid(c)
       orphan(c, 5)
@@ -831,7 +833,7 @@ defmodule Alambique.TxControlReviewTest do
       assert local_ids(c) == [0]
     end
 
-    test "H5: a row of a failed write is not published to the feed", env do
+    test "a row of a failed write is not published to the feed", env do
       {c, old, result, written} = ended_write(env)
       assert result == {:error, :transaction_ended}
       assert_down(old)
@@ -848,7 +850,7 @@ defmodule Alambique.TxControlReviewTest do
       assert store_ids(c) == [0, 2]
     end
 
-    test "H5: a row committed outside any write reaches the feed once under :replicate", env do
+    test "a row committed outside any write reaches the feed once under :replicate", env do
       c = boot(env, sql: [orphan_frames: :replicate])
       orphan(c, 5)
 
@@ -859,7 +861,7 @@ defmodule Alambique.TxControlReviewTest do
       assert keys == [0, 5]
     end
 
-    test "R5: a Tx.execute with several statements runs none of them", env do
+    test "a Tx.execute with several statements runs none of them", env do
       c = boot(env)
       old = pid(c)
 
@@ -878,10 +880,10 @@ defmodule Alambique.TxControlReviewTest do
   end
 
   # ----------------------------------------------------------------------
-  # D5: COMMIT; PRAGMA query_only = ON
+  # COMMIT; PRAGMA query_only = ON
   # ----------------------------------------------------------------------
 
-  describe "D5: the tail pragma" do
+  describe "the tail pragma" do
     test "a flag pragma takes effect when it is prepared, after the COMMIT ran" do
       {:ok, conn} = Sqlite.open(":memory:")
       :ok = Sqlite.execute(conn, "CREATE TABLE t (n)")
