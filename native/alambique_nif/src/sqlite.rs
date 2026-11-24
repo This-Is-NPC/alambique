@@ -1133,9 +1133,27 @@ fn sqlite_finish_transaction<'a>(
     token: u64,
     commit: bool,
 ) -> Term<'a> {
+    finish_transaction(env, &conn, token, commit)
+}
+
+/// The commit of `sqlite_finish_transaction` with the token the connection is
+/// armed with, for the tests that end a transaction behind the library's back
+/// (`test-panic` builds).
+#[cfg(feature = "test-panic")]
+pub(crate) fn finish_armed<'a>(env: Env<'a>, conn: &ResourceArc<Conn>) -> Term<'a> {
+    let token = conn.control.expect_txn.load(Relaxed);
+    finish_transaction(env, conn, token, true)
+}
+
+fn finish_transaction<'a>(
+    env: Env<'a>,
+    conn: &ResourceArc<Conn>,
+    token: u64,
+    commit: bool,
+) -> Term<'a> {
     let _t = crate::stats::SQLITE_CALLS.time();
     let run = || -> Outcome<'a> {
-        with_db(&conn, |db| {
+        with_db(conn, |db| {
             let ctl = &conn.control;
             let armed = ctl.expect_txn.load(Relaxed);
             if armed != 0 && armed != token {
