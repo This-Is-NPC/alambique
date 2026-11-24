@@ -130,6 +130,9 @@ defmodule Alambique.MigrationPropertiesTest do
       guard = AckGuard.attach(ctx.store, prefix, &(&1 in cells))
 
       state = %{
+        window: Config.fetch!(insts.new).migration_window,
+        # The version the cell has in the store when an operation starts.
+        stored: 0,
         seq: 0,
         acked: Map.new(cells, &{&1, []}),
         unknown: Map.new(cells, &{&1, []}),
@@ -175,13 +178,23 @@ defmodule Alambique.MigrationPropertiesTest do
            "acknowledged before the put landed: #{inspect(AckGuard.violations(guard))}"
   end
 
-  defp step({:run, fault, inner}, state, ctx, insts, versions, kinds, names, _world) do
+  defp step(
+         {:run, fault, {_kind, code, name} = inner},
+         state,
+         ctx,
+         insts,
+         versions,
+         kinds,
+         names,
+         _world
+       ) do
     # The cell is awake before its segment puts fail: it is the write that meets them.
-    with {:segment, _} <- fault, {_kind, code, name} <- inner do
+    with {:segment, _} <- fault do
       prepare(insts, code, names[name])
       _ = safely(fn -> Alambique.query(insts[code], names[name], "SELECT 1") end)
     end
 
+    state = %{state | stored: durable_version(ctx, names[name])}
     arm(fault, ctx)
     state = %{state | faulty?: state.faulty? or fault != :none}
 
@@ -267,6 +280,9 @@ defmodule Alambique.MigrationPropertiesTest do
 
     case safely(fn -> Alambique.query(insts[code], cell, "SELECT n FROM t") end) do
       {:ok, %{rows: rows}} ->
+        assert state.stored <= versions[code] + state.window,
+               "#{cell} at version #{state.stored} read by code at #{versions[code]}"
+
         seen = List.flatten(rows)
         assert Enum.all?(state.acked[cell], &(&1 in seen)), "read lost an acknowledged row"
         known = state.acked[cell] ++ state.unknown[cell]
@@ -274,10 +290,10 @@ defmodule Alambique.MigrationPropertiesTest do
         probe(insts[code], cell, kinds, versions[code])
 
       {:error, {:schema_too_new, v}} ->
-        assert v > versions[code] + 1
+        assert v > versions[code] + state.window
 
-      _ ->
-        :ok
+      other ->
+        assert state.faulty?, "#{cell}: read answered #{inspect(other)} with no fault"
     end
 
     {state, cell}
@@ -287,14 +303,19 @@ defmodule Alambique.MigrationPropertiesTest do
     do: Alambique.execute(inst, cell, "INSERT INTO t (n) VALUES (?)", [n])
 
   # Until the first fault a write is acknowledged, or refused because the cell
-  # is two versions ahead of the code.
+  # is further ahead of the code than the window. A cell that far ahead is
+  # never served, and one exactly at the edge of the window is.
   defp record(state, cell, n, result, code, versions) do
     case result do
       {:ok, _} ->
+        assert state.stored <= versions[code] + state.window,
+               "#{cell}: write #{n} acknowledged by code at #{versions[code]} " <>
+                 "for a cell at version #{state.stored}"
+
         update_in(state.acked[cell], &[n | &1])
 
       {:error, {:schema_too_new, v}} ->
-        assert v > versions[code] + 1
+        assert v > versions[code] + state.window
         state
 
       other ->
