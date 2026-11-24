@@ -76,7 +76,7 @@ suite runs in parts without coverage.
 | `coverage-build` | `mise run test:coverage:build`: the NIF built once with coverage instrumentation, shared with the parts as an artifact |
 | `coverage-run (i)` | one of N parts of the default suite: `mise run test:coverage:run -- --partitions N --slowest-modules 5 --export-coverage part-i` with `MIX_TEST_PARTITION=i` |
 | `coverage` | `mise run test:coverage:report`: sums the parts and fails below `ALAMBIQUE_COVERAGE_MIN` |
-| `native` | `mise run test:native`: the Rust unit tests of the NIF, then `mise run check:release-nif`: a release build without `test-panic` holds none of the test-only NIF names (one extra release build, about 40 s on a laptop) |
+| `native` | `mise run test:native`: the Rust unit tests of the NIF, then `mise run check:release-nif`: a release build without `test-panic` holds none of the test-only NIF names (one extra release build of the crate) |
 | `services` | `mise run test:seaweedfs` and `mise run test:litestream` against a SeaweedFS container |
 | `cluster (i)` | one of M parts of the failover properties on peer nodes: `mise run test:cluster -- --partitions M --slowest-modules 5` (`scripts/test-cluster`) with `MIX_TEST_PARTITION=i` |
 
