@@ -765,50 +765,103 @@ defmodule Alambique.TxControlReviewTest do
   # ----------------------------------------------------------------------
 
   describe "restored assertions (H3, H4, H5, R5)" do
-    test "H3: a later acknowledged write carries the frames of a failed write, or the cell stops",
-         env do
+    # A write function that ends its transaction behind the library's back
+    # while every put is held: the caller must be answered at once, the cell
+    # must have stopped, and nothing that the write made may reach the store,
+    # a cut or the feed.
+    # The cell is gone right after the answer, not at its next timer.
+    defp assert_down(pid) do
+      ref = Process.monitor(pid)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, _},
+                     300,
+                     "the cell kept serving after the write that ended its transaction"
+    end
+
+    defp ended_write(env) do
       c = boot(env, gated: true)
+      old = pid(c)
       {_, result} = written = go(c, ending(1))
+      {c, old, result, written}
+    end
+
+    test "H3: a later acknowledged write does not carry the frames of a failed write", env do
+      {c, old, result, written} = ended_write(env)
+
+      assert result == {:error, :transaction_ended}
+      assert_down(old)
+
       GatedStore.open(c.gate)
-      next = Alambique.execute(c.inst, c.cell, "INSERT INTO t VALUES (2)")
+      assert {:ok, _} = Alambique.execute(c.inst, c.cell, "INSERT INTO t VALUES (2)")
       finish(c, written)
 
-      # The ending write was answered with an error, so its row must not
-      # appear once the next write is acknowledged. Or the next fails.
-      stored = store_ids(c) |> Enum.reject(&(&1 == 0))
-
-      assert result in [:blocked, {:error, :transaction_ended}]
-      assert 1 not in stored or match?({:error, _}, next), inspect(%{stored: stored, next: next})
+      assert store_ids(c) == [0, 2]
+      assert local_ids(c) == [0, 2]
+      refute unreplicated?(c)
     end
 
     test "H4: a cut never includes a row of a write that failed", env do
-      c = boot(env, gated: true)
-      written = go(c, ending(1))
+      {c, old, result, written} = ended_write(env)
+
+      assert result == {:error, :transaction_ended}
+      assert_down(old)
+
+      # The cut is what the store holds: the state of the cell before the write.
       position = Alambique.position(c.inst, c.cell, timeout: 2_000)
+      assert {:ok, %{txid: txid}} = position
       stored = store_ids(c)
       finish(c, written)
 
-      # An answer is a cut: the state it names is what the store restores.
-      assert 1 not in stored, inspect(%{position: position, stored: stored})
+      assert stored == [0], inspect(%{position: position, stored: stored})
+      {:ok, %{txid: head}} = Alambique.Replication.head(repl_ctx(c.inst, c.cell), c.cell)
+      assert txid == head
+      assert local_ids(c) == [0]
+    end
+
+    test "H4: a row committed outside any write is no part of a cut", env do
+      c = boot(env)
+      old = pid(c)
+      orphan(c, 5)
+
+      # The backstop answers the cut with the error and stops the cell, which
+      # holds nothing of the row.
+      assert Alambique.position(c.inst, c.cell) == {:error, :orphan_frames}
+      assert eventually(fn -> not Process.alive?(old) end, 3_000)
+      assert store_ids(c) == [0]
+      assert local_ids(c) == [0]
     end
 
     test "H5: a row of a failed write is not published to the feed", env do
-      c = boot(env, gated: true)
-      written = go(c, ending(1))
+      {c, old, result, written} = ended_write(env)
+      assert result == {:error, :transaction_ended}
+      assert_down(old)
 
       next =
         Task.async(fn -> Alambique.execute(c.inst, c.cell, "INSERT INTO t VALUES (2)") end)
 
       GatedStore.open(c.gate)
-      _ = Task.await(next, 10_000)
+      assert {:ok, _} = Task.await(next, 10_000)
       keys = feed_until(c, 2)
       finish(c, written)
 
-      refute 1 in keys, inspect(keys)
+      assert keys == [0, 2]
+      assert store_ids(c) == [0, 2]
+    end
+
+    test "H5: a row committed outside any write reaches the feed once under :replicate", env do
+      c = boot(env, sql: [orphan_frames: :replicate])
+      orphan(c, 5)
+
+      # The cut is answered after the frames are a batch of their own.
+      assert {:ok, _} = Alambique.position(c.inst, c.cell)
+      assert store_ids(c) == [0, 5]
+      keys = feed_until(c, 5)
+      assert keys == [0, 5]
     end
 
     test "R5: a Tx.execute with several statements runs none of them", env do
       c = boot(env)
+      old = pid(c)
 
       result =
         Alambique.transaction(c.inst, c.cell, fn tx ->
@@ -816,7 +869,11 @@ defmodule Alambique.TxControlReviewTest do
         end)
 
       assert {:ok, {:error, {:multiple_statements, _}}} = result
+      assert pid(c) == old
+      refute unreplicated?(c)
       assert local_ids(c) == [0]
+      assert store_ids(c) == [0]
+      assert {:ok, _} = Alambique.position(c.inst, c.cell)
     end
   end
 
