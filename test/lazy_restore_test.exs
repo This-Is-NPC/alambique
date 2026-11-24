@@ -59,29 +59,6 @@ defmodule Alambique.LazyRestoreTest do
 
   defp hydrated?(cell), do: drain([:alambique, :replication, :hydrate], cell) != []
 
-  # Holds the background reads of every hydrator of `cell` until the returned
-  # function is called, so that only the pages statements miss get filled.
-  # A held read gives up when its hydrator ends.
-  defp hold_hydration(cell) do
-    gate = :atomics.new(1, [])
-
-    CrashPoints.arm(
-      :hydrate_before_fetch,
-      fn _, %{hydrator: hydrator} -> await_gate(gate, hydrator) end,
-      times: :infinity,
-      when: &match?(%{cell: ^cell}, &1)
-    )
-
-    fn -> :atomics.put(gate, 1, 1) end
-  end
-
-  defp await_gate(gate, hydrator) do
-    if :atomics.get(gate, 1) == 0 and Process.alive?(hydrator) do
-      Process.sleep(5)
-      await_gate(gate, hydrator)
-    end
-  end
-
   test "a cell answers before its file is complete and then completes it", ctx do
     cell = seed(ctx, 400)
     release = hold_hydration(cell)
