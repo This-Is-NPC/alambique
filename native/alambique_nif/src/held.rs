@@ -12,7 +12,8 @@
 //! operations account for.
 
 use std::collections::BTreeSet;
-use std::ffi::c_void;
+use std::ffi::{c_void, OsStr};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::ptr;
@@ -87,21 +88,91 @@ pub fn refuse_open(path: &Path) -> bool {
     refused
 }
 
-/// Whether `ATTACH` of `spec` (a file name or a `file:` URI) opens a held
-/// file read-write. Escapes in a URI are not decoded: those are left to the
-/// VFS.
-pub fn attach_refused(spec: &str) -> bool {
-    let (path, query) = match spec.strip_prefix("file:") {
-        Some(rest) => rest.split_once('?').unwrap_or((rest, "")),
-        None => (spec, ""),
-    };
-    if query
-        .split('&')
-        .any(|q| q == "mode=ro" || q == "immutable=1")
-    {
+/// Whether `ATTACH` of `spec` (a file name or a `file:` URI, as SQLite gets
+/// it) opens a held file read-write. The name is read as `sqlite3ParseUri`
+/// reads it and the file is the (device, inode) the path leads to, so
+/// escapes, `//localhost/`, relative paths, symbolic and hard links name the
+/// same file. A URI SQLite would not open is refused.
+pub fn attach_refused(spec: &[u8]) -> bool {
+    if bypassed() {
         return false;
     }
-    !bypassed() && file_id(Path::new(path)).is_some_and(is_held)
+    match attach_target(spec) {
+        Some((path, read_only)) => {
+            !read_only && file_id(Path::new(OsStr::from_bytes(&path))).is_some_and(is_held)
+        }
+        None => true,
+    }
+}
+
+fn hex(b: u8) -> Option<u8> {
+    (b as char).to_digit(16).map(|d| d as u8)
+}
+
+/// Decodes `%HH` escapes. `%00` ends the text, as in SQLite.
+fn percent_decode(s: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        let escaped = match (s[i], s.get(i + 1), s.get(i + 2)) {
+            (b'%', Some(&h), Some(&l)) => hex(h).zip(hex(l)).map(|(h, l)| h << 4 | l),
+            _ => None,
+        };
+        match escaped {
+            Some(0) => break,
+            Some(byte) => {
+                out.push(byte);
+                i += 3;
+            }
+            None => {
+                out.push(s[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The path an `ATTACH` name opens and whether it opens it read-only
+/// (`mode=ro`, the last `mode`, or a true `immutable`, the first). `None`
+/// for a `file:` URI whose authority SQLite refuses.
+fn attach_target(spec: &[u8]) -> Option<(Vec<u8>, bool)> {
+    let Some(rest) = spec.strip_prefix(b"file:") else {
+        return Some((spec.to_vec(), false));
+    };
+    let rest = match rest.strip_prefix(b"//") {
+        Some(after) => {
+            let end = after.iter().position(|&b| b == b'/').unwrap_or(after.len());
+            let (authority, tail) = after.split_at(end);
+            if !authority.is_empty() && authority != b"localhost" {
+                return None;
+            }
+            tail
+        }
+        None => rest,
+    };
+    let rest = rest.split(|&b| b == b'#').next().unwrap_or_default();
+    let (path, query) = match rest.iter().position(|&b| b == b'?') {
+        Some(at) => (&rest[..at], &rest[at + 1..]),
+        None => (rest, &rest[..0]),
+    };
+    let mut mode_ro = false;
+    let mut immutable = None;
+    for pair in query.split(|&b| b == b'&') {
+        let (key, value) = match pair.iter().position(|&b| b == b'=') {
+            Some(at) => (&pair[..at], &pair[at + 1..]),
+            None => (pair, &pair[..0]),
+        };
+        match percent_decode(key).as_slice() {
+            b"mode" => mode_ro = percent_decode(value) == b"ro",
+            b"immutable" if immutable.is_none() => {
+                let value = percent_decode(value).to_ascii_lowercase();
+                immutable = Some(matches!(value.as_slice(), b"1" | b"yes" | b"on" | b"true"));
+            }
+            _ => {}
+        }
+    }
+    Some((percent_decode(path), mode_ro || immutable == Some(true)))
 }
 
 pub fn clear_refused() {
@@ -371,5 +442,25 @@ mod tests {
         // A writer committed first: `iChange` moved.
         assert!(!foreign.settle(header(6, 0, 2), 4, 0));
         assert_eq!(foreign.check(header(6, 0, 2), 4), Verdict::Restarted);
+    }
+
+    #[test]
+    fn an_attach_name_is_read_as_sqlite_reads_it() {
+        let t = |s: &str| attach_target(s.as_bytes());
+        let rw = |p: &str| Some((p.as_bytes().to_vec(), false));
+        assert_eq!(t("/a/cell.db"), rw("/a/cell.db"));
+        assert_eq!(t("file:/a/cell.db"), rw("/a/cell.db"));
+        assert_eq!(t("file:%2Fa%2Fcell%2edb"), rw("/a/cell.db"));
+        assert_eq!(t("file:///a/cell.db?cache=shared#x"), rw("/a/cell.db"));
+        assert_eq!(t("file://localhost/a/cell.db"), rw("/a/cell.db"));
+        assert_eq!(t("file://host/a/cell.db"), None);
+        assert_eq!(t("file:rel/cell.db%00.x"), rw("rel/cell.db"));
+        assert_eq!(t("file:c?mode=ro"), Some((b"c".to_vec(), true)));
+        assert_eq!(t("file:c?mode=%72%6F"), Some((b"c".to_vec(), true)));
+        assert_eq!(t("file:c?mode=ro&mode=rw"), rw("c"));
+        assert_eq!(t("file:c?mode=rw&mode=ro"), Some((b"c".to_vec(), true)));
+        assert_eq!(t("file:c?immutable=1"), Some((b"c".to_vec(), true)));
+        assert_eq!(t("file:c?immutable=0&immutable=1"), rw("c"));
+        assert_eq!(t("c?mode=ro"), rw("c?mode=ro"));
     }
 }

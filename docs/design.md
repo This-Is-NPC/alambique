@@ -531,8 +531,10 @@ is that frames committed and not yet replicated imply a write in flight
   covers the default VFS and a `vfs=` URI, the `x_open` of the Alambique VFS
   checks it for every main database it opens read-write, `ATTACH` from a
   connection of that VFS included, and the authorizer of a connection
-  opened with `attach: true` refuses the `ATTACH` of a held name. Keying by
-  inode makes a hard link the same file. Read-only opens are allowed: the
+  opened with `attach: true` refuses the `ATTACH` of a held name, which it
+  reads as SQLite does (`file:` URI, escapes, `//localhost/`, query, relative
+  path) and compares by inode, except with `mode=ro` or `immutable=1`. Keying
+  by inode makes a hard link or a symbolic link the same file. Read-only opens are allowed: the
   feed reader, replicas, the scrub. Rewind and relocate work on files of
   their own (a restored target, a work directory), never on the file of an
   awake cell. What the table cannot see is not prevented: another OS
