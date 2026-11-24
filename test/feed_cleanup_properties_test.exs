@@ -236,8 +236,11 @@ defmodule Alambique.FeedCleanupPropertiesTest do
   end
 
   defp verify(ctx, n, run) do
+    # A crash armed and not yet fired would kill the cell after this point,
+    # and a dead cell publishes nothing until the next call wakes it.
+    CrashPoints.disarm(:feed_after_cleanup)
     ready(run)
-    # A crash armed earlier can still kill the cell under this read.
+    # A crash that fired meanwhile can still kill the cell under this read.
     expected =
       eventually(fn ->
         case Alambique.query(run.inst, @cell, "SELECT id FROM notes ORDER BY id") do
