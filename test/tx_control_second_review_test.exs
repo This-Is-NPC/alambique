@@ -407,6 +407,87 @@ defmodule Alambique.TxControlSecondReviewTest do
     end
   end
 
+  describe "a migration whose feed rows cannot be stamped" do
+    # Holds the write lock of the file from a second connection once the
+    # entry of `version` is in the schema index: the migration is committed
+    # and the stamp comes next. The test releases it with `unlock/1`.
+    defp lock_before_stamp(env, cell, version) do
+      test = self()
+      once = {__MODULE__, :locked}
+      :persistent_term.erase(once)
+
+      Fault.install(fn
+        :schema_after_put, %{cell: ^cell, version: ^version} ->
+          if :persistent_term.get(once, nil) == nil do
+            :persistent_term.put(once, true)
+            [path] = Path.wildcard(Path.join(env.dir, "instance_*/**/*.db"))
+            {:ok, other} = Sqlite.open(path)
+            :ok = Sqlite.execute(other, "BEGIN IMMEDIATE")
+            send(test, {:locked, other})
+          end
+
+          :ok
+
+        _, _ ->
+          :ok
+      end)
+
+      on_exit(fn -> :persistent_term.erase(once) end)
+    end
+
+    defp unlock do
+      assert_received {:locked, other}
+      :ok = Sqlite.execute(other, "ROLLBACK")
+      Sqlite.close(other)
+      Fault.uninstall()
+    end
+
+    # A wake of another cell takes the only slot, so it proves the slot back.
+    defp assert_released(inst, cell) do
+      assert Alambique.owner(inst, cell) == :none
+      assert {:ok, _} = Alambique.touch(inst, unique_cell(), timeout: 5_000)
+      {t, result} = :timer.tc(fn -> Alambique.execute(inst, cell, "INSERT INTO t VALUES (5)") end)
+      assert {:ok, _} = result
+      assert t < 2_000_000, "the lease was not released: the wake waited #{div(t, 1000)} ms"
+    end
+
+    test "fails the first wake and releases the lease and the slot", env do
+      cell = unique_cell()
+      lock_before_stamp(env, cell, 1)
+      inst = start_instance(env, migrations: @schema, compaction: false, awake: [max_wakes: 1])
+
+      result = Alambique.execute(inst, cell, "INSERT INTO t VALUES (5)")
+      unlock()
+
+      assert {:error, {:stamp_failed, _}} = result
+      assert_released(inst, cell)
+      c = %{inst: inst, cell: cell, env: env}
+      assert store(c) == [5]
+      assert rows(c) == [5]
+      assert feed_keys(c, 5) == [5]
+    end
+
+    test "stops a serving cell that migrates", env do
+      Migrations.set(@schema)
+      on_exit(fn -> :persistent_term.erase({Migrations, :list}) end)
+      c = boot(env, :stop, migrations: {Migrations, :list, []}, awake: [max_wakes: 1])
+      Migrations.set(@schema ++ [@v2_ok])
+      lock_before_stamp(env, c.cell, 2)
+      old = pid(c)
+
+      result = Alambique.migrate(c.inst, c.cell)
+      unlock()
+
+      assert {:error, {:migrate_failed, {:stamp_failed, _}}} = result
+      assert_stops(c, old, "a stamp that failed in a migration: #{inspect(result)}")
+      assert asleep?(c)
+      assert {:ok, _} = Alambique.execute(c.inst, c.cell, "INSERT INTO u VALUES (1)")
+      assert store(c) == [0, 1]
+      assert rows(c) == [0, 1]
+      assert feed_keys(c, 1) == [0, 1]
+    end
+  end
+
   describe "a statement that starts with a byte order mark" do
     defp bom_feed(c, ddl_fun) do
       assert {:ok, _} = Alambique.transaction(c.inst, c.cell, ddl_fun)

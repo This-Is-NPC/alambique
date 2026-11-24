@@ -550,16 +550,18 @@ defmodule Alambique.Cell.Wake do
   end
 
   defp finish_migration(state, previous, pending) do
-    state = Publisher.stamp(state)
+    with {:ok, state} <- Publisher.try_stamp(state) do
+      case sync(state, length(pending)) do
+        {:ok, state, txid} ->
+          if txid, do: Commit.after_ack(state, txid)
+          if pending != [], do: drop_previous(state, previous)
+          {:ok, state}
 
-    case sync(state, length(pending)) do
-      {:ok, state, txid} ->
-        if txid, do: Commit.after_ack(state, txid)
-        if pending != [], do: drop_previous(state, previous)
-        {:ok, state}
-
-      {:error, _reason, _state} = error ->
-        error
+        {:error, _reason, _state} = error ->
+          error
+      end
+    else
+      {:error, reason} -> {:error, {:stamp_failed, reason}, state}
     end
   end
 
