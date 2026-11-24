@@ -122,17 +122,18 @@ defmodule Alambique.KeyPropertiesTest do
               prefix <- prefix(),
               cell <- cell(),
               {min, max} <- span(),
-              level <- integer(0..9)
+              level <- integer(0..9),
+              above <- member_of([10, 11, 15, 16, 255])
             ) do
         key = fn level, min, max ->
           Keys.files_prefix(prefix, cell) <>
-            String.pad_leading(Integer.to_string(level, 16), 4, "0") <>
+            String.pad_leading(String.downcase(Integer.to_string(level, 16)), 4, "0") <>
             "/" <> Keys.hex(min) <> "-" <> Keys.hex(max) <> ".ltx"
         end
 
         assert Keys.parse(prefix, cell, [key.(level, max + 1, max)]) == {[], []}
         assert Keys.parse(prefix, cell, [key.(level, 0, max)]) == {[], []}
-        assert Keys.parse(prefix, cell, [key.(10, min, max)]) == {[], []}
+        assert Keys.parse(prefix, cell, [key.(above, min, max)]) == {[], []}
         assert Keys.parse(prefix, cell, [key.(9, 2 + min, 2 + max)]) == {[], []}
 
         upper = Keys.files_prefix(prefix, cell) <> "0000/000000000000000A-000000000000000B.ltx"
@@ -264,9 +265,25 @@ defmodule Alambique.KeyPropertiesTest do
       end
     end
 
-    property "any string is either a target or :error and never raises" do
-      check all(text <- string(:printable, max_length: 30)) do
-        assert Ops.parse_target(text) == :error or match?({:ok, _}, Ops.parse_target(text))
+    property "any string is either a target or :error, and a target is a valid one" do
+      text =
+        one_of([
+          string(:printable, max_length: 30),
+          map(integer(-3..3), &"txid:#{&1}"),
+          map(integer(-3..3), &"ms:#{&1}"),
+          map(
+            tuple({member_of(["txid:", "ms:"]), string(~c"-+0123456789 ", max_length: 6)}),
+            fn {kind, digits} -> kind <> digits end
+          )
+        ])
+
+      check all(text <- text) do
+        case Ops.parse_target(text) do
+          :error -> :ok
+          {:ok, :latest} -> assert text == "latest"
+          {:ok, {:txid, txid}} -> assert is_integer(txid) and txid >= 0
+          {:ok, {:timestamp, ms}} -> assert is_integer(ms)
+        end
       end
     end
   end
