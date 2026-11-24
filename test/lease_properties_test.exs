@@ -12,6 +12,14 @@ defmodule Alambique.LeasePropertiesTest do
   @ttl 10_000
   @margin 1_000
 
+  defmodule FixedClock do
+    @moduledoc false
+    @behaviour Alambique.Clock
+
+    @impl true
+    def now_ms(ms), do: ms
+  end
+
   setup do
     {:ok, pid} = start_supervised(MemoryStore, restart: :temporary)
     on_exit(&AlambiqueTestkit.CrashPoints.reset/0)
@@ -21,7 +29,16 @@ defmodule Alambique.LeasePropertiesTest do
   defp ctx(store, world, prefix, offset),
     do: node_ctx(store, world, prefix, offset: offset, ttl_ms: @ttl, skew_margin_ms: @margin)
 
+  # The context of `ctx` with a clock that stands still at `ms`.
+  defp frozen(ctx, ms), do: %{ctx | clock: {FixedClock, ms}}
+
+  # Distances from the expiry of a lease: one below, at and one above each of
+  # its three edges, `expiry - margin`, `expiry` and `expiry + margin`.
+  defp edge_deltas, do: for(edge <- [-@margin, 0, @margin], step <- [-1, 0, 1], do: edge + step)
+
   # Generators
+
+  defp delta_gen, do: one_of([member_of(edge_deltas()), integer((-2 * @margin)..(2 * @margin))])
 
   defp op_gen do
     one_of([
@@ -42,6 +59,15 @@ defmodule Alambique.LeasePropertiesTest do
         ) do
       [kind: kind, ops: ops, times: times, ms: ms]
     end
+  end
+
+  defp ahead_gen(left) do
+    threshold = 2 * @margin + left
+
+    one_of([
+      integer(0..(6 * @margin)),
+      map(member_of([-1, 0, 1]), &max(0, threshold + &1))
+    ])
   end
 
   defp schedule_gen do
@@ -67,21 +93,28 @@ defmodule Alambique.LeasePropertiesTest do
       Alambique.Fault.install(fn _, _ -> :erlang.yield() end)
       for fault <- schedule.faults, do: MemoryStore.inject(store_config, fault)
 
-      schedule.scripts
-      |> Enum.zip(schedule.offsets)
-      |> Enum.with_index()
-      |> Enum.map(fn {{script, offset}, i} ->
-        Task.async(fn ->
-          run_script(script, ctx(store, world, prefix, offset), "node#{i}", log)
+      finals =
+        schedule.scripts
+        |> Enum.zip(schedule.offsets)
+        |> Enum.with_index()
+        |> Enum.map(fn {{script, offset}, i} ->
+          Task.async(fn ->
+            run_script(script, ctx(store, world, prefix, offset), "node#{i}", log)
+          end)
         end)
-      end)
-      |> Task.await_many(30_000)
+        |> Task.await_many(30_000)
 
       events = :ets.tab2list(log)
       :ets.delete(log)
       MemoryStore.clear(store_config)
+      reader = ctx(store, world, prefix, 0)
 
-      assert_l1(events, Lease.read(ctx(store, world, prefix, 0), "c"))
+      assert_l1(events, Lease.read(reader, "c"))
+      assert_foreign_refused(reader, events)
+
+      for {lease, offset} <- Enum.zip(finals, schedule.offsets), lease != nil do
+        assert_validity_edges(ctx(store, world, prefix, offset), lease)
+      end
     end
   end
 
@@ -98,7 +131,7 @@ defmodule Alambique.LeasePropertiesTest do
   defp step(:acquire, lease, ctx, owner, log) do
     case Lease.acquire(ctx, "c", owner) do
       {:ok, new} ->
-        :ets.insert(log, {:acquire, new})
+        :ets.insert(log, [{:acquire, new}, {:plain, new}])
         new
 
       _ ->
@@ -109,7 +142,7 @@ defmodule Alambique.LeasePropertiesTest do
   defp step(:take_over, lease, ctx, owner, log) do
     case Lease.take_over(ctx, "c", owner) do
       {:ok, new, _previous} ->
-        :ets.insert(log, {:acquire, new})
+        :ets.insert(log, [{:acquire, new}, {:taken, new}])
         new
 
       _ ->
@@ -149,7 +182,10 @@ defmodule Alambique.LeasePropertiesTest do
     end
   end
 
-  defp assert_l1(events, final) do
+  defp assert_l1(all, final) do
+    {marks, events} = Enum.split_with(all, &(elem(&1, 0) in [:plain, :taken]))
+    assert_successors(events, marks)
+
     acquires = for {:acquire, l} <- events, do: l
 
     # No two different tokens were ever granted the same (cell, epoch).
@@ -181,6 +217,58 @@ defmodule Alambique.LeasePropertiesTest do
     case final do
       {:ok, stored} -> assert stored.epoch >= Enum.max([0 | epochs])
       :none -> assert acquires == []
+    end
+  end
+
+  # Every lease a node got back from the store, by the writes that made it.
+  defp written(events) do
+    Enum.flat_map(events, fn
+      {:acquire, lease} -> [lease]
+      {:renew, _old, new} -> [new]
+      {:release, _lease} -> []
+    end)
+  end
+
+  # An acquisition that follows a lease we saw written took its epoch + 1. An
+  # acquire (not a take-over) did so at its own clock past the expiry of that
+  # lease plus the margin: the clock of the attempt is `expires_at_ms - ttl`.
+  defp assert_successors(events, marks) do
+    written = events |> written() |> Map.new(&{&1.seq, &1})
+
+    for {kind, lease} <- marks, {:ok, prev} <- [Map.fetch(written, lease.seq - 1)] do
+      assert lease.epoch == prev.epoch + 1,
+             "#{kind}: epoch #{lease.epoch} after epoch #{prev.epoch}"
+
+      if kind == :plain do
+        attempted = lease.expires_at_ms - @ttl
+
+        assert attempted > prev.expires_at_ms + @margin,
+               "acquired at #{attempted}, before the expiry #{prev.expires_at_ms} plus the margin"
+      end
+    end
+  end
+
+  # A holder of an older acquisition can neither renew nor release the stored
+  # lease, and the attempt leaves it as it was.
+  defp assert_foreign_refused(ctx, events) do
+    with {:ok, stored} <- Lease.read(ctx, "c") do
+      stale = for lease <- written(events), lease.token != stored.token, do: lease
+
+      for lease <- Enum.take(stale, 6) do
+        assert {:error, :lost} = Lease.renew(ctx, lease)
+        assert {:ok, ^stored} = Lease.read(ctx, "c")
+        assert {:error, :lost} = Lease.release(ctx, lease)
+        assert {:ok, ^stored} = Lease.read(ctx, "c")
+      end
+    end
+  end
+
+  # The owner may use a lease before `expires_at_ms - skew_margin_ms` only.
+  defp assert_validity_edges(ctx, lease) do
+    for delta <- edge_deltas() do
+      at = frozen(ctx, lease.expires_at_ms + delta)
+
+      assert Lease.valid?(at, lease) == delta < -@margin, "valid? at #{delta} ms from the expiry"
     end
   end
 
@@ -256,19 +344,69 @@ defmodule Alambique.LeasePropertiesTest do
     end
   end
 
-  property "skew beyond the margin is what lets two nodes overlap", %{store: store} do
-    # Sanity check of the generator above: with a gap over 2 * margin there are
-    # times when the owner is valid and another node acquires.
-    {_, store_config} = store
-    world = ManualClock.new(@start)
-    prefix = unique_prefix("overlap")
-    a = ctx(store, world, prefix, 0)
-    b = ctx(store, world, prefix, 2 * @margin + 100)
+  property "an acquirer takes the cell exactly past expiry plus the margin", %{store: store} do
+    # The owner is still valid (`left` ms before its validity ends) while the
+    # acquirer's clock reads `ahead` ms more than the owner's. The acquirer is
+    # past the expiry plus the margin when `ahead > 2 * margin + left`: only
+    # then do two nodes overlap.
+    check all(left <- integer(1..(3 * @margin)), ahead <- ahead_gen(left), max_runs: 300) do
+      {_, store_config} = store
+      MemoryStore.clear(store_config)
+      world = ManualClock.new(@start)
+      prefix = unique_prefix("overlap")
+      a = ctx(store, world, prefix, 0)
+      b = ctx(store, world, prefix, ahead)
 
-    {:ok, lease} = Lease.acquire(a, "c", "a")
-    ManualClock.advance(world, @ttl - @margin - 50)
-    assert Lease.valid?(a, lease)
-    assert {:ok, %Lease{epoch: 2}} = Lease.acquire(b, "c", "b")
-    MemoryStore.clear(store_config)
+      {:ok, lease} = Lease.acquire(a, "c", "a")
+      ManualClock.advance(world, @ttl - @margin - left)
+      assert Lease.valid?(a, lease)
+
+      answer = Lease.acquire(b, "c", "b")
+
+      if ahead > 2 * @margin + left do
+        assert {:ok, %Lease{epoch: 2, owner: "b"}} = answer
+      else
+        assert {:error, {:owned, "a", expires}} = answer
+        assert expires == lease.expires_at_ms
+      end
+    end
+  end
+
+  property "validity and acquisition meet at the edges of the expiry", %{store: store} do
+    check all(offset <- integer(-5_000..5_000), delta <- delta_gen(), max_runs: 300) do
+      {_, store_config} = store
+      MemoryStore.clear(store_config)
+      world = ManualClock.new(@start)
+      prefix = unique_prefix("edges")
+      a = ctx(store, world, prefix, offset)
+      b = ctx(store, world, prefix, offset)
+
+      {:ok, lease} = Lease.acquire(a, "c", "a")
+      # Both clocks read `delta` ms from the expiry of the lease.
+      ManualClock.advance(world, @ttl + delta)
+
+      owner_valid? = Lease.valid?(a, lease)
+      assert owner_valid? == delta < -@margin, "owner validity #{delta} ms from the expiry"
+
+      answer = Lease.acquire(b, "c", "b")
+      {:ok, stored} = Lease.read(b, "c")
+
+      if delta > @margin do
+        assert {:ok, %Lease{epoch: epoch, owner: "b"}} = answer
+        assert epoch == lease.epoch + 1
+      else
+        assert {:error, {:owned, "a", expires}} = answer
+        assert expires == lease.expires_at_ms
+        assert {stored.token, stored.epoch, stored.seq} == {lease.token, lease.epoch, lease.seq}
+      end
+
+      # Never both at once.
+      refute owner_valid? and match?({:ok, _}, answer)
+
+      # An early take-over ignores the clock and advances the epoch by one.
+      assert {:ok, taken, previous} = Lease.take_over(b, "c", "b")
+      assert previous.epoch == stored.epoch
+      assert taken.epoch == stored.epoch + 1
+    end
   end
 end
