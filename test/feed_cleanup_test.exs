@@ -9,7 +9,7 @@ defmodule Alambique.FeedCleanupTest do
   import Alambique.CellHelpers
 
   alias Alambique.{CountingStore, Feed}
-  alias AlambiqueTestkit.{CrashPoints, GatedStore}
+  alias AlambiqueTestkit.{CrashPoints, GatedStore, ManualClock}
 
   @schema [{1, "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)"}]
   @rows "SELECT count(*) FROM _alambique_feed WHERE op <> 'floor'"
@@ -36,6 +36,12 @@ defmodule Alambique.FeedCleanupTest do
 
   defp insert(inst, cell, id),
     do: {:ok, _} = Alambique.execute(inst, cell, ~s|INSERT INTO notes VALUES (?, 'x')|, [id])
+
+  defp kill(inst, cell) do
+    pid = cell_pid(inst, cell)
+    Process.exit(pid, :kill)
+    eventually(fn -> Alambique.owner(inst, cell) == :none end)
+  end
 
   defp cell_pid(inst, cell), do: Alambique.Cell.whereis(Alambique.Config.fetch!(inst), cell)
 
@@ -221,9 +227,9 @@ defmodule Alambique.FeedCleanupTest do
 
     # Inserts row 1 with the segment puts held and lets that batch land, so the
     # cleanup batch that follows is the one held next.
-    defp cleanup_in_flight(ctx, mode) do
+    defp cleanup_in_flight(ctx, mode, opts \\ []) do
       {gate, ctx} = gated(ctx)
-      inst = start(ctx, cleanup: mode)
+      inst = start(ctx, [cleanup: mode], opts)
       cell = unique_cell()
       # The first batch carries the migration: let it and its cleanup pass.
       insert(inst, cell, 0)
@@ -334,9 +340,127 @@ defmodule Alambique.FeedCleanupTest do
       query = Task.async(fn -> Alambique.query(inst, cell, @rows_sql) end)
       assert Task.yield(query, 300) == nil
 
+      # The write batch lands and the cleanup batch behind it is still held:
+      # the read has what it waited for.
+      [write_key, cleanup_key] = GatedStore.held(gate)
+      GatedStore.release(gate, write_key)
+      assert {:ok, %{rows: [[1], [2]]}} = Task.await(query)
+      assert GatedStore.held(gate) == [cleanup_key]
+
       GatedStore.open(gate)
       assert {:ok, _} = Task.await(write)
-      assert {:ok, %{rows: [[1], [2]]}} = Task.await(query)
+    end
+
+    # A write that changes nothing has no batch of its own; the read behind it
+    # waits in the same batch of calls.
+    for {name, fail?} <- [{"held", false}, {"failing", true}] do
+      test "a write that changes nothing and a read behind it are answered while the cleanup batch is #{name}",
+           ctx do
+        {gate, inst, cell} = cleanup_in_flight(ctx, :idle_or_write)
+
+        if unquote(fail?) do
+          [key] = GatedStore.held(gate)
+          assert :ok = GatedStore.fail(gate, key)
+
+          eventually(fn ->
+            match?(%{pipe: %{queue: [%{attempts: n}]}} when n > 0, state(inst, cell))
+          end)
+        end
+
+        pid = cell_pid(inst, cell)
+        noop = "UPDATE notes SET body = 'y' WHERE id = 999"
+        write = :gen_server.send_request(pid, {:execute, noop, [], nil})
+        read = :gen_server.send_request(pid, {:query, @rows_sql, [], nil})
+
+        assert {:reply, {:ok, _}} = :gen_server.wait_response(write, 1_000)
+        assert {:reply, {:ok, %{rows: [[0], [1]]}}} = :gen_server.wait_response(read, 1_000)
+        assert %{pipe: %{queue: [%{writes: 0}]}} = state(inst, cell)
+
+        GatedStore.open(gate)
+        cleaned(inst, cell)
+      end
+    end
+
+    test "a write waiting for room in a full pipeline holds the read behind it", ctx do
+      {gate, inst, cell} = cleanup_in_flight(ctx, :idle_or_write, pipeline_depth: 1)
+
+      write =
+        Task.async(fn -> Alambique.execute(inst, cell, "INSERT INTO notes VALUES (2, 'x')") end)
+
+      eventually(fn -> match?(%{pending: [_]}, state(inst, cell)) end)
+
+      query = Task.async(fn -> Alambique.query(inst, cell, @rows_sql) end)
+      assert Task.yield(query, 300) == nil
+
+      GatedStore.open(gate)
+      assert {:ok, _} = Task.await(write)
+      assert {:ok, %{rows: [[0], [1], [2]]}} = Task.await(query)
+    end
+
+    test "position, hibernate and checkpoint wait for the cleanup batch", ctx do
+      {gate, inst, cell} = cleanup_in_flight(ctx, :idle_or_write)
+
+      position = Task.async(fn -> Alambique.position(inst, cell) end)
+      assert Task.yield(position, 300) == nil
+      assert GatedStore.held(gate) != []
+      GatedStore.open(gate)
+      assert {:ok, %{txid: txid}} = Task.await(position)
+      assert txid > 0
+
+      {gate, inst, cell} = cleanup_in_flight(ctx, :idle_or_write)
+      hibernate = Task.async(fn -> Alambique.hibernate(inst, cell) end)
+      assert Task.yield(hibernate, 300) == nil
+      assert GatedStore.held(gate) != []
+      GatedStore.open(gate)
+      assert :ok = Task.await(hibernate)
+
+      {gate, inst, cell} = cleanup_in_flight(ctx, :idle_or_write)
+      checkpoint = Task.async(fn -> Alambique.checkpoint(inst, cell) end)
+      assert Task.yield(checkpoint, 300) == nil
+      assert GatedStore.held(gate) != []
+      GatedStore.open(gate)
+      assert :ok = Task.await(checkpoint)
+    end
+
+    # Another node takes the cell while the cleanup batch is held; the
+    # lease is read after the statement, so the read gets no data.
+    test "a checked read gets no data when the lease was taken while the cleanup is held",
+         ctx do
+      world = ManualClock.new(1_800_000_000_000)
+      clock = fn offset -> {ManualClock, ManualClock.config(world, offset)} end
+      ttl = [lease_ttl_ms: 60_000]
+
+      {gate, a, cell} = cleanup_in_flight(ctx, :idle_or_write, [clock: clock.(0)] ++ ttl)
+      b = start(ctx, [cleanup: :idle_or_write], [clock: clock.(61_000)] ++ ttl)
+      assert {:ok, _} = Alambique.execute(b, cell, "INSERT INTO notes VALUES (9, 'x')")
+      assert GatedStore.held(gate) != []
+
+      pid = cell_pid(a, cell)
+      call = {:checked_query, @rows_sql, [], nil}
+      assert {{:shutdown, :lease_lost}, _} = catch_exit(GenServer.call(pid, call, 2_000))
+    end
+
+    # The cleanup is committed in the file and visible to a read before it is
+    # durable; a crash undoes it, and the rows are published and cleaned again.
+    test "rows a read saw removed come back after a crash and are published once", ctx do
+      {gate, inst, cell} = cleanup_in_flight(ctx, :idle_or_write)
+      first = records(ctx, cell)
+      assert keys(first) == [0, 1]
+
+      assert local_rows(inst, cell) == 0
+      assert stored_rows(ctx, cell) == 1
+
+      kill(inst, cell)
+      GatedStore.open(gate)
+      assert {:ok, %{rows: [[0], [1]]}} = Alambique.query(inst, cell, @rows_sql)
+      assert local_rows(inst, cell) == 1
+
+      cleaned(inst, cell)
+      eventually(fn -> stored_rows(ctx, cell) == 0 end)
+
+      all = records(ctx, cell)
+      assert all |> Enum.map(& &1.id) |> Enum.uniq() == Enum.map(first, & &1.id)
+      assert Enum.uniq_by(all, & &1.id) == first
     end
   end
 
@@ -760,12 +884,6 @@ defmodule Alambique.FeedCleanupTest do
 
       assert all |> Enum.uniq_by(& &1.id) |> Enum.map(&Map.delete(&1, :at)) ==
                Enum.map(first, &Map.delete(&1, :at))
-    end
-
-    defp kill(inst, cell) do
-      pid = cell_pid(inst, cell)
-      Process.exit(pid, :kill)
-      eventually(fn -> Alambique.owner(inst, cell) == :none end)
     end
   end
 
