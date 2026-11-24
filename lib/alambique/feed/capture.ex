@@ -370,16 +370,19 @@ defmodule Alambique.Feed.Capture do
   `[txid, ts, table, op, key, values, seq]`. `seq` grows with the order of
   the changes, so it pages through a batch (`{txid, -1}` is its start).
   """
-  @spec rows_from(term, {pos_integer, integer}, non_neg_integer, pos_integer | nil) :: [list]
+  @spec rows_from(term, {pos_integer, integer}, non_neg_integer, pos_integer | nil) ::
+          {:ok, [list]} | {:error, term}
   def rows_from(conn, {txid, seq}, upto, limit) do
-    rows(
-      conn,
-      """
-      SELECT txid, ts, tbl, op, key, vals, seq FROM #{@feed}
-      WHERE txid >= ?1 AND txid <= ?3 AND (txid > ?1 OR seq > ?2) ORDER BY txid, seq LIMIT ?4
-      """,
-      [txid, seq, upto, limit || -1]
-    )
+    sql = """
+    SELECT txid, ts, tbl, op, key, vals, seq FROM #{@feed}
+    WHERE txid >= ?1 AND txid <= ?3 AND (txid > ?1 OR seq > ?2) ORDER BY txid, seq LIMIT ?4
+    """
+
+    case Db.run(conn, sql, [txid, seq, upto, limit || -1]) do
+      {:ok, %{rows: rows}} -> {:ok, rows}
+      {:error, "no such table" <> _} -> {:ok, []}
+      {:error, _} = error -> error
+    end
   end
 
   @doc "Latest time any batch of this cell took, from the rows left and the saved state."

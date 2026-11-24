@@ -72,6 +72,9 @@ defmodule Alambique.Cell.State do
     # it, and nil for none.
     feed_part: nil,
     feed_tick: nil,
+    # With `hand_over: :sender`: the read-only connection the sender reads
+    # with. Only the cell closes it, before it closes its own connection.
+    feed_reader: nil,
     # The `:feed_cleanup` timer (`nil` when none is armed) and the failed
     # cleanups since the last one that committed.
     feed_cleanup: nil,

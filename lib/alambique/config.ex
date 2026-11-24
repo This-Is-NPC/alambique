@@ -161,6 +161,8 @@ defmodule Alambique.Config do
     cleanup_after_ms: 1_000,
     cleanup_rows: nil,
     hand_over_rows: nil,
+    hand_over: :cell,
+    reader_cache_kib: nil,
     shards: Alambique.Feed.Keys.default_shards(),
     internal_prefixes: [],
     tables: %{},
@@ -264,6 +266,8 @@ defmodule Alambique.Config do
             cleanup_after_ms: pos_integer,
             cleanup_rows: pos_integer | nil,
             hand_over_rows: pos_integer | nil,
+            hand_over: :cell | :sender,
+            reader_cache_kib: pos_integer | nil,
             shards: pos_integer,
             internal_prefixes: [String.t()],
             tables: %{String.t() => Alambique.Feed.Capture.spec()},
@@ -707,6 +711,13 @@ defmodule Alambique.Config do
     unless hand_over == nil or (is_integer(hand_over) and hand_over > 0),
       do: bad!(":feed hand_over_rows must be nil or a positive integer")
 
+    hand_over_mode = feed[:hand_over]
+
+    unless hand_over_mode in [:cell, :sender],
+      do: bad!(":feed hand_over must be :cell or :sender")
+
+    reader_cache = reader_cache!(feed, hand_over_mode)
+
     %{
       window_ms: pos_int!(feed, :window_ms),
       retention_ms: retention,
@@ -721,6 +732,8 @@ defmodule Alambique.Config do
       cleanup_after_ms: cleanup_after!(feed, given, idle_timeout),
       cleanup_rows: rows,
       hand_over_rows: hand_over,
+      hand_over: hand_over_mode,
+      reader_cache_kib: reader_cache,
       shards: shards!(feed),
       internal_prefixes: internal_prefixes!(feed[:internal_prefixes]),
       tables: tables!(feed[:tables]),
@@ -728,6 +741,17 @@ defmodule Alambique.Config do
       max_object_bytes: pos_int!(feed, :max_object_bytes)
     }
   end
+
+  # The page cache of the sender's reader exists only with `hand_over: :sender`.
+  defp reader_cache!(feed, :cell) do
+    if feed[:reader_cache_kib] != nil,
+      do: bad!(":feed reader_cache_kib applies only with hand_over: :sender")
+
+    nil
+  end
+
+  defp reader_cache!(feed, :sender),
+    do: if(feed[:reader_cache_kib] == nil, do: 64, else: pos_int!(feed, :reader_cache_kib))
 
   # A value that is not given is `cleanup_after_ms`'s default, kept below an
   # `idle_timeout_ms` that is shorter; a value that is given must be below it.

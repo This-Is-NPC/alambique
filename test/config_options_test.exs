@@ -161,6 +161,36 @@ defmodule Alambique.ConfigOptionsTest do
     end
   end
 
+  describe "feed reader" do
+    test "hand_over is :cell by default, or :sender with a reader cache of 64 KiB", ctx do
+      assert %{hand_over: :cell, reader_cache_kib: nil} = feed(ctx, [])
+      assert %{hand_over: :sender, reader_cache_kib: 64} = feed(ctx, hand_over: :sender)
+      assert feed(ctx, hand_over: :sender, reader_cache_kib: 256).reader_cache_kib == 256
+
+      for bad <- [nil, :reader, "sender", 1] do
+        assert_raise ArgumentError, ~r/:feed hand_over must be :cell or :sender/, fn ->
+          feed(ctx, hand_over: bad)
+        end
+      end
+    end
+
+    test "reader_cache_kib is a positive integer, and only for :sender", ctx do
+      for bad <- [0, -1, 1.5, :big] do
+        assert_raise ArgumentError, ~r/reader_cache_kib/, fn ->
+          feed(ctx, hand_over: :sender, reader_cache_kib: bad)
+        end
+      end
+
+      for opts <- [[reader_cache_kib: 64], [hand_over: :cell, reader_cache_kib: 64]] do
+        assert_raise ArgumentError,
+                     ~r/reader_cache_kib applies only with hand_over: :sender/,
+                     fn ->
+                       feed(ctx, opts)
+                     end
+      end
+    end
+  end
+
   test "awake.idle_gc is a boolean, true by default", ctx do
     assert Alambique.Config.build(base(ctx, [])).awake.idle_gc == true
     assert Alambique.Config.build(base(ctx, awake: [idle_gc: false])).awake.idle_gc == false

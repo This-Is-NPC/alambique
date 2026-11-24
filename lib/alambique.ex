@@ -508,7 +508,21 @@ defmodule Alambique do
       publisher joins the pieces: ids and objects are those of an unbounded
       hand-over. A smaller bound shortens the wait of a call and adds queries
       on the cell's file. A cell that stops hands over everything without
-      serving calls, within `:stop_publish_ms`. The option is of the instance.
+      serving calls, within `:stop_publish_ms`. With `hand_over: :sender` it
+      bounds each read of the sender, with the same meaning. The option is of
+      the instance.
+    * `:hand_over` - who reads the captured rows of acknowledged batches
+      (default `:cell`). `:cell`: the cell, in its own process. `:sender`: the
+      cell hands over only the range of TXIDs and the feed sender reads the rows
+      through a second, read-only connection to the cell's file, which the cell
+      opens and always closes before its own connection. It takes the read off
+      the cell and costs an open connection, its page cache and two open files
+      while the sender reads. Ids and objects are the same. With `:sender`,
+      `:max_backlog_batches` counts TXIDs, not batches. The option is of the
+      instance. See `docs/how-to-consume-the-change-feed.md`.
+    * `:reader_cache_kib` - page cache of the sender's reader in KiB (default
+      64, only with `hand_over: :sender`; refused with `:cell`). Counted in
+      `:awake` `:max_bytes` while the reader is open.
     * `:shards` - prefixes the feed of each location is spread over (default
       16, at most 1 000). It is fixed for as long as the feed exists: consumers
       must use the same value, and a cell changes shard when it changes.

@@ -60,6 +60,26 @@ defmodule Alambique.Cell.Db do
     end
   end
 
+  @doc """
+  Opens a read-only connection next to the cell's own on `path`, for the feed
+  sender (`feed: [hand_over: :sender]`): WAL readers never block the writer,
+  see committed rows only, and hold no lock between statements. The page
+  cache is `cache_kib`.
+  """
+  @spec open_reader(Path.t(), pos_integer) :: {:ok, Sqlite.conn()} | {:error, term}
+  def open_reader(path, cache_kib) do
+    with {:ok, conn} <- Sqlite.open(path, readonly: true, vfs: :alambique) do
+      case cache_size(conn, cache_kib) do
+        :ok ->
+          {:ok, conn}
+
+        {:error, _} = error ->
+          Sqlite.close(conn)
+          error
+      end
+    end
+  end
+
   @spec close(Sqlite.conn()) :: :ok
   def close(conn), do: Sqlite.close(conn)
 

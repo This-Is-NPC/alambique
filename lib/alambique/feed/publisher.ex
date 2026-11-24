@@ -7,9 +7,12 @@ defmodule Alambique.Feed.Publisher do
 
   require Logger
 
+  # A reader that could not be opened is tried again after this long.
+  @reader_retry_ms 1_000
+
   alias Alambique.Fault
   alias Alambique.Cell.{Db, State}
-  alias Alambique.Feed.{Capture, Sender}
+  alias Alambique.Feed.{Capture, Pieces, Sender}
   alias Alambique.Replication.Replicator
 
   # Batches
@@ -235,7 +238,7 @@ defmodule Alambique.Feed.Publisher do
       state
       | feed_published: txid,
         feed_floor: max(state.feed_floor, time),
-        feed_backlog: state.feed_backlog - count
+        feed_backlog: backlog(state, txid, count)
     }
 
     if state.feed_capped, do: after_ack(state), else: state
@@ -244,6 +247,37 @@ defmodule Alambique.Feed.Publisher do
   # A message of a sender that was replaced.
   def published(state, _pid, _txid, _time, _count), do: state
 
+  # With `hand_over: :sender` the cell does not know the batches: the backlog is
+  # the TXIDs handed over and not published, empty ones included.
+  defp backlog(%State{config: %{feed: %{hand_over: :sender}}} = state, txid, _count),
+    do: max(state.feed_sent - txid, 0)
+
+  defp backlog(state, _txid, count), do: state.feed_backlog - count
+
+  @doc """
+  Handles the report that the sender read up to `upto`: with nothing more
+  handed over than that, the reader is closed.
+  """
+  @spec read_done(State.t(), pid, non_neg_integer) :: State.t()
+  def read_done(%State{feed_pid: pid, feed_sent: sent} = state, pid, upto) when upto >= sent,
+    do: close_reader(state)
+
+  def read_done(state, _pid, _upto), do: state
+
+  @doc """
+  Closes the sender's reader. Only the cell closes it, and always before its
+  own connection: a reader that outlived it would keep the file open after the
+  checkpoint and the removal of `-wal` and `-shm`, and a statement of it would
+  keep the checkpoint from finishing. Closing interrupts a running statement.
+  """
+  @spec close_reader(State.t()) :: State.t()
+  def close_reader(%State{feed_reader: nil} = state), do: state
+
+  def close_reader(%State{feed_reader: reader} = state) do
+    Db.close(reader)
+    %{state | feed_reader: nil}
+  end
+
   @doc "Handles the end of the sender; the batches it had are handed over again."
   @spec sender_down(State.t(), pid) :: State.t()
   def sender_down(%State{feed_pid: pid} = state, pid), do: after_ack(reset(state))
@@ -251,13 +285,47 @@ defmodule Alambique.Feed.Publisher do
 
   defp reset(state),
     do: %{
-      state
+      close_reader(state)
       | feed_pid: nil,
         feed_sent: state.feed_published,
         feed_backlog: 0,
         feed_part: nil,
         feed_tick: nil
     }
+
+  # `hand_over: :sender`: the cell hands over the TXIDs, at most `room` of
+  # them, and the sender reads the rows with the reader of the cell.
+  defp hand_over(%State{config: %{feed: %{hand_over: :sender}}} = state, room) do
+    state = if alive?(state.feed_pid), do: state, else: reset(state)
+    acked = state.pipe.acked.txid
+    upto = if room == :all, do: acked, else: min(acked, state.feed_sent + room)
+
+    with true <- upto > state.feed_sent,
+         {:ok, state} <- open_reader(state) do
+      Fault.point(:feed_before_publish, %{cell: state.id, txid: upto, sender: state.feed_pid})
+      state = if state.feed_pid, do: state, else: %{state | feed_pid: Sender.start(state)}
+      send(state.feed_pid, {:range, state.feed_sent + 1, upto, state.feed_reader})
+
+      {%{
+         state
+         | feed_sent: upto,
+           feed_backlog: upto - state.feed_published,
+           feed_capped: upto < acked
+       }, false}
+    else
+      false ->
+        {%{state | feed_capped: false}, false}
+
+      {:error, reason} ->
+        Logger.warning(
+          "Alambique could not open the feed reader of #{state.id}: #{inspect(reason)}"
+        )
+
+        ref = make_ref()
+        Process.send_after(self(), {:feed_part, ref}, @reader_retry_ms)
+        {%{state | feed_tick: ref}, false}
+    end
+  end
 
   # One piece: at most `feed.hand_over_rows` rows from the position of the
   # hand-over: whole batches as far as they fit, and the start or the middle
@@ -266,11 +334,18 @@ defmodule Alambique.Feed.Publisher do
   # sender (`feed_capped`).
   defp hand_over(state, room) do
     state = if alive?(state.feed_pid), do: state, else: reset(state)
-    bound = state.config.feed.hand_over_rows
     position = state.feed_part || {state.feed_sent + 1, -1}
-    rows = Capture.rows_from(state.conn, position, state.pipe.acked.txid, bound && bound + 1)
-    {rows, beyond} = if bound, do: Enum.split(rows, bound), else: {rows, []}
-    {pieces, cut?} = rows |> pieces(beyond, state.feed_part) |> take_room(room)
+
+    {:ok, pieces, more?} =
+      Pieces.read(
+        state.conn,
+        position,
+        state.pipe.acked.txid,
+        state.config.feed.hand_over_rows,
+        state.feed_part
+      )
+
+    {pieces, cut?} = take_room(pieces, room)
 
     case pieces do
       [] ->
@@ -290,7 +365,7 @@ defmodule Alambique.Feed.Publisher do
           {:batches, Enum.map(pieces, &Map.take(&1, [:txid, :ts, :changes, :partial]))}
         )
 
-        {sent(state, pieces, cut?), beyond != [] and not cut?}
+        {sent(state, pieces, cut?), more? and not cut?}
     end
   end
 
@@ -306,37 +381,15 @@ defmodule Alambique.Feed.Publisher do
     }
   end
 
+  defp open_reader(%State{feed_reader: nil} = state) do
+    with {:ok, reader} <- Db.open_reader(state.path, state.config.feed.reader_cache_kib),
+         do: {:ok, %{state | feed_reader: reader}}
+  end
+
+  defp open_reader(state), do: {:ok, state}
+
   defp alive?(nil), do: false
   defp alive?(pid), do: Process.alive?(pid)
-
-  # The batches of `rows`, in order, as pieces: `partial` when rows of the
-  # batch follow the piece (the first of `beyond` is one), `first` when the
-  # piece starts it (`resumed` is the position of a batch started before),
-  # `seq` the position of its last row.
-  defp pieces(rows, beyond, resumed) do
-    pieces =
-      for group <- Enum.chunk_by(rows, &hd/1) do
-        [txid, ts | _] = hd(group)
-
-        %{
-          txid: txid,
-          ts: ts,
-          changes:
-            Enum.map(group, fn [_, _, tbl, op, key, vals, _seq] -> {tbl, op, key, vals} end),
-          partial: false,
-          first: not match?({^txid, _}, resumed),
-          seq: group |> List.last() |> List.last()
-        }
-      end
-
-    case {List.last(pieces), beyond} do
-      {%{txid: txid} = last, [[txid | _] | _]} ->
-        List.replace_at(pieces, -1, %{last | partial: true})
-
-      _ ->
-        pieces
-    end
-  end
 
   # The pieces of at most `room` batches: one that goes on a batch begun before
   # takes none. Whether others were left.

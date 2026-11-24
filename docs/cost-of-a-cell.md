@@ -109,6 +109,19 @@ not one cell. To count one cell, list its prefix in the bucket.
 
 ## 5. What changes the cost
 
+**`feed: [hand_over: :sender, reader_cache_kib: ...]`.** Off by default
+(`hand_over: :cell`: the cell reads the rows of an acknowledged batch itself).
+With `:sender` the cell hands over only the range of TXIDs and the feed sender
+reads the rows through a second, read-only connection to the cell's file. The
+connection is opened when a range is handed over and closed when the sender
+has read everything handed over, so a cell that publishes in bursts opens one
+connection per burst, not one per write; a read is one statement and holds no
+lock between statements. While it is open it holds a page cache of
+`reader_cache_kib` (default 64) plus its schema and statements, which count
+in `awake.max_bytes` with the cell's own connection, and two more open files
+(the database and its WAL). What the open and the page cache cost in time is
+not measured yet.
+
 **`awake: [cache_kib: ...]`.** The page cache of each awake cell's connection,
 in KiB, set with `PRAGMA cache_size` when the cell wakes. The default is 512.
 It caps the memory an awake cell takes for its database pages, and a cell with
