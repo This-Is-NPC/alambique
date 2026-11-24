@@ -17,7 +17,8 @@ defmodule Alambique.Tx do
   `ROLLBACK TO` and `RELEASE` are allowed, and `rollback/2` aborts the whole
   transaction. `query/3` and `execute/3` take one statement: text after it that
   holds another statement gives `{:error, {:multiple_statements, tail}}` and
-  nothing runs; comments, spaces and `;` may follow.
+  nothing runs; comments, spaces and `;` may follow. Text with a NUL byte gives
+  `{:error, :nul_in_statement}` and nothing runs.
 
   When SQLite ends the transaction by itself (`INSERT OR ROLLBACK` on a
   conflict, a trigger with `RAISE(ROLLBACK, ...)`, a statement stopped at its

@@ -12,7 +12,8 @@ defmodule Alambique.Sqlite do
   call returns `{:error, message}` with SQLite's message, or
   `{:error, :not_authorized}` for a statement the connection refuses (below),
   or `{:error, :disk_full}` when SQLite reports `SQLITE_FULL` (the disk or the
-  `max_page_count` limit has no room).
+  `max_page_count` limit has no room). Text with a NUL byte is refused with
+  `{:error, :nul_in_statement}` before anything runs.
 
   A connection refuses `ATTACH`, `DETACH` and `VACUUM` unless it was opened
   with `attach: true`, and is opened defensive (no writes to the schema or to

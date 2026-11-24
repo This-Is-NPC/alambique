@@ -33,7 +33,7 @@ mod atoms {
         ok, error, blob, nil, undefined, idle, transaction,
         connection_closed, argument_error, busy, disk_full,
         statement_timeout, result_too_large, not_authorized, multiple_statements, transaction_ended, cache_used,
-        schema_used, stmt_used, lookaside_used,
+        schema_used, stmt_used, lookaside_used, nul_in_statement,
     }
 }
 
@@ -132,6 +132,7 @@ enum Failure {
     TooLarge,
     Denied,
     Multiple(String),
+    NulInStatement,
     TransactionEnded,
     Busy,
     DiskFull,
@@ -148,6 +149,7 @@ impl Failure {
             Failure::Denied => atoms::not_authorized().encode(env),
             Failure::TransactionEnded => atoms::transaction_ended().encode(env),
             Failure::Multiple(tail) => (atoms::multiple_statements(), tail).encode(env),
+            Failure::NulInStatement => atoms::nul_in_statement().encode(env),
             Failure::Busy => atoms::busy().encode(env),
             Failure::DiskFull => atoms::disk_full().encode(env),
         };
@@ -828,8 +830,7 @@ fn sqlite_execute<'a>(
 ) -> Term<'a> {
     let _t = crate::stats::SQLITE_CALLS.time();
     let run = || -> Outcome<'a> {
-        let sql = CString::new(sql.as_slice())
-            .map_err(|_| Failure::Message("sql contains a nul byte".into()))?;
+        let sql = CString::new(sql.as_slice()).map_err(|_| Failure::NulInStatement)?;
         with_db(&conn, |db| {
             check_transaction(&conn.control, db)?;
             let limits = Limits {
@@ -877,6 +878,9 @@ fn sqlite_run<'a>(
         max_bytes: limits.3,
     };
     let run = || -> Outcome<'a> {
+        if sql.as_slice().contains(&0) {
+            return Err(Failure::NulInStatement);
+        }
         let _slot = Slot::take(max_concurrent)?;
         with_db(&conn, |db| {
             check_transaction(&conn.control, db)?;
