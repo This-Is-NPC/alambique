@@ -8,9 +8,15 @@ defmodule Alambique.TransactionControlPropertiesTest do
   with the store holding the uploads, a write of another caller in flight when
   the function runs, and idle feed cleanups between the steps:
 
-    * I1: committed frames no batch carries imply a write in flight;
-    * I2: a read never returns a row the store does not hold, and the row is
-      still there after the cell sleeps or is killed and wakes;
+    * A: the caller is answered as the steps say: `{:ok, :ok}` when none of
+      them ended the transaction, at once `{:error, :transaction_ended}` when
+      one did (a conflict that rolls back, an end behind the library's back);
+      any other answer, and any exit that is not the kill of the test, fails;
+    * I1: committed frames no batch carries imply a write in flight, while the
+      puts are held and again once the cell is idle;
+    * I2: a read never returns a row the store does not hold (it may time out
+      only while a write waits for its batch), and the row is still there
+      after the cell sleeps or is killed and wakes;
     * I3: after a hibernation and after a kill, the cell wakes with the rows
       the store holds;
     * I4: every durable row is in the change feed once.
@@ -175,13 +181,15 @@ defmodule Alambique.TransactionControlPropertiesTest do
 
   defp stored(ctx, cell), do: ids(durable_rows(%{ctx.env | store: ctx.raw}, cell, @all))
 
+  # What a read answers while the puts are held, with every kind of failure
+  # apart: `{:ok, ids}`, `{:error, reason}` or `{:exit, reason}`.
   defp rows(ctx, cell) do
     case Alambique.query(ctx.inst, cell, @all, [], timeout: 800) do
-      {:ok, %{rows: rows}} -> ids(rows)
-      _ -> :blocked
+      {:ok, %{rows: rows}} -> {:ok, ids(rows)}
+      {:error, _} = error -> error
     end
   catch
-    :exit, _ -> :blocked
+    :exit, reason -> {:exit, reason}
   end
 
   defp wake_rows(ctx, cell) do
@@ -191,15 +199,39 @@ defmodule Alambique.TransactionControlPropertiesTest do
 
   defp pid(ctx, cell), do: Cell.whereis(Config.fetch!(ctx.inst), cell)
 
-  defp unreplicated_without_write?(ctx, cell) do
-    with pid when is_pid(pid) <- pid(ctx, cell),
-         %{repl: repl, pending: pending, pipe: pipe} <- :sys.get_state(pid, 2_000) do
-      Replicator.unreplicated?(repl) and pending == [] and pipe.queue == []
-    else
-      _ -> false
+  # `:orphan` when the WAL holds frames that no write accounts for; `:none`
+  # when there is no cell. A cell that does not answer while it is alive is a
+  # failure, not a pass.
+  defp frames_state(ctx, cell) do
+    case pid(ctx, cell) do
+      pid when is_pid(pid) ->
+        try do
+          %{repl: repl, pending: pending, pipe: pipe} = :sys.get_state(pid, 2_000)
+
+          if Replicator.unreplicated?(repl) and pending == [] and pipe.queue == [],
+            do: :orphan,
+            else: :ok
+        catch
+          :exit, reason -> if Process.alive?(pid), do: {:exit, reason}, else: :none
+        end
+
+      _ ->
+        :none
+    end
+  end
+
+  # No write waits: nothing is pending or queued (or there is no cell).
+  defp idle?(ctx, cell) do
+    case pid(ctx, cell) do
+      pid when is_pid(pid) ->
+        s = :sys.get_state(pid, 2_000)
+        s.pending == [] and s.pipe.queue == []
+
+      _ ->
+        true
     end
   catch
-    :exit, _ -> false
+    :exit, _ -> true
   end
 
   defp cleaned?(ctx, cell) do
@@ -230,6 +262,51 @@ defmodule Alambique.TransactionControlPropertiesTest do
     end)
   end
 
+  # Whether any step ends the transaction of the function.
+  defp ends?(ops), do: Enum.any?(ops, &(&1 in [:conflict, :lifted]))
+
+  defp scripts?(ops),
+    do: Enum.any?(ops, &(is_tuple(&1) and elem(&1, 0) in [:smuggle, :variable, :bom]))
+
+  # Whether the function leaves something to commit when it ends.
+  defp commits?(ops), do: Enum.any?(ops, &(&1 in [:insert, :end_column, :trailing_bom]))
+
+  # The answer to the caller before the puts are released.
+  defp assert_early(early, ops, inflight?) do
+    cond do
+      ends?(ops) ->
+        assert early == {:ok, {:error, :transaction_ended}},
+               "A: a write that ended its transaction was answered #{inspect(early)}: #{inspect(ops)}"
+
+      commits?(ops) ->
+        assert early == nil,
+               "A: a write was answered #{inspect(early)} before its batch is durable: #{inspect(ops)}"
+
+      true ->
+        # Nothing was left to commit: answered at once, behind the batch in
+        # flight, or after the batch of a script whose triggers were rewritten
+        # although its statements were undone.
+        assert early == {:ok, {:ok, :ok}} or ((inflight? or scripts?(ops)) and early == nil),
+               "A: a write that changed nothing was answered #{inspect(early)}: #{inspect(ops)}"
+    end
+  end
+
+  # The answer once the puts are released, or the cell is killed. A write
+  # answered before (`assert_early/3`) is answered with the same.
+  defp assert_final(final, ops, killed?) do
+    cond do
+      ends?(ops) -> assert final == {:ok, {:error, :transaction_ended}}, "A: #{inspect(final)}"
+      final == {:ok, {:ok, :ok}} -> :ok
+      killed? -> assert down?(final), "A: #{inspect(final)} after the kill: #{inspect(ops)}"
+      true -> flunk("A: #{inspect(final)} for #{inspect(ops)}")
+    end
+  end
+
+  # The caller of a killed cell is told so, or exits with it.
+  defp down?({:ok, {:error, {:cell_down, _}}}), do: true
+  defp down?({:exit, _}), do: true
+  defp down?(_), do: false
+
   property "a transaction function cannot make a write the cell does not account for", ctx do
     counter = :counters.new(1, [])
 
@@ -238,12 +315,32 @@ defmodule Alambique.TransactionControlPropertiesTest do
             sleep? <- boolean(),
             inflight? <- boolean(),
             clean? <- boolean(),
+            orphan? <- boolean(),
             max_runs: 40
           ) do
       :counters.add(counter, 1, 1)
       cell = "cell-#{:counters.get(counter, 1)}-#{System.unique_integer([:positive])}"
       GatedStore.open(ctx.gate)
       {:ok, _} = Alambique.execute(ctx.inst, cell, "INSERT INTO t VALUES (0)")
+
+      # Frames committed outside any write: the cut that follows reports them
+      # and the cell stops, so the row is never durable.
+      if orphan? do
+        :ok =
+          Alambique.Cell.Db.writable_script(
+            :sys.get_state(pid(ctx, cell)).conn,
+            "INSERT INTO t VALUES (5000)"
+          )
+
+        assert Alambique.position(ctx.inst, cell) == {:error, :orphan_frames},
+               "orphan: #{inspect(ops)}"
+
+        eventually(fn -> Alambique.owner(ctx.inst, cell) == :none end)
+        refute 5000 in stored(ctx, cell)
+        # Woken again before the puts are held.
+        assert {:ok, _} = Alambique.query(ctx.inst, cell, "SELECT 1")
+      end
+
       GatedStore.hold(ctx.gate, Regex.compile!(Regex.escape(cell) <> "/0000/"))
 
       # Another caller's write is in flight when the function runs.
@@ -257,45 +354,64 @@ defmodule Alambique.TransactionControlPropertiesTest do
         end
 
       task = Task.async(fn -> Alambique.transaction(ctx.inst, cell, function(ops)) end)
-      _ = Task.yield(task, 300)
+      early = Task.yield(task, 300)
+      assert_early(early, ops, inflight?)
 
       # I1 and I2 while the puts are held.
-      refute unreplicated_without_write?(ctx, cell), "I1: #{inspect(ops)}"
-      seen = rows(ctx, cell)
+      assert frames_state(ctx, cell) in [:ok, :none], "I1: #{inspect(ops)}"
       held = stored(ctx, cell)
 
-      if seen != :blocked,
-        do: assert(seen -- held == [], "I2: #{inspect(ops)} saw #{inspect(seen)}")
+      case rows(ctx, cell) do
+        {:ok, seen} ->
+          assert seen -- held == [], "I2: #{inspect(ops)} saw #{inspect(seen)}"
+
+        # A write waits for its batch, or the cell that replaced the one that
+        # stopped is still waking behind the held puts.
+        {:error, :timeout} ->
+          assert inflight? or ends?(ops) or commits?(ops) or scripts?(ops),
+                 "I2: a read timed out with no write waiting: #{inspect(ops)}"
+
+        other ->
+          flunk("I2: a read answered #{inspect(other)}: #{inspect(ops)}")
+      end
 
       # Idle cleanups run between the steps, and must not carry frames of a
       # failed write or lose their feed rows.
-      if clean? do
-        GatedStore.open(ctx.gate)
-        _ = Task.yield(task, 3_000)
-        eventually(fn -> cleaned?(ctx, cell) end)
-      end
+      answer =
+        if clean? do
+          GatedStore.open(ctx.gate)
+          answer = early || Task.yield(task, 3_000)
+          eventually(fn -> cleaned?(ctx, cell) end)
+          answer
+        else
+          early
+        end
 
-      after_wake =
+      {final, after_wake} =
         if sleep? do
           GatedStore.open(ctx.gate)
-          _ = Task.yield(task, 3_000) || Task.shutdown(task, :brutal_kill)
+          final = answer || Task.yield(task, 5_000) || Task.shutdown(task, :brutal_kill)
+          eventually(fn -> idle?(ctx, cell) end)
+          assert frames_state(ctx, cell) in [:ok, :none], "I1 idle: #{inspect(ops)}"
           _ = Alambique.hibernate(ctx.inst, cell)
           eventually(fn -> Alambique.owner(ctx.inst, cell) == :none end)
           wipe(ctx, cell)
-          wake_rows(ctx, cell)
+          {final, wake_rows(ctx, cell)}
         else
           if pid = pid(ctx, cell), do: Process.exit(pid, :kill)
           eventually(fn -> Alambique.owner(ctx.inst, cell) == :none end)
           wipe(ctx, cell)
           GatedStore.open(ctx.gate)
-          Task.shutdown(task, 2_000)
-          wake_rows(ctx, cell)
+          final = answer || Task.shutdown(task, 2_000) || {:exit, :no_answer}
+          {final, wake_rows(ctx, cell)}
         end
+
+      assert_final(final, ops, not sleep?)
 
       # I3: the wake serves what the store holds; and what a reader saw is still there.
       durable = stored(ctx, cell)
       assert after_wake == durable, "I3: #{inspect(ops)}"
-      if seen != :blocked, do: assert(seen -- after_wake == [], "I2 later: #{inspect(ops)}")
+      refute 5000 in durable
 
       if inflight, do: Task.shutdown(inflight, 2_000)
 

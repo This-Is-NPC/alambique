@@ -26,7 +26,7 @@ defmodule Alambique.CellHelpers do
     Alambique.Fault.install(fn
       :db_before_commit, %{conn: conn} ->
         if Process.delete(@commit_behind_back),
-          do: :ok = Alambique.Replication.Native.commit_behind_back(conn)
+          do: _ = Alambique.Replication.Native.commit_behind_back(conn)
 
         :ok
 
