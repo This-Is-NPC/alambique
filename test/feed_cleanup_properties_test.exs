@@ -1,12 +1,15 @@
 defmodule Alambique.FeedCleanupPropertiesTest do
   @moduledoc """
-  The feed under every cleanup mode (design §13). Random scenarios mix writes
-  of random sizes, publications held and released, quiet periods, kills and
-  hibernations of one cell, with the cleanup bounded or not and the hand-over
-  to the sender in pieces or not, read by the cell or by the sender. After the cell has
-  published what it holds, the records, deduplicated by id, are every captured
-  change exactly once and in order, a repeated record is identical to its
-  first, and no change has two ids.
+  The feed under every cleanup mode and under feed puts that fail (design
+  §13, §15). Random scenarios mix writes of random sizes, publications held
+  and released, feed puts that fail, lose their acknowledgement or are slow,
+  quiet periods, kills and hibernations of one cell, and a write that cleans
+  while an earlier batch is still unpublished, with the cleanup bounded or not
+  and the hand-over to the sender in pieces or not. Once the faults are
+  cleared, the records of the feed, deduplicated by id, are the rows of the
+  state restored from the store: every acknowledged write, each row once and
+  in order, and no row that no write made. A repeated record is identical to
+  its first, and no change has two ids.
   """
   use ExUnit.Case, async: false
   use ExUnitProperties
@@ -16,7 +19,7 @@ defmodule Alambique.FeedCleanupPropertiesTest do
   alias Alambique.{Feed, Sqlite, Tx}
   alias Alambique.Cell.Db
   alias Alambique.Feed.Capture
-  alias AlambiqueTestkit.{CrashPoints, GatedStore}
+  alias AlambiqueTestkit.{CrashPoints, GatedStore, MemoryStore}
 
   @schema [{1, "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)"}]
   @cell "cleanup-cell"
@@ -34,7 +37,14 @@ defmodule Alambique.FeedCleanupPropertiesTest do
       {4, constant(:idle)},
       {1, constant(:kill)},
       {2, constant(:hibernate)},
-      {2, tuple({constant(:pass), integer(0..30)})}
+      {2, tuple({constant(:pass), integer(0..30)})},
+      # Fewer failures than the attempts of one put, and more.
+      {2, tuple({constant(:fail), integer(1..7)})},
+      {1, constant(:fail_all)},
+      {2, tuple({constant(:lose_ack), integer(1..4)})},
+      {1, tuple({constant(:slow), integer(20..80)})},
+      {2, constant(:clear)},
+      {3, tuple({constant(:race), member_of([:kill, :hibernate, :stay])})}
     ])
   end
 
@@ -43,14 +53,15 @@ defmodule Alambique.FeedCleanupPropertiesTest do
 
     check all(
             cleanup <- member_of([:in_write, :idle, :after_publish, :idle_or_write]),
-            rows <- member_of([nil, 2, 5]),
             pieces <- member_of([nil, 2, 3]),
             hand_over <- member_of([:cell, :sender]),
+            rows <- member_of([nil, 1, 2, 5]),
+            first <- integer(1..6),
             ops <- list_of(op(), min_length: 6, max_length: 16),
             max_runs: 20,
             max_shrinking_steps: 0
           ) do
-      scenario(ctx, runs, {cleanup, rows, pieces, hand_over}, ops)
+      scenario(ctx, runs, {cleanup, rows, pieces, hand_over}, [{:write, first} | ops])
     end
   end
 
@@ -61,7 +72,8 @@ defmodule Alambique.FeedCleanupPropertiesTest do
 
     check all(
             cleanup <- member_of([:idle, :after_publish, :idle_or_write]),
-            rows <- member_of([nil, 2]),
+            rows <- member_of([nil, 1, 2]),
+            first <- integer(1..6),
             pieces <- member_of([nil, 2, 3]),
             hand_over <- member_of([:cell, :sender]),
             ops <- list_of(op(), min_length: 6, max_length: 12),
@@ -75,7 +87,7 @@ defmodule Alambique.FeedCleanupPropertiesTest do
         |> List.insert_at(kill_at, :kill)
         |> List.insert_at(crash_at, :crash_in_cleanup)
 
-      scenario(ctx, runs, {cleanup, rows, pieces, hand_over}, ops)
+      scenario(ctx, runs, {cleanup, rows, pieces, hand_over}, [{:write, first} | ops])
     end
   end
 
@@ -143,6 +155,7 @@ defmodule Alambique.FeedCleanupPropertiesTest do
     n = :counters.get(runs, 1)
     {:ok, gate} = GatedStore.start_link()
     store = GatedStore.wrap(gate, ctx.store)
+    {_, mem} = ctx.store
 
     inst =
       start_instance(%{ctx | store: store},
@@ -152,6 +165,7 @@ defmodule Alambique.FeedCleanupPropertiesTest do
         lease_ttl_ms: 1_000,
         skew_margin_ms: 200,
         idle_timeout_ms: 60_000,
+        retry: [max_attempts: 3],
         feed: [
           cleanup: cleanup,
           cleanup_after_ms: 40,
@@ -165,11 +179,24 @@ defmodule Alambique.FeedCleanupPropertiesTest do
         ]
       )
 
+    run = %{
+      inst: inst,
+      cleanup: cleanup,
+      gate: gate,
+      mem: mem,
+      store: ctx.store,
+      n: n,
+      next: 1,
+      acked: [],
+      unknown: [],
+      hurt: false
+    }
+
     try do
-      run = Enum.reduce(ops, %{inst: inst, gate: gate, next: 1}, &step/2)
-      GatedStore.open(gate)
-      verify(ctx, n, run)
+      run = Enum.reduce(ops, run, &step/2)
+      verify(ctx, run)
     after
+      MemoryStore.clear(mem)
       GatedStore.open(gate)
       stop_supervised!(inst)
       GenServer.stop(gate)
@@ -180,19 +207,35 @@ defmodule Alambique.FeedCleanupPropertiesTest do
   defp ready(run),
     do: eventually(fn -> match?({:ok, _}, Alambique.touch(run.inst, @cell)) end, 15_000)
 
-  defp step({:write, k}, run) do
+  # The answer of a write is `{:ok, :ok}` unless a kill or a crash met it; a
+  # write with another answer may or may not be durable, as a whole.
+  defp write(run, k) do
     ready(run)
     ids = Enum.to_list(run.next..(run.next + k - 1))
 
-    # A write that meets a kill has no answer: the table says if it is durable.
-    _ =
-      Alambique.transaction(run.inst, @cell, fn tx ->
-        for id <- ids, do: {:ok, _} = Tx.execute(tx, "INSERT INTO notes VALUES (?, 'x')", [id])
-        :ok
-      end)
+    answer =
+      try do
+        Alambique.transaction(run.inst, @cell, fn tx ->
+          for id <- ids, do: {:ok, _} = Tx.execute(tx, "INSERT INTO notes VALUES (?, 'x')", [id])
+          :ok
+        end)
+      catch
+        :exit, reason -> {:exit, reason}
+      end
 
-    %{run | next: run.next + k}
+    run = %{run | next: run.next + k}
+
+    case answer do
+      {:ok, :ok} ->
+        %{run | acked: run.acked ++ ids}
+
+      other ->
+        assert run.hurt, "a write was not acknowledged without a kill: #{inspect(other)}"
+        %{run | unknown: [ids | run.unknown]}
+    end
   end
+
+  defp step({:write, k}, run), do: write(run, k)
 
   defp step(:hold, run) do
     GatedStore.hold(run.gate, ~r{/feed/})
@@ -210,18 +253,13 @@ defmodule Alambique.FeedCleanupPropertiesTest do
   end
 
   defp step(:kill, run) do
-    case Alambique.Cell.whereis(Alambique.Config.fetch!(run.inst), @cell) do
-      nil -> :ok
-      pid -> Process.exit(pid, :kill)
-    end
-
-    run
+    kill(run)
+    %{run | hurt: true}
   end
 
-  # The cell dies after a cleanup committed locally, before its batch is sent.
   defp step(:crash_in_cleanup, run) do
     CrashPoints.arm(:feed_after_cleanup, :kill, when: &match?(%{cell: @cell}, &1))
-    run
+    %{run | hurt: true}
   end
 
   defp step(:hibernate, run) do
@@ -235,46 +273,185 @@ defmodule Alambique.FeedCleanupPropertiesTest do
     run
   end
 
-  defp verify(ctx, n, run) do
+  defp step({:fail, times}, run), do: inject(run, :error, times: times)
+  defp step(:fail_all, run), do: inject(run, :error, [])
+  defp step({:lose_ack, times}, run), do: inject(run, :lost_ack, times: times)
+  defp step({:slow, ms}, run), do: inject(run, :latency, ms: ms, times: 4)
+
+  defp step(:clear, run) do
+    MemoryStore.clear(run.mem)
+    run
+  end
+
+  # A batch is published and the next one is held on its put, which the cell
+  # has handed over but not published, when a write cleans up the cell: the
+  # rows of the held batch stay, whatever happens to the cell next.
+  defp step({:race, after_race}, run) do
+    run = settle(run)
+    GatedStore.hold(run.gate, ~r{/feed/})
+    run = run |> write(1) |> write(1)
+
+    [first | _] =
+      eventually(fn -> GatedStore.held(run.gate) != [] and GatedStore.held(run.gate) end)
+
+    before = published(run) || 0
+    GatedStore.release(run.gate, first)
+    # A crash armed in the cleanup may have stopped the cell meanwhile.
+    eventually(fn -> (now = published(run)) == nil or now > before end)
+    run = write(run, 1)
+
+    case after_race do
+      :kill ->
+        kill(run)
+        %{run | hurt: true}
+
+      :hibernate ->
+        _ = Alambique.hibernate(run.inst, @cell)
+        run
+
+      :stay ->
+        run
+    end
+  end
+
+  defp inject(run, kind, opts) do
+    MemoryStore.inject(
+      run.mem,
+      [kind: kind, ops: [:put], key: ~r{cleanup-#{run.n}/feed/}] ++ opts
+    )
+
+    run
+  end
+
+  defp kill(run) do
+    case Alambique.Cell.whereis(Alambique.Config.fetch!(run.inst), @cell) do
+      nil -> :ok
+      pid -> Process.exit(pid, :kill)
+    end
+  end
+
+  # `nil` when the cell is not running.
+  defp published(run) do
+    case Alambique.Cell.whereis(Alambique.Config.fetch!(run.inst), @cell) do
+      nil -> nil
+      pid -> :sys.get_state(pid).feed_published
+    end
+  catch
+    :exit, _ -> nil
+  end
+
+  # Faults cleared, puts released, every acknowledged row on the feed and the
+  # cell told of its publication.
+  defp settle(run) do
+    MemoryStore.clear(run.mem)
+    GatedStore.open(run.gate)
+    ready(run)
+
+    try do
+      eventually(fn -> caught_up?(run) end, 20_000)
+    rescue
+      RuntimeError ->
+        records = feed_records(run)
+
+        flunk(
+          "feed stalled: acked #{inspect(run.acked)} feed #{inspect(ids(records))} " <>
+            "published #{inspect(published(run))}"
+        )
+    end
+
+    run
+  end
+
+  # A crash armed earlier may stop the cell again: a call wakes it. A cell
+  # that woke after its rows were cleaned has published nothing itself.
+  defp caught_up?(run) do
+    {:ok, _} = Alambique.touch(run.inst, @cell)
+    published = published(run) || 0
+
+    {:ok, %{rows: [[waiting]]}} =
+      Alambique.query(
+        run.inst,
+        @cell,
+        "SELECT count(*) FROM _alambique_feed WHERE op != 'floor' AND txid > ?",
+        [published]
+      )
+
+    run.acked -- ids(feed_records(run)) == [] and waiting == 0
+  end
+
+  defp feed_records(run) do
+    feed = Feed.ctx(store: run.store, prefix: "cleanup-#{run.n}", settle_ms: 0)
+    {:ok, all, _} = Feed.read(feed, nil, 10_000)
+    Enum.filter(all, &(&1.cell == @cell))
+  end
+
+  defp ids(records), do: records |> Enum.uniq_by(& &1.id) |> Enum.map(& &1.key["id"])
+
+  # The rows the store holds for the cell: what survives if every node dies.
+  defp stored(ctx, run) do
+    eventually(fn ->
+      read = fn ->
+        durable_rows(ctx, @cell, "SELECT id FROM notes ORDER BY id", "cleanup-#{run.n}")
+      end
+
+      first = read.()
+      Process.sleep(50)
+      first == read.() and List.flatten(first)
+    end)
+  end
+
+  defp verify(ctx, run) do
     # A crash armed and not yet fired would kill the cell after this point,
     # and a dead cell publishes nothing until the next call wakes it.
     CrashPoints.disarm(:feed_after_cleanup)
+    MemoryStore.clear(run.mem)
+    GatedStore.open(run.gate)
     ready(run)
-    # A crash that fired meanwhile can still kill the cell under this read.
-    expected =
-      eventually(fn ->
-        case Alambique.query(run.inst, @cell, "SELECT id FROM notes ORDER BY id") do
-          {:ok, %{rows: rows}} -> {:ids, List.flatten(rows)}
-          _ -> false
-        end
-      end)
-      |> elem(1)
+    stored = stored(ctx, run)
 
-    feed = Feed.ctx(store: ctx.store, prefix: "cleanup-#{n}", settle_ms: 0)
+    assert run.acked != []
+    assert run.acked -- stored == [], "an acknowledged row is not in the store"
+    unknown = List.flatten(run.unknown)
+    assert stored -- (run.acked ++ unknown) == [], "the store holds a row no write made"
 
-    records =
-      eventually(
-        fn ->
-          {:ok, all, _} = Feed.read(feed, nil, 10_000)
-          all = Enum.filter(all, &(&1.cell == @cell))
-          ids = all |> Enum.uniq_by(& &1.id) |> Enum.map(& &1.key["id"])
-          ids == expected and all
-        end,
-        20_000
-      )
+    for ids <- run.unknown do
+      assert length(ids -- stored) in [0, length(ids)],
+             "a write is durable in part: #{inspect(ids)}"
+    end
 
+    records = eventually(fn -> (r = feed_records(run)) && ids(r) == stored && r end, 20_000)
     first = Enum.uniq_by(records, & &1.id)
-    assert Enum.map(first, & &1.key["id"]) == expected
+
+    assert Enum.map(first, & &1.key["id"]) == stored
+    assert Enum.map(first, & &1.position) == Enum.sort(Enum.map(first, & &1.position))
 
     for {id, same} <- Enum.group_by(records, & &1.id) do
       assert same |> Enum.map(&Map.delete(&1, :at)) |> Enum.uniq() |> length() == 1,
              "#{id} was published twice with different content"
     end
 
+    # Published rows leave the cell, a batch at a time however small the
+    # bound, once the cell cleans on its own.
+    if run.cleanup != :in_write, do: assert_cleaned(run, 100)
+
     # The positions of a batch run from 0 without a gap.
     for {_txid, batch} <- Enum.group_by(first, &elem(&1.position, 0)) do
       assert batch |> Enum.map(&elem(&1.position, 1)) |> Enum.sort() ==
                Enum.to_list(0..(length(batch) - 1)//1)
+    end
+  end
+
+  # The idle modes clean in quiet time: a poll slower than the quiet period
+  # leaves it.
+  defp assert_cleaned(_run, 0), do: flunk("published rows were never removed from the cell")
+
+  defp assert_cleaned(run, tries) do
+    {:ok, %{rows: [[left]]}} =
+      Alambique.query(run.inst, @cell, "SELECT count(*) FROM _alambique_feed WHERE op != 'floor'")
+
+    if left > 0 do
+      Process.sleep(200)
+      assert_cleaned(run, tries - 1)
     end
   end
 end
