@@ -86,6 +86,16 @@ and the `Alambique.Tx` functions is one statement.
   `Tx.execute/3`, `Tx.query/3`, `Tx.script/2` and for any statement run on the
   connection of the handle with `Alambique.Sqlite` while the transaction is
   open. `SAVEPOINT`, `RELEASE` and `ROLLBACK TO` work; `Tx.rollback/2` aborts.
+- The connection of the handle (`tx.conn`) is the cell's own, and it is for the
+  function while it runs, in the process that runs it. While the function
+  runs it can also run its own statements on it, but not close it
+  (`Alambique.Sqlite.close/1`, `checkpoint/1` and a second
+  `begin_transaction/1` give `{:error, :not_authorized}`). Once the function
+  has returned, the handle can only read, and only in the cell's process: a
+  write, a pragma that sets something, `ATTACH`, `ANALYZE`, `REINDEX`,
+  `VACUUM` and `PRAGMA optimize` give `{:error, :not_authorized}`, and `close/1`
+  and `checkpoint/1` do too. Any call on it from another process gives
+  `{:error, :not_owner}`. Keep rows, not the handle.
 - Text after the first statement that holds another statement gives
   `{:error, {:multiple_statements, tail}}` (the start of the tail) and nothing
   runs. Spaces, comments and `;` may follow.
@@ -123,9 +133,7 @@ and the `Alambique.Tx` functions is one statement.
   is not durable; with `:replicate` the answer is `{:error, {:committed,
   {:query_only, reason}}}` and the rows are.
 - `{:error, {:rollback_failed, reason}}`: the rollback failed and the
-  transaction may still be open. The cell stops. A function that closes the
-  connection gets `{:rollback_failed, :connection_closed}` and loses its write.
-  The same two results stop the cell in a feed cleanup and in a migration of a
+  transaction may still be open. The cell stops. The same two results stop the cell in a feed cleanup and in a migration of a
   serving cell, whose caller gets `{:error, {:migrate_failed, {:migration,
   version, reason}}}`.
 - `{:error, {:stamp_failed, reason}}`: the feed rows of a batch could not be
