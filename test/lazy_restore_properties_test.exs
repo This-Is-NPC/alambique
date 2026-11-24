@@ -448,11 +448,23 @@ defmodule Alambique.LazyRestorePropertiesTest do
   # Nothing is acknowledged while a damaged page may be in the file: the write
   # gate holds the writes until hydration has checked the pages.
   defp sync(model) do
-    with false <- damaged?(model),
-         {:ok, repl} <- Replicator.sync(model.repl, model.ctx) do
-      %{model | repl: repl}
+    if damaged?(model) do
+      model
     else
-      _ -> model
+      case Replicator.encode(model.repl, model.ctx, :batch, []) do
+        :none ->
+          model
+
+        {:error, _} ->
+          model
+
+        {:ok, next, up} ->
+          case Replicator.upload(up, model.ctx, []) do
+            :ok -> %{model | repl: next}
+            _ when next.lazy == nil -> model
+            _ -> %{model | over: true}
+          end
+      end
     end
   end
 
@@ -507,7 +519,7 @@ defmodule Alambique.LazyRestorePropertiesTest do
     expected = read(model.reference, r)
 
     if read(model.conn, r) != expected do
-      {:ok, fresh} = Db.open(model.path)
+      {:ok, fresh} = Db.open_reader(model.path, 1024)
       agrees? = read(fresh, r) == expected
       Sqlite.close(fresh)
 
