@@ -15,7 +15,8 @@ defmodule Alambique.ConnectionGateTest do
   #   :read  - allowed in every state
   #   :write - refused unarmed, allowed armed and flagged
   #   :never - never run, in every state (no `attach: true`; the pragmas the library never allows)
-  #   :txn   - transaction control: refused unarmed and armed, allowed flagged
+  #   :txn   - transaction control: refused unarmed and armed, and in a user's
+  #            text in every state; allowed flagged in the library's own text
   @kinds [
     {:read, "SELECT * FROM t"},
     {:read, "SELECT count(*) FROM sqlite_master"},
@@ -41,7 +42,11 @@ defmodule Alambique.ConnectionGateTest do
     {:never, "VACUUM"},
     {:never, "PRAGMA wal_checkpoint"},
     {:never, "PRAGMA journal_mode = DELETE"},
-    {:txn, "BEGIN; ROLLBACK"}
+    {:txn, "BEGIN; ROLLBACK"},
+    {:txn, "BEGIN; COMMIT"},
+    {:txn, "BEGIN; END"},
+    {:txn, "BEGIN IMMEDIATE; ROLLBACK TRANSACTION"},
+    {:txn, "BEGIN DEFERRED; COMMIT TRANSACTION"}
   ]
 
   setup %{tmp_dir: dir} do
@@ -57,19 +62,27 @@ defmodule Alambique.ConnectionGateTest do
     %{conn: conn}
   end
 
-  # The result of `sql` on `conn` in `state`.
-  defp attempt(conn, sql, :unarmed), do: Sqlite.execute(conn, sql)
-  defp attempt(conn, sql, :flagged), do: Sqlite.execute(conn, sql, write: true)
+  # The result of `sql` on `conn` in `state`; `user?` runs it as a user's text
+  # (`no_transaction_control`).
+  defp attempt(conn, sql, :unarmed, user?),
+    do: Sqlite.execute(conn, sql, no_transaction_control: user?)
 
-  defp attempt(conn, sql, :armed) do
-    {:ok, result} = Db.transaction(conn, 1, fn tx -> Sqlite.execute(tx.conn, sql) end)
+  defp attempt(conn, sql, :flagged, user?),
+    do: Sqlite.execute(conn, sql, write: true, no_transaction_control: user?)
+
+  defp attempt(conn, sql, :armed, user?) do
+    {:ok, result} =
+      Db.transaction(conn, 1, fn tx ->
+        Sqlite.execute(tx.conn, sql, no_transaction_control: user?)
+      end)
+
     result
   end
 
   # What the table says of `kind` in `state`.
-  defp allowed?(:read, _state), do: true
-  defp allowed?(:write, state), do: state != :unarmed
-  defp allowed?(:txn, state), do: state == :flagged
+  defp allowed?(:read, _state, _user?), do: true
+  defp allowed?(:write, state, _user?), do: state != :unarmed
+  defp allowed?(:txn, state, user?), do: state == :flagged and not user?
 
   # `true` when the statement was not refused by the authorizer (it may fail
   # for another reason).
@@ -79,17 +92,18 @@ defmodule Alambique.ConnectionGateTest do
     check all(
             {kind, sql} <- member_of(@kinds),
             state <- member_of([:armed, :unarmed, :flagged]),
+            user? <- boolean(),
             max_runs: 300
           ) do
-      result = attempt(conn, sql, state)
+      result = attempt(conn, sql, state, user?)
 
       # Armed, SQLite itself refuses `VACUUM` before the authorizer is asked.
       if kind == :never,
         do: assert({:error, _} = result, "#{state} #{sql} gave #{inspect(result)}"),
         else:
           assert(
-            ran?(result) == allowed?(kind, state),
-            "#{state} #{kind} #{sql} gave #{inspect(result)}"
+            ran?(result) == allowed?(kind, state, user?),
+            "#{state} #{kind} #{sql} user text #{user?} gave #{inspect(result)}"
           )
 
       # Whatever ran, the connection is read-only again and the transaction is over.
