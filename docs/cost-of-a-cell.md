@@ -48,10 +48,11 @@ row.
 | Fixed, per node | 132 MB (small commits) and 137 MB (wakes) | intercepts of the two fits |
 | Per commit per second (small rows) | 0.118 MB | fit, R² 1.0, four good steps |
 | Per wake per second (cold) | 1.844 MB | fit, R² 0.99, three good steps |
-| Per awake cell | not measured | the operation on an awake cell has no fit |
+| Per idle awake cell | 0.45 to 0.5 MiB with `idle_gc` | anonymous memory, conditions in section 5 |
 | Per commit per second (large rows) | not measured | fit, R² 0.57, below 0.8 |
 
-The memory of a cell that is awake is not fitted, so it is not in the figures.
+The memory of a cell that is awake and busy is not fitted, so it is not in the
+figures. The memory of an idle awake cell is in section 5.
 The storage a cell keeps while asleep is in section 4.
 
 ## 3. Store requests and bytes per operation
@@ -116,11 +117,11 @@ reads the rows through a second, read-only connection to the cell's file. The
 connection is opened when a range is handed over and closed when the sender
 has read everything handed over, so a cell that publishes in bursts opens one
 connection per burst, not one per write; a read is one statement and holds no
-lock between statements. While it is open it holds a page cache of
+lock between statements. The cost per operation is one read-only open per burst
+of handed-over ranges. While it is open the reader holds a page cache of
 `reader_cache_kib` (default 64) plus its schema and statements, which count
 in `awake.max_bytes` with the cell's own connection, and two more open files
-(the database and its WAL). What the open and the page cache cost in time is
-not measured yet.
+(the database and its WAL).
 
 **`awake: [cache_kib: ...]`.** The page cache of each awake cell's connection,
 in KiB, set with `PRAGMA cache_size` when the cell wakes. The default is 512.
@@ -139,12 +140,16 @@ first call after a shrink reads its pages again. `idle_cache_after_ms` must be
 below `idle_timeout_ms`.
 
 `idle_gc` (default `true`) makes the cell also collect its own garbage when the
-shrink happens. It returns the garbage of the last calls: a cell that ran one
-large transaction holds about 1.5 MiB while idle, and about 14 KiB after the
-collection. The cost is one collection of the cell process at that moment, with
-no measurable cost on the next call. It does nothing while `idle_cache_after_ms`
-is `nil`; with `idle_gc: false` the cell shrinks its cache and keeps the
-garbage. No figures yet.
+shrink happens. It returns the garbage of the last calls. With `cache_kib: 512`,
+`idle_cache_after_ms` set and `idle_cache_kib: 64`, an idle awake cell that ran
+one transaction of 4,500 rows holds about 3.2 MiB of anonymous memory with
+`idle_gc: false` and about 0.45 MiB with `idle_gc: true`; the cell process alone
+holds about 2.4 MiB against under 0.02 MiB. An idle awake cell that ran only
+small writes holds about 0.7 MiB with `idle_gc: false` and 0.45 to 0.5 MiB with
+`idle_gc: true`. The cost is one collection of the cell process at that moment,
+with no measurable cost on the next call. It does nothing while
+`idle_cache_after_ms` is `nil`; with `idle_gc: false` the cell shrinks its cache
+and keeps the garbage.
 
 **Dirty IO schedulers and `sql: [max_concurrent_statements:]`.** The statements
 of callers run on the dirty IO schedulers, which the node's commits share. The
