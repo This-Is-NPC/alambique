@@ -18,6 +18,12 @@ defmodule Alambique.Tx do
   transaction. `query/3` and `execute/3` take one statement: text after it that
   holds another statement gives `{:error, {:multiple_statements, tail}}` and
   nothing runs; comments, spaces and `;` may follow.
+
+  When SQLite ends the transaction by itself (`INSERT OR ROLLBACK` on a
+  conflict, a trigger with `RAISE(ROLLBACK, ...)`, a statement stopped at its
+  deadline), every later statement of the function returns
+  `{:error, :transaction_ended}` without running, and so does the call of
+  `Alambique.transaction/4` if the function returns.
   """
 
   alias Alambique.Cell.Db

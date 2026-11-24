@@ -145,6 +145,8 @@ defmodule Alambique.Config do
 
   @list_cells_defaults [page_size: 100, max_limit: 1_000, timeout_ms: nil]
 
+  @orphan_frames [:stop, :replicate]
+
   @feed_cleanups [:in_write, :idle, :after_publish, :idle_or_write]
 
   @feed_defaults [
@@ -303,7 +305,8 @@ defmodule Alambique.Config do
             script_timeout_ms: pos_integer,
             max_result_rows: pos_integer,
             max_result_bytes: pos_integer,
-            max_concurrent_statements: pos_integer
+            max_concurrent_statements: pos_integer,
+            orphan_frames: :stop | :replicate
           },
           replicas:
             %{
@@ -1142,8 +1145,14 @@ defmodule Alambique.Config do
   # keeps two slots: a write's statements hold slots too, so one slot refused
   # reads while a scheduler was free.
   defp sql(opts, op_timeout) do
-    options!(
-      :sql,
+    opts = if Keyword.keyword?(opts), do: opts, else: bad!(":sql must be a keyword list")
+    {orphans, opts} = Keyword.pop(opts, :orphan_frames, :stop)
+
+    unless orphans in @orphan_frames,
+      do: bad!(":sql orphan_frames must be one of #{inspect(@orphan_frames)}")
+
+    :sql
+    |> options!(
       opts,
       [
         statement_timeout_ms: op_timeout,
@@ -1152,6 +1161,7 @@ defmodule Alambique.Config do
       ] ++
         @sql_defaults
     )
+    |> Map.put(:orphan_frames, orphans)
   end
 
   @doc false

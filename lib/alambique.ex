@@ -360,6 +360,14 @@ defmodule Alambique do
       shared by every instance in the VM, and the limit is per instance: an
       instance refuses its reads when the shared count reaches its own limit,
       so instances in one VM should use the same value.
+      `:orphan_frames` (`:stop`, the default, or `:replicate`) says what a cell
+      does when committed frames no write carries are found (they cannot
+      come from a transaction function; see design §15): `:stop` stops the
+      cell, so the next wake restores what the store holds, and the call that
+      found them gets `{:error, :orphan_frames}` (`position/3`, `hibernate/3`) or its
+      own error (a write); `:replicate` uploads them as a batch first and goes
+      on (a write that failed then answers `{:error, {:committed, reason}}`,
+      as its rows are durable).
     * `:query` - defaults of `Alambique.Query`: `:cache_bytes` (default 1 GiB),
       `:concurrency` (cells read at once, default 16: the wait for the store
       dominates a cell, so the default does not follow the CPUs),

@@ -42,6 +42,17 @@ defmodule Alambique.ConfigOptionsTest do
       assert Alambique.Config.build(no_jitter).retry.check_timeout_ms == 250
     end
 
+    test "sql orphan_frames is :stop or :replicate", ctx do
+      assert Alambique.Config.build(base(ctx, [])).sql.orphan_frames == :stop
+
+      assert Alambique.Config.build(base(ctx, sql: [orphan_frames: :replicate])).sql.orphan_frames ==
+               :replicate
+
+      assert_raise ArgumentError, ~r/:sql orphan_frames must be one of/, fn ->
+        Alambique.Config.build(base(ctx, sql: [orphan_frames: :ignore]))
+      end
+    end
+
     test "an explicit value up to the bound is kept and a larger one is refused", ctx do
       ok = base(ctx, retry: [check_timeout_ms: 200])
       assert Alambique.Config.build(ok).retry.check_timeout_ms == 200

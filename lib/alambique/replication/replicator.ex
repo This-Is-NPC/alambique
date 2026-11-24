@@ -526,6 +526,13 @@ defmodule Alambique.Replication.Replicator do
     end
   end
 
+  @doc """
+  Whether the WAL holds committed frames that no batch has carried yet. An
+  unreadable WAL counts as holding them.
+  """
+  @spec unreplicated?(t) :: boolean
+  def unreplicated?(%__MODULE__{} = s), do: pending(s) != {:ok, false}
+
   defp pending(s) do
     case Native.wal_pending(wal_path(s), s.page_size, s.wal_pos) do
       {:ok, bool} -> {:ok, bool}

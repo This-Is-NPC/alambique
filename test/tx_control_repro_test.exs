@@ -11,7 +11,7 @@ defmodule Alambique.TxControlReproTest do
   import Alambique.CellHelpers
 
   alias Alambique.{Cell, Config, Feed, Tx}
-  alias Alambique.Replication.Native
+  alias Alambique.Replication.{Native, Replicator}
   alias AlambiqueTestkit.GatedStore
 
   @moduletag capture_log: true
@@ -520,6 +520,35 @@ defmodule Alambique.TxControlReproTest do
 
       assert Enum.all?(attempts, &match?({:error, {:migration, 2, _}}, &1)), inspect(attempts)
       assert Alambique.owner(inst, cell) == :none
+    end
+
+    test "a failed wake leaves nothing that a later wake serves or replicates", env do
+      Mig.set([hd(@schema)])
+      inst = start_instance(env, migrations: {Mig, :migrations}, compaction: false)
+      cell = "cell-#{env.tag}"
+      {:ok, _} = Alambique.execute(inst, cell, "INSERT INTO t VALUES (1)")
+      :ok = Alambique.hibernate(inst, cell)
+      Mig.set([hd(@schema), committing()])
+      for _ <- 1..2, do: {:error, {:migration, 2, _}} = Alambique.query(inst, cell, @all)
+      assert Alambique.owner(inst, cell) == :none
+
+      # A corrected list wakes the cell from the files the failed wakes left.
+      Mig.set([hd(@schema), {2, "CREATE TABLE later (x)"}])
+      # A failed wake is retried after a backoff.
+      {:ok, %{rows: rows}} =
+        eventually(fn ->
+          case Alambique.query(inst, cell, @all, [], timeout: 10_000) do
+            {:ok, _} = ok -> ok
+            _ -> nil
+          end
+        end)
+
+      refute 100 in List.flatten(rows)
+
+      s = :sys.get_state(Cell.whereis(Config.fetch!(inst), cell))
+      refute Replicator.unreplicated?(s.repl)
+      assert List.flatten(durable_rows(env, cell, @all)) == List.flatten(rows)
+      assert {:ok, %{rows: [[2]]}} = Alambique.query(inst, cell, "PRAGMA user_version")
     end
 
     test "remigrate on a serving cell: the step leaves no committed row", env do
