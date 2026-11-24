@@ -197,10 +197,11 @@ defmodule Alambique.Cell.Db do
   Runs `fun` with a handle inside `BEGIN IMMEDIATE` ... `COMMIT`.
 
   Returns `{:ok, value}` after the local commit, or `{:error, reason}` after
-  a rollback (a raise, a `Tx.rollback/2`, or a failed commit). When the commit
-  ran and `PRAGMA query_only = ON` after it failed the reason is
-  `{:query_only, reason}`; when the rollback failed it is
-  `{:rollback_failed, reason}`: the cell stops in both cases. While `fun`
+  a rollback (a raise, a `Tx.rollback/2`, or a failed commit). The `COMMIT`
+  runs alone; when it ran and the `PRAGMA query_only = ON` after it failed the
+  write is committed and the reason is `{:query_only, reason}`; when the
+  rollback failed it is `{:rollback_failed, reason}`: the cell stops in both
+  cases. While `fun`
   runs, a statement on the connection returns `{:error, :transaction_ended}`
   without running once SQLite has ended the transaction itself (a conflict or
   a trigger that rolls back, an interrupt, an I/O error), so no later
@@ -220,7 +221,7 @@ defmodule Alambique.Cell.Db do
           {:ok, term} | {:error, term}
   def transaction(conn, txid, fun, opts \\ []) do
     # Each statement is one call on the dirty IO pool, so the pragma shares
-    # a call with the BEGIN and with the COMMIT.
+    # a call with the BEGIN.
     case Sqlite.execute(conn, "PRAGMA query_only = OFF; BEGIN IMMEDIATE") do
       :ok ->
         # From here a statement on the connection does not run once SQLite
@@ -268,9 +269,9 @@ defmodule Alambique.Cell.Db do
   defp finish({:commit, value}, conn) do
     with :ok <- check_open(conn),
          :ok <- Sqlite.expect_transaction(conn, false) do
-      case Sqlite.execute(conn, "COMMIT; PRAGMA query_only = ON") do
-        :ok -> {:ok, value}
-        {:error, reason} -> failed_commit(conn, reason)
+      case Sqlite.execute(conn, "COMMIT") do
+        :ok -> query_only(conn, value)
+        {:error, reason} -> abort(conn, reason)
       end
     else
       {:error, reason} -> abort(conn, reason)
@@ -279,13 +280,20 @@ defmodule Alambique.Cell.Db do
 
   defp finish({:abort, reason}, conn), do: abort(conn, reason)
 
-  # The commit ran and the pragma after it did not: the frames are in the WAL
-  # and the connection may write outside a transaction. The cell sees frames
-  # no write carries and stops.
-  defp failed_commit(conn, reason) do
-    if Sqlite.transaction_status(conn) == {:ok, :idle} and Sqlite.wal_advanced?(conn),
-      do: {:error, {:query_only, reason}},
-      else: abort(conn, reason)
+  # The commit ran, so a failure here is not a rollback: the frames are in the
+  # WAL and the connection may write outside a transaction. The cell sees the
+  # frames no write carries and stops.
+  defp query_only(conn, value) do
+    result =
+      case Fault.point(:db_after_commit, conn) do
+        {:error, _} = injected -> injected
+        _ -> read_only(conn)
+      end
+
+    case result do
+      :ok -> {:ok, value}
+      {:error, reason} -> {:error, {:query_only, reason}}
+    end
   end
 
   defp abort(conn, reason) do

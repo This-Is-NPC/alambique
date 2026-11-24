@@ -1307,7 +1307,8 @@ defmodule Alambique.Cell do
   # not sent get the stop reason and those in flight `:outcome_unknown`.
   # `:replicate` parks the caller as a write: the stamp, the reads' wait and
   # the batch apply, and it is answered after the batch with
-  # `{:error, {:committed, reason}}`, because its rows are durable then.
+  # `{:error, {:committed, reason}}`, because its rows are durable then. A
+  # failed `query_only` stops the cell after that batch.
   defp orphaned_write(state, from, reason) do
     log_orphans(state)
 
@@ -1318,7 +1319,20 @@ defmodule Alambique.Cell do
       :replicate ->
         item = {:write, from, {:error, {:committed, reason}}}
         :atomics.add(state.load, 1, 1)
-        {:noreply, queue_flush(%{state | pending: [item | state.pending]})}
+        state = %{state | pending: [item | state.pending]}
+
+        if match?({:query_only, _}, reason),
+          do: replicate_and_stop(state, reason),
+          else: {:noreply, queue_flush(state)}
+    end
+  end
+
+  # The connection is in an unknown mode after a commit: what it committed is
+  # made durable and the callers are answered, then the cell stops.
+  defp replicate_and_stop(state, reason) do
+    case with({:ok, state} <- orphan_batch(state), do: settle(state)) do
+      {:ok, state} -> stop_serving(state, reason)
+      {:stop, reason, state} -> stop_serving(state, reason)
     end
   end
 
