@@ -483,4 +483,90 @@ defmodule Alambique.SqliteTest do
       assert {:error, _} = Db.writable(cell, fn -> Db.script(cell, "SELECT * FROM nope") end)
     end
   end
+
+  describe "NUL bytes and scripts" do
+    setup %{conn: conn} do
+      :ok = Sqlite.execute(conn, "CREATE TABLE u (a)")
+    end
+
+    test "a NUL byte is refused before anything runs", %{conn: conn} do
+      text = "INSERT INTO u VALUES (1)\0; DELETE FROM u"
+      assert {:error, :nul_in_statement} = Sqlite.run(conn, text, [])
+      assert {:error, :nul_in_statement} = Sqlite.run(conn, "SELECT 1\0", [])
+      assert {:error, :nul_in_statement} = Sqlite.execute(conn, text)
+      assert {:error, :nul_in_statement} = Sqlite.script(conn, "CREATE TABLE z (a)\0")
+      assert {:ok, %{rows: [[0]]}} = Sqlite.run(conn, "SELECT count(*) FROM u", [])
+      assert {:error, _} = Sqlite.run(conn, "SELECT * FROM z", [])
+    end
+
+    test "a script runs schema statements as SQLite delimits them", %{conn: conn} do
+      bom = <<0xEF, 0xBB, 0xBF>>
+
+      script =
+        "CREATE TABLE s AS SELECT $a(') AS x; CREATE TABLE e (end, x);\n" <>
+          "CREATE TRIGGER g AFTER INSERT ON e BEGIN UPDATE e SET x = new.end; SELECT 1;#{bom}END;" <>
+          "#{bom}-- c\n/* c */ DROP TABLE s;#{bom}"
+
+      assert :ok = Sqlite.script(conn, script)
+
+      assert {:ok, %{rows: [["e"]]}} =
+               Sqlite.run(conn, "SELECT name FROM sqlite_master WHERE name = 'e'", [])
+
+      assert {:error, _} = Sqlite.run(conn, "SELECT * FROM s", [])
+    end
+
+    test "a statement that is not schema is refused before it runs, and nothing after it", %{
+      conn: conn
+    } do
+      script =
+        "CREATE TABLE s AS SELECT $a(') AS x; INSERT INTO u VALUES (7); CREATE TABLE after_ (a);\n--'"
+
+      assert {:error, {:not_ddl, "INSERT INTO u VALUES (7);"}} = Sqlite.script(conn, script)
+      assert {:ok, %{rows: [[0]]}} = Sqlite.run(conn, "SELECT count(*) FROM u", [])
+      assert {:error, _} = Sqlite.run(conn, "SELECT * FROM after_", [])
+    end
+
+    test "a script refuses transaction control", %{conn: conn} do
+      :ok = Sqlite.execute(conn, "BEGIN")
+
+      for control <- ["COMMIT", "END", "ROLLBACK", "BEGIN"] do
+        assert {:error, :not_authorized} =
+                 Sqlite.script(conn, "DROP TABLE IF EXISTS q; #{control}")
+      end
+
+      assert {:ok, :transaction} = Sqlite.transaction_status(conn)
+      :ok = Sqlite.execute(conn, "ROLLBACK")
+    end
+
+    test "while a transaction of the library is open nothing can end it", %{conn: conn} do
+      :ok = Sqlite.execute(conn, "BEGIN IMMEDIATE")
+      :ok = Sqlite.expect_transaction(conn, true)
+
+      for control <- ["COMMIT", "END", "ROLLBACK", "BEGIN"] do
+        assert {:error, :not_authorized} = Sqlite.execute(conn, control)
+        assert {:error, :not_authorized} = Sqlite.run(conn, control, [])
+      end
+
+      assert {:ok, :transaction} = Sqlite.transaction_status(conn)
+      assert :ok = Sqlite.execute(conn, "SAVEPOINT s; RELEASE s")
+
+      :ok = Sqlite.expect_transaction(conn, false)
+      assert :ok = Sqlite.execute(conn, "COMMIT")
+    end
+
+    test "the WAL moves only when a commit reaches it", %{conn: conn} do
+      {:ok, _} = Sqlite.run(conn, "PRAGMA journal_mode = WAL", [])
+      :ok = Sqlite.execute(conn, "BEGIN IMMEDIATE")
+      :ok = Sqlite.expect_transaction(conn, true)
+      :ok = Sqlite.execute(conn, "INSERT INTO u VALUES (1)")
+      refute Sqlite.wal_advanced?(conn)
+      :ok = Sqlite.expect_transaction(conn, false)
+      :ok = Sqlite.execute(conn, "COMMIT")
+      assert Sqlite.wal_advanced?(conn)
+
+      :ok = Sqlite.expect_transaction(conn, true)
+      refute Sqlite.wal_advanced?(conn)
+      :ok = Sqlite.expect_transaction(conn, false)
+    end
+  end
 end
