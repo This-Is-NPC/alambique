@@ -32,7 +32,7 @@ mod atoms {
     rustler::atoms! {
         ok, error, blob, nil, undefined, idle, transaction,
         connection_closed, argument_error, busy, disk_full,
-        statement_timeout, result_too_large, not_authorized, cache_used,
+        statement_timeout, result_too_large, not_authorized, multiple_statements, cache_used,
         schema_used, stmt_used, lookaside_used,
     }
 }
@@ -126,6 +126,7 @@ enum Failure {
     Timeout,
     TooLarge,
     Denied,
+    Multiple(String),
     Busy,
     DiskFull,
 }
@@ -139,6 +140,7 @@ impl Failure {
             Failure::Timeout => atoms::statement_timeout().encode(env),
             Failure::TooLarge => atoms::result_too_large().encode(env),
             Failure::Denied => atoms::not_authorized().encode(env),
+            Failure::Multiple(tail) => (atoms::multiple_statements(), tail).encode(env),
             Failure::Busy => atoms::busy().encode(env),
             Failure::DiskFull => atoms::disk_full().encode(env),
         };
@@ -503,23 +505,75 @@ fn c_len(len: usize) -> Result<c_int, Failure> {
     c_int::try_from(len).map_err(|_| Failure::Argument("value over 2 GiB".into()))
 }
 
-fn prepare(db: *mut ffi::sqlite3, sql: &[u8]) -> Result<Option<StmtPtr>, Failure> {
+/// Prepares the first statement of `sql`: the statement (`None` for blank
+/// text, comments or a lone `;`) and the bytes it consumed.
+fn prepare_at(db: *mut ffi::sqlite3, sql: &[u8]) -> Result<(Option<StmtPtr>, usize), Failure> {
     let len = c_len(sql.len())?;
     let mut s: *mut ffi::sqlite3_stmt = ptr::null_mut();
+    let mut tail: *const c_char = ptr::null();
     // SAFETY: `db` is a live connection; `sql` is valid for its length.
     let rc = unsafe {
-        ffi::sqlite3_prepare_v2(
-            db,
-            sql.as_ptr() as *const c_char,
-            len,
-            &mut s,
-            ptr::null_mut(),
-        )
+        ffi::sqlite3_prepare_v2(db, sql.as_ptr() as *const c_char, len, &mut s, &mut tail)
     };
     if rc != ffi::SQLITE_OK {
         return Err(failure(db));
     }
-    Ok(if s.is_null() { None } else { Some(StmtPtr(s)) })
+    let used = if tail.is_null() {
+        sql.len()
+    } else {
+        // `tail` points into `sql`.
+        (tail as usize - sql.as_ptr() as usize).min(sql.len())
+    };
+    Ok((if s.is_null() { None } else { Some(StmtPtr(s)) }, used))
+}
+
+/// The first statement of `sql` that is not empty, and the bytes up to its
+/// end (`;` included). `None` when only blanks, comments and `;` are there.
+fn next_statement(db: *mut ffi::sqlite3, sql: &[u8]) -> Result<(Option<StmtPtr>, usize), Failure> {
+    let mut at = 0;
+    while !sql[at..].iter().all(u8::is_ascii_whitespace) {
+        let (stmt, used) = prepare_at(db, &sql[at..])?;
+        at += used;
+        if stmt.is_some() || used == 0 {
+            return Ok((stmt, at));
+        }
+    }
+    Ok((None, sql.len()))
+}
+
+/// What of a refused tail the error carries.
+const TAIL_SHOWN: usize = 100;
+
+/// Refuses the text after the statement, unless it holds no statement: the
+/// rest of a call is never silently ignored.
+fn refuse_tail(db: *mut ffi::sqlite3, tail: &[u8]) -> Result<(), Failure> {
+    match next_statement(db, tail) {
+        Ok((None, _)) => Ok(()),
+        Ok((Some(StmtPtr(s)), _)) => {
+            finalize(s);
+            Err(Failure::tail(tail))
+        }
+        Err(_) => Err(Failure::tail(tail)),
+    }
+}
+
+impl Failure {
+    /// `Multiple` with the start of `tail`, trimmed.
+    fn tail(tail: &[u8]) -> Failure {
+        let text = String::from_utf8_lossy(tail);
+        let text = text.trim();
+        let shown: String = text.chars().take(TAIL_SHOWN).collect();
+        Failure::Multiple(if shown.len() < text.len() {
+            shown + "..."
+        } else {
+            shown
+        })
+    }
+}
+
+#[cfg(test)]
+fn prepare(db: *mut ffi::sqlite3, sql: &[u8]) -> Result<Option<StmtPtr>, Failure> {
+    prepare_at(db, sql).map(|(stmt, _)| stmt)
 }
 
 /// Binds `params` (a list) to `s`: integers, floats, `nil`, binaries and
@@ -779,6 +833,8 @@ fn sqlite_execute<'a>(
 }
 
 /// Prepares, binds, runs and finalizes one statement: `{:ok, columns, rows}`.
+/// Text after the statement that holds another statement is refused with
+/// `{:error, {:multiple_statements, tail}}` before anything runs.
 /// `limits` is `{read_only, timeout_ms, max_rows, max_bytes, max_concurrent,
 /// no_txn_control}`, 0 for no limit (`no_txn_control` as in `sqlite_execute`); over `max_concurrent` user statements running the call
 /// gives `{:error, :busy}` without touching the connection.
@@ -803,7 +859,9 @@ fn sqlite_run<'a>(
         let _slot = Slot::take(max_concurrent)?;
         with_db(&conn, |db| {
             let _call = Call::new(&conn.control, db, &limits);
-            let Some(StmtPtr(s)) = prepare(db, sql.as_slice())? else {
+            let sql = sql.as_slice();
+            let (stmt, end) = next_statement(db, sql)?;
+            let Some(StmtPtr(s)) = stmt else {
                 return Ok((atoms::ok(), Vec::<Term>::new(), Vec::<Term>::new()).encode(env));
             };
             struct Finalize(*mut ffi::sqlite3_stmt);
@@ -813,6 +871,7 @@ fn sqlite_run<'a>(
                 }
             }
             let _guard = Finalize(s);
+            refuse_tail(db, &sql[end..])?;
             bind_all(db, s, params)?;
             let columns = column_names(env, s);
             let rows = all_rows(env, db, s, &conn.control, &limits)?;
@@ -1177,6 +1236,49 @@ mod tests {
             // SAFETY: `db` is live and not used afterwards.
             unsafe { close_v2(db) };
         }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "calls SQLite")]
+    fn only_blank_text_may_follow_a_statement() {
+        let db = mem();
+        let next = |sql: &str| {
+            next_statement(db, sql.as_bytes())
+                .ok()
+                .map(|(s, end)| (s, end))
+        };
+        let kinds = |sql: &str| {
+            let (stmt, end) = next(sql).expect(sql);
+            let tail = &sql.as_bytes()[end..];
+            let stmt_found = stmt.map(|StmtPtr(s)| finalize(s)).is_some();
+            (stmt_found, refuse_tail(db, tail).is_ok())
+        };
+        for (sql, statement, tail_ok) in [
+            ("SELECT 1", true, true),
+            ("SELECT 1;", true, true),
+            ("SELECT 1; \n", true, true),
+            ("SELECT 1; -- c", true, true),
+            ("SELECT 1 /* c */; ; /* d */", true, true),
+            ("; SELECT 1", true, true),
+            (";;; /* c */ SELECT 1; ;", true, true),
+            ("", false, true),
+            (" ; -- c", false, true),
+            ("SELECT 1; SELECT 2", true, false),
+            ("SELECT 1; nonsense", true, false),
+            ("SELECT 1; COMMIT", true, false),
+        ] {
+            assert_eq!(kinds(sql), (statement, tail_ok), "{sql:?}");
+        }
+        let long = format!("SELECT 1; SELECT '{}'", "x".repeat(500));
+        let end = next(&long).unwrap().1;
+        match refuse_tail(db, &long.as_bytes()[end..]) {
+            Err(Failure::Multiple(tail)) => {
+                assert!(tail.len() <= TAIL_SHOWN + 3 && tail.ends_with("..."))
+            }
+            _ => panic!("tail accepted"),
+        }
+        // SAFETY: `db` is live and not used afterwards.
+        unsafe { close_v2(db) };
     }
 
     #[test]

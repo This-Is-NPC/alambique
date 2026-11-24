@@ -212,6 +212,32 @@ defmodule Alambique.SqliteTest do
       assert {:ok, :idle} = Sqlite.transaction_status(conn)
     end
 
+    test "text after the statement is refused unless it is blank", %{conn: conn} do
+      :ok = Sqlite.execute(conn, "CREATE TABLE m (a)")
+
+      assert {:error, {:multiple_statements, "INSERT INTO m VALUES (2)"}} =
+               run(conn, "INSERT INTO m VALUES (1); INSERT INTO m VALUES (2)", [])
+
+      assert {:error, {:multiple_statements, "COMMIT"}} = run(conn, "SELECT 1;  COMMIT ", [])
+
+      assert {:error, {:multiple_statements, tail}} =
+               run(conn, "SELECT 1; SELECT '#{String.duplicate("x", 500)}'", [])
+
+      assert byte_size(tail) <= 103
+
+      # Nothing ran, and the statements that are allowed still run.
+      assert {:ok, %{rows: [[0]]}} = run(conn, "SELECT count(*) FROM m", [])
+
+      for sql <- ["SELECT 1", "SELECT 1;", "SELECT 1; -- c", "SELECT 1 /* c */ ; ;", ";SELECT 1"] do
+        assert {:ok, %{rows: [[1]]}} = run(conn, sql, []), sql
+      end
+
+      assert {:ok, %{rows: []}} = run(conn, " ; /* nothing */", [])
+
+      assert {:error, {:multiple_statements, _}} =
+               run(conn, "SELECT 1; SELECT 2", read_only: true)
+    end
+
     test "a call can be read only, bounded in time and bounded in result size", %{conn: conn} do
       :ok = Sqlite.execute(conn, "CREATE TABLE b (a); INSERT INTO b VALUES (1), (2), (3)")
 

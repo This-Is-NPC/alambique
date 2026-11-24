@@ -10,6 +10,14 @@ defmodule Alambique.Tx do
   `nil`, binaries as text and `{:blob, binary}` as blobs. Results are
   `%{columns: [String.t()], rows: [[term]]}`. `script/2` creates a schema with
   one change-capture cycle.
+
+  A function cannot end its transaction. `query/3`, `execute/3` and `script/2`
+  refuse `BEGIN`, `COMMIT`, `END` and `ROLLBACK` with
+  `{:error, :not_authorized}`; the transaction goes on. `SAVEPOINT`,
+  `ROLLBACK TO` and `RELEASE` are allowed, and `rollback/2` aborts the whole
+  transaction. `query/3` and `execute/3` take one statement: text after it that
+  holds another statement gives `{:error, {:multiple_statements, tail}}` and
+  nothing runs; comments, spaces and `;` may follow.
   """
 
   alias Alambique.Cell.Db

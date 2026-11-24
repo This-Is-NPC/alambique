@@ -424,7 +424,7 @@ defmodule Alambique.TxControlReproTest do
       {:ok, %{rows: rows}} = Alambique.query(env.inst, env.cell, @all, [], timeout: 5_000)
 
       # Rejected as a whole, or run as a whole; never the first one only.
-      ok? = match?({:error, _}, result) or ids(rows) == [1, 2]
+      ok? = match?({:ok, {:error, {:multiple_statements, _}}}, result) or ids(rows) == [1, 2]
       assert ok?, inspect(%{execute: returned, result: result, local_rows: rows, wal: wal})
     end
   end
