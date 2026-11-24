@@ -25,8 +25,8 @@ defmodule Alambique.FeedCaptureTest do
   end
 
   defp rows(conn, txid, upto) do
-    for [t, ts, tbl, op, _key, _vals, _seq] <- Capture.rows_from(conn, {txid + 1, -1}, upto, nil),
-        do: {t, ts, tbl, op}
+    {:ok, rows} = Capture.rows_from(conn, {txid + 1, -1}, upto, nil)
+    for [t, ts, tbl, op, _key, _vals, _seq] <- rows, do: {t, ts, tbl, op}
   end
 
   test "a stamped row is read with its TXID and the time of its batch", %{conn: conn} do

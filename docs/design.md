@@ -360,6 +360,22 @@ cells without waking them.
   cleanup cannot remove it. A reset (sender ended, `feed_pid` replaced) clears
   both and starts again from `feed_published`; a message with another ref is
   ignored. The stop hands over everything in a loop, within `stop_publish_ms`.
+- **Reader.** With `hand_over: :sender` the cell sends `{:range, from, upto,
+  reader}` and the sender reads `txid` in `[from, upto]` through a read-only
+  connection to the cell's file (WAL: it sees committed rows only and holds a
+  lock only while a statement runs). The rows a reader can see are those of
+  stamped batches: pending rows have a negative TXID until `stamp` commits,
+  before the batch is sent, `upto` is at most the acknowledged TXID, and a
+  cleanup deletes whole batches up to `feed_published`, which is at most
+  `feed_sent`, in one transaction, so the range is never touched. The reader
+  is `feed_reader` of the cell. Only the cell closes it (`Publisher.close_reader`):
+  when the sender reports the read of the newest range, when the sender is
+  replaced, and at every close of the connection in `cell.ex`, before it
+  (`wake.ex` closes only before the sender starts). Closing interrupts the
+  statement and waits for it. `feed_backlog` is `feed_sent - feed_published`
+  in TXIDs; the sender queues a marker for the TXIDs after its last batch, and
+  reports it as published once the batches before it are, so the backlog
+  reaches 0 for batches without rows.
 - **Reading.** `Alambique.Feed.read/3` merges the shards by key. It skips
   objects newer than `now - settle_ms`, so a late put never lands behind
   a position.

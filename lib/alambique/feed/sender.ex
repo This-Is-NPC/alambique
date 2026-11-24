@@ -15,7 +15,7 @@ defmodule Alambique.Feed.Sender do
 
   alias Alambique.{Fault, Telemetry}
   alias Alambique.Cell.State
-  alias Alambique.Feed.{Keys, Record}
+  alias Alambique.Feed.{Keys, Pieces, Record}
   alias Alambique.Replication.Retry
 
   @doc "Starts the sender of the calling cell, linked to it."
@@ -45,23 +45,31 @@ defmodule Alambique.Feed.Sender do
         logged: nil,
         flush: nil,
         part: [],
+        last: 0,
         size: args.config.feed.object_batches
       })
     )
   end
 
   defp loop(w) do
-    if :queue.is_empty(w.queue) do
-      # The floor stays: keys never go back, however long the sender idles.
-      :erlang.hibernate(__MODULE__, :resume, [flushed(w)])
-    else
-      w = linger(w)
-      {batches, rest} = take(w.queue, w.size)
+    case :queue.peek(w.queue) do
+      :empty ->
+        # The floor stays: keys never go back, however long the sender idles.
+        :erlang.hibernate(__MODULE__, :resume, [flushed(w)])
 
-      case publish(w, batches) do
-        {:ok, w} -> loop(%{w | queue: rest})
-        {:error, w, delay} -> w |> receive_batches(delay) |> loop()
-      end
+      # The batches before it are published: the TXIDs up to it are, empty ones too.
+      {:value, %{upto: upto}} ->
+        send(w.cell, {:feed_published, self(), upto, w.floor, 0})
+        loop(%{w | queue: :queue.drop(w.queue)})
+
+      {:value, _batch} ->
+        w = linger(w)
+        {batches, rest} = take(w.queue, w.size)
+
+        case publish(w, batches) do
+          {:ok, w} -> loop(%{w | queue: rest})
+          {:error, w, delay} -> w |> receive_batches(delay) |> loop()
+        end
     end
   end
 
@@ -72,6 +80,7 @@ defmodule Alambique.Feed.Sender do
   defp receive_batches(w, :infinity) do
     receive do
       {:batches, batches} -> enqueue(w, batches)
+      {:range, from, upto, reader} -> read(w, from, upto, reader)
       {:flush, ref} -> %{w | flush: ref}
       {:DOWN, _, :process, _, _} -> exit(:normal)
     end
@@ -85,6 +94,7 @@ defmodule Alambique.Feed.Sender do
 
     receive do
       {:batches, batches} -> receive_until(enqueue(w, batches), deadline)
+      {:range, from, upto, reader} -> receive_until(read(w, from, upto, reader), deadline)
       {:flush, ref} -> receive_until(%{w | flush: ref}, deadline)
       {:DOWN, _, :process, _, _} -> exit(:normal)
     after
@@ -113,7 +123,47 @@ defmodule Alambique.Feed.Sender do
   defp accept(w, batch, arrived) do
     changes = Enum.concat(Enum.reverse([batch.changes | w.part]))
     batch = %{batch | changes: changes} |> Map.delete(:partial) |> Map.put(:arrived, arrived)
-    %{w | part: [], queue: :queue.in(batch, w.queue)}
+    %{w | part: [], last: batch.txid, queue: :queue.in(batch, w.queue)}
+  end
+
+  # `hand_over: :sender`: reads the rows of the TXIDs `from` to `upto` with the
+  # reader of the cell, `feed.hand_over_rows` at a time (a batch is never
+  # queued before its last row), and tells the cell it is done with the
+  # reader. A TXID after the last batch read has no rows: a marker in the
+  # queue reports it once the batches before it are published, so the cell's
+  # backlog reaches zero. The cell closes the reader, also under a read: an
+  # interrupted or closed one ends the sender, which the cell no longer needs.
+  defp read(w, from, upto, reader) do
+    arrived = System.monotonic_time(:millisecond)
+    w = read_pages(w, reader, {from, -1}, nil, upto, arrived)
+    send(w.cell, {:feed_read, self(), upto})
+
+    if w.last == upto,
+      do: w,
+      else: %{w | queue: :queue.in(%{upto: upto, arrived: arrived}, w.queue)}
+  end
+
+  defp read_pages(w, reader, position, resumed, upto, arrived) do
+    case Pieces.read(reader, position, upto, w.config.feed.hand_over_rows, resumed) do
+      {:ok, pieces, more?} ->
+        Fault.point(:feed_after_read, %{cell: w.id, txid: upto, reader: reader})
+        batches = Enum.map(pieces, &Map.take(&1, [:txid, :ts, :changes, :partial]))
+        w = Enum.reduce(batches, w, &accept(&2, &1, arrived))
+
+        if more? do
+          last = List.last(pieces)
+          next = if last.partial, do: {last.txid, last.seq}, else: {last.txid + 1, -1}
+          read_pages(w, reader, next, if(last.partial, do: next), upto, arrived)
+        else
+          w
+        end
+
+      {:error, reason} when reason in [:connection_closed, "interrupted"] ->
+        exit(:normal)
+
+      {:error, reason} ->
+        exit({:feed_read_failed, reason})
+    end
   end
 
   # While the group is short, waits up to `linger_ms` from the oldest queued
@@ -134,6 +184,7 @@ defmodule Alambique.Feed.Sender do
          :queue.len(w.queue) < w.config.feed.max_backlog_batches do
       receive do
         {:batches, batches} -> w |> enqueue(batches) |> fill(deadline)
+        {:range, from, upto, reader} -> w |> read(from, upto, reader) |> fill(deadline)
         {:flush, ref} -> fill(%{w | flush: ref}, deadline)
         {:DOWN, _, :process, _, _} -> exit(:normal)
       after
@@ -155,7 +206,7 @@ defmodule Alambique.Feed.Sender do
   defp take(queue, left, taken) do
     case :queue.out(queue) do
       {{:value, batch}, rest} ->
-        if rewind?(batch),
+        if alone?(batch),
           do: {Enum.reverse(taken), queue},
           else: take(rest, left - 1, [batch | taken])
 
@@ -166,10 +217,13 @@ defmodule Alambique.Feed.Sender do
 
   defp rewind_next?(queue) do
     case :queue.peek(queue) do
-      {:value, batch} -> rewind?(batch)
+      {:value, batch} -> alone?(batch)
       :empty -> false
     end
   end
+
+  # A rewind goes alone, and a marker (an `upto` and no changes) ends a group.
+  defp alone?(batch), do: rewind?(batch) or Map.has_key?(batch, :upto)
 
   defp rewind?(%{changes: [{"", "rewind", _, _}]}), do: true
   defp rewind?(_), do: false

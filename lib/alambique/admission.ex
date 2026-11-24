@@ -229,13 +229,18 @@ defmodule Alambique.Admission do
   # what its connection holds after every call and at the end of its wake;
   # nothing is measured or kept without a budget.
 
-  @doc "Records the memory of `conn` for the cell `pid`."
-  @spec track(Config.t(), pid, Sqlite.conn()) :: :ok
-  def track(%{awake: %{max_bytes: nil}}, _pid, _conn), do: :ok
+  @doc """
+  Records the memory of the connections `conns` for the cell `pid`: its own
+  and, while the feed sender reads, the reader's.
+  """
+  @spec track(Config.t(), pid, [Sqlite.conn()]) :: :ok
+  def track(%{awake: %{max_bytes: nil}}, _pid, _conns), do: :ok
 
-  def track(config, pid, conn) do
-    with {:ok, memory} <- Sqlite.memory(conn) do
-      bytes = memory.cache_used + memory.schema_used + memory.stmt_used
+  def track(config, pid, conns) do
+    memories = Enum.map(conns, &Sqlite.memory/1)
+
+    if Enum.all?(memories, &match?({:ok, _}, &1)) do
+      bytes = Enum.sum(for {:ok, m} <- memories, do: m.cache_used + m.schema_used + m.stmt_used)
       old = recorded(config, pid)
       :ets.insert(config.admission, {{:cell, pid}, bytes})
       if bytes != old, do: :ets.update_counter(config.admission, :bytes, bytes - old)

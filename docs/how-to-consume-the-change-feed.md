@@ -345,6 +345,37 @@ stay in the file for the next owner, as for any batch that was not published.
 The bound has a cost: each piece is a query on the cell's file. How small to
 set it for a given workload is not measured yet.
 
+## 14. Let the publisher read the rows
+
+`feed: [hand_over: :sender]` (default `:cell`) moves the read of the captured
+rows out of the cell. The cell hands over only the range of TXIDs of the
+acknowledged batches. The sender reads the rows with a second connection to the
+cell's file, opened read-only, and builds the batches itself, with the same
+record ids and objects as `:cell`. The cell no longer spends a turn of its
+mailbox on the read and the copy of the rows.
+
+What changes:
+
+- The cell owns the reader. It closes it when the sender has read everything
+  handed over, and always before it closes its own connection, so the stop,
+  the checkpoint and the removal of `-wal` and `-shm` never meet an open
+  reader. A reader that is waiting for a page (a lazy restore) is closed too:
+  the close waits for the read to end, at most `op_timeout_ms`.
+- Each read is one statement, with no transaction held between statements, so
+  it does not keep a checkpoint from finishing.
+- `max_backlog_batches` counts TXIDs, not batches: the cell cannot count what it
+  did not read. A TXID without rows, such as the batch of a cleanup, counts
+  until the batches before it are published.
+- `hand_over_rows` (step 13) bounds the rows of each read of the sender, with
+  the same meaning: it cuts between batches and, inside a larger batch, between
+  rows. The sender queues a batch only when its last row was read.
+- `reader_cache_kib` (default 64, only with `:sender`) is the page cache of the
+  reader. Its memory counts in `awake: [max_bytes:]` while it is open.
+- A cell that stops hands over the TXIDs and waits for the sender within
+  `stop_publish_ms`, as with `:cell`.
+
+How much cell time `:sender` saves for a given batch size is not measured yet.
+
 ## Troubleshooting
 
 - **`read` returns `{:ok, [], position}` for a long time.** Objects younger

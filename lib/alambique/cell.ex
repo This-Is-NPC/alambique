@@ -440,7 +440,7 @@ defmodule Alambique.Cell do
   end
 
   defp track(state),
-    do: Admission.track(state.config, self(), state.conn)
+    do: Admission.track(state.config, self(), [state.conn | List.wrap(state.feed_reader)])
 
   defp call(request, from, state) do
     state = restore_cache(%{state | last_active: System.monotonic_time(:millisecond)})
@@ -671,6 +671,9 @@ defmodule Alambique.Cell do
 
   defp info({:feed_published, pid, txid, time, count}, %State{mode: :serving} = state),
     do: {:noreply, state |> Publisher.published(pid, txid, time, count) |> arm_cleanup()}
+
+  defp info({:feed_read, pid, upto}, %State{mode: :serving} = state),
+    do: {:noreply, Publisher.read_done(state, pid, upto)}
 
   defp info({:feed_part, ref}, %State{mode: :serving} = state),
     do: {:noreply, Publisher.continue(state, ref)}
@@ -1398,6 +1401,8 @@ defmodule Alambique.Cell do
   # replicated frame before the marker says so. Closing never checkpoints
   # (design §6).
   defp finish_local(%State{pending: [], pipe: %{queue: []}} = state) do
+    # A reader would keep the checkpoint from finishing and the file open.
+    state = Publisher.close_reader(state)
     checkpointed = Replicator.checkpoint(state.repl, state.conn)
     Db.close(state.conn)
     state = %{state | conn: nil}
@@ -1457,12 +1462,14 @@ defmodule Alambique.Cell do
     state = %{state | pending: [], parked: [], pipe: %{state.pipe | queue: []}}
     # A fenced or lost lease belongs to someone else; any other lease is ours to give back.
     # An expired one no longer lets us publish. A file that failed to hydrate cannot be read.
-    if reason not in [:fenced, :lease_lost, :lease_expired] and
-         not match?({:hydration_failed, _}, reason),
-       do: Publisher.flush(state)
+    state =
+      if reason not in [:fenced, :lease_lost, :lease_expired] and
+           not match?({:hydration_failed, _}, reason),
+         do: Publisher.flush(state),
+         else: state
 
     if reason not in [:fenced, :lease_lost], do: abandon(state), else: close(state)
-    state = %{state | mode: :stopped, conn: nil}
+    state = %{state | mode: :stopped, conn: nil, feed_reader: nil}
 
     if reply,
       do: {:stop, {:shutdown, reason}, reply, state},
@@ -1476,8 +1483,11 @@ defmodule Alambique.Cell do
     release(state)
   end
 
-  defp close(%State{conn: nil}), do: :ok
-  defp close(%State{conn: conn}), do: Db.close(conn)
+  # The reader first: it never outlives the connection it reads next to.
+  defp close(%State{conn: conn} = state) do
+    Publisher.close_reader(state)
+    if conn, do: Db.close(conn), else: :ok
+  end
 
   @impl true
   def terminate(reason, state) do
