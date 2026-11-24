@@ -63,11 +63,15 @@ defmodule Alambique.NodesPropertiesTest do
     end
   end
 
+  # `held` is the last registration that succeeded, and whether it was released.
+  # The entry is live until its expiry plus the skew margin, boundary included.
   property "one node id is never live under two incarnations", %{store: {_, conf} = store} do
     op =
       one_of([
         tuple({constant(:register), member_of(~w(i1 i2 i3)), member_of([:restart, :free])}),
         tuple({constant(:advance), integer(0..@ttl), constant(nil)}),
+        # Another incarnation registers a tick before, at and after the end of the entry.
+        tuple({constant(:edge), member_of([-1, 0, 1]), member_of([:restart, :free])}),
         tuple({constant(:deregister), constant(nil), constant(nil)})
       ])
 
@@ -76,30 +80,64 @@ defmodule Alambique.NodesPropertiesTest do
       world = ManualClock.new(@start)
       ctx = ctx(store, world, unique_prefix("inc"))
 
-      Enum.reduce(ops, nil, fn
-        {:register, incarnation, takeover}, held ->
-          case Nodes.register(ctx, "n", incarnation, "adv", takeover: takeover) do
-            {:ok, entry} -> assert_one(ctx, entry)
-            {:error, {:held, _, _}} -> assert_one(ctx, held)
-          end
-
-        {:advance, ms, _}, held ->
-          ManualClock.advance(world, ms)
-          held
-
-        {:deregister, _, _}, held ->
-          if held, do: Nodes.deregister(ctx, held)
-          held
-      end)
+      Enum.reduce(ops, nil, &step(&1, &2, ctx, world))
     end
   end
 
-  # At most one live entry for the id, and it is the last one written.
-  defp assert_one(ctx, entry) do
-    live = live(ctx)
-    assert length(live) <= 1
-    if entry && live != [], do: assert(live == [{"n", entry.incarnation}])
-    entry
+  defp step({:register, incarnation, takeover}, held, ctx, world) do
+    now = ManualClock.world_ms(world)
+    answer = Nodes.register(ctx, "n", incarnation, "adv", takeover: takeover)
+    holding = holder(held, now)
+
+    held =
+      if holding && holding.incarnation != incarnation && takeover == :free do
+        assert answer == {:error, {:held, holding.incarnation, holding.expires_at_ms}}
+        held
+      else
+        assert {:ok, entry} = answer
+        assert entry.incarnation == incarnation
+        %{entry: entry, released?: false}
+      end
+
+    assert live(ctx) == listed(held, now)
+    held
+  end
+
+  defp step({:advance, ms, _}, held, ctx, world) do
+    ManualClock.advance(world, ms)
+    assert live(ctx) == listed(held, ManualClock.world_ms(world))
+    held
+  end
+
+  defp step({:edge, offset, takeover}, held, ctx, world) do
+    if held do
+      delta = held.entry.expires_at_ms + @skew + offset - ManualClock.world_ms(world)
+      if delta > 0, do: ManualClock.advance(world, delta)
+    end
+
+    step({:register, "i9", takeover}, held, ctx, world)
+  end
+
+  defp step({:deregister, _, _}, %{released?: false} = held, ctx, world) do
+    assert :ok = Nodes.deregister(ctx, held.entry)
+    held = %{held | released?: true}
+    assert live(ctx) == listed(held, ManualClock.world_ms(world))
+    held
+  end
+
+  defp step({:deregister, _, _}, held, _ctx, _world), do: held
+
+  defp holder(nil, _now), do: nil
+  defp holder(%{released?: true}, _now), do: nil
+
+  defp holder(%{entry: entry}, now),
+    do: if(now <= entry.expires_at_ms + @skew, do: entry)
+
+  defp listed(held, now) do
+    case holder(held, now) do
+      nil -> []
+      entry -> [{"n", entry.incarnation}]
+    end
   end
 
   property "deregister leaves the listing at once, the others stay", %{store: {_, conf} = store} do
