@@ -422,14 +422,23 @@ see it, a position could count it, and a crash would lose it. The invariant
 is that frames committed and not yet replicated imply a write in flight
 (pending or in a queued batch). Three layers keep it.
 
-- The text of a transaction function cannot end its transaction. The
-  authorizer of the native library (`SQLITE_TRANSACTION`) refuses `BEGIN`,
-  `COMMIT`, `END` and `ROLLBACK` in a call that carries user text:
-  `Alambique.Tx.query/3`, `execute/3` and the script of `script/2`. The
-  library's own transaction statements carry no such flag. Savepoints work.
-  A text holds one statement; a tail with another statement is refused
-  (`{:multiple_statements, tail}`), and the splitter of scripts reads words as
-  SQLite does (letters, digits, `_`, `$`, UTF-8), so `a$case` is no `CASE`.
+- A transaction function cannot end its transaction. The authorizer of the
+  native library (`SQLITE_TRANSACTION`) refuses `BEGIN`, `COMMIT`, `END` and
+  `ROLLBACK` in a call that carries user text (`Alambique.Tx.query/3`,
+  `execute/3` and `script/2`) and in every call on the connection while the
+  library's transaction is open, so `Alambique.Sqlite.execute(tx.conn,
+  "COMMIT")` is refused too (`{:error, :not_authorized}`). Only the library's
+  own final `COMMIT` or `ROLLBACK`, after it lifts the mark, may end it.
+  Savepoints work. A text holds one statement; a tail with another statement
+  is refused (`{:error, {:multiple_statements, tail}}`) and a NUL byte in any
+  text is refused (`{:error, :nul_in_statement}`), both before anything runs.
+  A script is not split by the library: the native library prepares it
+  statement by statement as SQLite delimits it, checks that each starts with
+  `CREATE`, `DROP` or `ALTER` before it runs (`{:error, {:not_ddl,
+  statement}}` otherwise, and nothing after it runs) and runs it with the
+  flag above. Statements before a refused one are undone by the savepoint of
+  the script. The splitter that migrations use (`Alambique.Cell.Sql`) gates
+  nothing: each piece goes to SQLite alone, which refuses a tail.
 - SQLite can still end a transaction itself: a conflict resolved with
   `ROLLBACK`, `RAISE(ROLLBACK)`, an interrupt or timeout, an I/O error.
   `Db.transaction` marks the connection while the transaction is open, and
@@ -437,19 +446,28 @@ is that frames committed and not yet replicated imply a write in flight
   every call on it, before the statement: once the transaction is gone the
   statement returns `{:error, :transaction_ended}` and does not run. It
   covers the library's own statements too, such as the `user_version` after a
-  migration step.
-- The cell checks the rest. When nothing is pending or queued it asks the WAL
-  for unreplicated frames after a write that failed, at every cut
-  (`position/3`, a drain, a checkpoint) and before a hibernation; a
-  hibernation never answers `:ok` while there are any. With `sql:
-  [orphan_frames: :stop]` (the default) the cell stops: the marker of its
-  local file is gone while it is awake, so the next wake restores what the
-  store holds, which is what the caller was told. With `:replicate` it stamps
-  the feed rows and uploads the frames as a batch of their own before it goes
-  on. A write that failed is then parked as a write and answered after the
-  batch with `{:error, {:committed, reason}}`. `:stop` is the default because
-  frames that no write accounts for are a defect to be seen, and discarding
-  them restores a state the store holds and every caller already knows.
+  migration step. A `COMMIT` whose `PRAGMA query_only = ON` after it failed,
+  and a failed `ROLLBACK`, stop the cell.
+- The cell checks the rest. The native library keeps the size of the WAL
+  (the WAL hook) and notes it when the mark is set; a write that failed is an
+  orphan when the WAL moved during its transaction, whether or not a batch is
+  queued or in flight (one native call, about 135 ns). At every cut
+  (`position/3`, a drain, a checkpoint), before a hibernation and before a
+  feed cleanup, the cell also asks the WAL for unreplicated frames when
+  nothing is pending or queued; a hibernation never answers `:ok` while there
+  are any. With `sql: [orphan_frames: :stop]` (the default) the cell stops:
+  the marker of its local file is gone while it is awake, so the next wake
+  restores what the store holds, which is what the caller was told. Writes
+  not sent yet get the stop reason, writes in flight `:outcome_unknown`.
+  With `:replicate` it stamps the feed rows and uploads the frames as a batch
+  of their own before it goes on; exactly the write that left them is parked
+  as a write and answered after the batch with `{:error, {:committed,
+  reason}}`, and reads wait for that batch. A write that failed without
+  moving the WAL gets its plain error, whatever older frames exist. `:stop`
+  is the default because frames that no write accounts for are a defect to be
+  seen, and discarding them restores a state the store holds and every
+  caller already knows. A checkpoint with a deadline waits for the batch of
+  `:replicate` within the deadline.
 
 ## 16. Lazy restore
 
