@@ -51,10 +51,17 @@ defmodule Alambique.Sqlite do
 
   @doc """
   Runs one or more statements without reading rows, with the deadline of the
-  connection (`open/2`).
+  connection (`open/2`). `no_transaction_control: true` is for a user's text:
+  `BEGIN`, `COMMIT`, `END` and `ROLLBACK` are refused as in `run/4`.
   """
-  @spec execute(conn, iodata) :: :ok | {:error, term}
-  def execute(conn, sql), do: Native.sqlite_execute(conn, IO.iodata_to_binary(sql))
+  @spec execute(conn, iodata, keyword) :: :ok | {:error, term}
+  def execute(conn, sql, opts \\ []) do
+    Native.sqlite_execute(
+      conn,
+      IO.iodata_to_binary(sql),
+      Keyword.get(opts, :no_transaction_control, false)
+    )
+  end
 
   @doc """
   Prepares, binds, runs and finalizes one statement.
@@ -71,6 +78,9 @@ defmodule Alambique.Sqlite do
     * `:max_rows` and `:max_bytes` - `{:error, :result_too_large}` when the
       result has more rows, or more bytes of text, blobs and (8 each) other
       values.
+    * `:no_transaction_control` - for a user's text: refuse `BEGIN`, `COMMIT`,
+      `END` and `ROLLBACK` with `{:error, :not_authorized}`, so the text
+      cannot end the transaction the library holds. Savepoints are allowed.
     * `:max_concurrent` - a user statement: `{:error, :busy}` at once when
       this many user statements already run on the node (design §7). The
       call is counted while it runs on the dirty scheduler, so a caller that
@@ -84,7 +94,8 @@ defmodule Alambique.Sqlite do
       Keyword.get(opts, :timeout_ms, 0),
       Keyword.get(opts, :max_rows, 0),
       Keyword.get(opts, :max_bytes, 0),
-      Keyword.get(opts, :max_concurrent, 0)
+      Keyword.get(opts, :max_concurrent, 0),
+      Keyword.get(opts, :no_transaction_control, false)
     }
 
     case Native.sqlite_run(conn, IO.iodata_to_binary(sql), params || [], limits) do

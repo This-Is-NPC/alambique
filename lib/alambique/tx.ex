@@ -17,6 +17,10 @@ defmodule Alambique.Tx do
 
   alias Alambique.Cell.Sql
 
+  # Transaction control is the library's: the text of a function cannot end
+  # the transaction its write holds.
+  @user_text [no_transaction_control: true]
+
   @enforce_keys [:conn, :txid, :ref]
   defstruct [:conn, :txid, :ref, capture: true, select: nil, isolated: false, limits: []]
 
@@ -73,7 +77,7 @@ defmodule Alambique.Tx do
   defp atomic(conn, sql) do
     :ok = Db.script(conn, "SAVEPOINT alambique_script")
 
-    case Db.script(conn, sql) do
+    case Db.script(conn, sql, no_transaction_control: true) do
       :ok ->
         :ok = Db.script(conn, "RELEASE alambique_script")
 
@@ -122,9 +126,11 @@ defmodule Alambique.Tx do
 
   defp guarded(%__MODULE__{conn: conn, capture: capture, select: select} = tx, sql, params) do
     with :ok <- active(tx) do
+      limits = @user_text ++ tx.limits
+
       if capture and Capture.ddl?(sql),
-        do: Capture.around_ddl(conn, select, fn -> Db.run(conn, sql, params, tx.limits) end),
-        else: Db.run(conn, sql, params, tx.limits)
+        do: Capture.around_ddl(conn, select, fn -> Db.run(conn, sql, params, limits) end),
+        else: Db.run(conn, sql, params, limits)
     end
   end
 end
