@@ -145,8 +145,9 @@ fn foreign_exec(path: String, sql: String) -> i32 {
 }
 
 /// The next transaction of the library on `conn` runs `sql` on a separate
-/// connection of `path` after the connection settled and before it takes the
-/// write lock.
+/// connection of `path` right after it compared the wal-index header. With the
+/// write lock held the statement is refused as busy; a check made before the
+/// lock would let it commit unseen.
 #[rustler::nif]
 fn set_foreign_commit(conn: ResourceArc<sqlite::Conn>, path: String, sql: String) -> Atom {
     conn.set_foreign_commit(path, sql);
