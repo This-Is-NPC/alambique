@@ -194,6 +194,8 @@ defmodule Alambique.Replication.Native do
   @doc false
   def sqlite_expect_transaction(_conn, _on), do: nif_error()
   @doc false
+  def sqlite_script(_conn, _sql), do: nif_error()
+  @doc false
   def sqlite_memory(_conn), do: nif_error()
 
   @doc false

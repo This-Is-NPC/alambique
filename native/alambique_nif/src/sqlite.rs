@@ -33,7 +33,7 @@ mod atoms {
         ok, error, blob, nil, undefined, idle, transaction,
         connection_closed, argument_error, busy, disk_full,
         statement_timeout, result_too_large, not_authorized, multiple_statements, transaction_ended, cache_used,
-        schema_used, stmt_used, lookaside_used, nul_in_statement,
+        schema_used, stmt_used, lookaside_used, nul_in_statement, not_ddl,
     }
 }
 
@@ -132,6 +132,7 @@ enum Failure {
     TooLarge,
     Denied,
     Multiple(String),
+    NotDdl(String),
     NulInStatement,
     TransactionEnded,
     Busy,
@@ -149,6 +150,7 @@ impl Failure {
             Failure::Denied => atoms::not_authorized().encode(env),
             Failure::TransactionEnded => atoms::transaction_ended().encode(env),
             Failure::Multiple(tail) => (atoms::multiple_statements(), tail).encode(env),
+            Failure::NotDdl(text) => (atoms::not_ddl(), text).encode(env),
             Failure::NulInStatement => atoms::nul_in_statement().encode(env),
             Failure::Busy => atoms::busy().encode(env),
             Failure::DiskFull => atoms::disk_full().encode(env),
@@ -580,17 +582,64 @@ fn refuse_tail(db: *mut ffi::sqlite3, tail: &[u8]) -> Result<(), Failure> {
 }
 
 impl Failure {
-    /// `Multiple` with the start of `tail`, trimmed.
-    fn tail(tail: &[u8]) -> Failure {
-        let text = String::from_utf8_lossy(tail);
+    /// The start of `text`, trimmed, for an error message.
+    fn shown(text: &[u8]) -> String {
+        let text = String::from_utf8_lossy(text);
         let text = text.trim();
         let shown: String = text.chars().take(TAIL_SHOWN).collect();
-        Failure::Multiple(if shown.len() < text.len() {
+        if shown.len() < text.len() {
             shown + "..."
         } else {
             shown
-        })
+        }
     }
+
+    /// `Multiple` with the start of `tail`, trimmed.
+    fn tail(tail: &[u8]) -> Failure {
+        Failure::Multiple(Self::shown(tail))
+    }
+}
+
+/// Finalizes the statement when dropped.
+struct Finalize(*mut ffi::sqlite3_stmt);
+
+impl Drop for Finalize {
+    fn drop(&mut self) {
+        finalize(self.0);
+    }
+}
+
+/// Whether the statement that SQLite delimited starts with `CREATE`, `DROP` or
+/// `ALTER`, after the blanks and comments SQLite skips (the UTF-8 BOM is one).
+/// The text is one statement already, so nothing can follow the keyword that
+/// the caller does not see.
+fn starts_ddl(text: &[u8]) -> bool {
+    let mut i = 0;
+    loop {
+        match text.get(i..) {
+            Some([b' ' | b'\t' | b'\n' | 0x0c | b'\r', ..]) => i += 1,
+            Some([0xEF, 0xBB, 0xBF, ..]) => i += 3,
+            Some([b'-', b'-', ..]) => {
+                i += text[i..]
+                    .iter()
+                    .position(|&c| c == b'\n')
+                    .map_or(text.len() - i, |n| n + 1)
+            }
+            Some([b'/', b'*', ..]) => {
+                i += text[i + 2..]
+                    .windows(2)
+                    .position(|w| w == b"*/")
+                    .map_or(text.len() - i, |n| n + 4)
+            }
+            _ => break,
+        }
+    }
+    let word: Vec<u8> = text[i.min(text.len())..]
+        .iter()
+        .take_while(|c| c.is_ascii_alphanumeric() || **c == b'_')
+        .map(u8::to_ascii_lowercase)
+        .collect();
+    matches!(word.as_slice(), b"create" | b"drop" | b"alter")
 }
 
 #[cfg(test)]
@@ -890,12 +939,6 @@ fn sqlite_run<'a>(
             let Some(StmtPtr(s)) = stmt else {
                 return Ok((atoms::ok(), Vec::<Term>::new(), Vec::<Term>::new()).encode(env));
             };
-            struct Finalize(*mut ffi::sqlite3_stmt);
-            impl Drop for Finalize {
-                fn drop(&mut self) {
-                    finalize(self.0);
-                }
-            }
             let _guard = Finalize(s);
             refuse_tail(db, &sql[end..])?;
             bind_all(db, s, params)?;
@@ -905,6 +948,66 @@ fn sqlite_run<'a>(
         })
     };
     reply(env, run())
+}
+
+/// Runs a user's script of schema statements, one at a time as SQLite
+/// delimits them (the tail of each prepare), without reading rows. A statement
+/// that is not `CREATE`, `DROP` or `ALTER` is refused before it runs with
+/// `{:error, {:not_ddl, statement}}` and nothing after it runs. Transaction
+/// control is refused as in a call with `no_txn_control`.
+#[rustler::nif(schedule = "DirtyIo")]
+fn sqlite_script<'a>(env: Env<'a>, conn: ResourceArc<Conn>, sql: Binary) -> Term<'a> {
+    let _t = crate::stats::SQLITE_CALLS.time();
+    let run = || -> Outcome<'a> {
+        let sql = sql.as_slice();
+        if sql.contains(&0) {
+            return Err(Failure::NulInStatement);
+        }
+        with_db(&conn, |db| {
+            let limits = Limits {
+                no_txn_control: true,
+                ..Limits::default()
+            };
+            let _call = Call::new(&conn.control, db, &limits);
+            let mut at = 0;
+            while at < sql.len() {
+                check_transaction(&conn.control, db)?;
+                let (stmt, used) = prepare_at(db, &sql[at..])?;
+                let text = &sql[at..at + used];
+                at += used;
+                let Some(StmtPtr(s)) = stmt else {
+                    if used == 0 {
+                        break;
+                    }
+                    continue;
+                };
+                let _guard = Finalize(s);
+                if !starts_ddl(text) {
+                    return Err(Failure::NotDdl(Failure::shown(text)));
+                }
+                step_to_end(db, s, &conn.control)?;
+            }
+            Ok(atoms::ok().encode(env))
+        })
+    };
+    reply(env, run())
+}
+
+/// Steps `s` to its end, dropping the rows.
+fn step_to_end(
+    db: *mut ffi::sqlite3,
+    s: *mut ffi::sqlite3_stmt,
+    ctl: &Control,
+) -> Result<(), Failure> {
+    loop {
+        // SAFETY: `s` is a live statement of `db`.
+        match unsafe { ffi::sqlite3_step(s) } {
+            ffi::SQLITE_ROW => {}
+            ffi::SQLITE_DONE => return Ok(()),
+            ffi::SQLITE_INTERRUPT if ctl.timed_out.load(Relaxed) => return Err(Failure::Timeout),
+            _ => return Err(failure(db)),
+        }
+    }
 }
 
 /// Says whether a transaction of the library is open on the connection: while
@@ -1311,6 +1414,33 @@ mod tests {
         }
         // SAFETY: `db` is live and not used afterwards.
         unsafe { close_v2(db) };
+    }
+
+    #[test]
+    fn a_schema_statement_starts_with_create_drop_or_alter() {
+        for (sql, ddl) in [
+            ("CREATE TABLE t (a)", true),
+            ("  drop table t", true),
+            ("-- c\nAlter TABLE t ADD b", true),
+            ("/* x */ create /* y */ index i on t(a)", true),
+            ("\u{FEFF}CREATE TABLE t (a)", true),
+            (
+                "\u{FEFF}\u{FEFF} /* c */ \u{FEFF}create view v as select 1",
+                true,
+            ),
+            ("INSERT INTO t VALUES (1)", false),
+            ("WITH c AS (SELECT 1) INSERT INTO t SELECT * FROM c", false),
+            ("EXPLAIN CREATE TABLE t (a)", false),
+            ("createx", false),
+            ("create_table", false),
+            ("COMMIT", false),
+            ("", false),
+            ("/* create */ SELECT 1", false),
+            ("-- create", false),
+            ("/* create", false),
+        ] {
+            assert_eq!(starts_ddl(sql.as_bytes()), ddl, "{sql:?}");
+        }
     }
 
     #[test]

@@ -30,8 +30,6 @@ defmodule Alambique.Tx do
   alias Alambique.Cell.Db
   alias Alambique.Feed.Capture
 
-  alias Alambique.Cell.Sql
-
   # Transaction control is the library's: the text of a function cannot end
   # the transaction its write holds.
   @user_text [no_transaction_control: true]
@@ -63,36 +61,29 @@ defmodule Alambique.Tx do
   one per statement. The triggers of new tables are installed before it
   returns, so later writes in the same transaction are captured.
 
-  The script is atomic: if a statement fails, none of its effects remain and
-  the error is returned. A script with any other statement, such as an
-  `INSERT`, is refused with `{:error, {:not_ddl, statement}}` before it runs,
-  because rows written while the triggers are dropped would escape the feed.
-  Use `execute/3` for those. Returns `:ok`.
+  SQLite decides where each statement ends, and each one is checked before it
+  runs: a statement that is not `CREATE`, `DROP` or `ALTER`, such as an
+  `INSERT`, is refused with `{:error, {:not_ddl, statement}}`, because rows
+  written while the triggers are dropped would escape the feed. Nothing after
+  it runs. Use `execute/3` for those.
+
+  The script is atomic: if a statement fails or is refused, none of its
+  effects remain and the error is returned. Returns `:ok`.
   """
   @spec script(t, String.t()) :: :ok | {:error, term}
   def script(%__MODULE__{conn: conn, capture: capture, select: select} = tx, sql) do
-    with :ok <- active(tx),
-         :ok <- ddl_only(Sql.split(sql)) do
+    with :ok <- active(tx) do
       if capture,
         do: Capture.around_ddl(conn, select, fn -> atomic(conn, sql) end),
         else: atomic(conn, sql)
     end
   end
 
-  defp ddl_only(statements) do
-    case Enum.find(statements, &(not Capture.ddl?(&1))) do
-      nil -> :ok
-      statement -> {:error, {:not_ddl, statement}}
-    end
-  end
-
-  # A savepoint makes the script all or nothing inside the transaction. Each
-  # of its statements is a call of its own, so the caller's text (an open
-  # comment, say) cannot swallow them.
+  # A savepoint makes the script all or nothing inside the transaction.
   defp atomic(conn, sql) do
     :ok = Db.script(conn, "SAVEPOINT alambique_script")
 
-    case Db.script(conn, sql, no_transaction_control: true) do
+    case Alambique.Sqlite.script(conn, sql) do
       :ok ->
         :ok = Db.script(conn, "RELEASE alambique_script")
 
