@@ -327,6 +327,7 @@ defmodule Alambique.Config do
             cache_kib: pos_integer,
             idle_cache_after_ms: pos_integer | nil,
             idle_cache_kib: non_neg_integer,
+            idle_gc: boolean,
             wake_queue_ms: pos_integer,
             max_wake_queue: pos_integer,
             max_bytes: pos_integer | nil
@@ -1146,7 +1147,8 @@ defmodule Alambique.Config do
         :max_bytes,
         :max_wake_queue,
         :idle_cache_after_ms,
-        :idle_cache_kib | Keyword.keys(@awake_defaults)
+        :idle_cache_kib,
+        :idle_gc | Keyword.keys(@awake_defaults)
       ])
 
     {max_bytes, rest} = Keyword.pop(opts, :max_bytes)
@@ -1154,8 +1156,12 @@ defmodule Alambique.Config do
     {idle_after, rest} = Keyword.pop(rest, :idle_cache_after_ms)
     {idle_kib, rest} = Keyword.pop(rest, :idle_cache_kib, @idle_cache_kib)
 
+    {idle_gc, rest} = Keyword.pop(rest, :idle_gc, true)
+
     unless is_integer(idle_kib) and idle_kib >= 0,
       do: bad!(":awake :idle_cache_kib must be a non-negative integer")
+
+    unless is_boolean(idle_gc), do: bad!(":awake :idle_gc must be true or false")
 
     for {key, value} <- [max_bytes: max_bytes, max_wake_queue: queue],
         not (is_nil(value) or (is_integer(value) and value > 0)),
@@ -1166,6 +1172,7 @@ defmodule Alambique.Config do
 
     awake
     |> Map.put(:idle_cache_kib, idle_kib)
+    |> Map.put(:idle_gc, idle_gc)
     |> Map.put(:idle_cache_after_ms, idle_after)
     |> Map.put(:max_bytes, max_bytes)
     |> Map.put(:max_wake_queue, queue || 4 * awake.max_wakes)
