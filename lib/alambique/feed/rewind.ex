@@ -41,29 +41,39 @@ defmodule Alambique.Feed.Rewind do
         }
 
   @doc false
+  # Accepts only what `encode/1` writes: TXIDs are non-negative integers, the
+  # target one of its two shapes, `kept` a list of table names.
   @spec decode(String.t(), pos_integer, map, non_neg_integer) :: t | {:error, :bad_record}
   def decode(cell, txid, body, at) do
-    case from_json(body["target"]) do
-      nil ->
-        {:error, :bad_record}
-
-      target ->
-        %__MODULE__{
-          cell: cell,
-          from_txid: body["from_txid"],
-          to_txid: body["to_txid"],
-          txid: txid,
-          target: target,
-          kept: body["kept"] || [],
-          id: "#{cell}:#{txid}:rewind",
-          at: at
-        }
+    with %{"from_txid" => from, "to_txid" => to, "target" => target} <- body,
+         true <- non_neg?(from) and non_neg?(to),
+         {:ok, target} <- from_json(target),
+         {:ok, kept} <- kept(Map.get(body, "kept", [])) do
+      %__MODULE__{
+        cell: cell,
+        from_txid: from,
+        to_txid: to,
+        txid: txid,
+        target: target,
+        kept: kept,
+        id: "#{cell}:#{txid}:rewind",
+        at: at
+      }
+    else
+      _ -> {:error, :bad_record}
     end
   end
 
-  defp from_json(%{"txid" => txid}), do: {:txid, txid}
-  defp from_json(%{"timestamp" => ms}), do: {:timestamp, ms}
-  defp from_json(_), do: nil
+  defp non_neg?(n), do: is_integer(n) and n >= 0
+
+  defp kept(kept) when is_list(kept),
+    do: if(Enum.all?(kept, &is_binary/1), do: {:ok, kept}, else: :error)
+
+  defp kept(_), do: :error
+
+  defp from_json(%{"txid" => txid}) when is_integer(txid) and txid >= 0, do: {:ok, {:txid, txid}}
+  defp from_json(%{"timestamp" => ms}) when is_integer(ms), do: {:ok, {:timestamp, ms}}
+  defp from_json(_), do: :error
 
   @doc false
   # The JSON of the marker row's `vals` and of the object's "rewind" key.
