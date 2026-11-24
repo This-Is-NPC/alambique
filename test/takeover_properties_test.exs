@@ -13,6 +13,7 @@ defmodule Alambique.TakeoverPropertiesTest do
       once, in acknowledgement order, and nothing that nobody attempted is;
     * epochs of acknowledged batches never go back along the TXIDs, and no
       epoch is acknowledged from two cell processes;
+    * a takeover replaces the epoch it found with the next one;
     * a batch of an older epoch acknowledged after a takeover returned is
       below the head the new owner woke with, so the fence did not let it in;
     * a checked read never misses a write acknowledged before it was issued;
@@ -188,6 +189,13 @@ defmodule Alambique.TakeoverPropertiesTest do
   end
 
   @doc false
+  def record([:alambique, :lease, :take_over], _m, %{result: :ok} = meta, log) do
+    insert(log, {:lease, :take_over, meta.cell, meta.epoch})
+
+    if Map.has_key?(meta, :previous_epoch),
+      do: insert(log, {:replaced, meta.cell, meta.previous_epoch, meta.epoch})
+  end
+
   def record([:alambique, :lease, kind], _m, %{result: :ok} = meta, log) do
     insert(log, {:lease, kind, meta.cell, meta.epoch})
   end
@@ -590,6 +598,11 @@ defmodule Alambique.TakeoverPropertiesTest do
 
   defp verify_log(run) do
     entries = entries(run)
+
+    for {_, _, {:replaced, cell, previous, epoch}} <- entries do
+      assert epoch == previous + 1,
+             "cell #{cell}: a takeover replaced epoch #{previous} with epoch #{epoch}"
+    end
 
     assert AckGuard.violations(run.guard) == [],
            "acknowledged before the put landed: #{inspect(AckGuard.violations(run.guard))}"
