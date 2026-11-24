@@ -19,14 +19,21 @@ defmodule Alambique.TransactionControlPropertiesTest do
       after the cell sleeps or is killed and wakes;
     * I3: after a hibernation and after a kill, the cell wakes with the rows
       the store holds;
-    * I4: every durable row is in the change feed once.
+    * I4: every durable row is in the change feed once;
+    * I5: every row of an insert the caller was told is committed is in the
+      store, and no caller is answered while its batch, or an earlier one, has
+      not landed: not when the later of two batches in flight lands first, and
+      not while a failed put waits for its retry;
+    * I6: a checkpoint asked while a write waits for its batch is refused, and
+      one asked over frames no batch carries answers `:orphan_frames`; a cell
+      woken after an orphan stop serves what the store holds.
   """
   use ExUnit.Case, async: false
   use ExUnitProperties
 
   import Alambique.CellHelpers
 
-  alias Alambique.{Cell, Config, Feed, Sqlite, Tx}
+  alias Alambique.{Cell, Config, Feed, HeldWrites, Sqlite, Tx}
   alias Alambique.Replication.Replicator
   alias AlambiqueTestkit.GatedStore
 
@@ -171,6 +178,9 @@ defmodule Alambique.TransactionControlPropertiesTest do
       start_instance(%{env | store: store},
         migrations: @schema,
         compaction: false,
+        # A failed put reaches the cell, which retries it after a short backoff.
+        retry: [max_attempts: 1],
+        upload: [retry_backoff_ms: 5, retry_backoff_max_ms: 20],
         feed: [cleanup: :idle, cleanup_after_ms: 50]
       )
 
@@ -262,6 +272,26 @@ defmodule Alambique.TransactionControlPropertiesTest do
     end)
   end
 
+  # The first held put fails: the cell puts it again, and nobody is answered.
+  defp fail_first(ctx, cell) do
+    case Enum.filter(GatedStore.held(ctx.gate), &String.contains?(&1, "/#{cell}/0000/")) do
+      [key | _] ->
+        GatedStore.fail(ctx.gate, key)
+        eventually(fn -> key in GatedStore.held(ctx.gate) end)
+
+      [] ->
+        :ok
+    end
+  end
+
+  # The put of the newest of two held batches lands; the cell shows it landed.
+  defp release_later_first(ctx, cell) do
+    case Enum.filter(GatedStore.held(ctx.gate), &String.contains?(&1, "/#{cell}/0000/")) do
+      [_, _ | _] = keys -> HeldWrites.release_last(ctx.gate, pid(ctx, cell), keys)
+      _ -> :ok
+    end
+  end
+
   # Whether any step ends the transaction of the function.
   defp ends?(ops), do: Enum.any?(ops, &(&1 in [:conflict, :lifted]))
 
@@ -316,6 +346,7 @@ defmodule Alambique.TransactionControlPropertiesTest do
             inflight? <- boolean(),
             clean? <- boolean(),
             orphan? <- boolean(),
+            fail? <- boolean(),
             max_runs: 40
           ) do
       :counters.add(counter, 1, 1)
@@ -332,13 +363,22 @@ defmodule Alambique.TransactionControlPropertiesTest do
             &Alambique.Cell.Db.writable_script(&1.conn, "INSERT INTO t VALUES (5000)")
           )
 
-        assert Alambique.position(ctx.inst, cell) == {:error, :orphan_frames},
-               "orphan: #{inspect(ops)}"
+        # Either the checkpoint or the cut reports them.
+        answer =
+          if fail?,
+            do: Alambique.checkpoint(ctx.inst, cell, deadline_ms: 100),
+            else: Alambique.position(ctx.inst, cell)
+
+        assert answer == {:error, :orphan_frames},
+               "I6: #{inspect(answer)} with frames no batch carries: #{inspect(ops)}"
 
         eventually(fn -> Alambique.owner(ctx.inst, cell) == :none end)
         refute 5000 in stored(ctx, cell)
         # Woken again before the puts are held.
         assert {:ok, _} = Alambique.query(ctx.inst, cell, "SELECT 1")
+
+        assert wake_rows(ctx, cell) == stored(ctx, cell),
+               "I6: the cell woken after the orphan stop serves frames the store lacks"
       end
 
       GatedStore.hold(ctx.gate, Regex.compile!(Regex.escape(cell) <> "/0000/"))
@@ -356,6 +396,20 @@ defmodule Alambique.TransactionControlPropertiesTest do
       task = Task.async(fn -> Alambique.transaction(ctx.inst, cell, function(ops)) end)
       early = Task.yield(task, 300)
       assert_early(early, ops, inflight?)
+
+      # A write that waits for its batch keeps the WAL where it is (I6) and
+      # stays unanswered when the later of two batches lands first (I5).
+      if early == nil do
+        assert Alambique.checkpoint(ctx.inst, cell, deadline_ms: 100) == {:error, :busy},
+               "I6: a checkpoint ran while a write waited: #{inspect(ops)}"
+
+        if fail?,
+          do: fail_first(ctx, cell),
+          else: if(inflight?, do: release_later_first(ctx, cell))
+
+        assert Task.yield(task, 0) == nil, "I5: answered before every earlier batch landed"
+        if inflight, do: assert(Task.yield(inflight, 0) == nil, "I5: answered with its put held")
+      end
 
       # I1 and I2 while the puts are held.
       assert frames_state(ctx, cell) in [:ok, :none], "I1: #{inspect(ops)}"
@@ -412,6 +466,14 @@ defmodule Alambique.TransactionControlPropertiesTest do
       durable = stored(ctx, cell)
       assert after_wake == durable, "I3: #{inspect(ops)}"
       refute 5000 in durable
+
+      # I5: a caller told its inserts are committed finds them in the store.
+      if final == {:ok, {:ok, :ok}} do
+        inserted = for {:insert, n} <- Enum.with_index(ops, 10), do: n
+
+        assert inserted -- durable == [],
+               "I5: acknowledged inserts #{inspect(inserted -- durable)} are not in the store: #{inspect(ops)}"
+      end
 
       if inflight, do: Task.shutdown(inflight, 2_000)
 
