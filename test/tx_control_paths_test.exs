@@ -506,6 +506,70 @@ defmodule Alambique.TxControlPathsTest do
     end
   end
 
+  describe "a stamp that fails on a batch" do
+    # Holds the write lock of the file from a second connection at the fault
+    # point `point`, once: the stamp that follows finds the file busy.
+    defp lock_at(env, point) do
+      test = self()
+
+      Fault.install(fn
+        ^point, _ ->
+          if :persistent_term.get(@fail, nil) == nil do
+            :persistent_term.put(@fail, :locked)
+            [file] = Path.wildcard(Path.join(env.dir, "instance_*/**/*.db"))
+            me = self()
+            holder = spawn(fn -> hold(file, me, test) end)
+            assert_receive {:held, ^holder}, 5_000
+            send(test, {:locked, holder})
+          end
+
+          :ok
+
+        _, _ ->
+          :ok
+      end)
+    end
+
+    for mode <- [:stop, :replicate] do
+      test "an ordinary write answers :stamp_failed and stops the cell (#{mode})", env do
+        c = boot(env, unquote(mode))
+        old = pid(c)
+        lock_at(env, :cell_after_commit)
+
+        result = Alambique.execute(c.inst, c.cell, "INSERT INTO t VALUES (5)")
+        unlock()
+
+        assert {:error, {:stamp_failed, _}} = result
+        assert_stops(c, old, "a stamp that failed on a batch: #{inspect(result)}")
+        assert_clean_wake(c, false)
+        assert {:ok, _} = Alambique.execute(c.inst, c.cell, "INSERT INTO t VALUES (6)")
+        assert store(c) == [0, 1, 6]
+        assert feed_keys(c, 6) == [0, 1, 6]
+      end
+    end
+
+    test "the batch of orphan frames answers :stamp_failed and stops the cell", env do
+      c = boot(env, :replicate)
+      old = pid(c)
+      orphan(c, 5)
+      [file] = Path.wildcard(Path.join(env.dir, "instance_*/**/*.db"))
+      test = self()
+      holder = spawn(fn -> hold(file, test, test) end)
+      assert_receive {:held, ^holder}, 5_000
+      send(test, {:locked, holder})
+
+      result = Alambique.position(c.inst, c.cell)
+      unlock()
+
+      assert {:error, {:stamp_failed, _}} = result
+      assert_stops(c, old, "a stamp that failed on the orphan batch: #{inspect(result)}")
+      assert_clean_wake(c, false)
+      assert {:ok, _} = Alambique.execute(c.inst, c.cell, "INSERT INTO t VALUES (6)")
+      assert store(c) == [0, 1, 6]
+      assert feed_keys(c, 6) == [0, 1, 6]
+    end
+  end
+
   describe "a statement that starts with a byte order mark" do
     defp bom_feed(c, ddl_fun) do
       assert {:ok, _} = Alambique.transaction(c.inst, c.cell, ddl_fun)
