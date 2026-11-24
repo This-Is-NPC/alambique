@@ -7,7 +7,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use libsqlite3_sys as ffi;
-use rustler::{Atom, Resource, ResourceArc};
+use rustler::{Atom, Env, Resource, ResourceArc, Term};
 
 use crate::guard::{guard, probe};
 use crate::{sqlite, vfs};
@@ -61,6 +61,14 @@ fn panic_drops() -> u64 {
 fn fail_next_query_only(conn: ResourceArc<sqlite::Conn>) -> Atom {
     conn.fail_next_query_only();
     rustler::types::atom::ok()
+}
+
+/// Commits the transaction of the library on `conn` with the token it holds,
+/// as a bug that ended it behind the library's back would. The token is not
+/// handed out: tests that need the commit call this.
+#[rustler::nif(schedule = "DirtyIo")]
+fn commit_behind_back<'a>(env: Env<'a>, conn: ResourceArc<sqlite::Conn>) -> Term<'a> {
+    sqlite::finish_armed(env, &conn)
 }
 
 /// Opens a database through the Alambique VFS, with the authorizer of the

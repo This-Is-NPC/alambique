@@ -648,45 +648,39 @@ defmodule Alambique.TxControlSecondReviewTest do
   end
 
   describe "the token of the transaction" do
-    # `Fault.install/1` is public and global, and the point before the commit
-    # hands over the token that ends the transaction. Any code that installs a
-    # handler can end any write.
+    # `Fault.install/1` is public and global, so what the point before the
+    # commit hands to a handler is available to any code that installs one. It
+    # must not hold the token that ends the transaction.
     for mode <- [:stop, :replicate] do
-      test "a write function ends its own transaction through a fault handler (#{mode})", env do
+      test "the point before the commit hands out no token (#{mode})", env do
         c = boot(env, unquote(mode))
         test = self()
 
-        result =
-          Alambique.transaction(c.inst, c.cell, fn tx ->
-            {:ok, _} = Tx.execute(tx, "INSERT INTO t VALUES (7)")
+        Fault.install(fn
+          :db_before_commit, context ->
+            # Every integer of the context, and zero, tried as the token of the
+            # transaction that is open now.
+            guesses = [0 | for({_key, value} <- context, is_integer(value), do: value)]
+            tried = for g <- guesses, do: Sqlite.finish_transaction(context.conn, g, :commit)
+            send(test, {:tried, Map.keys(context), tried})
+            :ok
 
-            Fault.install(fn
-              :db_before_commit, %{conn: conn, token: token} ->
-                send(test, {:token, token})
-                :ok = Sqlite.finish_transaction(conn, token, :commit)
+          _, _ ->
+            :ok
+        end)
 
-              _, _ ->
-                :ok
-            end)
+        assert {:ok, :done} =
+                 Alambique.transaction(c.inst, c.cell, fn tx ->
+                   {:ok, _} = Tx.execute(tx, "INSERT INTO t VALUES (7)")
+                   :done
+                 end)
 
-            :done
-          end)
-
-        assert_received {:token, token}
-        assert is_integer(token)
         Fault.uninstall()
-
-        # The library still accounts for what the token did.
-        case unquote(mode) do
-          :stop ->
-            assert result == {:error, :transaction_ended}
-            assert asleep?(c)
-            assert store(c) == [0, 1]
-
-          :replicate ->
-            assert result == {:error, {:committed, :transaction_ended}}
-            assert store(c) == [0, 1, 7]
-        end
+        assert_received {:tried, keys, tried}
+        assert keys == [:conn]
+        assert tried == [{:error, :not_authorized}]
+        assert rows(c) == [0, 1, 7]
+        assert store(c) == [0, 1, 7]
       end
     end
   end

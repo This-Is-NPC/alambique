@@ -24,9 +24,9 @@ defmodule Alambique.CellHelpers do
   """
   def install_commit_behind_back do
     Alambique.Fault.install(fn
-      :db_before_commit, %{conn: conn, token: token} ->
+      :db_before_commit, %{conn: conn} ->
         if Process.delete(@commit_behind_back),
-          do: :ok = Alambique.Sqlite.finish_transaction(conn, token, :commit)
+          do: :ok = Alambique.Replication.Native.commit_behind_back(conn)
 
         :ok
 

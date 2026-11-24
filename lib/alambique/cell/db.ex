@@ -275,7 +275,7 @@ defmodule Alambique.Cell.Db do
   end
 
   defp finish({:commit, value}, conn, token) do
-    Fault.point(:db_before_commit, %{conn: conn, token: token})
+    Fault.point(:db_before_commit, %{conn: conn})
 
     case Sqlite.finish_transaction(conn, token, :commit) do
       :ok -> {:ok, value}

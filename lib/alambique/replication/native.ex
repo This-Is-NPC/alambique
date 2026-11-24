@@ -230,6 +230,8 @@ defmodule Alambique.Replication.Native do
     def panic_in_callback(_site, _path), do: nif_error()
     @doc false
     def fail_next_query_only(_conn), do: nif_error()
+    @doc false
+    def commit_behind_back(_conn), do: nif_error()
   end
 
   defp nif_error, do: :erlang.nif_error(:nif_not_loaded)
