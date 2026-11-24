@@ -593,7 +593,9 @@ defmodule Alambique.Cell do
         if isolated?, do: encode_now(state), else: {:noreply, queue_flush(state)}
 
       {:error, reason} = error ->
-        if orphan?(state), do: orphaned_write(state, from, reason), else: {:reply, error, state}
+        if Sqlite.wal_advanced?(state.conn),
+          do: orphaned_write(state, from, reason),
+          else: {:reply, error, state}
     end
   end
 
@@ -1246,8 +1248,10 @@ defmodule Alambique.Cell do
   # Committed frames that no write carries (design §15): nothing is pending
   # or queued, yet the WAL holds frames no batch has encoded. The write path
   # keeps this from happening; the check is for what it cannot foresee. It
-  # looks at the WAL file, so it runs where a cut or a sleep is reported, and
-  # after a write that failed.
+  # looks at the WAL file, so it runs where a cut or a sleep is reported and
+  # before a feed cleanup. A write that failed is judged by the position of the
+  # WAL at its start instead (`Sqlite.wal_advanced?/1`), so a batch in flight
+  # does not hide what it left.
   defp orphan?(%State{conn: conn, unsent: false} = state) when conn != nil,
     do: idle?(state) and Replicator.unreplicated?(state.repl)
 
