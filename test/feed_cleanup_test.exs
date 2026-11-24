@@ -76,6 +76,32 @@ defmodule Alambique.FeedCleanupTest do
 
   defp keys(records), do: Enum.map(records, & &1.key["id"])
 
+  # Full collections of the traced cell until `:cleanup` arrives.
+  defp collections_until(:cleanup) do
+    receive do
+      :cleanup -> []
+      {:trace, _, :gc_major_start, _} = event -> [event | collections_until(:cleanup)]
+      {:trace, _, _, _} -> collections_until(:cleanup)
+    after
+      5_000 -> flunk("no cleanup")
+    end
+  end
+
+  # Full collections of the traced cell until it has shrunk its cache.
+  defp collections_until(:shrunk, pid) do
+    eventually(fn -> :sys.get_state(pid).idle_cache == :shrunk end)
+    drain_collections([])
+  end
+
+  defp drain_collections(acc) do
+    receive do
+      {:trace, _, :gc_major_start, _} = event -> drain_collections([event | acc])
+      {:trace, _, _, _} -> drain_collections(acc)
+    after
+      50 -> acc
+    end
+  end
+
   # Time enough for a cleanup that would run to have run.
   defp quiet, do: Process.sleep(4 * @quiet)
 
@@ -232,6 +258,34 @@ defmodule Alambique.FeedCleanupTest do
       end
     end
 
+    test "after_publish keeps the rows of a batch handed over but not published", ctx do
+      {gate, ctx} = gated(ctx)
+      inst = start(ctx, cleanup: :after_publish)
+      cell = unique_cell()
+      GatedStore.hold(gate, ~r{/feed/})
+      insert(inst, cell, 1)
+      eventually(fn -> GatedStore.held(gate) != [] end)
+      [first] = GatedStore.held(gate)
+      # The sender has the second batch while it waits for the first.
+      insert(inst, cell, 2)
+      eventually(fn -> state(inst, cell).feed_sent == state(inst, cell).pipe.acked.txid end)
+
+      # The report of the first batch makes the cell clean.
+      GatedStore.release(gate, first)
+      eventually(fn -> state(inst, cell).feed_cleaned > 0 end)
+      eventually(fn -> length(GatedStore.held(gate)) == 1 end)
+
+      quiet()
+
+      assert %{feed_published: published, feed_cleaned: published, feed_sent: sent} =
+               state(inst, cell)
+
+      assert sent > published
+      assert stored_rows(ctx, cell) == 1
+      assert local_rows(inst, cell) == 1
+      GatedStore.open(gate)
+    end
+
     test "a failed publication leaves the rows, a later one clears them", ctx do
       {gate, ctx} = gated(ctx)
       inst = start(ctx, cleanup: :idle, publish_retry_ms: 20, publish_retry_max_ms: 40)
@@ -303,6 +357,48 @@ defmodule Alambique.FeedCleanupTest do
       GatedStore.open(gate)
       assert {:ok, _} = Task.await(write)
       cleaned(inst, cell)
+    end
+
+    # `cleanup/1` sends its batch in the callback that committed it, after
+    # `cleanup_ready?` saw room (cell.ex), so a full pipe with `unsent` set is
+    # not reachable from outside. The nearest state: the cleanup committed in
+    # the cell and `unsent` set, the pipe full, then the `:flush` message.
+    test "a cleanup committed while the pipe is full goes out once it has room", ctx do
+      {gate, ctx} = gated(ctx)
+      inst = start(ctx, [cleanup: :in_write], pipeline_depth: 1)
+      cell = unique_cell()
+      insert(inst, cell, 1)
+      published(inst, cell)
+      pid = cell_pid(inst, cell)
+      before = segments(ctx)
+      GatedStore.hold(gate, ~r{/0000/})
+      on_exit(fn -> catch_exit(GatedStore.open(gate)) end)
+
+      write =
+        Task.async(fn -> Alambique.execute(inst, cell, "INSERT INTO notes VALUES (2, 'x')") end)
+
+      eventually(fn -> GatedStore.held(gate) != [] end)
+
+      :sys.replace_state(pid, fn s ->
+        {:ok, s} = Alambique.Feed.Publisher.cleanup(s)
+        %{s | unsent: true}
+      end)
+
+      send(pid, :flush)
+      assert %{unsent: true, pipe: %{flush_wanted: true, queue: [_]}} = state(inst, cell)
+      assert %{feed_cleaned: cleaned} = state(inst, cell)
+      assert cleaned > 0
+      assert segments(ctx) == before
+
+      GatedStore.open(gate)
+      assert {:ok, _} = Task.await(write)
+      eventually(fn -> (s = state(inst, cell)).unsent == false and s.pipe.queue == [] end)
+
+      # The write's batch and the cleanup's: no third.
+      quiet()
+      assert segments(ctx) == before + 2
+      assert stored_rows(ctx, cell) == 1
+      assert state(inst, cell).feed_cleaned == cleaned
     end
 
     test "no cleanup while the lease is not valid", ctx do
@@ -408,6 +504,37 @@ defmodule Alambique.FeedCleanupTest do
         shrunk = eventually(fn -> (s = :sys.get_state(pid)).idle_cache == :shrunk and s end)
         assert shrunk.feed_published > 0
         assert shrunk.feed_cleaned == shrunk.feed_published
+      end
+    end
+
+    for {name, shrink, cleanup} <- [{"before", 100, 500}, {"after", 500, 100}] do
+      test "the collection follows the cleanup when the shrink is due #{name} it", ctx do
+        inst =
+          start(ctx, [cleanup: :idle, cleanup_after_ms: unquote(cleanup)],
+            awake: [
+              cache_kib: 512,
+              idle_cache_after_ms: unquote(shrink),
+              idle_cache_kib: 16,
+              idle_gc: true
+            ]
+          )
+
+        cell = unique_cell()
+        insert(inst, cell, 1)
+        published(inst, cell)
+        pid = cell_pid(inst, cell)
+        test = self()
+
+        CrashPoints.arm(:feed_before_cleanup, fn _, _ -> send(test, :cleanup) end,
+          when: &match?(%{cell: ^cell}, &1)
+        )
+
+        :erlang.trace(pid, true, [:garbage_collection])
+        on_exit(fn -> catch_error(:erlang.trace(pid, false, [:garbage_collection])) end)
+
+        # No full collection before the cleanup, one after it.
+        assert [] = collections_until(:cleanup)
+        assert [_ | _] = collections_until(:shrunk, pid)
       end
     end
 

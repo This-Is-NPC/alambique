@@ -15,12 +15,13 @@ defmodule Alambique.FeedCleanupPropertiesTest do
   alias Alambique.{Feed, Sqlite, Tx}
   alias Alambique.Cell.Db
   alias Alambique.Feed.Capture
-  alias AlambiqueTestkit.GatedStore
+  alias AlambiqueTestkit.{CrashPoints, GatedStore}
 
   @schema [{1, "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)"}]
   @cell "cleanup-cell"
 
   setup do
+    on_exit(&CrashPoints.reset/0)
     setup_store()
   end
 
@@ -46,39 +47,30 @@ defmodule Alambique.FeedCleanupPropertiesTest do
             max_runs: 20,
             max_shrinking_steps: 0
           ) do
-      :counters.add(runs, 1, 1)
-      n = :counters.get(runs, 1)
-      {:ok, gate} = GatedStore.start_link()
-      store = GatedStore.wrap(gate, ctx.store)
+      scenario(ctx, runs, cleanup, rows, ops)
+    end
+  end
 
-      inst =
-        start_instance(%{ctx | store: store},
-          name: :"cleanup_run_#{n}",
-          prefix: "cleanup-#{n}",
-          migrations: @schema,
-          lease_ttl_ms: 1_000,
-          skew_margin_ms: 200,
-          idle_timeout_ms: 60_000,
-          feed: [
-            cleanup: cleanup,
-            cleanup_after_ms: 40,
-            cleanup_rows: rows,
-            publish_retry_ms: 10,
-            publish_retry_max_ms: 40,
-            stop_publish_ms: 200,
-            window_ms: 60_000
-          ]
-        )
+  # Every run holds a kill at a random place and a crash of the cell between
+  # the local commit of a cleanup and the upload of its batch.
+  property "a kill anywhere, also inside a cleanup, loses and repeats nothing", ctx do
+    runs = :counters.new(1, [])
 
-      try do
-        run = Enum.reduce(ops, %{inst: inst, gate: gate, next: 1}, &step/2)
-        GatedStore.open(gate)
-        verify(ctx, n, run)
-      after
-        GatedStore.open(gate)
-        stop_supervised!(inst)
-        GenServer.stop(gate)
-      end
+    check all(
+            cleanup <- member_of([:idle, :after_publish, :idle_or_write]),
+            rows <- member_of([nil, 2]),
+            ops <- list_of(op(), min_length: 6, max_length: 12),
+            kill_at <- integer(0..12),
+            crash_at <- integer(0..12),
+            max_runs: 12,
+            max_shrinking_steps: 0
+          ) do
+      ops =
+        ops
+        |> List.insert_at(kill_at, :kill)
+        |> List.insert_at(crash_at, :crash_in_cleanup)
+
+      scenario(ctx, runs, cleanup, rows, ops)
     end
   end
 
@@ -141,6 +133,42 @@ defmodule Alambique.FeedCleanupPropertiesTest do
     n
   end
 
+  defp scenario(ctx, runs, cleanup, rows, ops) do
+    :counters.add(runs, 1, 1)
+    n = :counters.get(runs, 1)
+    {:ok, gate} = GatedStore.start_link()
+    store = GatedStore.wrap(gate, ctx.store)
+
+    inst =
+      start_instance(%{ctx | store: store},
+        name: :"cleanup_run_#{n}",
+        prefix: "cleanup-#{n}",
+        migrations: @schema,
+        lease_ttl_ms: 1_000,
+        skew_margin_ms: 200,
+        idle_timeout_ms: 60_000,
+        feed: [
+          cleanup: cleanup,
+          cleanup_after_ms: 40,
+          cleanup_rows: rows,
+          publish_retry_ms: 10,
+          publish_retry_max_ms: 40,
+          stop_publish_ms: 200,
+          window_ms: 60_000
+        ]
+      )
+
+    try do
+      run = Enum.reduce(ops, %{inst: inst, gate: gate, next: 1}, &step/2)
+      GatedStore.open(gate)
+      verify(ctx, n, run)
+    after
+      GatedStore.open(gate)
+      stop_supervised!(inst)
+      GenServer.stop(gate)
+    end
+  end
+
   # A cell that was killed keeps its lease until it expires.
   defp ready(run),
     do: eventually(fn -> match?({:ok, _}, Alambique.touch(run.inst, @cell)) end, 15_000)
@@ -149,7 +177,8 @@ defmodule Alambique.FeedCleanupPropertiesTest do
     ready(run)
     ids = Enum.to_list(run.next..(run.next + k - 1))
 
-    {:ok, :ok} =
+    # A write that meets a kill has no answer: the table says if it is durable.
+    _ =
       Alambique.transaction(run.inst, @cell, fn tx ->
         for id <- ids, do: {:ok, _} = Tx.execute(tx, "INSERT INTO notes VALUES (?, 'x')", [id])
         :ok
@@ -182,6 +211,12 @@ defmodule Alambique.FeedCleanupPropertiesTest do
     run
   end
 
+  # The cell dies after a cleanup committed locally, before its batch is sent.
+  defp step(:crash_in_cleanup, run) do
+    CrashPoints.arm(:feed_after_cleanup, :kill, when: &match?(%{cell: @cell}, &1))
+    run
+  end
+
   defp step(:hibernate, run) do
     ready(run)
     _ = Alambique.hibernate(run.inst, @cell)
@@ -195,7 +230,16 @@ defmodule Alambique.FeedCleanupPropertiesTest do
 
   defp verify(ctx, n, run) do
     ready(run)
-    expected = if run.next == 1, do: [], else: Enum.to_list(1..(run.next - 1))
+    # A crash armed earlier can still kill the cell under this read.
+    expected =
+      eventually(fn ->
+        case Alambique.query(run.inst, @cell, "SELECT id FROM notes ORDER BY id") do
+          {:ok, %{rows: rows}} -> {:ids, List.flatten(rows)}
+          _ -> false
+        end
+      end)
+      |> elem(1)
+
     feed = Feed.ctx(store: ctx.store, prefix: "cleanup-#{n}", settle_ms: 0)
 
     records =
