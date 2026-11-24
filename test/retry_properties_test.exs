@@ -9,6 +9,10 @@ defmodule Alambique.Replication.RetryPropertiesTest do
 
   alias Alambique.Replication.Retry
 
+  # How far past its deadline a call that is killed there may end, when the
+  # machine is not stalled: well under the 500 ms that a wait of its own would add.
+  @kill_ms 300
+
   # How far past its deadline a call may end. It only has to tell a kill at the
   # deadline from an attempt left running (the longest hang here is 5 s), so it
   # leaves room for a loaded scheduler.
@@ -30,11 +34,11 @@ defmodule Alambique.Replication.RetryPropertiesTest do
     {fun, fn -> agent |> Agent.get(& &1) |> Enum.reverse() end}
   end
 
-  defp ctx(backoff, max),
+  defp ctx(backoff, max, attempts \\ 1_000_000),
     do: %{
       backoff_ms: backoff,
       max_backoff_ms: max,
-      max_attempts: 1_000_000,
+      max_attempts: attempts,
       store: nil,
       max_object_bytes: Alambique.Store.max_object_bytes(),
       max_control_bytes: Alambique.Store.max_control_bytes()
@@ -85,12 +89,20 @@ defmodule Alambique.Replication.RetryPropertiesTest do
   end
 
   property "a retry that would end past the deadline is not started" do
-    check all(backoff <- integer(2..6), deadline_ms <- integer(1..60), max_runs: 40) do
+    check all(
+            backoff <- integer(2..6),
+            deadline_ms <- integer(1..60),
+            cap <- member_of([1, 2, 3, 5, 1_000_000]),
+            max_runs: 40
+          ) do
       {fun, calls} = recorder(fn n -> {:retry, n} end)
       deadline = Retry.deadline_in(deadline_ms)
 
-      assert {:error, last} = Retry.run(ctx(backoff, backoff * 4), deadline, fun)
+      assert {:error, last} = Retry.run(ctx(backoff, backoff * 4, cap), deadline, fun)
       times = calls.()
+
+      # The attempts stop at the cap.
+      assert length(times) <= cap
 
       # The reason is the one of the last call, or of the one before when the
       # deadline killed the last call after it was recorded.
@@ -105,6 +117,24 @@ defmodule Alambique.Replication.RetryPropertiesTest do
       |> Enum.chunk_every(2, 1, :discard)
       |> Enum.zip(schedule)
       |> Enum.each(fn {[a, b], wait} -> assert b - a >= wait end)
+    end
+  end
+
+  property "an attempt killed at the deadline ends with the reason of the last failure" do
+    check all(failures <- integer(0..3), deadline_ms <- integer(60..120), max_runs: 25) do
+      {fun, _calls} =
+        recorder(fn n ->
+          if n < failures, do: {:retry, {:failed, n}}, else: Process.sleep(:infinity)
+        end)
+
+      result = Retry.run(ctx(2, 4), Retry.deadline_in(deadline_ms), fun)
+
+      if failures == 0 do
+        assert result == {:error, :timeout}
+      else
+        assert {:error, {:failed, n}} = result
+        assert n < failures
+      end
     end
   end
 
@@ -162,22 +192,31 @@ defmodule Alambique.Replication.RetryPropertiesTest do
     assert_receive {:DOWN, ^ref, :process, ^blocked, _}, 5_000
   end
 
-  property "no attempt outlives the deadline by more than a small slack" do
+  # Killed at the deadline, not before and not later, and left no process.
+  property "an attempt that hangs is killed at the deadline and does not outlive it" do
     check all(
             deadline_ms <- integer(20..120),
             hang <- member_of([:infinity, :long]),
             max_runs: 25
           ) do
+      parent = self()
       started = System.monotonic_time(:millisecond)
 
       result =
         Retry.run(ctx(5, 20), Retry.deadline_in(deadline_ms), fn ->
+          send(parent, {:attempt, self()})
           Process.sleep(if hang == :infinity, do: :infinity, else: 5_000)
           :done
         end)
 
-      assert {:error, _} = result
-      assert System.monotonic_time(:millisecond) - started < deadline_ms + @slack_ms
+      elapsed = System.monotonic_time(:millisecond) - started
+      assert result == {:error, :timeout}
+      assert elapsed >= deadline_ms - 2
+      assert elapsed < deadline_ms + @kill_ms
+
+      assert_received {:attempt, pid}
+      ref = Process.monitor(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000
     end
   end
 
