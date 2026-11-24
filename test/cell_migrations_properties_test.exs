@@ -14,7 +14,10 @@ defmodule Alambique.CellMigrationsPropertiesTest do
     * a cell that `Alambique.migrate/3` answers a version for is at its
       namespace's version at that moment or ahead of it;
     * the schema index lists every cell at version 1 or later at its durable
-      version (perhaps also at an older one, never nowhere).
+      version (perhaps also at an older one, never nowhere);
+    * a write is acknowledged only once its segment is in the store, also when
+      the later of two batches in flight lands first, and until the first
+      fault every write is acknowledged.
 
   At the end, once the breaker of the store lets requests through again, the
   sweeper brings every listed cell to the version of its
@@ -27,7 +30,8 @@ defmodule Alambique.CellMigrationsPropertiesTest do
 
   import Alambique.CellHelpers
 
-  alias AlambiqueTestkit.{CrashPoints, MemoryStore}
+  alias Alambique.{AckGuard, Cell, Config, HeldWrites}
+  alias AlambiqueTestkit.{CrashPoints, GatedStore, MemoryStore}
 
   @moduletag :capture_log
   @moduletag timeout: 120_000
@@ -126,12 +130,17 @@ defmodule Alambique.CellMigrationsPropertiesTest do
     fault =
       one_of([
         tuple({constant(:store), member_of([:error, :timeout, :lost_ack]), integer(1..4)}),
+        tuple({constant(:segment), integer(1..4)}),
         tuple({constant(:crash), member_of(@points)}),
         constant(:none)
       ])
 
+    # The puts of the pair are held, so no fault runs with it.
+    held = tuple({constant(:held), member_of(@cells)})
+
     frequency([
       {10, tuple({constant(:run), fault, inner})},
+      {2, tuple({constant(:run), constant(:none), held})},
       {3, tuple({constant(:deploy), member_of(@namespaces)})},
       {1, constant(:restart)}
     ])
@@ -149,14 +158,21 @@ defmodule Alambique.CellMigrationsPropertiesTest do
       versions = Map.new(Enum.zip(@namespaces, starts))
       Lists.set(versions)
       name = :"cell_migrations_#{System.unique_integer([:positive])}"
+      {:ok, gate} = GatedStore.start_link()
+      raw = ctx.store
+      ctx = %{ctx | store: GatedStore.wrap(gate, raw)}
       start(ctx, name)
 
       # The namespace of "a.1-17" is "a".
       cells = for c <- @cells, do: "#{c}-#{System.unique_integer([:positive])}"
       names = Map.new(Enum.zip(@cells, cells))
+      guard = AckGuard.attach(raw, "cells-test", &(&1 in cells))
 
       state = %{
         seq: 0,
+        faulty?: false,
+        gate: gate,
+        guard: guard,
         restarted: false,
         acked: Map.new(cells, &{&1, []}),
         unknown: Map.new(cells, &{&1, []})
@@ -187,9 +203,17 @@ defmodule Alambique.CellMigrationsPropertiesTest do
         check_rows(ctx, state, cell)
       end
 
+      assert_acks_landed(state)
+      AckGuard.detach(guard)
+      GenServer.stop(gate)
       stop_supervised(name)
       MemoryStore.clear(ctx.store_config)
     end
+  end
+
+  defp assert_acks_landed(%{guard: guard}) do
+    assert AckGuard.violations(guard) == [],
+           "acknowledged before the put landed: #{inspect(AckGuard.violations(guard))}"
   end
 
   # A restart is a new instance: the leases that a crashed cell left are not
@@ -225,7 +249,10 @@ defmodule Alambique.CellMigrationsPropertiesTest do
       start_instance(ctx,
         name: name,
         migrations: {Lists, :migrations},
-        op_timeout_ms: 300
+        op_timeout_ms: 300,
+        # A failed put reaches the cell, which retries it after a short backoff.
+        retry: [max_attempts: 1],
+        upload: [retry_backoff_ms: 5, retry_backoff_max_ms: 20]
       )
 
   defp step({:deploy, ns}, state, _ctx, _name, _names) do
@@ -243,11 +270,18 @@ defmodule Alambique.CellMigrationsPropertiesTest do
   end
 
   defp step({:run, fault, inner}, state, ctx, name, names) do
+    # The cell is awake before its segment puts fail: it is the write that meets them.
+    with {:segment, _} <- fault, base when is_binary(base) <- elem(inner, 1) do
+      _ = safely(fn -> Alambique.query(name, names[base], "SELECT 1") end)
+    end
+
     arm(fault, ctx)
+    state = %{state | faulty?: state.faulty? or fault != :none}
 
     try do
       {state, cell} = run(inner, state, name, names)
       CrashPoints.reset()
+      assert_acks_landed(state)
       verify(ctx, state, cell)
       state
     after
@@ -258,6 +292,17 @@ defmodule Alambique.CellMigrationsPropertiesTest do
   defp arm({:store, kind, times}, ctx),
     do: MemoryStore.inject(ctx.store_config, kind: kind, times: times, ms: 1)
 
+  # Puts of segments fail: the cell puts them again while its lease holds.
+  defp arm({:segment, times}, ctx) do
+    MemoryStore.inject(ctx.store_config,
+      kind: :error,
+      ops: [:put],
+      key: ~r{/0000/},
+      times: times,
+      reason: {:http, 503, ""}
+    )
+  end
+
   defp arm({:crash, point}, _ctx), do: CrashPoints.arm(point, :raise)
   defp arm(:none, _ctx), do: :ok
 
@@ -266,26 +311,31 @@ defmodule Alambique.CellMigrationsPropertiesTest do
     n = state.seq + 1
     asleep? = Alambique.owner(name, cell) == :none
     expected = Lists.version(cell)
+    result = safely(fn -> write(name, cell, n) end)
+    {record(%{state | seq: n}, name, cell, n, result, asleep?, expected), cell}
+  end
 
-    result =
-      safely(fn -> Alambique.execute(name, cell, "INSERT INTO t (n) VALUES (?)", [n]) end)
+  # Two writes whose puts are held, the later one landing first.
+  defp run({:held, base}, state, name, names) do
+    cell = names[base]
+    expected = Lists.version(cell)
+    _ = safely(fn -> Alambique.query(name, cell, "SELECT 1") end)
+    pid = Cell.whereis(Config.fetch!(name), cell)
 
-    state = %{state | seq: n}
+    if pid do
+      ns = [state.seq + 1, state.seq + 2]
 
-    state =
-      case result do
-        {:ok, _} ->
-          served(name, cell, asleep?, expected)
-          update_in(state.acked[cell], &[n | &1])
+      answers =
+        HeldWrites.run(state.gate, cell, pid, 8, ns, &safely(fn -> write(name, cell, &1) end))
 
-        {:error, {:schema_too_new, v}} ->
-          flunk("#{cell} refused at version #{v}")
+      state = %{state | seq: state.seq + 2}
 
-        _ ->
-          update_in(state.unknown[cell], &[n | &1])
-      end
-
-    {state, cell}
+      {Enum.reduce(answers, state, fn {n, result}, state ->
+         record(state, name, cell, n, result, false, expected)
+       end), cell}
+    else
+      {state, cell}
+    end
   end
 
   defp run({:read, base}, state, name, names) do
@@ -333,6 +383,28 @@ defmodule Alambique.CellMigrationsPropertiesTest do
     cell = names[base]
     safely(fn -> Alambique.hibernate(name, cell) end)
     {state, cell}
+  end
+
+  defp write(name, cell, n),
+    do: Alambique.execute(name, cell, "INSERT INTO t (n) VALUES (?)", [n])
+
+  # Until the first fault a write is acknowledged.
+  defp record(state, name, cell, n, result, asleep?, expected) do
+    case result do
+      {:ok, _} ->
+        served(name, cell, asleep?, expected)
+        update_in(state.acked[cell], &[n | &1])
+
+      {:error, {:schema_too_new, v}} ->
+        flunk("#{cell} refused at version #{v}")
+
+      other ->
+        # A cell of a namespace with no migration has no table yet.
+        assert state.faulty? or expected == 0,
+               "#{cell}: write #{n} answered #{inspect(other)} with no fault"
+
+        update_in(state.unknown[cell], &[n | &1])
+    end
   end
 
   # A cell that woke for this call is at the version of its namespace, or
