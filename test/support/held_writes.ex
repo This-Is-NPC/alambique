@@ -12,7 +12,8 @@ defmodule Alambique.HeldWrites do
   import ExUnit.Assertions
   import Alambique.CellHelpers, only: [eventually: 2]
 
-  alias AlambiqueTestkit.GatedStore
+  alias Alambique.ClusterFuns
+  alias AlambiqueTestkit.{Cluster, GatedStore}
 
   @held_wait_ms 3_000
 
@@ -55,6 +56,28 @@ defmodule Alambique.HeldWrites do
         do: spawn_link(fn -> send(parent, {ref, n, answer_of(fn -> write.(n) end)}) end)
 
     collect(ref, ns)
+  end
+
+  @doc """
+  `run/6` for a cell that a peer of `cluster` serves: finds the live peer that
+  holds the lease of `cell`, asking `via`, and runs the writes against its
+  process, with as many in flight as there are writes. `:none` when no live
+  peer of `dead` (a `MapSet` of names) has the cell awake. The gate must
+  be the one the instances' store goes through.
+  """
+  def run_on(cluster, gate, via, cell, dead, ns, write) do
+    args = [Cluster.instance(cluster), cell]
+
+    with {:ok, {:ok, owner}} <- Cluster.call(cluster, via, Alambique, :owner, args, 5_000),
+         name when name != nil <-
+           Enum.find(Cluster.names(cluster), &(Cluster.node(cluster, &1) == owner)),
+         false <- name in dead,
+         {:ok, pid} when is_pid(pid) <-
+           Cluster.call(cluster, name, ClusterFuns, :cell_pid, args) do
+      run(gate, cell, pid, length(ns), ns, write)
+    else
+      _ -> :none
+    end
   end
 
   @doc """
