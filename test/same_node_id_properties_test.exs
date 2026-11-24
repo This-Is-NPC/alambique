@@ -97,11 +97,14 @@ defmodule Alambique.SameNodeIdPropertiesTest do
       killed: MapSet.new(),
       gate: gate,
       guard: guard,
-      store: ctx.store_config
+      store: ctx.store_config,
+      raw: ctx.store,
+      prefix: prefix,
+      epochs: %{}
     }
 
     try do
-      run = Enum.reduce(ops, run, &step/2)
+      run = Enum.reduce(ops, run, &observed_step/2)
       verify(ctx, run, prefix, log)
     after
       AckGuard.detach(guard)
@@ -118,6 +121,35 @@ defmodule Alambique.SameNodeIdPropertiesTest do
     do: :ets.insert(log, {{meta.cell, meta.txid}, self()})
 
   def record(_event, _m, _meta, _log), do: :ok
+
+  defp observed_step(op, run), do: op |> step(run) |> observe()
+
+  # The lease object of each cell as the store holds it: a renewal keeps its
+  # epoch and every new acquisition, of any instance, has a higher one.
+  defp observe(run) do
+    {store, config} = run.raw
+
+    Enum.reduce(@cells, run, fn cell, run ->
+      case store.get(config, "#{run.prefix}/cells/#{cell}/lease") do
+        {:ok, body, _etag, _meta} ->
+          %{"epoch" => epoch, "token" => token} = Jason.decode!(body)
+          seen = {token, epoch}
+          assert_advanced(run.epochs[cell], seen, cell)
+          %{run | epochs: Map.put(run.epochs, cell, seen)}
+
+        {:error, :not_found} ->
+          run
+      end
+    end)
+  end
+
+  defp assert_advanced(nil, _seen, _cell), do: :ok
+
+  defp assert_advanced({token, before}, {token, now}, cell),
+    do: assert(now == before, "#{cell}: epoch #{before} became #{now} within one acquisition")
+
+  defp assert_advanced({_, before}, {_, now}, cell),
+    do: assert(now > before, "#{cell}: a new acquisition kept epoch #{before}")
 
   # The model keeps the holder of each cell: `{who, :live | :killed}`. A write
   # from another instance may be acknowledged only after the holder gave the
