@@ -65,6 +65,10 @@ pub(crate) struct Control {
     /// (`sqlite_expect_transaction`): a statement that finds it gone does not
     /// run (`check_transaction`).
     expect_txn: AtomicBool,
+    /// Frames in the WAL after the latest commit on the connection (the WAL
+    /// hook), and the value when the transaction of the library began.
+    wal_frames: AtomicU64,
+    txn_frames: AtomicU64,
     /// `now_us()` after which the running statement is stopped; 0 for none.
     deadline: AtomicU64,
     /// The progress handler stopped a statement at the deadline.
@@ -81,6 +85,8 @@ impl Control {
             read_only: AtomicBool::new(false),
             no_txn_control: AtomicBool::new(false),
             expect_txn: AtomicBool::new(false),
+            wal_frames: AtomicU64::new(0),
+            txn_frames: AtomicU64::new(0),
             deadline: AtomicU64::new(0),
             timed_out: AtomicBool::new(false),
             allow_attach,
@@ -269,6 +275,22 @@ fn pragma_allowed(name: &[u8], arg: Option<&[u8]>, read_only: bool) -> bool {
     } else {
         !read_only || arg.is_none() || INTROSPECTION.iter().any(|p| name.eq_ignore_ascii_case(p))
     }
+}
+
+/// Notes the size of the WAL after every commit. It never checkpoints:
+/// automatic checkpoints are off (design §6).
+unsafe extern "C" fn wal_committed(
+    ctx: *mut std::ffi::c_void,
+    _: *mut ffi::sqlite3,
+    _: *const c_char,
+    frames: c_int,
+) -> c_int {
+    guard("wal_hook", ffi::SQLITE_OK, || {
+        // SAFETY: the context is the `Control` of this connection (see there).
+        let ctl = unsafe { &*(ctx as *const Control) };
+        ctl.wal_frames.store(frames as u64, Relaxed);
+        ffi::SQLITE_OK
+    })
 }
 
 /// Stops the running statement once its deadline has passed.
@@ -846,6 +868,7 @@ fn sqlite_open<'a>(
         unsafe {
             ffi::sqlite3_set_authorizer(db, Some(authorize), ctx);
             ffi::sqlite3_progress_handler(db, PROGRESS_OPS, Some(progress), ctx);
+            ffi::sqlite3_wal_hook(db, Some(wal_committed), ctx);
         }
         Ok((atoms::ok(), conn).encode(env))
     };
@@ -1016,8 +1039,21 @@ fn step_to_end(
 /// `COMMIT` or `ROLLBACK`.
 #[rustler::nif]
 fn sqlite_expect_transaction(conn: ResourceArc<Conn>, on: bool) -> Atom {
+    if on {
+        let frames = conn.control.wal_frames.load(Relaxed);
+        conn.control.txn_frames.store(frames, Relaxed);
+    }
     conn.control.expect_txn.store(on, Relaxed);
     atoms::ok()
+}
+
+/// Whether a commit reached the WAL since the transaction of the library
+/// began (`sqlite_expect_transaction` with `true`): frames that no write of
+/// the cell accounts for when that transaction failed.
+#[rustler::nif]
+fn sqlite_wal_advanced(conn: ResourceArc<Conn>) -> bool {
+    let ctl = &conn.control;
+    ctl.wal_frames.load(Relaxed) != ctl.txn_frames.load(Relaxed)
 }
 
 /// User statements running now (`sqlite_run` calls with a `max_concurrent`).
@@ -1066,7 +1102,11 @@ fn sqlite_checkpoint<'a>(env: Env<'a>, conn: ResourceArc<Conn>) -> Term<'a> {
                 )
             };
             match rc {
-                ffi::SQLITE_OK => Ok(atoms::ok().encode(env)),
+                ffi::SQLITE_OK => {
+                    // The WAL starts over: the count must not equal a later one by chance.
+                    conn.control.wal_frames.store(0, Relaxed);
+                    Ok(atoms::ok().encode(env))
+                }
                 ffi::SQLITE_BUSY => Ok((atoms::error(), atoms::busy()).encode(env)),
                 _ => Err(failure(db)),
             }

@@ -141,10 +141,18 @@ defmodule Alambique.Sqlite do
   `{:error, :transaction_ended}` without running a statement once SQLite has
   ended the transaction (a conflict or a trigger that rolls back, an
   interrupted statement, an I/O error). Turn it off before the final `COMMIT`
-  or `ROLLBACK`.
+  or `ROLLBACK`. Turning it on notes the size of the WAL for `wal_advanced?/1`.
   """
   @spec expect_transaction(conn, boolean) :: :ok | {:error, term}
   def expect_transaction(conn, on), do: Native.sqlite_expect_transaction(conn, on)
+
+  @doc """
+  Whether a commit reached the WAL of `conn` since `expect_transaction(conn,
+  true)`. After a transaction that failed it says that frames were committed
+  that no write accounts for.
+  """
+  @spec wal_advanced?(conn) :: boolean
+  def wal_advanced?(conn), do: Native.sqlite_wal_advanced(conn)
 
   @doc """
   Runs a user's script of schema statements, each as SQLite delimits it.

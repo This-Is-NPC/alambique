@@ -366,8 +366,9 @@ defmodule Alambique do
       cell, so the next wake restores what the store holds, and the call that
       found them gets `{:error, :orphan_frames}` (`position/3`, `hibernate/3`) or its
       own error (a write); `:replicate` uploads them as a batch first and goes
-      on (a write that failed then answers `{:error, {:committed, reason}}`,
-      as its rows are durable).
+      on (the write that left them answers `{:error, {:committed, reason}}`,
+      as its rows are durable; a write that failed without leaving frames
+      answers its own error).
     * `:query` - defaults of `Alambique.Query`: `:cache_bytes` (default 1 GiB),
       `:concurrency` (cells read at once, default 16: the wait for the store
       dominates a cell, so the default does not follow the CPUs),
