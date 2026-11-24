@@ -307,17 +307,26 @@ defmodule Alambique.ConfigPropertiesTest do
       end
     end
 
+    # A TTL just above twice the skew margin is no longer refused for that
+    # reason: it is too short for the freeze check, or accepted.
     property "lease_ttl_ms must exceed twice skew_margin_ms" do
-      check all(skew <- integer(0..20), around <- integer(-2..2)) do
+      check all(skew <- integer(0..20), around <- member_of([-2, -1, 0, 1, 2])) do
         ttl = max(2 * skew + around, 1)
-        opts = base(lease_ttl_ms: ttl, skew_margin_ms: skew)
+
+        refusal =
+          try do
+            Config.build(base(lease_ttl_ms: ttl, skew_margin_ms: skew))
+            nil
+          rescue
+            error in ArgumentError -> error.message
+          end
 
         if ttl > 2 * skew do
           roomy = base(lease_ttl_ms: 4 * skew + 30, skew_margin_ms: skew)
           assert %{skew_margin_ms: ^skew} = Config.build(roomy)
+          refute is_binary(refusal) and refusal =~ "greater than twice"
         else
-          error = assert_raise ArgumentError, fn -> Config.build(opts) end
-          assert error.message =~ "greater than twice"
+          assert is_binary(refusal) and refusal =~ "greater than twice"
         end
       end
     end
