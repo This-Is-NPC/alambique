@@ -397,8 +397,6 @@ defmodule Alambique.TxControlSecondReviewTest do
       feed_after(c, "t", 6, "u")
     end
 
-    # Skipped: Capture.ddl? does not skip a byte order mark, so no triggers follow the table.
-    @tag :skip
     test "that creates a table through Tx.execute keeps the table in the feed", env do
       c = boot(env, :stop)
 
@@ -432,11 +430,48 @@ defmodule Alambique.TxControlSecondReviewTest do
       assert feed_after(c, "t", 6, "u") == [5]
     end
 
-    # Skipped: Capture.ddl? does not skip a byte order mark.
-    @tag :skip
-    test "is recognised as schema by Capture.ddl?", _env do
-      assert Alambique.Feed.Capture.ddl?(@bom <> "CREATE TABLE u (n)")
-      assert Alambique.Feed.Capture.ddl?(@bom <> "-- c\nALTER TABLE u ADD COLUMN x")
+    test "is recognised as schema by Sqlite.ddl?", _env do
+      assert Sqlite.ddl?(@bom <> "CREATE TABLE u (n)")
+      assert Sqlite.ddl?(@bom <> "-- c\nALTER TABLE u ADD COLUMN x")
+      refute Sqlite.ddl?(@bom <> "INSERT INTO u VALUES (1)")
+    end
+
+    # Every prefix that SQLite skips, in each way a statement can reach the cell.
+    for {name, prefix} <- [
+          blanks: " \t\r\n\f ",
+          line_comment: "-- note\n",
+          block_comment: "/* note */",
+          mixed: "\uFEFF /* a */ -- b\n\uFEFF\n"
+        ] do
+      test "after #{name} is captured through Tx.execute, Tx.script and a migration", env do
+        prefix = unquote(prefix)
+        c = boot(env, :stop)
+
+        keys =
+          bom_feed(c, fn tx ->
+            {:ok, _} = Tx.execute(tx, prefix <> "CREATE TABLE u (n INTEGER PRIMARY KEY)")
+          end)
+
+        assert keys == [5]
+
+        c = boot(env, :stop)
+
+        keys =
+          bom_feed(c, fn tx ->
+            :ok = Tx.script(tx, prefix <> "CREATE TABLE u (n INTEGER PRIMARY KEY)")
+          end)
+
+        assert keys == [5]
+
+        Migrations.set(@schema)
+        on_exit(fn -> :persistent_term.erase({Migrations, :list}) end)
+        c = boot(env, :stop, migrations: {Migrations, :list, []})
+        Migrations.set(@schema ++ [{2, prefix <> "CREATE TABLE u (n INTEGER PRIMARY KEY)"}])
+        assert {:ok, 2} = Alambique.migrate(c.inst, c.cell)
+        {:ok, _} = Alambique.execute(c.inst, c.cell, "INSERT INTO u VALUES (5)")
+        {:ok, _} = Alambique.execute(c.inst, c.cell, "INSERT INTO t VALUES (6)")
+        assert feed_after(c, "t", 6, "u") == [5]
+      end
     end
   end
 

@@ -184,6 +184,15 @@ defmodule Alambique.Sqlite do
   def script(conn, sql), do: Native.sqlite_script(conn, IO.iodata_to_binary(sql))
 
   @doc """
+  Whether a statement starts with `CREATE`, `DROP` or `ALTER` once the blanks
+  and comments that SQLite skips are skipped (a UTF-8 byte order mark is one
+  of them). It is the check of `script/2`, so a statement is schema for the
+  library when it is schema for the script. It does not call SQLite.
+  """
+  @spec ddl?(iodata) :: boolean
+  def ddl?(sql), do: Native.sqlite_starts_ddl(IO.iodata_to_binary(sql))
+
+  @doc """
   Bytes the connection holds, by purpose: `:cache_used` (page cache),
   `:schema_used`, `:stmt_used` (prepared statements) and `:lookaside_used`.
   """

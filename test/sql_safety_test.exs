@@ -83,15 +83,15 @@ defmodule Alambique.SqlSafetyTest do
   end
 
   test "the DDL check of a transaction statement is linear in the statement" do
-    alias Alambique.Feed.Capture
+    alias Alambique.Sqlite
     hostile = String.duplicate("/**/ ", 30) <> "SELECT 1"
 
-    {micros, false} = :timer.tc(fn -> Capture.ddl?(hostile) end)
+    {micros, false} = :timer.tc(fn -> Sqlite.ddl?(hostile) end)
     assert micros < 50_000
-    assert Capture.ddl?("/* a */ -- b\n  CREATE TABLE x (y)")
-    assert Capture.ddl?(String.duplicate("/**/ ", 30) <> "drop table x")
-    refute Capture.ddl?("/* never closed CREATE TABLE x (y)")
-    refute Capture.ddl?("SELECT 'create'")
+    assert Sqlite.ddl?("/* a */ -- b\n  CREATE TABLE x (y)")
+    assert Sqlite.ddl?(String.duplicate("/**/ ", 30) <> "drop table x")
+    refute Sqlite.ddl?("/* never closed CREATE TABLE x (y)")
+    refute Sqlite.ddl?("SELECT 'create'")
   end
 
   describe "ATTACH" do

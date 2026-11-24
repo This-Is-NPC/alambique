@@ -137,7 +137,7 @@ defmodule Alambique.Tx do
     with :ok <- active(tx) do
       limits = @user_text ++ tx.limits
 
-      if capture and Capture.ddl?(sql),
+      if capture and Alambique.Sqlite.ddl?(sql),
         do: Capture.around_ddl(conn, select, fn -> Db.run(conn, sql, params, limits) end),
         else: Db.run(conn, sql, params, limits)
     end
