@@ -587,7 +587,10 @@ wake event shows `reason: :disk_full` (`[:alambique, :cell, :wake]`).
     `operation`, and whether the failure `counted` toward the breaker.
   - `Alambique.breaker_status(MyApp.Cells)` shows the state of each location
     (`:closed`, `:open` or `:half_open`), without asking the store. Use it for a
-    health check.
+    health check. Each location has a second state under `feed`, for the
+    objects of the change feed. If only `feed` is open, the store fails for
+    those objects alone: writes and reads go on and the feed is published
+    again when the store answers.
   - Check the store, not the node. Calls are safe to repeat once the store
     answers again.
   - Raise `breaker: [failures:]` if a store that fails now and then opens the

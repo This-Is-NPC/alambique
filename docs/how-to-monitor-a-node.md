@@ -36,8 +36,10 @@ cells. Use `cell` as a label only on the events you read when you investigate.
 import Telemetry.Metrics
 
 metrics = [
-  counter("alambique.store.failure", tags: [:instance, :location, :operation, :reason, :counted]),
-  counter("alambique.store.breaker.open", tags: [:instance, :location, :reason]),
+  counter("alambique.store.failure",
+    tags: [:instance, :location, :class, :operation, :reason, :counted]
+  ),
+  counter("alambique.store.breaker.open", tags: [:instance, :location, :class, :reason]),
   counter("alambique.lease.lost"),
   counter("alambique.lease.renew", tags: [:result]),
   counter("alambique.cell.stop", tags: [:reason]),
@@ -60,7 +62,7 @@ means chart it and look when something else fires.
 
 | Signal | Limit | Source |
 | --- | --- | --- |
-| `[:alambique, :store, :breaker, :open]`, or `Alambique.breaker_status/1` not `:closed` | Page on any open breaker. One that opens again with `reason: :probe_failed` is a store that stays down. | The breaker opens after `breaker: [failures: 5]` failures in a row and waits `cooldown_ms: 5_000` before one probe (`config.ex`). |
+| `[:alambique, :store, :breaker, :open]`, or `Alambique.breaker_status/1` not `:closed` (also its `feed` entry) | Page on any open breaker. `class: :feed` is a store that fails for the objects of the change feed only: writes go on and the feed falls behind. One that opens again with `reason: :probe_failed` is a store that stays down. | The breaker opens after `breaker: [failures: 5]` failures in a row and waits `cooldown_ms: 5_000` before one probe (`config.ex`). |
 | `[:alambique, :store, :failure]` with `counted: true`, by `reason` | Page when the rate does not return to zero. `{:http, 5xx}`, `:timeout_recv` and `:transport` point at the store or the network. | `breaker: [failures: 5]`; the reasons are in [telemetry.md](telemetry.md), Store events. |
 | `[:alambique, :store, :failure]` with `counted: false` (`reason: :local`) | Watch. A sustained rate means the node is overloaded, not the store: its pool of connections is full. | `Store.S3` `pool_size` (default 256); [how-to-configure-the-s3-store.md](how-to-configure-the-s3-store.md) |
 | `[:alambique, :store, :too_large]`, `size`, `max`, `key` | Page on any. An object was over its cap and was refused before it was read. It is not a store failure and does not open the breaker. A restore or a lease read that hits it fails. Check `key`: a corrupt or foreign object, or a cell that outgrew `max_object_bytes`. | `read_limits: [max_object_bytes: 1_073_741_824, max_control_bytes: 16_777_216]` |
