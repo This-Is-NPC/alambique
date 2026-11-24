@@ -17,15 +17,19 @@ defmodule Alambique.PlacementPropertiesTest do
     * the epochs of a cell's commits never decrease over time, and no epoch
       committed in both locations (fencing across any sequence of moves);
     * the change feed, read from both locations, holds every stored row exactly
-      once after deduplication, in commit order (F1).
+      once after deduplication, in commit order (F1);
+    * after a move, the lease of the location the cell moved to has a higher
+      epoch than the one the move left at the location it came from;
+    * no write is acknowledged before its segment is in the store of its
+      location, also with the puts of a cell held while writes arrive.
   """
   use ExUnit.Case, async: false
   use ExUnitProperties
 
   import Alambique.CellHelpers, only: [eventually: 2]
 
-  alias Alambique.{ClusterFuns, Feed, Lease, Location}
-  alias AlambiqueTestkit.{Cluster, CrashPoints, MemoryStore}
+  alias Alambique.{AckGuard, ClusterFuns, Feed, HeldWrites, Lease, Location}
+  alias AlambiqueTestkit.{Cluster, CrashPoints, GatedStore, MemoryStore}
   alias AlambiqueTestkit.Placement, as: TestPlacement
 
   @moduletag :cluster
@@ -67,6 +71,7 @@ defmodule Alambique.PlacementPropertiesTest do
 
     frequency([
       {16, tuple({constant(:write), node, cell})},
+      {3, tuple({constant(:held), node, cell, integer(2..3)})},
       {7, tuple({constant(:relocate), node, cell, member_of(["a", "b"])})},
       {4, tuple({constant(:cleanup), node, cell, member_of(["a", "b"])})},
       {5, tuple({constant(:crash_point), node, member_of(@points)})},
@@ -102,6 +107,7 @@ defmodule Alambique.PlacementPropertiesTest do
   end
 
   defp run_scenario(ops, grace) do
+    {:ok, gate} = GatedStore.start_link()
     {:ok, b_pid} = MemoryStore.start_link()
     {:ok, table_pid} = MemoryStore.start_link()
     b = MemoryStore.config(b_pid)
@@ -114,7 +120,7 @@ defmodule Alambique.PlacementPropertiesTest do
         skew_margin_ms: @skew_ms,
         op_timeout_ms: 1_500,
         migrations: ClusterFuns.feed_schema(),
-        placement: &placement(&1, b, table),
+        placement: &placement(&1, b, table, gate),
         instance_opts: [
           feed: [window_ms: 500],
           moved_grace_ms: @moved_grace_ms,
@@ -123,16 +129,30 @@ defmodule Alambique.PlacementPropertiesTest do
       )
 
     locations = locations(Cluster.store(cluster), b)
-    sampler = start_sampler(locations, table)
+    leases = lease_ctxs(locations)
+    sampler = start_sampler(locations, table, leases)
+    guard = AckGuard.attach_peers(Map.new(locations, &{&1.id, {&1.store, &1.prefix}}))
 
     try do
+      for name <- @names, do: watch(cluster, name, guard)
       # Every node learns the first answer, so later moves meet stale views.
       warm_caches(cluster)
 
       run =
         Enum.reduce(
           ops,
-          %{seq: 0, dead: MapSet.new(), acked: [], tried: [], moving: %{}, b: b, grace: grace},
+          %{
+            seq: 0,
+            dead: MapSet.new(),
+            acked: [],
+            tried: [],
+            moving: %{},
+            b: b,
+            grace: grace,
+            gate: gate,
+            guard: guard,
+            leases: leases
+          },
           &step(cluster, &1, &2)
         )
 
@@ -143,14 +163,27 @@ defmodule Alambique.PlacementPropertiesTest do
 
       Cluster.heal_all(cluster)
       MemoryStore.clear(b)
-      for node <- run.dead, do: Cluster.restart(cluster, node)
+      for node <- run.dead, do: restart(cluster, node, run)
+
+      assert AckGuard.violations(guard) == [],
+             "acknowledged before the put landed: #{inspect(AckGuard.violations(guard))}"
+
+      if run.acked != [],
+        do: assert(AckGuard.acks(guard) != [], "the guard saw no acknowledgement")
+
       verify(cluster, run, locations)
     after
       Process.unlink(cluster)
       Cluster.stop(cluster)
+      AckGuard.detach(guard)
+      GenServer.stop(gate)
       CrashPoints.reset()
     end
   end
+
+  # Peers report their acknowledgements to the guard; a restarted peer needs it again.
+  defp watch(cluster, name, guard),
+    do: Cluster.call(cluster, name, AckGuard, :watch, [guard])
 
   # Locations: `a` is the cluster's store, `b` has a store of its own.
   defp locations({store, config}, b) do
@@ -160,8 +193,15 @@ defmodule Alambique.PlacementPropertiesTest do
     ]
   end
 
-  defp placement(shared, b, table),
-    do: {TestPlacement, placement_opts(locations(shared, b), table)}
+  # The instances reach the stores through the gate, which holds the puts a
+  # step asks for.
+  defp placement(shared, b, table, gate) do
+    gated = for location <- locations(shared, b), do: gate_store(location, gate)
+    {TestPlacement, placement_opts(gated, table)}
+  end
+
+  defp gate_store(%Location{store: store} = location, gate),
+    do: %{location | store: GatedStore.wrap(gate, store)}
 
   defp placement_opts(locations, table),
     do: [locations: locations, table: {MemoryStore, table}, initial: Map.new(@cells, &{&1, "a"})]
@@ -183,21 +223,43 @@ defmodule Alambique.PlacementPropertiesTest do
     end
   end
 
-  defp step(cluster, {:write, node, cell}, run) do
-    n = run.seq + 1
+  # Records the write `n` and whether `answer` acknowledged it.
+  defp account(run, cell, n, answer) do
+    run = %{run | seq: n, tried: [{cell, n} | run.tried]}
+    if match?({:ok, {:ok, _}}, answer), do: %{run | acked: [{cell, n} | run.acked]}, else: run
+  end
 
-    case write(cluster, node, cell, n) do
-      {:ok, {:ok, _}} ->
-        %{run | seq: n, acked: [{cell, n} | run.acked], tried: [{cell, n} | run.tried]}
+  defp step(cluster, {:write, node, cell}, run),
+    do: account(run, cell, run.seq + 1, write(cluster, node, cell, run.seq + 1))
 
-      _ ->
-        %{run | seq: n, tried: [{cell, n} | run.tried]}
+  # Writes whose puts are held while the cell is served by whoever owns it now
+  # (after the moves and crashes of earlier steps): none is answered before its
+  # put, and the put of every batch before it, landed.
+  defp step(cluster, {:held, node, cell, count}, run) do
+    run = step(cluster, {:write, node, cell}, run)
+    ns = Enum.to_list((run.seq + 1)..(run.seq + count))
+    write = &write(cluster, node, cell, &1)
+
+    case HeldWrites.run_on(cluster, run.gate, node, cell, run.dead, ns, write) do
+      :none ->
+        run
+
+      answers ->
+        Enum.reduce(answers, run, fn {n, answer}, run -> account(run, cell, n, answer) end)
     end
   end
 
   defp step(cluster, {:relocate, node, cell, dest}, run) do
     args = [Cluster.instance(cluster), cell, dest, [timeout: @relocate_timeout_ms]]
-    Cluster.call(cluster, node, Alambique, :relocate, args, @relocate_timeout_ms + 4_000)
+
+    outcome =
+      Cluster.call(cluster, node, Alambique, :relocate, args, @relocate_timeout_ms + 4_000)
+
+    case outcome do
+      {:ok, {:ok, %Location{id: ^dest}}} -> check_move_epochs(run.leases, cell, dest)
+      _ -> :ok
+    end
+
     %{run | moving: Map.put(run.moving, cell, dest)}
   end
 
@@ -242,10 +304,7 @@ defmodule Alambique.PlacementPropertiesTest do
     %{run | dead: MapSet.put(run.dead, node)}
   end
 
-  defp step(cluster, {:restart, node}, run) do
-    if node in run.dead, do: Cluster.restart(cluster, node)
-    %{run | dead: MapSet.delete(run.dead, node)}
-  end
+  defp step(cluster, {:restart, node}, run), do: restart(cluster, node, run)
 
   defp step(cluster, {:fault, :a, node, kind, times}, run) do
     unless node in run.dead,
@@ -280,28 +339,52 @@ defmodule Alambique.PlacementPropertiesTest do
 
   defp step(_cluster, {:pass, ms}, run), do: tap(run, fn _ -> Process.sleep(ms) end)
 
+  defp restart(cluster, node, run) do
+    if node in run.dead do
+      Cluster.restart(cluster, node)
+      watch(cluster, node, run.guard)
+    end
+
+    %{run | dead: MapSet.delete(run.dead, node)}
+  end
+
+  # The lease a move installs where the cell goes has a higher epoch than the
+  # one it holds where the cell came from (fencing across moves, design §18):
+  # the source lease is marked as moved to `dest`, and the destination's is
+  # read after it, so whatever happened to it since only raised its epoch.
+  defp check_move_epochs(leases, cell, dest) do
+    other = if dest == "a", do: "b", else: "a"
+
+    with {:ok, %{moved_to: ^dest} = left} <- Lease.read(leases[other], cell),
+         {:ok, live} <- Lease.read(leases[dest], cell) do
+      assert live.epoch > left.epoch,
+             "cell #{cell} moved to #{dest} with lease epoch #{live.epoch}, " <>
+               "the location it left holds #{left.epoch}"
+    end
+  end
+
   # The sampler reads the placement, then the lease of the other location,
   # then the placement again. If the placement named the same location both
   # times, the other lease must not be one that anyone can hold: absent, a
   # moved marker, or a free lease installed by a move that did not commit yet.
   # (A move completes within a placement write, far longer than the sampling
   # step, so the placement does not flip twice between the reads.)
-  defp start_sampler([a, b] = locations, table) do
+  defp start_sampler(locations, table, leases) do
     opts = placement_opts(locations, table)
-
-    leases =
-      for location <- [a, b], into: %{} do
-        {location.id,
-         Lease.ctx(
-           store: location.store,
-           clock: {Alambique.Clock.System, nil},
-           prefix: location.prefix,
-           ttl_ms: @ttl_ms,
-           skew_margin_ms: @skew_ms
-         )}
-      end
-
     spawn_link(fn -> sample(opts, leases, []) end)
+  end
+
+  defp lease_ctxs(locations) do
+    for location <- locations, into: %{} do
+      {location.id,
+       Lease.ctx(
+         store: location.store,
+         clock: {Alambique.Clock.System, nil},
+         prefix: location.prefix,
+         ttl_ms: @ttl_ms,
+         skew_margin_ms: @skew_ms
+       )}
+    end
   end
 
   defp sample(opts, leases, violations) do
@@ -338,7 +421,7 @@ defmodule Alambique.PlacementPropertiesTest do
   defp verify(cluster, run, locations) do
     inst = Cluster.instance(cluster)
 
-    for {cell, dest} <- run.moving, do: settle_move(cluster, inst, cell, dest)
+    for {cell, dest} <- run.moving, do: settle_move(cluster, inst, cell, dest, run.leases)
 
     stored = for cell <- @cells, into: %{}, do: {cell, durable_numbers(cluster, inst, cell)}
 
@@ -364,12 +447,13 @@ defmodule Alambique.PlacementPropertiesTest do
 
   # Runs the last relocation asked for until it returns. A move left half done
   # towards the other location is finished first.
-  defp settle_move(cluster, inst, cell, dest) do
+  defp settle_move(cluster, inst, cell, dest, leases) do
     eventually(
       fn ->
         Enum.find_value(@names, fn node ->
           case relocate(cluster, node, inst, cell, dest) do
             {:ok, {:ok, %Location{id: ^dest}}} ->
+              check_move_epochs(leases, cell, dest)
               true
 
             {:ok, {:error, {:move_pending, other}}} ->
