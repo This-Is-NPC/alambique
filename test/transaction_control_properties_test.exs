@@ -327,9 +327,9 @@ defmodule Alambique.TransactionControlPropertiesTest do
       # and the cell stops, so the row is never durable.
       if orphan? do
         :ok =
-          Alambique.Cell.Db.writable_script(
-            :sys.get_state(pid(ctx, cell)).conn,
-            "INSERT INTO t VALUES (5000)"
+          in_cell(
+            pid(ctx, cell),
+            &Alambique.Cell.Db.writable_script(&1.conn, "INSERT INTO t VALUES (5000)")
           )
 
         assert Alambique.position(ctx.inst, cell) == {:error, :orphan_frames},

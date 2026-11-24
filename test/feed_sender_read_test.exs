@@ -112,17 +112,17 @@ defmodule Alambique.FeedSenderReadTest do
       :ok =
         Sqlite.execute(
           w,
-          "PRAGMA query_only = OFF; BEGIN IMMEDIATE; INSERT INTO t VALUES (2, 'b')"
+          "PRAGMA query_only = OFF; BEGIN IMMEDIATE; INSERT INTO t VALUES (2, 'b')",
+          write: true
         )
 
       assert {:ok, %{rows: [[1]]}} = count(r)
-      :ok = Sqlite.execute(w, "COMMIT; PRAGMA query_only = ON")
+      :ok = Sqlite.execute(w, "COMMIT; PRAGMA query_only = ON", write: true)
       assert {:ok, %{rows: [[2]]}} = count(r)
     end
 
     test "cannot write", %{reader: r} do
-      assert {:error, "attempt to write a readonly database"} =
-               Sqlite.run(r, "INSERT INTO t VALUES (9, 'z')", [])
+      assert {:error, :not_authorized} = Sqlite.run(r, "INSERT INTO t VALUES (9, 'z')", [])
     end
 
     test "reads rows only once the batch stamped them", %{writer: w, reader: r} do
@@ -305,11 +305,15 @@ defmodule Alambique.FeedSenderReadTest do
       CrashPoints.arm(
         :feed_after_read,
         fn _, %{reader: reader} ->
-          :ok = Sqlite.execute(reader, "BEGIN")
-          {:ok, _} = Sqlite.run(reader, "SELECT count(*) FROM notes", [])
+          # A second reader of the same file, owned by this process.
+          {:ok, %{rows: [[_, "main", file]]}} = Sqlite.run(reader, "PRAGMA database_list", [])
+          {:ok, mine} = Sqlite.open(file, readonly: true, vfs: :alambique)
+          :ok = Sqlite.execute(mine, "BEGIN")
+          {:ok, _} = Sqlite.run(mine, "SELECT count(*) FROM notes", [])
           send(test, :reading)
           eventually(fn -> :atomics.get(release, 1) == 1 end)
-          Sqlite.execute(reader, "ROLLBACK")
+          Sqlite.execute(mine, "ROLLBACK")
+          Sqlite.close(mine)
         end,
         when: &match?(%{cell: @cell}, &1)
       )
@@ -361,7 +365,7 @@ defmodule Alambique.FeedSenderReadTest do
       s = state(inst)
       {:ok, _} = Alambique.query(inst, @cell, "SELECT 1")
 
-      {:ok, m} = Sqlite.memory(s.feed_reader)
+      {:ok, m} = in_cell(pid(inst), fn st -> Sqlite.memory(st.feed_reader) end)
       reader = m.cache_used + m.schema_used + m.stmt_used
       assert reader > 0
       assert Admission.bytes(config) >= without + reader

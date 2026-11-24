@@ -14,6 +14,7 @@ defmodule Alambique.Feed.Publisher do
   alias Alambique.Cell.{Db, State}
   alias Alambique.Feed.{Capture, Pieces, Sender}
   alias Alambique.Replication.Replicator
+  alias Alambique.Sqlite
 
   # Batches
 
@@ -305,7 +306,9 @@ defmodule Alambique.Feed.Publisher do
          {:ok, state} <- open_reader(state) do
       Fault.point(:feed_before_publish, %{cell: state.id, txid: upto, sender: state.feed_pid})
       state = if state.feed_pid, do: state, else: %{state | feed_pid: Sender.start(state)}
-      send(state.feed_pid, {:range, state.feed_sent + 1, upto, state.feed_reader})
+      :ok = Sqlite.assign(state.feed_reader, state.feed_pid)
+      reader = Sqlite.ref(state.feed_reader)
+      send(state.feed_pid, {:range, state.feed_sent + 1, upto, reader})
 
       {%{
          state

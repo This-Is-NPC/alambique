@@ -130,6 +130,10 @@ defmodule Alambique.SqliteTest do
     test "interrupt stops a running statement", %{conn: conn} do
       task =
         Task.async(fn ->
+          receive do
+            :go -> :ok
+          end
+
           Sqlite.run(
             conn,
             "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n) SELECT count(*) FROM n",
@@ -137,9 +141,12 @@ defmodule Alambique.SqliteTest do
           )
         end)
 
+      :ok = Sqlite.assign(conn, task.pid)
+      send(task.pid, :go)
       Process.sleep(100)
       assert :ok = Sqlite.interrupt(conn)
       assert {:error, "interrupted"} = Task.await(task, 10_000)
+      :ok = Sqlite.assign(conn, self())
       assert {:ok, %{rows: [[1]]}} = Sqlite.run(conn, "SELECT 1", [])
     end
 
@@ -148,6 +155,10 @@ defmodule Alambique.SqliteTest do
 
       runner =
         Task.async(fn ->
+          receive do
+            :go -> :ok
+          end
+
           Sqlite.run(
             conn,
             "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 300000000) SELECT count(*) FROM n",
@@ -155,14 +166,14 @@ defmodule Alambique.SqliteTest do
           )
         end)
 
+      :ok = Sqlite.assign(conn, runner.pid)
+      send(runner.pid, :go)
       Process.sleep(100)
-      closer = Task.async(fn -> Sqlite.close(conn) end)
-      Process.sleep(100)
-      Sqlite.interrupt(conn)
+      # The opener closes while the user runs the statement.
+      assert :ok = Sqlite.close(conn)
 
       assert {:error, reason} = Task.await(runner, 2_000)
       assert reason in ["interrupted", :connection_closed]
-      assert :ok = Task.await(closer, 2_000)
     end
 
     test "ATTACH and DETACH need attach: true, and the schema is defensive", %{
@@ -385,7 +396,7 @@ defmodule Alambique.SqliteTest do
     end
 
     test "transaction commits, rolls back and reports a function that ended it", %{cell: cell} do
-      :ok = Db.writable(cell, fn -> Db.script(cell, "CREATE TABLE d (a INTEGER PRIMARY KEY)") end)
+      :ok = Db.writable_script(cell, "CREATE TABLE d (a INTEGER PRIMARY KEY)")
       rows = fn -> Db.run(cell, "SELECT a FROM d ORDER BY a", []) end
 
       assert {:ok, :done} =
@@ -478,9 +489,9 @@ defmodule Alambique.SqliteTest do
 
     test "script runs several statements and user_version reads the pragma", %{cell: cell} do
       assert {:ok, 0} = Db.user_version(cell)
-      :ok = Db.writable(cell, fn -> Db.script(cell, "PRAGMA user_version = 4; SELECT 1") end)
+      :ok = Db.writable_script(cell, "PRAGMA user_version = 4; SELECT 1")
       assert {:ok, 4} = Db.user_version(cell)
-      assert {:error, _} = Db.writable(cell, fn -> Db.script(cell, "SELECT * FROM nope") end)
+      assert {:error, _} = Db.writable_script(cell, "SELECT * FROM nope")
     end
   end
 

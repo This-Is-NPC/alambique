@@ -9,14 +9,16 @@ use std::ffi::{c_char, c_int, CStr, CString};
 use std::ptr;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed};
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::Instant;
 
 use crate::guard::guard;
 use crate::stats::{CACHE_HITS, CACHE_MISSES, CONNECTIONS_OPEN};
 
 use libsqlite3_sys as ffi;
-use rustler::{Atom, Binary, Encoder, Env, NewBinary, Resource, ResourceArc, Term, TermType};
+use rustler::{
+    Atom, Binary, Encoder, Env, LocalPid, Monitor, NewBinary, Resource, ResourceArc, Term, TermType,
+};
 
 extern "C" {
     // Not in the generated bindings. Closes now when no statement is open and
@@ -33,7 +35,7 @@ mod atoms {
         ok, error, blob, nil, undefined, idle, transaction,
         connection_closed, argument_error, busy, disk_full,
         statement_timeout, result_too_large, not_authorized, multiple_statements, transaction_ended, cache_used,
-        schema_used, stmt_used, lookaside_used, nul_in_statement, not_ddl, query_only,
+        schema_used, stmt_used, lookaside_used, nul_in_statement, not_ddl, query_only, not_owner,
     }
 }
 
@@ -85,6 +87,15 @@ pub(crate) struct Control {
     allow_attach: bool,
     /// Deadline in ms of a call that sets none; 0 for none.
     default_timeout_ms: u64,
+    /// The connection allows only reading outside the transaction of the
+    /// library, unless the call is flagged (`flagged`).
+    gated: bool,
+    /// The secret of a gated connection; 0 for none. Calls that close, begin
+    /// or checkpoint, and calls that write outside the transaction, give it.
+    key: u64,
+    /// Set for the duration of a call that gave the secret while no
+    /// transaction of the library is open (`Call`): it may write.
+    flagged: AtomicBool,
 }
 
 impl Control {
@@ -102,7 +113,29 @@ impl Control {
             timed_out: AtomicBool::new(false),
             allow_attach,
             default_timeout_ms,
+            gated: false,
+            key: 0,
+            flagged: AtomicBool::new(false),
         }
+    }
+
+    /// Makes the connection read-only outside a transaction of the library,
+    /// except for the calls that give `key`.
+    fn gate(mut self, key: u64) -> Self {
+        self.gated = true;
+        self.key = key;
+        self
+    }
+
+    /// Whether `key` is the secret the connection needs for a call that is
+    /// not a plain statement (none for an ungated connection).
+    fn key_ok(&self, key: u64) -> bool {
+        !self.gated || (key != 0 && key == self.key)
+    }
+
+    /// Whether a call that gave `key` may write outside a transaction.
+    fn flag(&self, key: u64) -> bool {
+        self.gated && key != 0 && key == self.key && self.expect_txn.load(Relaxed) == 0
     }
 }
 
@@ -110,9 +143,31 @@ impl Control {
 pub struct Conn {
     db: RwLock<Option<DbPtr>>,
     control: Box<Control>,
+    /// The process that opened the connection: it closes it, interrupts it,
+    /// reads its memory and names the user.
+    opener: LocalPid,
+    /// The process that runs statements on it (the opener at first).
+    user: Mutex<LocalPid>,
 }
 
 impl Conn {
+    /// Stops the running statement and closes the connection; once only.
+    fn shut(&self) {
+        // Closing ends everything: stop the running statement first, because
+        // a waiting writer keeps `interrupt` from taking the read lock.
+        interrupt(self);
+        if let Some(DbPtr(db)) = self.db.write().unwrap_or_else(|e| e.into_inner()).take() {
+            // SAFETY: the write lock waited for every user; the pointer is
+            // out of the slot, so nothing can use it again.
+            unsafe { close(db) };
+        }
+    }
+
+    /// Whether the calling process runs the statements.
+    fn is_user(&self, env: Env) -> bool {
+        *self.user.lock().unwrap_or_else(|e| e.into_inner()) == env.pid()
+    }
+
     /// Makes the pragma after the next commit fail (`test-panic` builds).
     #[cfg(feature = "test-panic")]
     pub(crate) fn fail_next_query_only(&self) {
@@ -121,7 +176,16 @@ impl Conn {
 }
 
 #[rustler::resource_impl]
-impl Resource for Conn {}
+impl Resource for Conn {
+    const IMPLEMENTS_DOWN: bool = true;
+
+    /// The opener is gone: nobody may close the connection but whoever holds
+    /// a handle, and a handle someone kept would keep it open (and its
+    /// transaction) for good, so it closes here.
+    fn down<'a>(&'a self, _env: Env<'a>, _pid: LocalPid, _mon: Monitor) {
+        guard("conn_down", (), || self.shut());
+    }
+}
 
 // ERTS runs `drop` from a C callback that rustler does not protect, so it
 // must not panic (design §2.1).
@@ -156,6 +220,7 @@ enum Failure {
     Timeout,
     TooLarge,
     Denied,
+    NotOwner,
     Multiple(String),
     NotDdl(String),
     NulInStatement,
@@ -179,6 +244,7 @@ impl Failure {
             Failure::Timeout => atoms::statement_timeout().encode(env),
             Failure::TooLarge => atoms::result_too_large().encode(env),
             Failure::Denied => atoms::not_authorized().encode(env),
+            Failure::NotOwner => atoms::not_owner().encode(env),
             Failure::TransactionEnded => atoms::transaction_ended().encode(env),
             Failure::Multiple(tail) => (atoms::multiple_statements(), tail).encode(env),
             Failure::NotDdl(text) => (atoms::not_ddl(), text).encode(env),
@@ -240,8 +306,15 @@ const INTROSPECTION: [&[u8]; 16] = [
 
 /// Decides every statement of the connection when it is prepared, whatever
 /// its syntax (virtual tables prepare theirs when they run, so the read-only
-/// flag stays up for the whole call). A panic denies the statement.
+/// flag stays up for the whole call). A panic denies the statement. Every
+/// action code is decided; an unknown one is denied.
 ///
+/// - A gated connection (`Control::gate`) reads outside the transaction of
+///   the library: reads, selects, functions and the pragmas that only read
+///   (`pragma_reads`) are allowed; every other action, among them every
+///   pragma with an argument that is not introspection, `ATTACH`, `DETACH`,
+///   `VACUUM`, `ANALYZE`, `REINDEX`, `PRAGMA optimize` and `incremental_vacuum`, needs the
+///   transaction or a flagged call (`Control::flag`).
 /// - Always: the pragmas that would checkpoint, turn automatic checkpoints
 ///   back on or leave WAL mode: WAL frames reach the database file only
 ///   through `sqlite_checkpoint` (design §6).
@@ -268,15 +341,23 @@ pub(crate) unsafe extern "C" fn authorize(
         // SAFETY: the context is the `Control` of this connection (see there).
         let ctl = unsafe { &*(ctx as *const Control) };
         let read_only = ctl.read_only.load(Relaxed);
+        // A gated connection writes only inside the transaction of the
+        // library or in a flagged call.
+        let writes = !ctl.gated || ctl.expect_txn.load(Relaxed) != 0 || ctl.flagged.load(Relaxed);
         let allowed = match action {
-            ffi::SQLITE_ATTACH | ffi::SQLITE_DETACH => ctl.allow_attach && !read_only,
+            ffi::SQLITE_READ
+            | ffi::SQLITE_SELECT
+            | ffi::SQLITE_FUNCTION
+            | ffi::SQLITE_RECURSIVE => true,
+            ffi::SQLITE_ATTACH | ffi::SQLITE_DETACH => ctl.allow_attach && !read_only && writes,
             ffi::SQLITE_TRANSACTION => {
                 ctl.finishing.load(Relaxed)
                     || (!read_only
+                        && writes
                         && !ctl.no_txn_control.load(Relaxed)
                         && ctl.expect_txn.load(Relaxed) == 0)
             }
-            ffi::SQLITE_SAVEPOINT => !read_only,
+            ffi::SQLITE_SAVEPOINT => !read_only && writes,
             ffi::SQLITE_PRAGMA if !name.is_null() => {
                 // SAFETY: for a pragma SQLite passes NUL-terminated names,
                 // `arg` possibly null.
@@ -286,9 +367,35 @@ pub(crate) unsafe extern "C" fn authorize(
                         (!arg.is_null()).then(|| CStr::from_ptr(arg).to_bytes()),
                     )
                 };
-                pragma_allowed(name, arg, read_only)
+                pragma_allowed(name, arg, read_only) && (writes || pragma_reads(name, arg))
             }
-            _ => true,
+            ffi::SQLITE_CREATE_INDEX
+            | ffi::SQLITE_CREATE_TABLE
+            | ffi::SQLITE_CREATE_TEMP_INDEX
+            | ffi::SQLITE_CREATE_TEMP_TABLE
+            | ffi::SQLITE_CREATE_TEMP_TRIGGER
+            | ffi::SQLITE_CREATE_TEMP_VIEW
+            | ffi::SQLITE_CREATE_TRIGGER
+            | ffi::SQLITE_CREATE_VIEW
+            | ffi::SQLITE_CREATE_VTABLE
+            | ffi::SQLITE_DELETE
+            | ffi::SQLITE_DROP_INDEX
+            | ffi::SQLITE_DROP_TABLE
+            | ffi::SQLITE_DROP_TEMP_INDEX
+            | ffi::SQLITE_DROP_TEMP_TABLE
+            | ffi::SQLITE_DROP_TEMP_TRIGGER
+            | ffi::SQLITE_DROP_TEMP_VIEW
+            | ffi::SQLITE_DROP_TRIGGER
+            | ffi::SQLITE_DROP_VIEW
+            | ffi::SQLITE_DROP_VTABLE
+            | ffi::SQLITE_INSERT
+            | ffi::SQLITE_UPDATE
+            | ffi::SQLITE_ALTER_TABLE
+            | ffi::SQLITE_REINDEX
+            | ffi::SQLITE_ANALYZE => writes,
+            // `SQLITE_COPY`, a pragma without a name and any code a newer
+            // SQLite adds.
+            _ => false,
         };
         if allowed {
             ffi::SQLITE_OK
@@ -296,6 +403,55 @@ pub(crate) unsafe extern "C" fn authorize(
             ffi::SQLITE_DENY
         }
     })
+}
+
+/// Pragmas that only read when they have no argument: the ones a gated
+/// connection answers outside a transaction. Introspection pragmas read with
+/// an argument too.
+const READING: [&[u8]; 36] = [
+    b"analysis_limit",
+    b"application_id",
+    b"auto_vacuum",
+    b"automatic_index",
+    b"busy_timeout",
+    b"cache_size",
+    b"cell_size_check",
+    b"data_version",
+    b"defer_foreign_keys",
+    b"encoding",
+    b"foreign_keys",
+    b"freelist_count",
+    b"fullfsync",
+    b"hard_heap_limit",
+    b"journal_mode",
+    b"journal_size_limit",
+    b"legacy_alter_table",
+    b"locking_mode",
+    b"max_page_count",
+    b"mmap_size",
+    b"page_count",
+    b"page_size",
+    b"query_only",
+    b"read_uncommitted",
+    b"recursive_triggers",
+    b"schema_version",
+    b"secure_delete",
+    b"soft_heap_limit",
+    b"synchronous",
+    b"temp_store",
+    b"threads",
+    b"trusted_schema",
+    b"user_version",
+    b"wal_autocheckpoint",
+    b"writable_schema",
+    b"checkpoint_fullfsync",
+];
+
+/// Whether the pragma only reads: introspection with any argument, or a
+/// reading pragma without one.
+fn pragma_reads(name: &[u8], arg: Option<&[u8]>) -> bool {
+    INTROSPECTION.iter().any(|p| name.eq_ignore_ascii_case(p))
+        || (arg.is_none() && READING.iter().any(|p| name.eq_ignore_ascii_case(p)))
 }
 
 fn pragma_allowed(name: &[u8], arg: Option<&[u8]>, read_only: bool) -> bool {
@@ -377,6 +533,8 @@ struct Limits {
     timeout_ms: u64,
     max_rows: u64,
     max_bytes: u64,
+    /// The call may write outside a transaction of the library (`Control::flag`).
+    flagged: bool,
 }
 
 /// Arms the connection for one call and disarms it when dropped. In a
@@ -392,6 +550,7 @@ impl<'a> Call<'a> {
         ctl.timed_out.store(false, Relaxed);
         ctl.read_only.store(limits.read_only, Relaxed);
         ctl.no_txn_control.store(limits.no_txn_control, Relaxed);
+        ctl.flagged.store(limits.flagged, Relaxed);
         let timeout_ms = if limits.timeout_ms > 0 {
             limits.timeout_ms
         } else {
@@ -414,6 +573,7 @@ impl Drop for Call<'_> {
     fn drop(&mut self) {
         self.ctl.read_only.store(false, Relaxed);
         self.ctl.no_txn_control.store(false, Relaxed);
+        self.ctl.flagged.store(false, Relaxed);
         self.ctl.deadline.store(0, Relaxed);
         if let Some(old) = self.length {
             // SAFETY: as in `new`; the lock is still held.
@@ -817,7 +977,13 @@ fn bind_one(s: *mut ffi::sqlite3_stmt, idx: c_int, term: Term) -> Result<c_int, 
 /// a registered VFS, `None` is SQLite's default. `attach` allows `ATTACH`,
 /// `DETACH` and `VACUUM`, which the connection refuses otherwise.
 /// `timeout_ms` is the deadline of every `sqlite_run` and `sqlite_execute`
-/// call that sets none, 0 for none.
+/// call that sets none, 0 for none. `gated` makes the connection read-only
+/// outside the transaction of the library, except for the calls that give the
+/// secret returned with the connection (see `authorize`).
+///
+/// The calling process is the opener and the user (see `Conn`); the
+/// connection closes when the opener ends.
+/// Returns `{:ok, conn, secret}`, the secret 0 for a connection that is not gated.
 #[rustler::nif(schedule = "DirtyIo")]
 fn sqlite_open<'a>(
     env: Env<'a>,
@@ -826,6 +992,7 @@ fn sqlite_open<'a>(
     vfs: Option<String>,
     attach: bool,
     timeout_ms: u64,
+    gated: bool,
 ) -> Term<'a> {
     let _t = crate::stats::SQLITE_CALLS.time();
     let run = || -> Outcome<'a> {
@@ -899,9 +1066,17 @@ fn sqlite_open<'a>(
             }
         }
         CONNECTIONS_OPEN.fetch_add(1, Relaxed);
+        let key = if gated { new_token() } else { 0 };
+        let mut control = Control::new(attach, timeout_ms);
+        if gated {
+            control = control.gate(key);
+        }
+        let opener = env.pid();
         let conn = ResourceArc::new(Conn {
             db: RwLock::new(Some(DbPtr(db))),
-            control: Box::new(Control::new(attach, timeout_ms)),
+            control: Box::new(control),
+            opener,
+            user: Mutex::new(opener),
         });
         let ctx = &*conn.control as *const Control as *mut std::ffi::c_void;
         // SAFETY: `db` is live and not shared yet; `ctx` outlives it (see
@@ -911,43 +1086,85 @@ fn sqlite_open<'a>(
             ffi::sqlite3_progress_handler(db, PROGRESS_OPS, Some(progress), ctx);
             ffi::sqlite3_wal_hook(db, Some(wal_committed), ctx);
         }
-        Ok((atoms::ok(), conn).encode(env))
+        conn.monitor(Some(env), &opener);
+        Ok((atoms::ok(), conn, key).encode(env))
     };
     reply(env, run())
 }
 
 /// Closes the connection. Statements that are still alive report
-/// `:connection_closed`.
+/// `:connection_closed`. Only the opener may, with the secret, and not while
+/// the transaction of the library is open: `{:error, :not_owner}` and
+/// `{:error, :not_authorized}`.
 #[rustler::nif(schedule = "DirtyIo")]
-fn sqlite_close(conn: ResourceArc<Conn>) -> Atom {
+fn sqlite_close<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64) -> Term<'a> {
     let _t = crate::stats::SQLITE_CALLS.time();
-    // Closing ends everything: stop the running statement first, because a
-    // waiting writer keeps `sqlite_interrupt` from taking the read lock.
-    interrupt(&conn);
-    if let Some(DbPtr(db)) = conn.db.write().unwrap_or_else(|e| e.into_inner()).take() {
-        // SAFETY: the write lock waited for every user; the pointer is out of
-        // the slot, so nothing can use it again.
-        unsafe { close(db) };
+    let run = || -> Outcome<'a> {
+        check_opener(env, &conn)?;
+        let ctl = &conn.control;
+        if !ctl.key_ok(key) || ctl.expect_txn.load(Relaxed) != 0 {
+            return Err(Failure::Denied);
+        }
+        conn.shut();
+        Ok(atoms::ok().encode(env))
+    };
+    reply(env, run())
+}
+
+/// The caller must be the opener of `conn`.
+fn check_opener(env: Env, conn: &Conn) -> Result<(), Failure> {
+    if conn.opener == env.pid() {
+        Ok(())
+    } else {
+        Err(Failure::NotOwner)
     }
-    atoms::ok()
+}
+
+/// The caller must be the user of `conn`.
+fn check_user(env: Env, conn: &Conn) -> Result<(), Failure> {
+    if conn.is_user(env) {
+        Ok(())
+    } else {
+        Err(Failure::NotOwner)
+    }
+}
+
+/// Names the process that runs statements on `conn`. Only the opener may, with
+/// the secret.
+#[rustler::nif]
+fn sqlite_assign<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64, user: LocalPid) -> Term<'a> {
+    let run = || -> Outcome<'a> {
+        check_opener(env, &conn)?;
+        if !conn.control.key_ok(key) {
+            return Err(Failure::Denied);
+        }
+        *conn.user.lock().unwrap_or_else(|e| e.into_inner()) = user;
+        Ok(atoms::ok().encode(env))
+    };
+    reply(env, run())
 }
 
 /// Runs one or more statements without reading rows. `no_txn_control` says
 /// the text is a user's: transaction control is refused (see `authorize`).
+/// `key` is the secret of a gated connection when the statements may write
+/// outside a transaction of the library.
 #[rustler::nif(schedule = "DirtyIo")]
 fn sqlite_execute<'a>(
     env: Env<'a>,
     conn: ResourceArc<Conn>,
     sql: Binary,
     no_txn_control: bool,
+    key: u64,
 ) -> Term<'a> {
     let _t = crate::stats::SQLITE_CALLS.time();
     let run = || -> Outcome<'a> {
+        check_user(env, &conn)?;
         let sql = CString::new(sql.as_slice()).map_err(|_| Failure::NulInStatement)?;
         with_db(&conn, |db| {
             check_transaction(&conn.control, db)?;
             let limits = Limits {
                 no_txn_control,
+                flagged: conn.control.flag(key),
                 ..Limits::default()
             };
             let _call = Call::new(&conn.control, db, &limits);
@@ -976,7 +1193,7 @@ fn exec(db: *mut ffi::sqlite3, ctl: &Control, sql: &CStr) -> Result<(), Failure>
 /// Text after the statement that holds another statement is refused with
 /// `{:error, {:multiple_statements, tail}}` before anything runs.
 /// `limits` is `{read_only, timeout_ms, max_rows, max_bytes, max_concurrent,
-/// no_txn_control}`, 0 for no limit (`no_txn_control` as in `sqlite_execute`); over `max_concurrent` user statements running the call
+/// no_txn_control, key}`, 0 for no limit (`no_txn_control` as in `sqlite_execute`); over `max_concurrent` user statements running the call
 /// gives `{:error, :busy}` without touching the connection.
 #[rustler::nif(schedule = "DirtyIo")]
 fn sqlite_run<'a>(
@@ -984,18 +1201,20 @@ fn sqlite_run<'a>(
     conn: ResourceArc<Conn>,
     sql: Binary,
     params: Term<'a>,
-    limits: (bool, u64, u64, u64, u64, bool),
+    limits: (bool, u64, u64, u64, u64, bool, u64),
 ) -> Term<'a> {
     let _t = crate::stats::SQLITE_CALLS.time();
     let max_concurrent = limits.4;
     let limits = Limits {
         read_only: limits.0,
         no_txn_control: limits.5,
+        flagged: conn.control.flag(limits.6),
         timeout_ms: limits.1,
         max_rows: limits.2,
         max_bytes: limits.3,
     };
     let run = || -> Outcome<'a> {
+        check_user(env, &conn)?;
         if sql.as_slice().contains(&0) {
             return Err(Failure::NulInStatement);
         }
@@ -1028,6 +1247,7 @@ fn sqlite_run<'a>(
 fn sqlite_script<'a>(env: Env<'a>, conn: ResourceArc<Conn>, sql: Binary) -> Term<'a> {
     let _t = crate::stats::SQLITE_CALLS.time();
     let run = || -> Outcome<'a> {
+        check_user(env, &conn)?;
         let sql = sql.as_slice();
         if sql.contains(&0) {
             return Err(Failure::NulInStatement);
@@ -1087,15 +1307,20 @@ fn step_to_end(
 /// roll one back. `{:ok, token}`; `{:error, :not_authorized}` when a
 /// transaction of the library is already open.
 #[rustler::nif(schedule = "DirtyIo")]
-fn sqlite_begin_transaction<'a>(env: Env<'a>, conn: ResourceArc<Conn>) -> Term<'a> {
+fn sqlite_begin_transaction<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64) -> Term<'a> {
     let _t = crate::stats::SQLITE_CALLS.time();
     let run = || -> Outcome<'a> {
+        check_user(env, &conn)?;
         with_db(&conn, |db| {
             let ctl = &conn.control;
-            if ctl.expect_txn.load(Relaxed) != 0 {
+            if ctl.expect_txn.load(Relaxed) != 0 || !ctl.key_ok(key) {
                 return Err(Failure::Denied);
             }
-            let _call = Call::new(ctl, db, &Limits::default());
+            let limits = Limits {
+                flagged: true,
+                ..Limits::default()
+            };
+            let _call = Call::new(ctl, db, &limits);
             // Before the statement: a BEGIN that fails must be judged with the
             // WAL as it is now, not with the one of the previous transaction.
             ctl.txn_frames.store(ctl.wal_frames.load(Relaxed), Relaxed);
@@ -1133,7 +1358,10 @@ fn sqlite_finish_transaction<'a>(
     token: u64,
     commit: bool,
 ) -> Term<'a> {
-    finish_transaction(env, &conn, token, commit)
+    match check_user(env, &conn) {
+        Ok(()) => finish_transaction(env, &conn, token, commit),
+        Err(f) => f.term(env),
+    }
 }
 
 /// The commit of `sqlite_finish_transaction` with the token the connection is
@@ -1173,7 +1401,11 @@ fn finish_transaction<'a>(
             }
             ctl.expect_txn.store(0, Relaxed);
             if commit {
-                let _call = Call::new(ctl, db, &Limits::default());
+                let limits = Limits {
+                    flagged: true,
+                    ..Limits::default()
+                };
+                let _call = Call::new(ctl, db, &limits);
                 query_only(db, ctl).map_err(|f| Failure::QueryOnly(Box::new(f)))?;
             }
             Ok(atoms::ok().encode(env))
@@ -1194,9 +1426,13 @@ fn query_only(db: *mut ffi::sqlite3, ctl: &Control) -> Result<(), Failure> {
 /// began (`sqlite_begin_transaction`): frames that no write of
 /// the cell accounts for when that transaction failed.
 #[rustler::nif]
-fn sqlite_wal_advanced(conn: ResourceArc<Conn>) -> bool {
-    let ctl = &conn.control;
-    ctl.wal_frames.load(Relaxed) != ctl.txn_frames.load(Relaxed)
+fn sqlite_wal_advanced<'a>(env: Env<'a>, conn: ResourceArc<Conn>) -> Term<'a> {
+    let run = || -> Outcome<'a> {
+        check_user(env, &conn)?;
+        let ctl = &conn.control;
+        Ok((ctl.wal_frames.load(Relaxed) != ctl.txn_frames.load(Relaxed)).encode(env))
+    };
+    reply(env, run())
 }
 
 /// User statements running now (`sqlite_run` calls with a `max_concurrent`).
@@ -1206,11 +1442,15 @@ fn sqlite_user_statements() -> u64 {
 }
 
 /// Makes the statement that is running on this connection stop with
-/// "interrupted". Safe to call from any process while another one steps.
+/// "interrupted". Only the opener may; it is safe while another process steps.
 #[rustler::nif]
-fn sqlite_interrupt(conn: ResourceArc<Conn>) -> Atom {
-    interrupt(&conn);
-    atoms::ok()
+fn sqlite_interrupt<'a>(env: Env<'a>, conn: ResourceArc<Conn>) -> Term<'a> {
+    let run = || -> Outcome<'a> {
+        check_opener(env, &conn)?;
+        interrupt(&conn);
+        Ok(atoms::ok().encode(env))
+    };
+    reply(env, run())
 }
 
 fn interrupt(conn: &Conn) {
@@ -1229,12 +1469,15 @@ fn interrupt(conn: &Conn) {
 /// kept it from finishing. `{:error, :not_authorized}` while the transaction
 /// of the library is open: its frames must reach a batch from the WAL.
 #[rustler::nif(schedule = "DirtyIo")]
-fn sqlite_checkpoint<'a>(env: Env<'a>, conn: ResourceArc<Conn>) -> Term<'a> {
+fn sqlite_checkpoint<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64) -> Term<'a> {
     let _t = crate::stats::SQLITE_CALLS.time();
+    if let Err(f) = check_user(env, &conn) {
+        return f.term(env);
+    }
     reply(
         env,
         with_db(&conn, |db| {
-            if conn.control.expect_txn.load(Relaxed) != 0 {
+            if conn.control.expect_txn.load(Relaxed) != 0 || !conn.control.key_ok(key) {
                 return Err(Failure::Denied);
             }
             let (mut log, mut done) = (0, 0);
@@ -1264,6 +1507,9 @@ fn sqlite_checkpoint<'a>(env: Env<'a>, conn: ResourceArc<Conn>) -> Term<'a> {
 /// Rows changed by the latest statement that changed rows.
 #[rustler::nif]
 fn sqlite_changes<'a>(env: Env<'a>, conn: ResourceArc<Conn>) -> Term<'a> {
+    if let Err(f) = check_user(env, &conn) {
+        return f.term(env);
+    }
     reply(
         env,
         with_db(&conn, |db| {
@@ -1276,6 +1522,9 @@ fn sqlite_changes<'a>(env: Env<'a>, conn: ResourceArc<Conn>) -> Term<'a> {
 /// `:transaction` inside an open transaction, `:idle` otherwise.
 #[rustler::nif]
 fn sqlite_transaction_status<'a>(env: Env<'a>, conn: ResourceArc<Conn>) -> Term<'a> {
+    if let Err(f) = check_user(env, &conn) {
+        return f.term(env);
+    }
     reply(
         env,
         with_db(&conn, |db| {
@@ -1294,6 +1543,9 @@ fn sqlite_transaction_status<'a>(env: Env<'a>, conn: ResourceArc<Conn>) -> Term<
 /// cache, the schema, the prepared statements and the lookaside slots in use.
 #[rustler::nif]
 fn sqlite_memory<'a>(env: Env<'a>, conn: ResourceArc<Conn>) -> Term<'a> {
+    if let Err(f) = check_opener(env, &conn) {
+        return f.term(env);
+    }
     reply(
         env,
         with_db(&conn, |db| {
@@ -1394,6 +1646,82 @@ mod tests {
         } else {
             Err(())
         }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "calls SQLite")]
+    fn a_gated_connection_writes_only_in_a_transaction_or_flagged() {
+        let db = mem();
+        let ctl = Box::new(Control::new(false, 0).gate(7));
+        let ctx = &*ctl as *const Control as *mut std::ffi::c_void;
+        // SAFETY: `db` is live and `ctl` outlives it.
+        unsafe { ffi::sqlite3_set_authorizer(db, Some(authorize), ctx) };
+
+        ctl.flagged.store(true, Relaxed);
+        assert!(run(db, "CREATE TABLE t (a)").is_ok());
+        assert!(run(db, "CREATE INDEX k ON t (a)").is_ok());
+        ctl.flagged.store(false, Relaxed);
+
+        let reads = [
+            "SELECT * FROM t",
+            "PRAGMA user_version",
+            "PRAGMA table_info(t)",
+            "SELECT * FROM pragma_table_info('t')",
+        ];
+        let writes = [
+            "INSERT INTO t VALUES (1)",
+            "UPDATE t SET a = 2",
+            "DELETE FROM t",
+            "CREATE TABLE u (a)",
+            "CREATE INDEX i ON t (a)",
+            "ALTER TABLE t ADD COLUMN b",
+            "ANALYZE",
+            "REINDEX",
+            "PRAGMA optimize",
+            "PRAGMA incremental_vacuum",
+            "PRAGMA cache_size = -64",
+            "PRAGMA query_only = OFF",
+            "PRAGMA shrink_memory",
+            "SAVEPOINT s",
+            "BEGIN",
+        ];
+        for sql in reads {
+            assert!(run(db, sql).is_ok(), "{sql}");
+        }
+        for sql in writes {
+            assert!(run(db, sql).is_err(), "{sql} unarmed");
+        }
+        // Not even a flagged call attaches on a connection without `attach`.
+        ctl.flagged.store(true, Relaxed);
+        assert!(run(db, "ATTACH ':memory:' AS x").is_err());
+        assert!(run(db, "VACUUM").is_err());
+        assert!(run(db, "PRAGMA wal_checkpoint").is_err());
+        assert!(run(db, "INSERT INTO t VALUES (1)").is_ok());
+        assert!(run(db, "PRAGMA optimize").is_ok());
+        ctl.flagged.store(false, Relaxed);
+        // Armed: the transaction of the library writes and cannot begin or end one.
+        ctl.expect_txn.store(9, Relaxed);
+        assert!(run(db, "INSERT INTO t VALUES (1)").is_ok());
+        assert!(run(db, "ANALYZE").is_ok());
+        assert!(run(db, "BEGIN").is_err());
+        assert!(run(db, "COMMIT").is_err());
+        // SAFETY: `db` is live and not used afterwards.
+        unsafe { close_v2(db) };
+    }
+
+    #[test]
+    fn only_the_secret_flags_a_call() {
+        let ctl = Control::new(false, 0).gate(7);
+        assert!(ctl.flag(7));
+        assert!(!ctl.flag(0));
+        assert!(!ctl.flag(8));
+        ctl.expect_txn.store(1, Relaxed);
+        assert!(!ctl.flag(7), "a transaction of the library is open");
+        assert!(ctl.key_ok(7) && !ctl.key_ok(0) && !ctl.key_ok(8));
+        assert!(
+            Control::new(false, 0).key_ok(0),
+            "an ungated connection needs no secret"
+        );
     }
 
     #[test]

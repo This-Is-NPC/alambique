@@ -18,11 +18,38 @@ defmodule Alambique.Sqlite do
   A connection refuses `ATTACH`, `DETACH` and `VACUUM` unless it was opened
   with `attach: true`, and is opened defensive (no writes to the schema or to
   shadow tables), with untrusted schemas and extension loading off.
+
+  ## Ownership
+
+  The process that opens a connection is its opener and, at first, its user.
+  Only the user runs statements and reads its state (`run/4`, `execute/3`,
+  `script/2`, `changes/1`, `transaction_status/1`, `checkpoint/2`...); only
+  the opener closes it, interrupts it, reads its `memory/1` and names another
+  user with `assign/2`. A call from any other process is
+  `{:error, :not_owner}`. A connection closes when its opener ends, even
+  when another process still holds the reference.
+
+  ## Gated connections
+
+  A gated connection (`gated: true`) allows only reading outside the
+  transaction of `begin_transaction/1`: any other statement, pragma that sets
+  something, `ATTACH`, `DETACH`, `VACUUM`, `ANALYZE`, `REINDEX` and
+  `PRAGMA optimize` included, is `{:error, :not_authorized}`. The handle
+  `open/2` returns holds a secret that `close/1`, `checkpoint/1`,
+  `begin_transaction/1`, `assign/2` and a call with `write: true` need; the
+  reference of `handle.ref` has none, so whoever keeps only the reference can
+  read and nothing else. `write: true` lets one statement call write outside
+  a transaction.
   """
 
   alias Alambique.Replication.Native
+  alias Alambique.Sqlite.Handle
 
-  @type conn :: reference
+  @typedoc """
+  A connection: the reference `open/2` returns, or the handle of a gated
+  connection (`gated: true`), which also holds its secret.
+  """
+  @type conn :: reference | Handle.t()
   @type row :: [integer | float | binary | nil]
 
   @doc """
@@ -30,8 +57,9 @@ defmodule Alambique.Sqlite do
   `false`: read-write, created when missing), `:vfs`, `:alambique` for the
   Alambique VFS (default: SQLite's), `:attach` (default `false`) to allow
   `ATTACH`, `DETACH` and `VACUUM`, and `:timeout_ms` (default 0, none), the
-  deadline of every `run/4` and `execute/2` call that sets none. A statement
-  over it gives `{:error, :statement_timeout}`.
+  deadline of every `run/4` and `execute/3` call that sets none. A statement
+  over it gives `{:error, :statement_timeout}`, and `:gated` (default `false`)
+  for a gated connection, which `open/2` then returns as a handle.
   """
   @spec open(Path.t(), keyword) :: {:ok, conn} | {:error, term}
   def open(path, opts \\ []) do
@@ -42,25 +70,57 @@ defmodule Alambique.Sqlite do
       Keyword.get(opts, :readonly, false),
       vfs,
       Keyword.get(opts, :attach, false),
-      Keyword.get(opts, :timeout_ms, 0)
+      Keyword.get(opts, :timeout_ms, 0),
+      Keyword.get(opts, :gated, false)
     )
+    |> case do
+      {:ok, ref, 0} -> {:ok, ref}
+      {:ok, ref, key} -> {:ok, %Handle{ref: ref, key: key}}
+      error -> error
+    end
   end
 
-  @doc "Closes the connection. "
-  @spec close(conn) :: :ok
-  def close(conn), do: Native.sqlite_close(conn)
+  @doc false
+  @spec ref(conn) :: reference
+  def ref(%Handle{ref: ref}), do: ref
+  def ref(ref), do: ref
+
+  defp key(%Handle{key: key}), do: key
+  defp key(_ref), do: 0
+
+  # The secret of a call that may write outside a transaction.
+  defp write_key(conn, opts), do: if(Keyword.get(opts, :write, false), do: key(conn), else: 0)
+
+  @doc """
+  Closes the connection: the opener only, with the secret of a gated one, and
+  not while the transaction of `begin_transaction/1` is open
+  (`{:error, :not_authorized}`).
+  """
+  @spec close(conn) :: :ok | {:error, term}
+  def close(conn), do: Native.sqlite_close(ref(conn), key(conn))
+
+  @doc """
+  Names `pid` as the process that runs statements on `conn`. The opener only,
+  with the secret of a gated connection. The opener keeps closing, interrupting
+  and reading the memory of the connection.
+  """
+  @spec assign(conn, pid) :: :ok | {:error, term}
+  def assign(conn, pid) when is_pid(pid), do: Native.sqlite_assign(ref(conn), key(conn), pid)
 
   @doc """
   Runs one or more statements without reading rows, with the deadline of the
   connection (`open/2`). `no_transaction_control: true` is for a user's text:
   `BEGIN`, `COMMIT`, `END` and `ROLLBACK` are refused as in `run/4`.
+  `write: true` is for a call of the library that may write outside a
+  transaction (see the module doc).
   """
   @spec execute(conn, iodata, keyword) :: :ok | {:error, term}
   def execute(conn, sql, opts \\ []) do
     Native.sqlite_execute(
-      conn,
+      ref(conn),
       IO.iodata_to_binary(sql),
-      Keyword.get(opts, :no_transaction_control, false)
+      Keyword.get(opts, :no_transaction_control, false),
+      write_key(conn, opts)
     )
   end
 
@@ -86,6 +146,8 @@ defmodule Alambique.Sqlite do
       this many user statements already run on the node (design §7). The
       call is counted while it runs on the dirty scheduler, so a caller that
       dies mid-call cannot leak a slot. `user_statements/0` is the count.
+    * `:write` - the statement may write outside a transaction on a gated
+      connection (it needs the secret of the handle).
   """
   @spec run(conn, iodata, list, keyword) ::
           {:ok, %{columns: [String.t()], rows: [row]}} | {:error, term}
@@ -96,10 +158,11 @@ defmodule Alambique.Sqlite do
       Keyword.get(opts, :max_rows, 0),
       Keyword.get(opts, :max_bytes, 0),
       Keyword.get(opts, :max_concurrent, 0),
-      Keyword.get(opts, :no_transaction_control, false)
+      Keyword.get(opts, :no_transaction_control, false),
+      write_key(conn, opts)
     }
 
-    case Native.sqlite_run(conn, IO.iodata_to_binary(sql), params || [], limits) do
+    case Native.sqlite_run(ref(conn), IO.iodata_to_binary(sql), params || [], limits) do
       {:ok, columns, rows} -> {:ok, %{columns: columns, rows: rows}}
       other -> raise_argument_error(other)
     end
@@ -111,10 +174,10 @@ defmodule Alambique.Sqlite do
 
   @doc """
   Makes the statement running on `conn` stop with `{:error, "interrupted"}`.
-  Callable from any process. `close/1` does it too.
+  The opener only. `close/1` does it too.
   """
-  @spec interrupt(conn) :: :ok
-  def interrupt(conn), do: Native.sqlite_interrupt(conn)
+  @spec interrupt(conn) :: :ok | {:error, term}
+  def interrupt(conn), do: Native.sqlite_interrupt(ref(conn))
 
   @doc """
   Copies every WAL frame into the database file and truncates the WAL. It is
@@ -123,18 +186,18 @@ defmodule Alambique.Sqlite do
   automatic checkpoints on or leave WAL mode are refused when a statement is
   prepared (design §6). `{:error, :busy}` when a reader kept it from
   finishing, and `{:error, :not_authorized}` while the transaction of
-  `begin_transaction/1` is open.
+  `begin_transaction/1` is open or without the secret of a gated connection.
   """
   @spec checkpoint(conn) :: :ok | {:error, term}
-  def checkpoint(conn), do: Native.sqlite_checkpoint(conn)
+  def checkpoint(conn), do: Native.sqlite_checkpoint(ref(conn), key(conn))
 
   @doc "Rows changed by the latest statement that changed rows."
   @spec changes(conn) :: {:ok, non_neg_integer} | {:error, term}
-  def changes(conn), do: Native.sqlite_changes(conn)
+  def changes(conn), do: Native.sqlite_changes(ref(conn))
 
   @doc "`{:ok, :transaction}` inside an open transaction, `{:ok, :idle}` otherwise."
   @spec transaction_status(conn) :: {:ok, :idle | :transaction} | {:error, term}
-  def transaction_status(conn), do: Native.sqlite_transaction_status(conn)
+  def transaction_status(conn), do: Native.sqlite_transaction_status(ref(conn))
 
   @doc """
   Runs `PRAGMA query_only = OFF; BEGIN IMMEDIATE` and returns `{:ok, token}`.
@@ -147,10 +210,11 @@ defmodule Alambique.Sqlite do
   Beginning again while armed is `{:error, :not_authorized}` too. Arming notes
   the size of the WAL for `wal_advanced?/1`. Only the holder of the token can
   end the transaction, so the function of a transaction, which gets the
-  connection but not the token, cannot.
+  connection but not the token, cannot. On a gated connection it needs the
+  secret.
   """
   @spec begin_transaction(conn) :: {:ok, non_neg_integer} | {:error, term}
-  def begin_transaction(conn), do: Native.sqlite_begin_transaction(conn)
+  def begin_transaction(conn), do: Native.sqlite_begin_transaction(ref(conn), key(conn))
 
   @doc """
   Ends the transaction of `begin_transaction/1` with `COMMIT` or `ROLLBACK`,
@@ -164,15 +228,15 @@ defmodule Alambique.Sqlite do
   """
   @spec finish_transaction(conn, non_neg_integer, :commit | :rollback) :: :ok | {:error, term}
   def finish_transaction(conn, token, how) when how in [:commit, :rollback],
-    do: Native.sqlite_finish_transaction(conn, token, how == :commit)
+    do: Native.sqlite_finish_transaction(ref(conn), token, how == :commit)
 
   @doc """
   Whether a commit reached the WAL of `conn` since `begin_transaction/1`.
   After a transaction that failed it says that frames were committed that no
   write accounts for.
   """
-  @spec wal_advanced?(conn) :: boolean
-  def wal_advanced?(conn), do: Native.sqlite_wal_advanced(conn)
+  @spec wal_advanced?(conn) :: boolean | {:error, term}
+  def wal_advanced?(conn), do: Native.sqlite_wal_advanced(ref(conn))
 
   @doc """
   Runs a user's script of schema statements, each as SQLite delimits it.
@@ -182,7 +246,7 @@ defmodule Alambique.Sqlite do
   Statements before a refused one have run: the caller undoes them.
   """
   @spec script(conn, iodata) :: :ok | {:error, term}
-  def script(conn, sql), do: Native.sqlite_script(conn, IO.iodata_to_binary(sql))
+  def script(conn, sql), do: Native.sqlite_script(ref(conn), IO.iodata_to_binary(sql))
 
   @doc """
   Whether a statement starts with `CREATE`, `DROP` or `ALTER` once the blanks
@@ -196,9 +260,10 @@ defmodule Alambique.Sqlite do
   @doc """
   Bytes the connection holds, by purpose: `:cache_used` (page cache),
   `:schema_used`, `:stmt_used` (prepared statements) and `:lookaside_used`.
+  The opener only.
   """
   @spec memory(conn) :: {:ok, %{atom => non_neg_integer}} | {:error, term}
-  def memory(conn), do: Native.sqlite_memory(conn)
+  def memory(conn), do: Native.sqlite_memory(ref(conn))
 
   defp raise_argument_error({:error, {:argument_error, message}}),
     do: raise(ArgumentError, message)

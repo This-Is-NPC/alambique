@@ -44,6 +44,24 @@ defmodule Alambique.CellHelpers do
   """
   def commit_behind_back, do: Process.put(@commit_behind_back, true)
 
+  @doc """
+  Runs `fun` with the state of the cell `pid` inside that process, which owns
+  its connection (`Alambique.Sqlite`): the way a test uses it.
+  """
+  def in_cell(pid, fun) do
+    ref = make_ref()
+    me = self()
+
+    :sys.replace_state(pid, fn state ->
+      send(me, {ref, fun.(state)})
+      state
+    end)
+
+    receive do
+      {^ref, result} -> result
+    end
+  end
+
   @doc "Starts an instance with short timings; `opts` override the defaults. Returns its name."
   def start_instance(%{store: store, dir: dir}, opts \\ []) do
     name =

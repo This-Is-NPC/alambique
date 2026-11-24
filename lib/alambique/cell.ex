@@ -313,7 +313,10 @@ defmodule Alambique.Cell do
 
   # The first call after a shrink gives the cache its full limit back.
   defp restore_cache(%State{idle_cache: :shrunk} = state) do
-    Sqlite.execute(state.conn, "PRAGMA cache_size = -#{state.config.awake.cache_kib}")
+    Sqlite.execute(state.conn, "PRAGMA cache_size = -#{state.config.awake.cache_kib}",
+      write: true
+    )
+
     arm_idle_cache(state)
   end
 
@@ -911,7 +914,10 @@ defmodule Alambique.Cell do
     if Publisher.cleanup_due?(state) do
       {:noreply, arm_idle_cache(state)}
     else
-      Sqlite.execute(state.conn, "PRAGMA cache_size = -#{state.config.awake.idle_cache_kib}")
+      Sqlite.execute(state.conn, "PRAGMA cache_size = -#{state.config.awake.idle_cache_kib}",
+        write: true
+      )
+
       # The garbage of the last calls would stay for as long as the cell is idle.
       if state.config.awake.idle_gc, do: :erlang.garbage_collect()
       {:noreply, %{state | idle_cache: :shrunk}}

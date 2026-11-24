@@ -97,7 +97,7 @@ defmodule Alambique.LazyRestorePropertiesTest do
   defp read_sql({:table, i}), do: "SELECT count(*), sum(length(b)) FROM t#{i}"
   defp read_sql(:integrity), do: "PRAGMA integrity_check"
 
-  defp run_sql(conn, sql), do: Db.writable(conn, fn -> Sqlite.execute(conn, sql) end)
+  defp run_sql(conn, sql), do: Db.writable_script(conn, sql)
 
   # One operation: `:ok` or `{:error, message}`; a failed operation leaves nothing behind.
   defp apply_op(conn, {kind, ops}) when kind in [:txn, :rollback] do

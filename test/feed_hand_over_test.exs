@@ -146,7 +146,9 @@ defmodule Alambique.FeedHandOverTest do
       waiting = %{state | feed_tick: tick, feed_part: {state.feed_sent + 1, 4}}
 
       assert Publisher.continue(waiting, make_ref()) == waiting
-      assert %{feed_tick: nil} = Publisher.continue(waiting, tick)
+
+      assert %{feed_tick: nil} =
+               in_cell(cell_pid(inst), fn _ -> Publisher.continue(waiting, tick) end)
 
       # Sent to a live cell it changes nothing.
       send(cell_pid(inst), {:feed_part, make_ref()})

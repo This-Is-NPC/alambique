@@ -63,7 +63,7 @@ defmodule Alambique.TxControlFailedWriteTest do
   # Rows committed on the cell's own connection, outside any write (the
   # state an undetected transaction end leaves).
   defp orphan(c, n) do
-    :ok = Db.writable_script(cstate(c).conn, "INSERT INTO t VALUES (#{n})")
+    :ok = in_cell(pid(c), &Db.writable_script(&1.conn, "INSERT INTO t VALUES (#{n})"))
     assert unreplicated?(c)
   end
 
@@ -560,7 +560,7 @@ defmodule Alambique.TxControlFailedWriteTest do
       refute unreplicated?(c)
     end
 
-    test "closing the connection rolls the write back and stops the cell", env do
+    test "closing the connection is refused and the write goes on", env do
       c = boot(env)
 
       result =
@@ -569,10 +569,9 @@ defmodule Alambique.TxControlFailedWriteTest do
           Sqlite.close(tx.conn)
         end)
 
-      assert {:error, {:rollback_failed, :connection_closed}} = result
-      assert asleep?(c)
-      assert local_ids(c) == [0]
-      assert store_ids(c) == [0]
+      assert {:ok, {:error, :not_authorized}} = result
+      assert local_ids(c) == [0, 1]
+      assert store_ids(c) == [0, 1]
     end
   end
 

@@ -153,7 +153,6 @@ defmodule Alambique.TxControlPathsTest do
   defp pid(%{inst: inst, cell: cell}), do: Cell.whereis(Config.fetch!(inst), cell)
   defp state(c), do: :sys.get_state(pid(c))
   defp path(c), do: state(c).repl.db_path
-  defp conn(c), do: state(c).conn
   defp unreplicated?(c), do: Replicator.unreplicated?(state(c).repl)
 
   defp rows(c, table \\ "t") do
@@ -192,7 +191,7 @@ defmodule Alambique.TxControlPathsTest do
 
   # Committed on the connection of the cell outside any write.
   defp orphan(c, n) do
-    :ok = Db.writable_script(conn(c), "INSERT INTO t VALUES (#{n})")
+    :ok = in_cell(pid(c), &Db.writable_script(&1.conn, "INSERT INTO t VALUES (#{n})"))
     assert unreplicated?(c)
   end
 
@@ -420,9 +419,10 @@ defmodule Alambique.TxControlPathsTest do
           if :persistent_term.get(once, nil) == nil do
             :persistent_term.put(once, true)
             [path] = Path.wildcard(Path.join(env.dir, "instance_*/**/*.db"))
-            {:ok, other} = Sqlite.open(path)
-            :ok = Sqlite.execute(other, "BEGIN IMMEDIATE")
-            send(test, {:locked, other})
+            parent = self()
+            holder = spawn(fn -> hold(path, parent, test) end)
+            assert_receive {:held, ^holder}, 5_000
+            send(test, {:locked, holder})
           end
 
           :ok
@@ -434,10 +434,24 @@ defmodule Alambique.TxControlPathsTest do
       on_exit(fn -> :persistent_term.erase(once) end)
     end
 
+    # A second connection that holds the write lock until it is told to leave.
+    defp hold(path, parent, test) do
+      {:ok, other} = Sqlite.open(path)
+      :ok = Sqlite.execute(other, "BEGIN IMMEDIATE")
+      send(parent, {:held, self()})
+
+      receive do
+        :unlock ->
+          :ok = Sqlite.execute(other, "ROLLBACK")
+          Sqlite.close(other)
+          send(test, {:released, self()})
+      end
+    end
+
     defp unlock do
-      assert_received {:locked, other}
-      :ok = Sqlite.execute(other, "ROLLBACK")
-      Sqlite.close(other)
+      assert_received {:locked, holder}
+      send(holder, :unlock)
+      assert_receive {:released, ^holder}, 5_000
       Fault.uninstall()
     end
 
@@ -670,36 +684,53 @@ defmodule Alambique.TxControlPathsTest do
       result
     end
 
-    defp write_by(c, :checkpoint) do
-      :ok = write_by(c, :stale_handle)
-      Sqlite.checkpoint(conn(c))
+    # A write, a checkpoint and a close with the handle of a finished write,
+    # from the process of the cell itself, as a handler running there could.
+    defp write_by(c, :inside) do
+      {:ok, conn} = Alambique.transaction(c.inst, c.cell, fn tx -> tx.conn end)
+
+      in_cell(pid(c), fn _state ->
+        [
+          Sqlite.execute(conn, "PRAGMA query_only = OFF; INSERT INTO t VALUES (50)"),
+          Sqlite.checkpoint(conn),
+          Sqlite.close(conn)
+        ]
+      end)
     end
 
-    # Skipped: not enforced yet. The connection of a finished write can still
-    # write outside the library.
-    @tag :skip
-    test "the handle of a write that returned cannot write later", env do
-      c = boot(env, :stop)
-      assert {:error, _} = write_by(c, :stale_handle)
-      assert rows(c) == [0, 1]
+    # A row that a second connection commits and checkpoints: a writer that
+    # the library does not guard.
+    defp write_by(c, :second_checkpoint) do
+      {:ok, other} = Sqlite.open(path(c))
+      :ok = Sqlite.execute(other, "INSERT INTO t VALUES (50)")
+      result = Sqlite.checkpoint(other)
+      Sqlite.close(other)
+      result
     end
 
-    # Skipped: not enforced yet. A checkpoint has no state check and moves
-    # uncaptured frames into the file.
-    @tag :skip
-    test "a checkpoint outside a write never leaves a row that the store lacks, answered as a cut",
-         env do
-      c = boot(env, :stop)
-      :ok = write_by(c, :checkpoint)
-      position = Alambique.position(c.inst, c.cell)
-      assert rows(c) == store(c), "position gave #{inspect(position)} with the row visible"
+    for mode <- [:stop, :replicate] do
+      test "the handle of a write that returned cannot write later (#{mode})", env do
+        c = boot(env, unquote(mode))
+        assert {:error, _} = write_by(c, :stale_handle)
+        assert rows(c) == [0, 1]
+      end
+
+      test "a checkpoint outside a write never leaves a row that the store lacks, answered as a cut (#{mode})",
+           env do
+        c = boot(env, unquote(mode))
+        assert [{:error, _}, {:error, _}, {:error, _}] = write_by(c, :inside)
+        position = Alambique.position(c.inst, c.cell)
+        assert {:ok, _} = position
+        assert rows(c) == store(c), "position gave #{inspect(position)} with the row visible"
+        refute unreplicated?(c)
+      end
     end
 
     # What the library does with a row that reached the file by a route it
     # does not guard: it is visible to reads, in no batch and no feed, until
     # the next cut or the idle backstop; after a checkpoint it is not even
     # found there.
-    for route <- [:stale_handle, :second_connection], mode <- [:stop, :replicate] do
+    for route <- [:second_connection], mode <- [:stop, :replicate] do
       test "#{route}: the row is judged at the next cut (#{mode})", env do
         c = boot(env, unquote(mode))
         assert :ok = write_by(c, unquote(route))
@@ -730,7 +761,7 @@ defmodule Alambique.TxControlPathsTest do
       test "checkpoint: the row is answered as a cut, never durable, and gone at the next wake (#{mode})",
            env do
         c = boot(env, unquote(mode))
-        :ok = write_by(c, :checkpoint)
+        :ok = write_by(c, :second_checkpoint)
 
         # The WAL is empty: nothing shows frames no write carries.
         refute unreplicated?(c)
@@ -828,7 +859,7 @@ defmodule Alambique.TxControlPathsTest do
         refute match?({:error, {:committed, _}}, result)
         # The pages reached the WAL, so the cache did spill.
         assert File.stat!(wal).size - before > 4_000_000
-        refute Sqlite.wal_advanced?(conn(c))
+        refute in_cell(pid(c), &Sqlite.wal_advanced?(&1.conn))
         refute unreplicated?(c)
 
         # A cut is not judged an orphan, and the cell is the same one.
