@@ -197,7 +197,12 @@ defmodule Alambique.Cell.Db do
   Runs `fun` with a handle inside `BEGIN IMMEDIATE` ... `COMMIT`.
 
   Returns `{:ok, value}` after the local commit, or `{:error, reason}` after
-  a rollback (a raise, a `Tx.rollback/2`, or a failed commit).
+  a rollback (a raise, a `Tx.rollback/2`, or a failed commit). While `fun`
+  runs, a statement on the connection returns `{:error, :transaction_ended}`
+  without running once SQLite has ended the transaction itself (a conflict or
+  a trigger that rolls back, an interrupt, an I/O error), so no later
+  statement commits on its own; a function that returns after that gets
+  `{:error, :transaction_ended}` too.
 
   With `capture: false` the transaction does not keep the change-feed triggers
   up to date when it changes the schema (migrations and the feed's own steps).
@@ -214,6 +219,9 @@ defmodule Alambique.Cell.Db do
     # a call with the BEGIN and with the COMMIT.
     case Sqlite.execute(conn, "PRAGMA query_only = OFF; BEGIN IMMEDIATE") do
       :ok ->
+        # From here a statement on the connection does not run once SQLite
+        # has ended the transaction by itself (design §15).
+        :ok = Sqlite.expect_transaction(conn, true)
         transact(conn, txid, fun, opts)
 
       {:error, _} = error ->
@@ -255,6 +263,7 @@ defmodule Alambique.Cell.Db do
 
   defp finish({:commit, value}, conn) do
     with :ok <- check_open(conn),
+         :ok <- Sqlite.expect_transaction(conn, false),
          :ok <- Sqlite.execute(conn, "COMMIT; PRAGMA query_only = ON") do
       {:ok, value}
     else
@@ -278,6 +287,8 @@ defmodule Alambique.Cell.Db do
   end
 
   defp rollback(conn) do
+    :ok = Sqlite.expect_transaction(conn, false)
+
     if Sqlite.transaction_status(conn) == {:ok, :transaction},
       do: Sqlite.execute(conn, "ROLLBACK")
 

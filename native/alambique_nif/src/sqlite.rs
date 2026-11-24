@@ -32,7 +32,7 @@ mod atoms {
     rustler::atoms! {
         ok, error, blob, nil, undefined, idle, transaction,
         connection_closed, argument_error, busy, disk_full,
-        statement_timeout, result_too_large, not_authorized, multiple_statements, cache_used,
+        statement_timeout, result_too_large, not_authorized, multiple_statements, transaction_ended, cache_used,
         schema_used, stmt_used, lookaside_used,
     }
 }
@@ -61,6 +61,10 @@ pub(crate) struct Control {
     /// END and ROLLBACK are refused, so the text cannot end the transaction
     /// of the cell's write (`Call`).
     no_txn_control: AtomicBool,
+    /// A transaction of the library is open on the connection
+    /// (`sqlite_expect_transaction`): a statement that finds it gone does not
+    /// run (`check_transaction`).
+    expect_txn: AtomicBool,
     /// `now_us()` after which the running statement is stopped; 0 for none.
     deadline: AtomicU64,
     /// The progress handler stopped a statement at the deadline.
@@ -76,6 +80,7 @@ impl Control {
         Control {
             read_only: AtomicBool::new(false),
             no_txn_control: AtomicBool::new(false),
+            expect_txn: AtomicBool::new(false),
             deadline: AtomicU64::new(0),
             timed_out: AtomicBool::new(false),
             allow_attach,
@@ -127,6 +132,7 @@ enum Failure {
     TooLarge,
     Denied,
     Multiple(String),
+    TransactionEnded,
     Busy,
     DiskFull,
 }
@@ -140,6 +146,7 @@ impl Failure {
             Failure::Timeout => atoms::statement_timeout().encode(env),
             Failure::TooLarge => atoms::result_too_large().encode(env),
             Failure::Denied => atoms::not_authorized().encode(env),
+            Failure::TransactionEnded => atoms::transaction_ended().encode(env),
             Failure::Multiple(tail) => (atoms::multiple_statements(), tail).encode(env),
             Failure::Busy => atoms::busy().encode(env),
             Failure::DiskFull => atoms::disk_full().encode(env),
@@ -368,6 +375,19 @@ fn count_cache(db: *mut ffi::sqlite3) {
         unsafe { ffi::sqlite3_db_status(db, op, &mut cur, &mut high, 1) };
         counter.fetch_add(cur as u64, Relaxed);
     }
+}
+
+/// While a transaction of the library is expected, a statement does not run
+/// once SQLite has ended it (a conflict or a trigger that rolls back, an
+/// interrupt, an I/O error): what it would write would commit by itself, out
+/// of the write that the transaction belongs to. Called with the lock held,
+/// before the statement.
+fn check_transaction(ctl: &Control, db: *mut ffi::sqlite3) -> Result<(), Failure> {
+    // SAFETY: `db` is a live connection (callers hold the lock).
+    if ctl.expect_txn.load(Relaxed) && unsafe { ffi::sqlite3_get_autocommit(db) } != 0 {
+        return Err(Failure::TransactionEnded);
+    }
+    Ok(())
 }
 
 /// Closes a connection that `Conn` owned.
@@ -811,6 +831,7 @@ fn sqlite_execute<'a>(
         let sql = CString::new(sql.as_slice())
             .map_err(|_| Failure::Message("sql contains a nul byte".into()))?;
         with_db(&conn, |db| {
+            check_transaction(&conn.control, db)?;
             let limits = Limits {
                 no_txn_control,
                 ..Limits::default()
@@ -858,6 +879,7 @@ fn sqlite_run<'a>(
     let run = || -> Outcome<'a> {
         let _slot = Slot::take(max_concurrent)?;
         with_db(&conn, |db| {
+            check_transaction(&conn.control, db)?;
             let _call = Call::new(&conn.control, db, &limits);
             let sql = sql.as_slice();
             let (stmt, end) = next_statement(db, sql)?;
@@ -879,6 +901,16 @@ fn sqlite_run<'a>(
         })
     };
     reply(env, run())
+}
+
+/// Says whether a transaction of the library is open on the connection: while
+/// it is, `sqlite_run` and `sqlite_execute` answer `{:error, :transaction_ended}`
+/// without running when SQLite has ended the transaction. Off at the final
+/// `COMMIT` or `ROLLBACK`.
+#[rustler::nif]
+fn sqlite_expect_transaction(conn: ResourceArc<Conn>, on: bool) -> Atom {
+    conn.control.expect_txn.store(on, Relaxed);
+    atoms::ok()
 }
 
 /// User statements running now (`sqlite_run` calls with a `max_concurrent`).
@@ -1277,6 +1309,27 @@ mod tests {
             }
             _ => panic!("tail accepted"),
         }
+        // SAFETY: `db` is live and not used afterwards.
+        unsafe { close_v2(db) };
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "calls SQLite")]
+    fn a_statement_does_not_run_once_the_expected_transaction_ended() {
+        let db = mem();
+        let ctl = Control::new(false, 0);
+        assert!(check_transaction(&ctl, db).is_ok());
+        assert!(run(db, "CREATE TABLE t (a)").is_ok());
+        assert!(run(db, "BEGIN").is_ok());
+        ctl.expect_txn.store(true, Relaxed);
+        assert!(check_transaction(&ctl, db).is_ok());
+        assert!(run(db, "COMMIT").is_ok());
+        assert!(matches!(
+            check_transaction(&ctl, db),
+            Err(Failure::TransactionEnded)
+        ));
+        ctl.expect_txn.store(false, Relaxed);
+        assert!(check_transaction(&ctl, db).is_ok());
         // SAFETY: `db` is live and not used afterwards.
         unsafe { close_v2(db) };
     }

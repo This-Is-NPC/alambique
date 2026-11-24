@@ -417,6 +417,60 @@ defmodule Alambique.SqliteTest do
       assert {:ok, %{rows: [[1]]}} = Db.run(cell, "PRAGMA query_only", [])
     end
 
+    @ended "CREATE TABLE d (a PRIMARY KEY); CREATE TABLE g (x); " <>
+             "CREATE TRIGGER g BEFORE INSERT ON g BEGIN SELECT RAISE(ROLLBACK, 'no'); END"
+    @slow "INSERT INTO d SELECT x + 100 FROM (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL " <>
+            "SELECT x+1 FROM c WHERE x < 400000000) SELECT x FROM c)"
+
+    test "a statement does not run once SQLite ended the transaction", %{cell: cell} do
+      {:ok, _} = Db.transaction(cell, 1, fn tx -> Tx.script(tx, @ended) end, capture: false)
+      {:ok, _} = Db.transaction(cell, 2, fn tx -> Tx.execute(tx, "INSERT INTO d VALUES (0)") end)
+
+      for {name, sql, limits} <- [
+            {:conflict, "INSERT OR ROLLBACK INTO d VALUES (0)", []},
+            {:trigger, "INSERT INTO g VALUES (1)", []},
+            {:interrupt, @slow, [timeout_ms: 100]}
+          ] do
+        assert {:error, :transaction_ended} =
+                 Db.transaction(
+                   cell,
+                   3,
+                   fn tx ->
+                     {:ok, _} = Tx.execute(tx, "INSERT INTO d VALUES (1)")
+                     assert {:error, _} = Tx.execute(tx, sql)
+                     assert {:ok, :idle} = Sqlite.transaction_status(tx.conn)
+
+                     # Neither a user statement nor the library's own runs.
+                     assert {:error, :transaction_ended} =
+                              Tx.execute(tx, "INSERT INTO d VALUES (2)")
+
+                     assert {:error, :transaction_ended} =
+                              Db.script(tx.conn, "PRAGMA user_version = 5")
+
+                     assert {:error, :transaction_ended} = Db.run(tx.conn, "SELECT 1", [])
+                     :returned
+                   end,
+                   limits: limits
+                 ),
+               inspect(name)
+
+        # The check ended with the transaction: the connection is usable, and
+        # nothing of the function is left.
+        assert {:ok, %{rows: [[0]]}} = Db.run(cell, "SELECT a FROM d", []), inspect(name)
+        assert {:ok, %{rows: [[0]]}} = Db.run(cell, "PRAGMA user_version", []), inspect(name)
+        assert {:ok, %{rows: [[1]]}} = Db.run(cell, "PRAGMA query_only", []), inspect(name)
+      end
+    end
+
+    test "ROLLBACK after the transaction ended is harmless, and a raise ends the check",
+         %{cell: cell} do
+      assert {:error, {:raised, %RuntimeError{}, _}} =
+               Db.transaction(cell, 1, fn _tx -> raise "boom" end)
+
+      assert {:ok, %{rows: [[1]]}} = Db.run(cell, "PRAGMA query_only", [])
+      assert {:ok, %{rows: [[0]]}} = Db.run(cell, "SELECT count(*) FROM sqlite_master", [])
+    end
+
     test "a handle works only inside its transaction", %{cell: cell} do
       {:ok, tx} = Db.transaction(cell, 2, & &1)
       assert {:error, :inactive_transaction} = Tx.query(tx, "SELECT 1")
