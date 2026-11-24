@@ -61,12 +61,15 @@ pub(crate) struct Control {
     /// END and ROLLBACK are refused, so the text cannot end the transaction
     /// of the cell's write (`Call`).
     no_txn_control: AtomicBool,
-    /// A transaction of the library is open on the connection
-    /// (`sqlite_expect_transaction`): a statement that finds it gone does not
-    /// run (`check_transaction`), and no statement of any call may begin,
-    /// commit or roll it back (`authorize`). Only the library's own final
-    /// `COMMIT` or `ROLLBACK`, after it turned this off, may.
-    expect_txn: AtomicBool,
+    /// The token of the transaction of the library that is open on the
+    /// connection (`sqlite_begin_transaction`), 0 for none: a statement that
+    /// finds it gone does not run (`check_transaction`), and no statement of
+    /// any call may begin, commit or roll it back (`authorize`). Only
+    /// `sqlite_finish_transaction` with the token may end it, and nothing
+    /// else turns this off.
+    expect_txn: AtomicU64,
+    /// Set while `sqlite_finish_transaction` runs its `COMMIT` or `ROLLBACK`.
+    finishing: AtomicBool,
     /// Frames in the WAL after the latest commit on the connection (the WAL
     /// hook), and the value when the transaction of the library began.
     wal_frames: AtomicU64,
@@ -86,7 +89,8 @@ impl Control {
         Control {
             read_only: AtomicBool::new(false),
             no_txn_control: AtomicBool::new(false),
-            expect_txn: AtomicBool::new(false),
+            expect_txn: AtomicU64::new(0),
+            finishing: AtomicBool::new(false),
             wal_frames: AtomicU64::new(0),
             txn_frames: AtomicU64::new(0),
             deadline: AtomicU64::new(0),
@@ -228,7 +232,8 @@ const INTROSPECTION: [&[u8]; 16] = [
 /// - In a read-only call: transaction and savepoint statements, and every
 ///   pragma with an argument except the introspection ones.
 /// - In a call that runs a user's text (`no_txn_control`), and in every call
-///   while a transaction of the library is open (`expect_txn`): `BEGIN`,
+///   while a transaction of the library is open (`expect_txn`), except the
+///   final statement of `sqlite_finish_transaction` (`finishing`): `BEGIN`,
 ///   `COMMIT`, `END` and `ROLLBACK` (`SQLITE_TRANSACTION`). Savepoints stay:
 ///   `ROLLBACK TO` and `RELEASE` are `SQLITE_SAVEPOINT` and never end the
 ///   transaction.
@@ -247,7 +252,10 @@ pub(crate) unsafe extern "C" fn authorize(
         let allowed = match action {
             ffi::SQLITE_ATTACH | ffi::SQLITE_DETACH => ctl.allow_attach && !read_only,
             ffi::SQLITE_TRANSACTION => {
-                !read_only && !ctl.no_txn_control.load(Relaxed) && !ctl.expect_txn.load(Relaxed)
+                ctl.finishing.load(Relaxed)
+                    || (!read_only
+                        && !ctl.no_txn_control.load(Relaxed)
+                        && ctl.expect_txn.load(Relaxed) == 0)
             }
             ffi::SQLITE_SAVEPOINT => !read_only,
             ffi::SQLITE_PRAGMA if !name.is_null() => {
@@ -416,7 +424,7 @@ fn count_cache(db: *mut ffi::sqlite3) {
 /// before the statement.
 fn check_transaction(ctl: &Control, db: *mut ffi::sqlite3) -> Result<(), Failure> {
     // SAFETY: `db` is a live connection (callers hold the lock).
-    if ctl.expect_txn.load(Relaxed) && unsafe { ffi::sqlite3_get_autocommit(db) } != 0 {
+    if ctl.expect_txn.load(Relaxed) != 0 && unsafe { ffi::sqlite3_get_autocommit(db) } != 0 {
         return Err(Failure::TransactionEnded);
     }
     Ok(())
@@ -916,20 +924,25 @@ fn sqlite_execute<'a>(
                 ..Limits::default()
             };
             let _call = Call::new(&conn.control, db, &limits);
-            // SAFETY: `db` is live and `sql` is NUL-terminated.
-            let rc = unsafe {
-                ffi::sqlite3_exec(db, sql.as_ptr(), None, ptr::null_mut(), ptr::null_mut())
-            };
-            if rc == ffi::SQLITE_OK {
-                Ok(atoms::ok().encode(env))
-            } else if rc == ffi::SQLITE_INTERRUPT && conn.control.timed_out.load(Relaxed) {
-                Err(Failure::Timeout)
-            } else {
-                Err(failure(db))
-            }
+            exec(db, &conn.control, &sql)?;
+            Ok(atoms::ok().encode(env))
         })
     };
     reply(env, run())
+}
+
+/// Runs the statements of `sql` without reading rows. Called with the lock
+/// held, inside a `Call`.
+fn exec(db: *mut ffi::sqlite3, ctl: &Control, sql: &CStr) -> Result<(), Failure> {
+    // SAFETY: `db` is live and `sql` is NUL-terminated.
+    let rc = unsafe { ffi::sqlite3_exec(db, sql.as_ptr(), None, ptr::null_mut(), ptr::null_mut()) };
+    if rc == ffi::SQLITE_OK {
+        Ok(())
+    } else if rc == ffi::SQLITE_INTERRUPT && ctl.timed_out.load(Relaxed) {
+        Err(Failure::Timeout)
+    } else {
+        Err(failure(db))
+    }
 }
 
 /// Prepares, binds, runs and finalizes one statement: `{:ok, columns, rows}`.
@@ -1039,22 +1052,85 @@ fn step_to_end(
     }
 }
 
-/// Says whether a transaction of the library is open on the connection: while
-/// it is, `sqlite_run` and `sqlite_execute` answer `{:error, :transaction_ended}`
-/// without running when SQLite has ended the transaction. Off at the final
-/// `COMMIT` or `ROLLBACK`.
-#[rustler::nif]
-fn sqlite_expect_transaction(conn: ResourceArc<Conn>, on: bool) -> Atom {
-    if on {
-        let frames = conn.control.wal_frames.load(Relaxed);
-        conn.control.txn_frames.store(frames, Relaxed);
-    }
-    conn.control.expect_txn.store(on, Relaxed);
-    atoms::ok()
+/// Opens the transaction of the library: `PRAGMA query_only = OFF; BEGIN
+/// IMMEDIATE`, and arms the connection with a token that only
+/// `sqlite_finish_transaction` takes. While it is armed `sqlite_run` and
+/// `sqlite_execute` answer `{:error, :transaction_ended}` without running when
+/// SQLite has ended the transaction, and no statement may begin, commit or
+/// roll one back. `{:ok, token}`; `{:error, :not_authorized}` when a
+/// transaction of the library is already open.
+#[rustler::nif(schedule = "DirtyIo")]
+fn sqlite_begin_transaction<'a>(env: Env<'a>, conn: ResourceArc<Conn>) -> Term<'a> {
+    let _t = crate::stats::SQLITE_CALLS.time();
+    let run = || -> Outcome<'a> {
+        with_db(&conn, |db| {
+            let ctl = &conn.control;
+            if ctl.expect_txn.load(Relaxed) != 0 {
+                return Err(Failure::Denied);
+            }
+            let _call = Call::new(ctl, db, &Limits::default());
+            exec(db, ctl, c"PRAGMA query_only = OFF; BEGIN IMMEDIATE")?;
+            ctl.txn_frames.store(ctl.wal_frames.load(Relaxed), Relaxed);
+            let token = new_token();
+            ctl.expect_txn.store(token, Relaxed);
+            Ok((atoms::ok(), token).encode(env))
+        })
+    };
+    reply(env, run())
+}
+
+/// A random token, never 0: the hasher of a fresh `RandomState` has random keys.
+fn new_token() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish()
+        | 1
+}
+
+/// Ends the transaction of the library with its own `COMMIT` or `ROLLBACK`,
+/// the only statement that may: `token` is the one `sqlite_begin_transaction`
+/// returned (`{:error, :not_authorized}` otherwise). The connection stays
+/// armed until the statement succeeded, so a failed one can be followed by a
+/// rollback. A `COMMIT` that finds the transaction gone gives
+/// `{:error, :transaction_ended}`; a `ROLLBACK` of one that is gone disarms
+/// and gives `:ok`.
+#[rustler::nif(schedule = "DirtyIo")]
+fn sqlite_finish_transaction<'a>(
+    env: Env<'a>,
+    conn: ResourceArc<Conn>,
+    token: u64,
+    commit: bool,
+) -> Term<'a> {
+    let _t = crate::stats::SQLITE_CALLS.time();
+    let run = || -> Outcome<'a> {
+        with_db(&conn, |db| {
+            let ctl = &conn.control;
+            let armed = ctl.expect_txn.load(Relaxed);
+            if armed != 0 && armed != token {
+                return Err(Failure::Denied);
+            }
+            // SAFETY: `db` is live (`with_db`).
+            let open = unsafe { ffi::sqlite3_get_autocommit(db) } == 0;
+            if commit && (armed == 0 || !open) {
+                return Err(Failure::TransactionEnded);
+            }
+            if open {
+                let _call = Call::new(ctl, db, &Limits::default());
+                ctl.finishing.store(true, Relaxed);
+                let result = exec(db, ctl, if commit { c"COMMIT" } else { c"ROLLBACK" });
+                ctl.finishing.store(false, Relaxed);
+                result?;
+            }
+            ctl.expect_txn.store(0, Relaxed);
+            Ok(atoms::ok().encode(env))
+        })
+    };
+    reply(env, run())
 }
 
 /// Whether a commit reached the WAL since the transaction of the library
-/// began (`sqlite_expect_transaction` with `true`): frames that no write of
+/// began (`sqlite_begin_transaction`): frames that no write of
 /// the cell accounts for when that transaction failed.
 #[rustler::nif]
 fn sqlite_wal_advanced(conn: ResourceArc<Conn>) -> bool {
@@ -1306,13 +1382,13 @@ mod tests {
 
         // While a transaction of the library is open, no call may control it.
         assert!(run(db, "BEGIN").is_ok());
-        ctl.expect_txn.store(true, Relaxed);
+        ctl.expect_txn.store(1, Relaxed);
         for sql in ["BEGIN", "COMMIT", "END", "ROLLBACK"] {
             assert!(run(db, sql).is_err(), "{sql}");
         }
         assert!(run(db, "SAVEPOINT s").is_ok());
         assert!(run(db, "RELEASE s").is_ok());
-        ctl.expect_txn.store(false, Relaxed);
+        ctl.expect_txn.store(0, Relaxed);
         assert!(run(db, "COMMIT").is_ok());
 
         // SAFETY: `db` is live and not used afterwards.
@@ -1508,14 +1584,14 @@ mod tests {
         assert!(check_transaction(&ctl, db).is_ok());
         assert!(run(db, "CREATE TABLE t (a)").is_ok());
         assert!(run(db, "BEGIN").is_ok());
-        ctl.expect_txn.store(true, Relaxed);
+        ctl.expect_txn.store(1, Relaxed);
         assert!(check_transaction(&ctl, db).is_ok());
         assert!(run(db, "COMMIT").is_ok());
         assert!(matches!(
             check_transaction(&ctl, db),
             Err(Failure::TransactionEnded)
         ));
-        ctl.expect_txn.store(false, Relaxed);
+        ctl.expect_txn.store(0, Relaxed);
         assert!(check_transaction(&ctl, db).is_ok());
         // SAFETY: `db` is live and not used afterwards.
         unsafe { close_v2(db) };

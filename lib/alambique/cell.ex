@@ -592,6 +592,11 @@ defmodule Alambique.Cell do
         Fault.point(:cell_after_commit, %{cell: state.id, txid: state.repl.txid})
         if isolated?, do: encode_now(state), else: {:noreply, queue_flush(state)}
 
+      # A function closed the connection: nothing can be read from it, so
+      # nothing is handed to the feed.
+      {:error, {:rollback_failed, :connection_closed} = reason} ->
+        stop_serving(%{state | conn: nil}, reason, {:error, reason})
+
       {:error, {:rollback_failed, _} = reason} ->
         stop_serving(state, reason, {:error, reason})
 

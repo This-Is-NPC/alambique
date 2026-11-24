@@ -539,34 +539,50 @@ defmodule Alambique.SqliteTest do
     end
 
     test "while a transaction of the library is open nothing can end it", %{conn: conn} do
-      :ok = Sqlite.execute(conn, "BEGIN IMMEDIATE")
-      :ok = Sqlite.expect_transaction(conn, true)
+      {:ok, token} = Sqlite.begin_transaction(conn)
 
       for control <- ["COMMIT", "END", "ROLLBACK", "BEGIN"] do
         assert {:error, :not_authorized} = Sqlite.execute(conn, control)
         assert {:error, :not_authorized} = Sqlite.run(conn, control, [])
       end
 
+      assert {:error, :not_authorized} = Sqlite.begin_transaction(conn)
+      assert {:error, :not_authorized} = Sqlite.finish_transaction(conn, token + 1, :commit)
+      assert {:error, :not_authorized} = Sqlite.finish_transaction(conn, token + 1, :rollback)
       assert {:ok, :transaction} = Sqlite.transaction_status(conn)
       assert :ok = Sqlite.execute(conn, "SAVEPOINT s; RELEASE s")
 
-      :ok = Sqlite.expect_transaction(conn, false)
-      assert :ok = Sqlite.execute(conn, "COMMIT")
+      assert :ok = Sqlite.finish_transaction(conn, token, :commit)
+      assert {:ok, :idle} = Sqlite.transaction_status(conn)
+      assert :ok = Sqlite.execute(conn, "BEGIN; ROLLBACK")
+    end
+
+    test "a transaction that SQLite ended is not committed, and a rollback of it is ok", %{
+      conn: conn
+    } do
+      :ok = Sqlite.execute(conn, "CREATE TABLE k (a PRIMARY KEY); INSERT INTO k VALUES (1)")
+      {:ok, token} = Sqlite.begin_transaction(conn)
+      :ok = Sqlite.execute(conn, "INSERT INTO u VALUES (1)")
+      {:error, _} = Sqlite.execute(conn, "INSERT OR ROLLBACK INTO k VALUES (1)")
+      assert {:ok, :idle} = Sqlite.transaction_status(conn)
+
+      assert {:error, :transaction_ended} = Sqlite.execute(conn, "INSERT INTO u VALUES (2)")
+      assert {:error, :transaction_ended} = Sqlite.finish_transaction(conn, token, :commit)
+      assert :ok = Sqlite.finish_transaction(conn, token, :rollback)
+      assert :ok = Sqlite.execute(conn, "INSERT INTO u VALUES (3)")
     end
 
     test "the WAL moves only when a commit reaches it", %{conn: conn} do
       {:ok, _} = Sqlite.run(conn, "PRAGMA journal_mode = WAL", [])
-      :ok = Sqlite.execute(conn, "BEGIN IMMEDIATE")
-      :ok = Sqlite.expect_transaction(conn, true)
+      {:ok, token} = Sqlite.begin_transaction(conn)
       :ok = Sqlite.execute(conn, "INSERT INTO u VALUES (1)")
       refute Sqlite.wal_advanced?(conn)
-      :ok = Sqlite.expect_transaction(conn, false)
-      :ok = Sqlite.execute(conn, "COMMIT")
+      :ok = Sqlite.finish_transaction(conn, token, :commit)
       assert Sqlite.wal_advanced?(conn)
 
-      :ok = Sqlite.expect_transaction(conn, true)
+      {:ok, token} = Sqlite.begin_transaction(conn)
       refute Sqlite.wal_advanced?(conn)
-      :ok = Sqlite.expect_transaction(conn, false)
+      :ok = Sqlite.finish_transaction(conn, token, :rollback)
     end
   end
 end

@@ -10,7 +10,7 @@ defmodule Alambique.OrphanFramesTest do
 
   import Alambique.CellHelpers
 
-  alias Alambique.{Cell, Config, Feed, Sqlite, Tx}
+  alias Alambique.{Cell, Config, Feed, Tx}
   alias Alambique.Cell.Db
   alias Alambique.Replication.Replicator
 
@@ -19,6 +19,7 @@ defmodule Alambique.OrphanFramesTest do
   @schema [{1, "CREATE TABLE t (n INTEGER PRIMARY KEY)"}]
 
   setup do
+    install_commit_behind_back()
     setup_store()
   end
 
@@ -104,14 +105,11 @@ defmodule Alambique.OrphanFramesTest do
       end
 
       test "a write that failed after it committed is not lost or reported durable", %{c: c} do
-        # The function ends the transaction behind the library's back. The
-        # connection refuses that while the transaction is open, so the
-        # function lifts the library's flag first, as a defect would.
+        # The function ends the transaction behind the library's back.
         result =
           Alambique.transaction(c.inst, c.cell, fn tx ->
             {:ok, _} = Tx.execute(tx, "INSERT INTO t VALUES (6)")
-            :ok = Sqlite.expect_transaction(tx.conn, false)
-            :ok = Sqlite.execute(tx.conn, "COMMIT")
+            commit_behind_back()
           end)
 
         case unquote(mode) do

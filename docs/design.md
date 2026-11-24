@@ -428,8 +428,18 @@ is that frames committed and not yet replicated imply a write in flight
   `execute/3` and `script/2`) and in every call on the connection while the
   library's transaction is open, so `Alambique.Sqlite.execute(tx.conn,
   "COMMIT")` is refused too (`{:error, :not_authorized}`). Only the library's
-  own final `COMMIT` or `ROLLBACK`, after it lifts the mark, may end it.
-  Savepoints work. A text holds one statement; a tail with another statement
+  own final `COMMIT` or `ROLLBACK` may end it: `Db.transaction` opens the
+  transaction with `Alambique.Sqlite.begin_transaction/1`, which arms the
+  connection and returns a random token, and ends it with
+  `finish_transaction/3` and that token, in one native call under the lock
+  of the connection. The token lives only in the frame of `Db.transaction`;
+  the `%Alambique.Tx{}` of the function holds the connection, and nothing
+  public that takes the connection can end, restart or disarm the
+  transaction (a wrong token is `{:error, :not_authorized}`, so is a second
+  `begin_transaction/1`). A function that closes the connection loses its
+  write (SQLite rolls it back) and the cell stops with `{:rollback_failed,
+  :connection_closed}`. Savepoints work.
+  A text holds one statement; a tail with another statement
   is refused (`{:error, {:multiple_statements, tail}}`) and a NUL byte in any
   text is refused (`{:error, :nul_in_statement}`), both before anything runs.
   A script is not split by the library: the native library prepares it
@@ -441,7 +451,7 @@ is that frames committed and not yet replicated imply a write in flight
   nothing: each piece goes to SQLite alone, which refuses a tail.
 - SQLite can still end a transaction itself: a conflict resolved with
   `ROLLBACK`, `RAISE(ROLLBACK)`, an interrupt or timeout, an I/O error.
-  `Db.transaction` marks the connection while the transaction is open, and
+  The connection is armed while the transaction is open, and
   the native library looks at `sqlite3_get_autocommit` under the lock of
   every call on it, before the statement: once the transaction is gone the
   statement returns `{:error, :transaction_ended}` and does not run. It
@@ -455,7 +465,7 @@ is that frames committed and not yet replicated imply a write in flight
   {:query_only, reason}}}` and the cell stops after the batch. A failed
   `ROLLBACK` stops the cell too.
 - The cell checks the rest. The native library keeps the size of the WAL
-  (the WAL hook) and notes it when the mark is set; a write that failed is an
+  (the WAL hook) and notes it when the connection is armed; a write that failed is an
   orphan when the WAL moved during its transaction, whether or not a batch is
   queued or in flight (one native call, about 135 ns). At every cut
   (`position/3`, a drain, a checkpoint), before a hibernation and before a
