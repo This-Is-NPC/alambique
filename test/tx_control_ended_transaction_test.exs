@@ -469,6 +469,8 @@ defmodule Alambique.TxControlEndedTransactionTest do
 
       wal = wal(env)
       GatedStore.open(env.gate)
+      # The answer may come only once the puts are let through.
+      result = if result == :blocked, do: Task.await(task, 10_000), else: result
       finish(env, {task, result})
       {:ok, %{rows: rows}} = Alambique.query(env.inst, env.cell, @all, [], timeout: 5_000)
 
