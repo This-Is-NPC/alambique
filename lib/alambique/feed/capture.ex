@@ -190,7 +190,11 @@ defmodule Alambique.Feed.Capture do
     try do
       fun.()
     after
-      if not current?(conn, select), do: :ok = install(conn, select)
+      # A statement stopped at its deadline rolled the transaction back:
+      # there is no schema to match and no statement may run.
+      if Alambique.Sqlite.transaction_status(conn) == {:ok, :transaction} and
+           not current?(conn, select),
+         do: :ok = install(conn, select)
     end
   end
 
