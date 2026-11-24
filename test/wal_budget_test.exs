@@ -31,6 +31,12 @@ defmodule Alambique.WalBudgetTest do
     end
   end
 
+  # The size of the WAL as the cell reports it to the budget.
+  defp published(config, cell) do
+    {_pid, load} = Alambique.Cell.find(config, cell)
+    Alambique.Cell.wal_bytes(load)
+  end
+
   defp total(inst, cells), do: cells |> Enum.map(&wal_size(inst, &1)) |> Enum.sum()
 
   defp write(inst, cell, count),
@@ -80,12 +86,7 @@ defmodule Alambique.WalBudgetTest do
     for {cell, n} <- Enum.zip(cells, [8, 4, 1]), do: write(inst, cell, n)
     config = Alambique.Config.fetch!(inst)
 
-    published = fn cell ->
-      {_pid, load} = Alambique.Cell.find(config, cell)
-      Alambique.Cell.wal_bytes(load)
-    end
-
-    eventually(fn -> Enum.all?(cells, &(published.(&1) == wal_size(inst, &1))) end)
+    eventually(fn -> Enum.all?(cells, &(published(config, &1) == wal_size(inst, &1))) end)
     [sb, sm, ss] = Enum.map(cells, &wal_size(inst, &1))
     assert sb > sm and sm > ss and ss > 0
 
@@ -97,6 +98,59 @@ defmodule Alambique.WalBudgetTest do
     assert [wal_size(inst, big), wal_size(inst, mid), wal_size(inst, small)] == [0, sm, ss]
 
     assert :ok = Alambique.WalBudget.run(tight)
+  end
+
+  # The sizes a round checkpoints under `max`: the largest first, until the
+  # rest is under the budget.
+  defp relieved(sizes, max) do
+    {_sum, picked} =
+      sizes
+      |> Enum.sort(:desc)
+      |> Enum.reduce_while({Enum.sum(sizes), []}, fn size, {sum, picked} ->
+        if sum < max, do: {:halt, {sum, picked}}, else: {:cont, {sum - size, [size | picked]}}
+      end)
+
+    Enum.reverse(picked)
+  end
+
+  property "a round checkpoints the largest WALs first, ties included", env do
+    check all(
+            writes <- list_of(integer(1..8), min_length: 2, max_length: 5),
+            percent <- integer(1..100),
+            max_runs: 15
+          ) do
+      inst =
+        start_instance(env,
+          migrations: @schema,
+          wal: [max_bytes: 100_000_000, budget_interval_ms: 3_600_000]
+        )
+
+      cells = for _ <- writes, do: unique_cell()
+      for {cell, n} <- Enum.zip(cells, writes), do: write(inst, cell, n)
+      config = Alambique.Config.fetch!(inst)
+      eventually(fn -> Enum.all?(cells, &(published(config, &1) == wal_size(inst, &1))) end)
+
+      before = Enum.map(cells, &wal_size(inst, &1))
+      total = Enum.sum(before)
+      budget = max(div(total * percent, 100), 1)
+      expected = relieved(before, budget)
+      tight = %{config | wal: %{config.wal | max_bytes: budget}}
+
+      if expected == [] do
+        assert Alambique.WalBudget.run(tight) == :ok
+      else
+        assert {:checkpointed, %{bytes: ^total, cells: done, busy: 0}} =
+                 Alambique.WalBudget.run(tight)
+
+        assert done == length(expected)
+      end
+
+      sizes = Enum.zip(before, Enum.map(cells, &wal_size(inst, &1)))
+      assert Enum.sort(for({was, 0} <- sizes, do: was), :desc) == expected
+      assert Enum.all?(for({was, now} <- sizes, now != 0, do: was == now))
+
+      stop_supervised(inst)
+    end
   end
 
   test "frames whose uploads are not acknowledged stay, and the round goes on", env do
