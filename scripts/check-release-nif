@@ -23,10 +23,19 @@ fi
 # The function name on the line after each #[rustler::nif ...] attribute.
 mapfile -t names < <(awk '/#\[rustler::nif/ { want = 1; next }
   want && /fn [a-z_0-9]+/ { sub(/.*fn /, ""); sub(/[<(].*/, ""); print; want = 0 }' "$source_file")
-if ((${#names[@]} == 0)); then
-  echo "check-release-nif: no NIF found in $source_file" >&2
+# Every attribute must give one plain name: a miscount or a name that carries
+# more than an identifier would make the inspection pass without reading it.
+attributes="$(grep -c '#\[rustler::nif' "$source_file" || true)"
+if ((${#names[@]} == 0 || ${#names[@]} != attributes)); then
+  echo "check-release-nif: read ${#names[@]} names for $attributes #[rustler::nif] attributes in $source_file" >&2
   exit 2
 fi
+for name in "${names[@]}"; do
+  if [[ ! "$name" =~ ^[a-z_][a-z0-9_]*$ ]]; then
+    echo "check-release-nif: '$name' read from $source_file is not a plain identifier" >&2
+    exit 2
+  fi
+done
 
 target="${CARGO_TARGET_DIR:-$crate/target}/release-check-$expect"
 cargo build --release --manifest-path "$crate/Cargo.toml" --target-dir "$target" "${features[@]}"
