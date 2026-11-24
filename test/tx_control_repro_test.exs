@@ -631,14 +631,6 @@ defmodule Alambique.TxControlReproTest do
     end
   end
 
-  describe "R8: the library's own statements after the function" do
-    @tag :skip
-    test "COMMIT; PRAGMA query_only = ON failing after COMMIT is not reachable from a test" do
-      # No fault point sits between the COMMIT and the PRAGMA of
-      # Db.finish/2, and neither statement can be made to fail from SQL.
-    end
-  end
-
   describe "R9: virtual tables" do
     test "FTS5 and rtree: a write through the transaction is a normal write", env do
       env = boot(env)

@@ -130,6 +130,39 @@ defmodule Alambique.OrphanFramesTest do
         refute unreplicated?(c)
       end
 
+      test "the pragma after a commit fails: the cell stops and every answer agrees", %{c: c} do
+        Alambique.Fault.install(fn
+          :db_after_commit, _ -> {:error, :injected}
+          _, _ -> :ok
+        end)
+
+        on_exit(&Alambique.Fault.uninstall/0)
+
+        result =
+          Alambique.transaction(c.inst, c.cell, fn tx ->
+            {:ok, _} = Tx.execute(tx, "INSERT INTO t VALUES (7)")
+            :done
+          end)
+
+        Alambique.Fault.uninstall()
+        assert asleep?(c)
+
+        # What the caller was told is what the store holds and the next wake serves.
+        case unquote(mode) do
+          :stop ->
+            assert result == {:error, {:query_only, :injected}}
+            assert store(c) == [0, 1]
+
+          :replicate ->
+            assert result == {:error, {:committed, {:query_only, :injected}}}
+            assert store(c) == [0, 1, 7]
+            assert feed_keys(c, 7) |> Enum.count(&(&1 == 7)) == 1
+        end
+
+        assert rows(c) == store(c)
+        refute unreplicated?(c)
+      end
+
       test "a freeze puts the cell to sleep with what the store holds", %{c: c} do
         orphan(c, 5)
         _ = Alambique.freeze(c.inst, c.cell)

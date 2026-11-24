@@ -446,8 +446,14 @@ is that frames committed and not yet replicated imply a write in flight
   every call on it, before the statement: once the transaction is gone the
   statement returns `{:error, :transaction_ended}` and does not run. It
   covers the library's own statements too, such as the `user_version` after a
-  migration step. A `COMMIT` whose `PRAGMA query_only = ON` after it failed,
-  and a failed `ROLLBACK`, stop the cell.
+  migration step. The `COMMIT` runs alone and the `PRAGMA query_only = ON` is
+  a call of its own after it. When that pragma fails the write is committed
+  and the connection is in an unknown mode, so the cell stops: the caller gets
+  `{:error, {:query_only, reason}}` and, with `sql: [orphan_frames: :stop]`,
+  the store and the next wake do not have the row; with `:replicate` the
+  frames are uploaded first, the caller gets `{:error, {:committed,
+  {:query_only, reason}}}` and the cell stops after the batch. A failed
+  `ROLLBACK` stops the cell too.
 - The cell checks the rest. The native library keeps the size of the WAL
   (the WAL hook) and notes it when the mark is set; a write that failed is an
   orphan when the WAL moved during its transaction, whether or not a batch is
