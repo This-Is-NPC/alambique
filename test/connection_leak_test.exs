@@ -8,6 +8,7 @@ defmodule Alambique.ConnectionLeakTest do
 
   import Alambique.CellHelpers
 
+  alias Alambique.Cell.Db
   alias Alambique.{Cell, Config, Fault, Feed, Sqlite, Tx}
 
   @moduletag capture_log: true
@@ -98,6 +99,31 @@ defmodule Alambique.ConnectionLeakTest do
         assert Alambique.hibernate(c.inst, c.cell) == :ok
         assert rows(c) == [0, 1, 2]
       end
+    end
+  end
+
+  describe "an open that fails after the connection opened" do
+    @describetag :tmp_dir
+
+    test "closes the connection and lets the next open through", %{tmp_dir: dir} do
+      path = Path.join(dir, "cell.db")
+      open = Alambique.NativeStats.read().connections_open
+
+      assert {:error, _} = Db.open(path, cache_kib: "x")
+      assert Alambique.NativeStats.read().connections_open == open
+
+      assert {:ok, conn} = Db.open(path)
+      assert :ok = Db.close(conn)
+    end
+
+    test "closes the connection of a reader", %{tmp_dir: dir} do
+      path = Path.join(dir, "cell.db")
+      {:ok, conn} = Db.open(path)
+      :ok = Db.close(conn)
+      open = Alambique.NativeStats.read().connections_open
+
+      assert {:error, _} = Db.open_reader(path, "x")
+      assert Alambique.NativeStats.read().connections_open == open
     end
   end
 

@@ -28,19 +28,33 @@ defmodule Alambique.Cell.Db do
   def open(path, opts \\ []) do
     {cache_kib, opts} = Keyword.pop(opts, :cache_kib)
 
-    with {:ok, conn} <- Sqlite.open(path, [vfs: :alambique, gated: true] ++ opts),
-         {:ok, %{rows: [["wal"]]}} <-
+    with {:ok, conn} <- Sqlite.open(path, [vfs: :alambique, gated: true] ++ opts) do
+      settle(conn, setup(conn, cache_kib))
+    end
+  end
+
+  defp setup(conn, cache_kib) do
+    with {:ok, %{rows: [["wal"]]}} <-
            Sqlite.run(conn, "PRAGMA journal_mode = WAL", [], write: true),
          :ok <- cache_size(conn, cache_kib),
          :ok <- Sqlite.execute(conn, "PRAGMA synchronous = NORMAL", write: true),
          :ok <- Sqlite.execute(conn, "PRAGMA recursive_triggers = ON", write: true),
          :ok <- read_only(conn),
          :ok <- Sqlite.baseline_wal(conn) do
-      {:ok, conn}
+      :ok
     else
       {:error, _} = error -> error
       other -> {:error, {:open, other}}
     end
+  end
+
+  # A connection whose setup failed is closed, so it holds neither the file
+  # (design §15) nor its descriptors.
+  defp settle(conn, :ok), do: {:ok, conn}
+
+  defp settle(conn, {:error, _} = error) do
+    Sqlite.close(conn)
+    error
   end
 
   defp cache_size(_conn, nil), do: :ok
@@ -56,9 +70,8 @@ defmodule Alambique.Cell.Db do
   def open_read_only(path, opts \\ []) do
     uri = "file:" <> URI.encode(path, &(URI.char_unreserved?(&1) or &1 == ?/)) <> "?immutable=1"
 
-    with {:ok, conn} <- Sqlite.open(uri, [readonly: true, gated: true] ++ opts),
-         :ok <- read_only(conn) do
-      {:ok, conn}
+    with {:ok, conn} <- Sqlite.open(uri, [readonly: true, gated: true] ++ opts) do
+      settle(conn, read_only(conn))
     end
   end
 
@@ -71,14 +84,7 @@ defmodule Alambique.Cell.Db do
   @spec open_reader(Path.t(), pos_integer) :: {:ok, Sqlite.conn()} | {:error, term}
   def open_reader(path, cache_kib) do
     with {:ok, conn} <- Sqlite.open(path, readonly: true, vfs: :alambique, gated: true) do
-      case cache_size(conn, cache_kib) do
-        :ok ->
-          {:ok, conn}
-
-        {:error, _} = error ->
-          Sqlite.close(conn)
-          error
-      end
+      settle(conn, cache_size(conn, cache_kib))
     end
   end
 
