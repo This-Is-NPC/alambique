@@ -60,15 +60,17 @@ lost its entry to another live incarnation of its id emits
 ## Store events
 
 Emitted by `Alambique.Store.Breaker`, the circuit breaker of a store (design
-§3). There is one breaker for each location of an instance. `instance` is the
-instance name and `location` the id of the location.
+§3). There are two breaker states for each location of an instance: the one
+for the objects of the change feed (`class: :feed`) and the one for everything
+else (`class: :default`). Each opens and closes on its own. `instance` is the
+instance name, `location` the id of the location and `class` the state.
 
 | Event | Measurements | Metadata |
 | --- | --- | --- |
-| `[:alambique, :store, :breaker, :open]` | `cooldown_ms` (the configured cool-down; the wait is up to 20 % longer) | `instance`, `location`, `reason` (`:failures`: `breaker: [failures:]` failures in a row; `:probe_failed`: the probe after a cool-down failed) |
-| `[:alambique, :store, :breaker, :close]` | none | `instance`, `location` |
+| `[:alambique, :store, :breaker, :open]` | `cooldown_ms` (the configured cool-down; the wait is up to 20 % longer) | `instance`, `location`, `class`, `reason` (`:failures`: `breaker: [failures:]` failures in a row; `:probe_failed`: the probe after a cool-down failed) |
+| `[:alambique, :store, :breaker, :close]` | none | `instance`, `location`, `class` |
 | `[:alambique, :store, :too_large]` | `size` (bytes the object has, or declared), `max` (its cap, `read_limits:`) | `key`: an object over its cap was refused before it was held; not a store failure, not counted by the breaker |
-| `[:alambique, :store, :failure]` | none | `instance`, `location`, `operation` (`:put`, `:get`, `:head`, `:get_range`, `:list`, `:delete`; `nil` for a killed request that was in none), `reason` (below), `counted` (`true` if it counted toward `breaker: [failures:]`), `kind` and `detail` (the crash, below; `nil` when the failure is not a crash) |
+| `[:alambique, :store, :failure]` | none | `instance`, `location`, `class`, `operation` (`:put`, `:get`, `:head`, `:get_range`, `:list`, `:delete`; `nil` for a killed request that was in none), `reason` (below), `counted` (`true` if it counted toward `breaker: [failures:]`), `kind` and `detail` (the crash, below; `nil` when the failure is not a crash) |
 
 `[:alambique, :store, :failure]` is emitted for each store request that fails
 while the breaker admits it, so a log can say why the breaker opened. `reason`
@@ -98,7 +100,8 @@ failures. An answer of a working store (`:not_found`, `:precondition_failed`,
 a 4xx) is not a failure and emits nothing.
 
 `Alambique.breaker_status/1` gives the current state of each breaker without
-waiting for an event.
+waiting for an event: for each location the default state, and under `feed` the
+state of the feed objects.
 
 While the breaker is open a store request answers `{:error, :store_unavailable}`
 without reaching the store, and emits nothing. A failed request that reached

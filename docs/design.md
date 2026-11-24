@@ -47,9 +47,17 @@ the shared object contains one of their names.
   start.
 - **Failures.** A failed `put` may have been applied. A store that raises
   becomes a failed request.
-- **Circuit breaker.** One breaker per location, shared by its cells. After a
-  run of store failures it answers `:store_unavailable` and lets one probe
-  through after a cool-down. Lease renewals bypass it.
+- **Circuit breaker.** Two states per location, shared by its cells, with the
+  same settings (`breaker:`). The default state guards segments, snapshots,
+  leases, markers and listings. The feed state guards the puts and heads of
+  the feed sender (§13). After a run of store failures a state answers
+  `:store_unavailable` and lets one probe through after a cool-down. A store
+  that fails only for feed objects opens the feed state: the sender waits and
+  retries, and commits and reads go on. A store that fails for everything
+  opens both, so the sender does not keep asking a store that is down. Lease
+  renewals bypass both. The consumer (`Alambique.Feed.read/3`, `prune/2`)
+  uses no breaker. A state is told apart in events by `class` (`:default` or
+  `:feed`) and in `Alambique.breaker_status/1` by the `feed` entry.
 
 ### 3.1 Trust model
 
@@ -347,7 +355,9 @@ cells without waking them.
   `{txid, n}`: the batch TXID and the index of the change in it.
 - **Publication.** After a batch is acknowledged, a sender writes one
   object per batch (or per group, `object_batches`) with
-  `:if_none_match`, without making the write wait.
+  `:if_none_match`, without making the write wait. Its store requests use the
+  feed state of the circuit breaker (§3), so failing feed puts open that state
+  and not the one that guards the commit of the write.
 - **Cleanup.** Published rows leave the file only after the publication is
   acknowledged, and a batch is removed whole: ids are `cell:txid:n` with `n`
   counted over the rows that remain, and the next owner publishes the rows left
