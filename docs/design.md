@@ -335,6 +335,18 @@ cells without waking them.
 - **Publication.** After a batch is acknowledged, a sender writes one
   object per batch (or per group, `object_batches`) with
   `:if_none_match`, without making the write wait.
+- **Cleanup.** Published rows leave the file only after the publication is
+  acknowledged, and a batch is removed whole: ids are `cell:txid:n` with `n`
+  counted over the rows that remain, and the next owner publishes the rows left
+  in the file from 0. `feed: [cleanup:]` says when: `:in_write` in the next
+  user write, `:idle` in a transaction of the cell's own after
+  `cleanup_after_ms` without a call, `:after_publish` in one when the
+  publication is acknowledged, `:idle_or_write` both (default). The cleanup
+  transaction goes through `flush` like a commit, so `pipeline_depth` and the
+  order of the batches apply; it runs only while serving, with a valid lease,
+  not hydrating and, for the idle modes, with nothing pending or in flight.
+  `feed_cleaned` advances when it commits; a failure retries with a backoff.
+  `cleanup_rows` bounds it at batch boundaries.
 - **Reading.** `Alambique.Feed.read/3` merges the shards by key. It skips
   objects newer than `now - settle_ms`, so a late put never lands behind
   a position.

@@ -282,7 +282,38 @@ shuts down publishes what it holds first, for up to `feed: [stop_publish_ms:]`
 (default 5 000; 0 turns it off). If it cannot, the records appear when the next
 owner wakes the cell.
 
-## 11. Decode the objects yourself
+## 11. Choose when published rows leave the cell's file
+
+A cell keeps the rows of a change in its file until the batch is published.
+Published rows are removed later, in a transaction that is uploaded like any
+other. `feed: [cleanup:]` says when:
+
+| `cleanup:` | When the rows of published batches are removed | Cost |
+| --- | --- | --- |
+| `:in_write` | In the next write of a caller. | That write pays the delete, the pages it dirties and a larger upload, so a one-row write after a large transaction is several times slower. |
+| `:idle` | In a transaction of the cell's own, once the cell has had no call for `cleanup_after_ms`. A write never removes them. | An idle cell uploads one more batch. Under constant load the rows pile up in the file until there is a quiet time. |
+| `:after_publish` | In a transaction of the cell's own as soon as the publication is acknowledged, if the pipeline has room. A write never removes them. | One more batch per published batch, also under load. |
+| `:idle_or_write` (default) | As `:idle`, and a write that finds rows waiting removes them as `:in_write` does. | The table stays bounded under constant load. A write after a burst can pay as with `:in_write`. |
+
+`cleanup_after_ms` (default 1 000, below `idle_timeout_ms`; when
+`idle_timeout_ms` is 1 000 or less the default is one less than it) is the time
+without a call that makes the cell idle for `:idle` and `:idle_or_write`. Reads
+count as calls, so a cell that is read often does not clean while idle. A cell
+whose idle cache shrink is on (`awake: [idle_cache_after_ms:]`) removes the
+published rows first and shrinks after.
+
+`cleanup_rows` (default `nil`, all rows) bounds the rows one cleanup removes.
+It cuts only between batches, never inside one: a batch that has more rows than
+the bound goes whole. The cleanup then repeats until nothing is left. Use it
+when a cell holds so many rows that deleting them stalls its next call.
+
+A cleanup of the cell's own uses a TXID, like a migration, so a cell shows more
+gaps in its TXIDs and `after_ack` runs for that batch too. A cleanup that fails
+leaves the rows, is tried again at growing intervals and never stops the cell.
+After a crash the next owner publishes the rows that are still in the file
+again, with the same record ids (step 4).
+
+## 12. Decode the objects yourself
 
 `Alambique.Feed.read/3` and the Broadway producer decode the objects. A reader
 that decodes them itself reads this format: the bytes `"ALF"`, the version byte
@@ -305,8 +336,8 @@ The module documentation of `Alambique.Feed.Record` describes the body.
   cell's file.
 - **A record appears twice.** This is expected after an owner change or a lost
   acknowledgement. Deduplicate by `record.id`.
-- **A cell shows gaps in its TXIDs.** Fences, migrations and transactions that
-  change no row use TXIDs without producing an object. Nothing is missing. See
+- **A cell shows gaps in its TXIDs.** Fences, migrations, cleanups of the feed
+  and transactions that change no row use TXIDs without producing an object. Nothing is missing. See
   [design.md](design.md), section 13.
 - **A table of your application appears on the feed.** List its prefix in
   `feed: [internal_prefixes: ...]` (step 7). The change applies at the cell's

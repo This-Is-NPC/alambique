@@ -94,6 +94,60 @@ defmodule Alambique.ConfigOptionsTest do
     end
   end
 
+  describe "feed cleanup" do
+    defp feed(ctx, opts, rest \\ []),
+      do: Alambique.Config.build(base(ctx, [feed: opts] ++ rest)).feed
+
+    test "cleans in the idle time or in a write by default, after a second", ctx do
+      assert %{cleanup: :idle_or_write, cleanup_after_ms: 1_000, cleanup_rows: nil} =
+               feed(ctx, [])
+    end
+
+    test "accepts each mode and rejects any other value", ctx do
+      for mode <- [:in_write, :idle, :after_publish, :idle_or_write],
+          do: assert(feed(ctx, cleanup: mode).cleanup == mode)
+
+      for bad <- [nil, :never, "idle", 1, true] do
+        assert_raise ArgumentError, ~r/:feed cleanup must be one of/, fn ->
+          feed(ctx, cleanup: bad)
+        end
+      end
+    end
+
+    test "cleanup_after_ms is a positive integer below idle_timeout_ms", ctx do
+      assert feed(ctx, [cleanup_after_ms: 59_999], idle_timeout_ms: 60_000).cleanup_after_ms ==
+               59_999
+
+      for bad <- [0, -1, 1.5, :soon, nil] do
+        assert_raise ArgumentError, ~r/cleanup_after_ms/, fn ->
+          feed(ctx, cleanup_after_ms: bad)
+        end
+      end
+
+      for after_ms <- [1_000, 5_000] do
+        assert_raise ArgumentError, ~r/cleanup_after_ms must be less than :idle_timeout_ms/, fn ->
+          feed(ctx, [cleanup_after_ms: after_ms], idle_timeout_ms: 1_000)
+        end
+      end
+    end
+
+    test "the default delay stays below a short idle_timeout_ms", ctx do
+      assert feed(ctx, [], idle_timeout_ms: 5_000).cleanup_after_ms == 1_000
+      assert feed(ctx, [], idle_timeout_ms: 300).cleanup_after_ms == 299
+      assert feed(ctx, [], idle_timeout_ms: 1).cleanup_after_ms == 1
+    end
+
+    test "cleanup_rows is nil or a positive integer", ctx do
+      assert feed(ctx, cleanup_rows: 500).cleanup_rows == 500
+
+      for bad <- [0, -1, 1.5, :all] do
+        assert_raise ArgumentError, ~r/cleanup_rows must be nil or a positive integer/, fn ->
+          feed(ctx, cleanup_rows: bad)
+        end
+      end
+    end
+  end
+
   test "awake.idle_gc is a boolean, true by default", ctx do
     assert Alambique.Config.build(base(ctx, [])).awake.idle_gc == true
     assert Alambique.Config.build(base(ctx, awake: [idle_gc: false])).awake.idle_gc == false

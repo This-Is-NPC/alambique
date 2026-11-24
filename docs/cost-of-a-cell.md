@@ -90,7 +90,9 @@ objects. The bucket key layout is in
 - **Change feed**: with `feed` on (the default), the cell's file has a table,
   `_alambique_feed`, that holds a copy of each changed row. It is written in the
   segments of the batch. A feed object (`feed/<shard>/...`) holds the changed
-  rows of a batch as zlib-compressed JSON. `feed: false` writes neither.
+  rows of a batch as zlib-compressed JSON. The rows leave the file in a later
+  transaction, when `feed: [cleanup:]` says (the default is an idle time of one
+  second or the next write). `feed: false` writes neither.
 - **Lease**: one object per cell, overwritten at each renewal. The lease TTL is
   30 s, renewed every third of it with 10% jitter.
 - **Markers and manifests**: `chain`, `trashed`, `frozen`, `crashes`, and the

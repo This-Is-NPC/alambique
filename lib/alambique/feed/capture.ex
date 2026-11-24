@@ -438,6 +438,32 @@ defmodule Alambique.Feed.Capture do
     :ok = Db.script(conn, raise_floor(ts))
   end
 
+  @doc """
+  The newest batch that a cleanup of the rows after `from`, up to `upto`, may
+  remove when it removes about `rows` of them (`nil`: all). It never cuts a
+  batch: one that alone has more rows than that goes whole.
+  """
+  @spec cutoff(term, non_neg_integer, non_neg_integer, pos_integer | nil) :: non_neg_integer
+  def cutoff(_conn, _from, upto, nil), do: upto
+
+  def cutoff(conn, from, upto, rows) do
+    sql = "SELECT txid FROM #{@feed} WHERE txid > ? AND txid <= ? ORDER BY txid LIMIT 1 OFFSET ?"
+
+    case rows(conn, sql, [from, upto, rows]) do
+      [] ->
+        upto
+
+      [[beyond]] ->
+        case rows(conn, "SELECT max(txid) FROM #{@feed} WHERE txid > ? AND txid < ?", [
+               from,
+               beyond
+             ]) do
+          [[nil]] -> beyond
+          [[before]] -> before
+        end
+    end
+  end
+
   @doc "Deletes the rows of stamped batches up to `txid` and remembers the time, in the caller's transaction."
   @spec cleanup(term, non_neg_integer, integer) :: :ok
   def cleanup(conn, txid, time) do

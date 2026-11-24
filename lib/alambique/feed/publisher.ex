@@ -8,7 +8,7 @@ defmodule Alambique.Feed.Publisher do
   require Logger
 
   alias Alambique.Fault
-  alias Alambique.Cell.State
+  alias Alambique.Cell.{Db, State}
   alias Alambique.Feed.{Capture, Sender}
   alias Alambique.Replication.Replicator
 
@@ -29,23 +29,69 @@ defmodule Alambique.Feed.Publisher do
     %{state | feed_floor: ts}
   end
 
-  @doc "Wraps a transaction function so it also removes the rows already published."
+  # Cleanup (design §13): the rows of published batches are removed either in
+  # the next user write (`:in_write`, `:idle_or_write`) or in a transaction of
+  # the cell's own (`:idle`, `:after_publish`, `:idle_or_write`), which the cell
+  # sends as a batch of its own.
+
+  @doc """
+  Wraps a transaction function so it also removes the rows already published,
+  when the instance cleans in user writes.
+  """
   @spec wrap(State.t(), (Alambique.Tx.t() -> term)) :: (Alambique.Tx.t() -> term)
-  def wrap(%State{feed_published: same, feed_cleaned: same}, fun), do: fun
+  def wrap(%State{config: %{feed: %{cleanup: mode}}} = state, fun) do
+    if mode in [:in_write, :idle_or_write] and state.feed_published != state.feed_cleaned do
+      {published, floor} = {state.feed_published, state.feed_floor}
 
-  def wrap(state, fun) do
-    {published, floor} = {state.feed_published, state.feed_floor}
-
-    fn tx ->
-      Fault.point(:feed_before_cleanup, %{cell: state.id, txid: published})
-      :ok = Capture.cleanup(tx.conn, published, floor)
-      fun.(tx)
+      fn tx ->
+        Fault.point(:feed_before_cleanup, %{cell: state.id, txid: published})
+        :ok = Capture.cleanup(tx.conn, published, floor)
+        fun.(tx)
+      end
+    else
+      fun
     end
   end
 
   @doc "Records that the transaction built by `wrap/2` committed."
   @spec committed(State.t()) :: State.t()
-  def committed(state), do: %{state | feed_cleaned: state.feed_published}
+  def committed(%State{config: %{feed: %{cleanup: mode}}} = state)
+      when mode in [:in_write, :idle_or_write],
+      do: %{state | feed_cleaned: state.feed_published}
+
+  def committed(state), do: state
+
+  @doc "Whether published rows wait for a cleanup that runs outside user writes."
+  @spec cleanup_due?(State.t()) :: boolean
+  def cleanup_due?(%State{config: %{feed: %{cleanup: :in_write}}}), do: false
+  def cleanup_due?(state), do: state.feed_published > state.feed_cleaned
+
+  @doc """
+  Removes the published rows in a transaction of its own, up to
+  `feed.cleanup_rows` of them but whole batches only: a batch that kept some
+  of its rows would be published again under other record ids after a crash.
+  `feed_cleaned` advances only once the transaction committed. The cell must
+  send a batch afterwards: the deletion is a change of the file.
+  """
+  @spec cleanup(State.t()) :: {:ok, State.t()} | {:error, State.t()}
+  def cleanup(state) do
+    {from, published, floor} = {state.feed_cleaned, state.feed_published, state.feed_floor}
+    rows = state.config.feed.cleanup_rows
+
+    fun = fn tx ->
+      Fault.point(:feed_before_cleanup, %{cell: state.id, txid: published})
+      cut = Capture.cutoff(tx.conn, from, published, rows)
+      :ok = Capture.cleanup(tx.conn, cut, floor)
+      cut
+    end
+
+    case Db.transaction(state.conn, Replicator.next_txid(state.repl), fun,
+           select: state.config.feed
+         ) do
+      {:ok, cut} -> {:ok, %{state | feed_cleaned: cut}}
+      {:error, _} -> {:error, state}
+    end
+  end
 
   # Wake
 
