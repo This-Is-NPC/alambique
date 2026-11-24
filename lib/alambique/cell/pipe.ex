@@ -26,6 +26,7 @@ defmodule Alambique.Cell.Pipe do
           last: term,
           # newest first
           items: list,
+          # user writes; a feed cleanup batch has none
           writes: non_neg_integer,
           started: integer,
           inflight: pos_integer,
@@ -70,6 +71,18 @@ defmodule Alambique.Cell.Pipe do
   def attach(%__MODULE__{queue: queue} = pipe, items) do
     {last, rest} = List.pop_at(queue, -1)
     %{pipe | queue: rest ++ [%{last | items: items ++ last.items}]}
+  end
+
+  @doc """
+  Like `attach/2`, for the newest batch with a user write; the queue must hold
+  one. Batches behind it, which carry none, are not waited for.
+  """
+  @spec attach_to_write(t, list) :: t
+  def attach_to_write(%__MODULE__{queue: queue} = pipe, items) do
+    {behind, rest} = Enum.split_while(Enum.reverse(queue), &(&1.writes == 0))
+    [last | older] = rest
+    last = %{last | items: items ++ last.items}
+    %{pipe | queue: Enum.reverse(older) ++ [last | Enum.reverse(behind)]}
   end
 
   @doc "Batch pids by pid, for selective receives."

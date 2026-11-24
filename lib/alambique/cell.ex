@@ -454,14 +454,16 @@ defmodule Alambique.Cell do
   end
 
   # A read that may see unacknowledged writes is answered after the newest
-  # batch is durable, which implies every earlier one is, so no caller
-  # observes a write that could still be lost.
+  # batch that carries one is durable, which implies every earlier batch is, so
+  # no caller observes a write that could still be lost. A feed cleanup batch
+  # carries none: it only removes rows already published, so reads do not wait
+  # for it.
   defp serve_call({:query, sql, params, ms}, from, state) do
     reply = Db.read(state.conn, sql, params, Db.limits(state.config, ms))
 
-    if idle?(state),
-      do: {:reply, reply, state},
-      else: {:noreply, wait(state, {:read, from, reply})}
+    if write_in_flight?(state),
+      do: {:noreply, wait(state, {:read, from, reply})},
+      else: {:reply, reply, state}
   end
 
   # A checked read (design §5) is answered only if the lease is still ours
@@ -470,14 +472,14 @@ defmodule Alambique.Cell do
   defp serve_call({:checked_query, sql, params, ms}, from, state) do
     reply = Db.read(state.conn, sql, params, Db.limits(state.config, ms))
 
-    if idle?(state) do
+    if write_in_flight?(state) do
+      {:noreply, wait(state, {:checked_read, from, reply})}
+    else
       case check_lease(state) do
         :ok -> {:reply, reply, state}
         :lost -> stop_serving(state, :lease_lost)
         {:unreadable, reason} -> {:reply, {:error, {:lease_unreadable, reason}}, state}
       end
-    else
-      {:noreply, wait(state, {:checked_read, from, reply})}
     end
   end
 
@@ -901,11 +903,17 @@ defmodule Alambique.Cell do
 
   defp idle?(state), do: state.pending == [] and state.pipe.queue == []
 
-  # Makes an item wait for the newest batch, which is the open one when it has
-  # items. Its release implies that every earlier write is acknowledged.
+  # A user write is pending or not yet acknowledged. Batches without one, the
+  # feed cleanups, do not count.
+  defp write_in_flight?(state),
+    do: state.pending != [] or Enum.any?(state.pipe.queue, &(&1.writes > 0))
+
+  # Makes a read wait for the open batch when it has items, else for the newest
+  # batch with a write. Its release implies that every earlier write is
+  # acknowledged.
   defp wait(%State{pending: []} = state, item) do
     :atomics.add(state.load, 1, 1)
-    %{state | pipe: Pipe.attach(state.pipe, [item])}
+    %{state | pipe: Pipe.attach_to_write(state.pipe, [item])}
   end
 
   defp wait(state, item) do
