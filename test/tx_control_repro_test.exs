@@ -10,7 +10,7 @@ defmodule Alambique.TxControlReproTest do
 
   import Alambique.CellHelpers
 
-  alias Alambique.{Cell, Config, Feed, Tx}
+  alias Alambique.{Cell, Config, Feed, Sqlite, Tx}
   alias Alambique.Replication.{Native, Replicator}
   alias AlambiqueTestkit.GatedStore
 
@@ -51,6 +51,14 @@ defmodule Alambique.TxControlReproTest do
 
   defp ins(tx, n), do: Tx.execute(tx, "INSERT INTO t VALUES (#{n})")
 
+  # What a defect of the library would do: end the transaction behind its
+  # back. The connection refuses it while the library's transaction is open,
+  # so the flag of the library is lifted first.
+  defp lifted_commit(tx) do
+    :ok = Sqlite.expect_transaction(tx.conn, false)
+    Sqlite.execute(tx.conn, "COMMIT")
+  end
+
   defp ids(rows), do: rows |> List.flatten() |> Enum.reject(&(&1 == 0))
 
   defp store_ids(env),
@@ -65,15 +73,19 @@ defmodule Alambique.TxControlReproTest do
         try do
           case Alambique.query(env.inst, env.cell, @all, [], timeout: 1_000) do
             {:ok, %{rows: rows}} -> {ids(rows), System.monotonic_time(:microsecond) - started}
+            {:error, :timeout} -> :blocked
             other -> {:error, other}
           end
         catch
-          :exit, reason -> {:error, {:exit, elem(reason, 0)}}
+          # A call that does not answer in time is a block.
+          :exit, {:timeout, _} -> :blocked
+          :exit, reason -> {:error, {:exit, reason}}
         end
       end)
 
     case Task.yield(task, 3_000) || Task.shutdown(task, :brutal_kill) do
-      {:ok, {:error, _}} -> :blocked
+      {:ok, {:error, _} = error} -> error
+      {:ok, :blocked} -> :blocked
       {:ok, {ids, us}} -> {ids, us}
       _ -> :blocked
     end
@@ -145,12 +157,14 @@ defmodule Alambique.TxControlReproTest do
     wiped = kill_or_hibernate(env, opts)
     finish(env, written)
     local = if wiped.after_wake, do: wiped.after_wake, else: []
+    final = store_ids(env)
 
     %{
       result: result,
       reader: reader,
       wal: wal,
       store_ids: stored,
+      final_store: final,
       seen: seen,
       after_wake: local,
       hibernate: wiped[:hibernate]
@@ -172,7 +186,11 @@ defmodule Alambique.TxControlReproTest do
     [
       if(obs.wal.unreplicated and not obs.wal.in_flight, do: :unreplicated_frames_no_write),
       if(obs.seen -- obs.store_ids != [], do: :reader_saw_unacknowledged_rows),
-      if(obs.seen -- obs.after_wake != [], do: :reader_saw_rows_lost_after_wake)
+      if(obs.seen -- obs.after_wake != [], do: :reader_saw_rows_lost_after_wake),
+      # An error answer means no row of the function exists, here or in the store.
+      if(match?({:error, _}, obs.result) and (obs.after_wake != [] or obs.final_store != []),
+        do: :error_but_row_present
+      )
     ]
     |> Enum.reject(&is_nil/1)
   end
@@ -277,16 +295,29 @@ defmodule Alambique.TxControlReproTest do
     end
   end
 
-  describe "later batches and cuts (H3, H4)" do
-    test "H3: a later acknowledged write carries the orphan row to the store", env do
-      env = boot(env)
+  describe "a transaction ended behind the library's back" do
+    # The connection refuses a COMMIT while the library's transaction is
+    # open; these lift the flag, as a defect of the library would.
+    defp lifted(tx) do
+      {:ok, _} = ins(tx, 1)
+      lifted_commit(tx)
+    end
 
-      {task, _} =
-        written =
-        write(env, fn tx ->
-          {:ok, _} = ins(tx, 1)
-          Tx.execute(tx, "COMMIT")
-        end)
+    test "the cell stops and neither the store nor the next wake has the row", env do
+      env = boot(env)
+      {task, result} = written = write(env, &lifted/1)
+      assert result == {:error, :transaction_ended}
+      eventually(fn -> Alambique.owner(env.inst, env.cell) == :none end)
+      finish(env, written)
+      Task.shutdown(task, 100)
+
+      {:ok, %{rows: rows}} = Alambique.query(env.inst, env.cell, @all, [], timeout: 20_000)
+      assert ids(rows) == [] and store_ids(env) == []
+    end
+
+    test "H3: a later acknowledged write does not carry the row to the store", env do
+      env = boot(env)
+      {task, _} = written = write(env, &lifted/1)
 
       GatedStore.open(env.gate)
       {:ok, _} = Alambique.execute(env.inst, env.cell, "INSERT INTO t VALUES (2)")
@@ -294,40 +325,40 @@ defmodule Alambique.TxControlReproTest do
       finish(env, written)
       Task.shutdown(task, 100)
 
-      # Documents the expected behaviour: the next acknowledgement makes the
-      # frames durable.
-      assert stored == [1, 2]
+      # The write was answered with an error: its row is not durable.
+      assert stored == [2]
     end
 
-    test "H4: position does not cut above a row that is not durable", env do
+    test "H4: a cut never includes a row of a write that failed", env do
       env = boot(env)
-
-      written =
-        write(env, fn tx ->
-          {:ok, _} = ins(tx, 1)
-          Tx.execute(tx, "COMMIT")
-        end)
-
+      written = write(env, &lifted/1)
       position = Alambique.position(env.inst, env.cell, timeout: 2_000)
       stored = store_ids(env)
       finish(env, written)
 
-      # The row of the write in flight is not durable: no cut is reported
-      # until it is.
-      refute match?({:ok, _}, position) and stored == [],
-             inspect(%{position: position, stored: stored})
+      # An answer is a cut of the state the store holds; the cell stopped, so
+      # it is not an awake cell's.
+      refute match?({:ok, %{awake: true}}, position), inspect(position)
+      assert 1 not in stored
     end
-  end
 
-  describe "H5: the change feed" do
-    test "the orphan row is published once, with the batch that carries it", env do
+    test "H5: the row is not published; with :replicate it is, once", env do
       env = boot(env)
+      written = write(env, &lifted/1)
 
-      written =
-        write(env, fn tx ->
-          {:ok, _} = ins(tx, 1)
-          Tx.execute(tx, "COMMIT")
-        end)
+      next =
+        Task.async(fn -> Alambique.execute(env.inst, env.cell, "INSERT INTO t VALUES (2)") end)
+
+      GatedStore.open(env.gate)
+      {:ok, _} = Task.await(next, 10_000)
+      records = feed(env, 2)
+      finish(env, written)
+      assert Enum.sort(for {n, op, _} <- records, n > 0, do: {n, op}) == [{2, :insert}]
+    end
+
+    test "H5: with orphan_frames: :replicate the row is published once", env do
+      env = boot(env, sql: [orphan_frames: :replicate])
+      written = write(env, &lifted/1)
 
       next =
         Task.async(fn -> Alambique.execute(env.inst, env.cell, "INSERT INTO t VALUES (2)") end)
@@ -454,10 +485,19 @@ defmodule Alambique.TxControlReproTest do
             "COMMIT; INSERT INTO t VALUES (7); " <>
             "CREATE TRIGGER trg2 AFTER INSERT ON t BEGIN SELECT 1; END"
 
-        {task, result} = write(env, fn tx -> Tx.script(tx, script) end)
-        finish(env, {task, result})
+        test = self()
 
-        assert {:ok, {:error, {:not_ddl, _}}} = result
+        written =
+          write(env, fn tx ->
+            send(test, {:script, Tx.script(tx, script)})
+            :done
+          end)
+
+        finish(env, written)
+
+        # Refused before it runs: the COMMIT by the connection, an INSERT as not DDL.
+        assert_received {:script, {:error, reason}}
+        assert reason == :not_authorized or match?({:not_ddl, _}, reason)
         assert {:ok, %{rows: [[0]]}} = Alambique.query(env.inst, env.cell, "SELECT max(n) FROM t")
       end
     end
