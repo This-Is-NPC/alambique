@@ -298,12 +298,10 @@ defmodule Alambique.RewindTest do
       for n <- 3..40,
           do: Alambique.execute(inst, cell, "INSERT INTO t VALUES (?)", [n * 1_000_003])
 
+      assert {:ok, _} = Alambique.execute(inst, cell, "CREATE TABLE big (v BLOB)")
+
       assert {:ok, _} =
-               Alambique.execute(
-                 inst,
-                 cell,
-                 "CREATE TABLE big (v BLOB); INSERT INTO big VALUES (zeroblob(60000))"
-               )
+               Alambique.execute(inst, cell, "INSERT INTO big VALUES (zeroblob(60000))")
 
       assert {:error, {:too_large, bytes, 8_192}} = Alambique.rewind(inst, cell, {:txid, at})
       assert bytes > 8_192
