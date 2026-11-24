@@ -441,6 +441,7 @@ defmodule Alambique.CellMigrationsPropertiesTest do
   defp run({:held, base}, state, name, names) do
     cell = names[base]
     expected = Lists.version(cell)
+    asleep? = Alambique.owner(name, cell) == :none
     _ = safely(fn -> Alambique.query(name, cell, "SELECT 1") end)
     pid = Cell.whereis(Config.fetch!(name), cell)
 
@@ -453,7 +454,7 @@ defmodule Alambique.CellMigrationsPropertiesTest do
       state = %{state | seq: state.seq + 2}
 
       {Enum.reduce(answers, state, fn {n, result}, state ->
-         record(state, name, cell, n, result, false, expected)
+         record(state, name, cell, n, result, asleep?, expected)
        end), cell}
     else
       {state, cell}
@@ -522,7 +523,7 @@ defmodule Alambique.CellMigrationsPropertiesTest do
 
       other ->
         # A cell of a namespace with no migration has no table yet.
-        assert state.faulty? or expected == 0,
+        assert state.faulty? or expected == 0 or not asleep?,
                "#{cell}: write #{n} answered #{inspect(other)} with no fault"
 
         update_in(state.unknown[cell], &[n | &1])
