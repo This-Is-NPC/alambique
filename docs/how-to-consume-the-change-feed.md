@@ -180,6 +180,11 @@ each must be a non-empty string. The option affects only the feed:
 `Alambique.query/5`, migrations and the deploy check treat these tables like
 any other.
 
+The rows that `CREATE TABLE ... AS SELECT` writes are not captured: the
+triggers of the new table exist only once the statement has ended. The rows
+are in the cell and in its store, but not in the feed. Create the table first
+and fill it with `INSERT ... SELECT` in a write to have them in the feed.
+
 A feed copies every column of a captured row into the cell's file and into the
 feed object. A column that your consumer never reads, such as a large body,
 can be left out of both:

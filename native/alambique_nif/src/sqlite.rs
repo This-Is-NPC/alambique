@@ -697,6 +697,14 @@ fn starts_ddl(text: &[u8]) -> bool {
     matches!(word.as_slice(), b"create" | b"drop" | b"alter")
 }
 
+/// `starts_ddl` for Elixir, so a statement is decided to be schema by the same
+/// code that `sqlite_script` refuses a statement with. It never touches
+/// SQLite, so it is not counted in `SQLITE_CALLS`.
+#[rustler::nif]
+fn sqlite_starts_ddl(sql: Binary) -> bool {
+    starts_ddl(sql.as_slice())
+}
+
 #[cfg(test)]
 fn prepare(db: *mut ffi::sqlite3, sql: &[u8]) -> Result<Option<StmtPtr>, Failure> {
     prepare_at(db, sql).map(|(stmt, _)| stmt)

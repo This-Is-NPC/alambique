@@ -28,14 +28,6 @@ defmodule Alambique.Feed.Capture do
   @pending "_alambique_feed_pending"
   @pending_time 1_099_511_627_776
 
-  # Possessive and atomic, so that a statement of many comments cannot
-  # backtrack exponentially.
-  @ddl ~r/\A(?:\s++|--[^\n]*+(?:\n|\z)|\/\*(?>.*?\*\/))*+(?:create|drop|alter)\b/is
-
-  @doc "Whether `sql` is a statement that can change the schema."
-  @spec ddl?(String.t()) :: boolean
-  def ddl?(sql), do: Regex.match?(@ddl, sql)
-
   @typedoc """
   What the feed captures: the `feed` map of the instance configuration. A table
   is captured whole (`:capture`), not at all (`:skip`), without some columns
