@@ -592,6 +592,9 @@ defmodule Alambique.Cell do
         Fault.point(:cell_after_commit, %{cell: state.id, txid: state.repl.txid})
         if isolated?, do: encode_now(state), else: {:noreply, queue_flush(state)}
 
+      {:error, {:rollback_failed, _} = reason} ->
+        stop_serving(state, reason, {:error, reason})
+
       {:error, reason} = error ->
         if Sqlite.wal_advanced?(state.conn),
           do: orphaned_write(state, from, reason),

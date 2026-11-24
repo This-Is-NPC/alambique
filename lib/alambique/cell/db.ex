@@ -2,7 +2,7 @@ defmodule Alambique.Cell.Db do
   @moduledoc false
   # SQLite access of a cell: connection setup, statements and transactions.
 
-  alias Alambique.{Sqlite, Tx}
+  alias Alambique.{Fault, Sqlite, Tx}
   alias Alambique.Feed.Capture
 
   @active :alambique_active_tx
@@ -197,7 +197,10 @@ defmodule Alambique.Cell.Db do
   Runs `fun` with a handle inside `BEGIN IMMEDIATE` ... `COMMIT`.
 
   Returns `{:ok, value}` after the local commit, or `{:error, reason}` after
-  a rollback (a raise, a `Tx.rollback/2`, or a failed commit). While `fun`
+  a rollback (a raise, a `Tx.rollback/2`, or a failed commit). When the commit
+  ran and `PRAGMA query_only = ON` after it failed the reason is
+  `{:query_only, reason}`; when the rollback failed it is
+  `{:rollback_failed, reason}`: the cell stops in both cases. While `fun`
   runs, a statement on the connection returns `{:error, :transaction_ended}`
   without running once SQLite has ended the transaction itself (a conflict or
   a trigger that rolls back, an interrupt, an I/O error), so no later
@@ -264,19 +267,32 @@ defmodule Alambique.Cell.Db do
 
   defp finish({:commit, value}, conn) do
     with :ok <- check_open(conn),
-         :ok <- Sqlite.expect_transaction(conn, false),
-         :ok <- Sqlite.execute(conn, "COMMIT; PRAGMA query_only = ON") do
-      {:ok, value}
+         :ok <- Sqlite.expect_transaction(conn, false) do
+      case Sqlite.execute(conn, "COMMIT; PRAGMA query_only = ON") do
+        :ok -> {:ok, value}
+        {:error, reason} -> failed_commit(conn, reason)
+      end
     else
-      {:error, reason} ->
-        rollback(conn)
-        {:error, reason}
+      {:error, reason} -> abort(conn, reason)
     end
   end
 
-  defp finish({:abort, reason}, conn) do
-    rollback(conn)
-    {:error, reason}
+  defp finish({:abort, reason}, conn), do: abort(conn, reason)
+
+  # The commit ran and the pragma after it did not: the frames are in the WAL
+  # and the connection may write outside a transaction. The cell sees frames
+  # no write carries and stops.
+  defp failed_commit(conn, reason) do
+    if Sqlite.transaction_status(conn) == {:ok, :idle} and Sqlite.wal_advanced?(conn),
+      do: {:error, {:query_only, reason}},
+      else: abort(conn, reason)
+  end
+
+  defp abort(conn, reason) do
+    case rollback(conn) do
+      :ok -> {:error, reason}
+      {:error, failure} -> {:error, {:rollback_failed, failure}}
+    end
   end
 
   # The function ended the transaction itself, for example with COMMIT.
@@ -287,13 +303,18 @@ defmodule Alambique.Cell.Db do
     end
   end
 
+  # A failed `ROLLBACK` leaves the transaction open: the cell stops.
   defp rollback(conn) do
     :ok = Sqlite.expect_transaction(conn, false)
+    Fault.point(:db_before_rollback, conn)
 
-    if Sqlite.transaction_status(conn) == {:ok, :transaction},
-      do: Sqlite.execute(conn, "ROLLBACK")
+    result =
+      if Sqlite.transaction_status(conn) == {:ok, :transaction},
+        do: Sqlite.execute(conn, "ROLLBACK"),
+        else: :ok
 
     read_only(conn)
+    result
   end
 
   @doc """
