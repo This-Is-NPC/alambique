@@ -13,6 +13,7 @@ use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::Instant;
 
 use crate::guard::guard;
+use crate::held::{self, Verdict};
 use crate::stats::{CACHE_HITS, CACHE_MISSES, CONNECTIONS_OPEN};
 
 use libsqlite3_sys as ffi;
@@ -36,6 +37,7 @@ mod atoms {
         connection_closed, argument_error, busy, disk_full,
         statement_timeout, result_too_large, not_authorized, multiple_statements, transaction_ended, cache_used,
         schema_used, stmt_used, lookaside_used, nul_in_statement, not_ddl, query_only, not_owner,
+        held_by_cell, foreign_write, none, advanced, restarted,
     }
 }
 
@@ -79,6 +81,19 @@ pub(crate) struct Control {
     /// hook), and the value when the transaction of the library began.
     wal_frames: AtomicU64,
     txn_frames: AtomicU64,
+    /// Commits made on the connection that reached the WAL (the WAL hook).
+    wal_commits: AtomicU64,
+    /// Whether the connection is a cell's own read-write connection, whose
+    /// wal-index header `watch` follows (`held`).
+    watched: bool,
+    watch: held::Watch,
+    /// Test builds: the header reads as unreadable.
+    #[cfg(feature = "test-panic")]
+    header_unreadable: AtomicBool,
+    /// Test builds: a statement run on a separate connection of the same file
+    /// just before `BEGIN IMMEDIATE` (a foreign commit at the worst moment).
+    #[cfg(feature = "test-panic")]
+    before_begin: Mutex<Option<(String, String)>>,
     /// `now_us()` after which the running statement is stopped; 0 for none.
     deadline: AtomicU64,
     /// The progress handler stopped a statement at the deadline.
@@ -109,6 +124,13 @@ impl Control {
             fail_query_only: AtomicBool::new(false),
             wal_frames: AtomicU64::new(0),
             txn_frames: AtomicU64::new(0),
+            wal_commits: AtomicU64::new(0),
+            watched: false,
+            watch: held::Watch::default(),
+            #[cfg(feature = "test-panic")]
+            header_unreadable: AtomicBool::new(false),
+            #[cfg(feature = "test-panic")]
+            before_begin: Mutex::new(None),
             deadline: AtomicU64::new(0),
             timed_out: AtomicBool::new(false),
             allow_attach,
@@ -125,6 +147,37 @@ impl Control {
         self.gated = true;
         self.key = key;
         self
+    }
+
+    /// Follows the wal-index header of the connection (`watch`).
+    fn watch_wal(mut self) -> Self {
+        self.watched = true;
+        self
+    }
+
+    /// The wal-index header of `db`.
+    fn header(&self, db: *mut ffi::sqlite3) -> Option<[u32; 12]> {
+        #[cfg(feature = "test-panic")]
+        if self.header_unreadable.load(Relaxed) {
+            return None;
+        }
+        // SAFETY: callers hold the lock that keeps `db` open.
+        unsafe { held::read_header(db) }
+    }
+
+    /// Compares the header with what the connection's own operations left.
+    fn check_wal(&self, db: *mut ffi::sqlite3) -> Verdict {
+        self.watch
+            .check(self.header(db), self.wal_commits.load(Relaxed))
+    }
+
+    /// After an own commit or checkpoint: whether the header is accounted for.
+    fn settle_wal(&self, db: *mut ffi::sqlite3) -> bool {
+        self.watch.settle(
+            self.header(db),
+            self.wal_commits.load(Relaxed),
+            self.wal_frames.load(Relaxed),
+        )
     }
 
     /// Whether `key` is the secret the connection needs for a call that is
@@ -148,6 +201,9 @@ pub struct Conn {
     opener: LocalPid,
     /// The process that runs statements on it (the opener at first).
     user: Mutex<LocalPid>,
+    /// The file this connection holds in the table of `held`, until closed.
+    held: Option<held::FileId>,
+    released: AtomicBool,
 }
 
 impl Conn {
@@ -160,6 +216,16 @@ impl Conn {
             // SAFETY: the write lock waited for every user; the pointer is
             // out of the slot, so nothing can use it again.
             unsafe { close(db) };
+        }
+        self.release_held();
+    }
+
+    /// Gives the file back once the database is closed.
+    fn release_held(&self) {
+        if let Some(id) = self.held {
+            if !self.released.swap(true, Relaxed) {
+                held::release(id);
+            }
         }
     }
 
@@ -196,6 +262,7 @@ impl Drop for Conn {
                 // SAFETY: `Conn` owned the connection; it is closed once.
                 unsafe { close(db) };
             }
+            self.release_held();
         });
     }
 }
@@ -227,6 +294,10 @@ enum Failure {
     TransactionEnded,
     Busy,
     DiskFull,
+    /// A cell holds the file read-write (`held`).
+    HeldByCell,
+    /// The wal-index header is not what the connection's own writes left.
+    ForeignWrite,
     /// The `COMMIT` ran and the `PRAGMA query_only = ON` after it failed.
     QueryOnly(Box<Failure>),
 }
@@ -251,6 +322,8 @@ impl Failure {
             Failure::NulInStatement => atoms::nul_in_statement().encode(env),
             Failure::Busy => atoms::busy().encode(env),
             Failure::DiskFull => atoms::disk_full().encode(env),
+            Failure::HeldByCell => atoms::held_by_cell().encode(env),
+            Failure::ForeignWrite => atoms::foreign_write().encode(env),
             Failure::QueryOnly(inner) => (atoms::query_only(), inner.reason(env)).encode(env),
         }
     }
@@ -304,6 +377,16 @@ const INTROSPECTION: [&[u8]; 16] = [
     b"compile_options",
 ];
 
+/// Whether the file name an `ATTACH` gives is a file that a cell holds.
+fn attaches_held(name: *const c_char) -> bool {
+    if name.is_null() {
+        return false;
+    }
+    // SAFETY: for ATTACH SQLite passes a NUL-terminated name.
+    let name = unsafe { CStr::from_ptr(name) };
+    name.to_str().is_ok_and(held::attach_refused)
+}
+
 /// Decides every statement of the connection when it is prepared, whatever
 /// its syntax (virtual tables prepare theirs when they run, so the read-only
 /// flag stays up for the whole call). A panic denies the statement. Every
@@ -321,6 +404,7 @@ const INTROSPECTION: [&[u8]; 16] = [
 /// - Unless the connection was opened with `attach: true`, or in a read-only
 ///   call: `ATTACH` and `DETACH`, which `VACUUM` also raises. An attached
 ///   file is another cell's data or a file the SQL creates.
+/// - `ATTACH` of a file that a cell holds open read-write is denied (`held`).
 /// - In a read-only call: transaction and savepoint statements, and every
 ///   pragma with an argument except the introspection ones.
 /// - In a call that runs a user's text (`no_txn_control`), and in every call
@@ -349,7 +433,9 @@ pub(crate) unsafe extern "C" fn authorize(
             | ffi::SQLITE_SELECT
             | ffi::SQLITE_FUNCTION
             | ffi::SQLITE_RECURSIVE => true,
-            ffi::SQLITE_ATTACH | ffi::SQLITE_DETACH => ctl.allow_attach && !read_only && writes,
+            // A held file is not attached read-write, as it is not opened.
+            ffi::SQLITE_ATTACH => ctl.allow_attach && !read_only && writes && !attaches_held(name),
+            ffi::SQLITE_DETACH => ctl.allow_attach && !read_only && writes,
             ffi::SQLITE_TRANSACTION => {
                 ctl.finishing.load(Relaxed)
                     || (!read_only
@@ -478,6 +564,7 @@ unsafe extern "C" fn wal_committed(
         // SAFETY: the context is the `Control` of this connection (see there).
         let ctl = unsafe { &*(ctx as *const Control) };
         ctl.wal_frames.store(frames as u64, Relaxed);
+        ctl.wal_commits.fetch_add(1, Relaxed);
         ffi::SQLITE_OK
     })
 }
@@ -543,6 +630,8 @@ struct Call<'a> {
     ctl: &'a Control,
     db: *mut ffi::sqlite3,
     length: Option<c_int>,
+    /// Commits on the connection when the call began.
+    commits: u64,
 }
 
 impl<'a> Call<'a> {
@@ -565,12 +654,22 @@ impl<'a> Call<'a> {
             // SAFETY: `db` is a live connection (callers hold the lock).
             unsafe { ffi::sqlite3_limit(db, ffi::SQLITE_LIMIT_LENGTH, cap) }
         });
-        Call { ctl, db, length }
+        Call {
+            ctl,
+            db,
+            length,
+            commits: ctl.wal_commits.load(Relaxed),
+        }
     }
 }
 
 impl Drop for Call<'_> {
     fn drop(&mut self) {
+        // A call that committed (a flagged write, or the `COMMIT` of the
+        // library) leaves a header that its own commits account for.
+        if self.ctl.watched && self.ctl.wal_commits.load(Relaxed) != self.commits {
+            self.ctl.settle_wal(self.db);
+        }
         self.ctl.read_only.store(false, Relaxed);
         self.ctl.no_txn_control.store(false, Relaxed);
         self.ctl.flagged.store(false, Relaxed);
@@ -994,6 +1093,19 @@ fn sqlite_open<'a>(
     timeout_ms: u64,
     gated: bool,
 ) -> Term<'a> {
+    open(env, path, readonly, vfs, attach, timeout_ms, gated)
+}
+
+/// The body of `sqlite_open`, for the test NIF that opens as a foreign writer.
+pub(crate) fn open<'a>(
+    env: Env<'a>,
+    path: String,
+    readonly: bool,
+    vfs: Option<String>,
+    attach: bool,
+    timeout_ms: u64,
+    gated: bool,
+) -> Term<'a> {
     let _t = crate::stats::SQLITE_CALLS.time();
     let run = || -> Outcome<'a> {
         let path = CString::new(path).map_err(|_| Failure::Message("invalid file name".into()))?;
@@ -1007,6 +1119,7 @@ fn sqlite_open<'a>(
             ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_CREATE
         };
         let mut db: *mut ffi::sqlite3 = ptr::null_mut();
+        held::clear_refused();
         // SAFETY: `path` and `vfs` are NUL-terminated and outlive the call.
         let rc = unsafe {
             ffi::sqlite3_open_v2(
@@ -1017,7 +1130,9 @@ fn sqlite_open<'a>(
             )
         };
         if rc != ffi::SQLITE_OK {
-            let failure = if db.is_null() {
+            let failure = if held::take_refused() {
+                Failure::HeldByCell
+            } else if db.is_null() {
                 Failure::Message("out of memory".into())
             } else {
                 failure(db)
@@ -1026,6 +1141,31 @@ fn sqlite_open<'a>(
             unsafe { close_v2(db) };
             return Err(failure);
         }
+        // A cell's own connection takes the file; any other read-write open
+        // of a held file is refused, whichever VFS opened it (the Alambique
+        // VFS refuses its own opens, and ATTACH, in `x_open`).
+        let held = if readonly {
+            None
+        } else {
+            // SAFETY: `db` is a live connection; the name is read at once.
+            let name = unsafe {
+                let n = ffi::sqlite3_db_filename(db, c"main".as_ptr());
+                (!n.is_null()).then(|| CStr::from_ptr(n).to_string_lossy().into_owned())
+            };
+            let id = name.and_then(|n| held::file_id(std::path::Path::new(&n)));
+            let free = match id {
+                _ if held::bypassed() => true,
+                Some(id) if gated => held::hold(id),
+                Some(id) => !held::is_held(id),
+                None => true,
+            };
+            if !free {
+                // SAFETY: `db` is the handle `sqlite3_open_v2` returned.
+                unsafe { close_v2(db) };
+                return Err(Failure::HeldByCell);
+            }
+            id.filter(|_| gated)
+        };
         // SAFETY: `db` is a live connection that nothing else uses yet.
         unsafe {
             // Match the options the cells were built with: no double-quoted
@@ -1070,6 +1210,9 @@ fn sqlite_open<'a>(
         let mut control = Control::new(attach, timeout_ms);
         if gated {
             control = control.gate(key);
+            if !readonly {
+                control = control.watch_wal();
+            }
         }
         let opener = env.pid();
         let conn = ResourceArc::new(Conn {
@@ -1077,6 +1220,8 @@ fn sqlite_open<'a>(
             control: Box::new(control),
             opener,
             user: Mutex::new(opener),
+            held,
+            released: AtomicBool::new(false),
         });
         let ctx = &*conn.control as *const Control as *mut std::ffi::c_void;
         // SAFETY: `db` is live and not shared yet; `ctx` outlives it (see
@@ -1324,7 +1469,19 @@ fn sqlite_begin_transaction<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64)
             // Before the statement: a BEGIN that fails must be judged with the
             // WAL as it is now, not with the one of the previous transaction.
             ctl.txn_frames.store(ctl.wal_frames.load(Relaxed), Relaxed);
-            exec(db, ctl, c"PRAGMA query_only = OFF; BEGIN IMMEDIATE")?;
+            exec(db, ctl, c"PRAGMA query_only = OFF")?;
+            #[cfg(feature = "test-panic")]
+            foreign_before_begin(ctl);
+            exec(db, ctl, c"BEGIN IMMEDIATE")?;
+            // The write lock is ours: no commit or restart can follow the
+            // check before the write is done (design §15).
+            if ctl.watched {
+                let verdict = ctl.check_wal(db);
+                if verdict != Verdict::Same {
+                    exec(db, ctl, c"ROLLBACK")?;
+                    return Err(Failure::ForeignWrite);
+                }
+            }
             let token = new_token();
             ctl.expect_txn.store(token, Relaxed);
             Ok((atoms::ok(), token).encode(env))
@@ -1480,6 +1637,10 @@ fn sqlite_checkpoint<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64) -> Ter
             if conn.control.expect_txn.load(Relaxed) != 0 || !conn.control.key_ok(key) {
                 return Err(Failure::Denied);
             }
+            // Whatever else wrote must reach a batch from the WAL first.
+            if conn.control.watched && conn.control.check_wal(db) != Verdict::Same {
+                return Err(Failure::ForeignWrite);
+            }
             let (mut log, mut done) = (0, 0);
             // SAFETY: `db` is live (`with_db`); the out pointers are locals.
             let rc = unsafe {
@@ -1495,6 +1656,11 @@ fn sqlite_checkpoint<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64) -> Ter
                 ffi::SQLITE_OK => {
                     // The WAL starts over: the count must not equal a later one by chance.
                     conn.control.wal_frames.store(0, Relaxed);
+                    // A write that slipped in before the checkpoint took the
+                    // lock is in the file now and gone from the WAL.
+                    if conn.control.watched && !conn.control.settle_wal(db) {
+                        return Err(Failure::ForeignWrite);
+                    }
                     Ok(atoms::ok().encode(env))
                 }
                 ffi::SQLITE_BUSY => Ok((atoms::error(), atoms::busy()).encode(env)),
@@ -1502,6 +1668,80 @@ fn sqlite_checkpoint<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64) -> Ter
             }
         }),
     )
+}
+
+/// Compares the wal-index header with what the connection's own commits and
+/// checkpoints left (`held`). `mode` 0 checks and answers `:none`,
+/// `:advanced` (something else committed; its frames are in the WAL) or
+/// `:restarted` (the WAL restarted or the header cannot be read: frames may
+/// be gone); 1 takes what the latest check saw as accounted for, once its
+/// frames are replicated; 2 takes the header as it is as the baseline.
+#[rustler::nif(schedule = "DirtyIo")]
+fn sqlite_foreign_write<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64, mode: u8) -> Term<'a> {
+    let _t = crate::stats::SQLITE_CALLS.time();
+    if let Err(f) = check_user(env, &conn) {
+        return f.term(env);
+    }
+    reply(
+        env,
+        with_db(&conn, |db| {
+            let ctl = &conn.control;
+            if !ctl.key_ok(key) || ctl.expect_txn.load(Relaxed) != 0 {
+                return Err(Failure::Denied);
+            }
+            if !ctl.watched {
+                return Ok(atoms::none().encode(env));
+            }
+            let commits = ctl.wal_commits.load(Relaxed);
+            Ok(match mode {
+                0 => match ctl.check_wal(db) {
+                    Verdict::Same => atoms::none(),
+                    Verdict::Advanced => atoms::advanced(),
+                    Verdict::Restarted => atoms::restarted(),
+                }
+                .encode(env),
+                1 => {
+                    ctl.watch.accept(commits);
+                    atoms::ok().encode(env)
+                }
+                _ => {
+                    ctl.watch.baseline(ctl.header(db), commits);
+                    atoms::ok().encode(env)
+                }
+            })
+        }),
+    )
+}
+
+/// Test builds: runs the statement of `set_foreign_commit` on a separate
+/// connection of the same file, as another process would.
+#[cfg(feature = "test-panic")]
+fn foreign_before_begin(ctl: &Control) {
+    let hook = ctl
+        .before_begin
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    if let Some((path, sql)) = hook {
+        crate::test_panic::foreign_exec_raw(&path, &sql);
+    }
+}
+
+#[cfg(feature = "test-panic")]
+impl Conn {
+    /// The next `begin` runs `sql` on a separate connection of `path` first.
+    pub(crate) fn set_foreign_commit(&self, path: String, sql: String) {
+        *self
+            .control
+            .before_begin
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((path, sql));
+    }
+
+    /// Makes the wal-index header read as unreadable.
+    pub(crate) fn set_header_unreadable(&self, on: bool) {
+        self.control.header_unreadable.store(on, Relaxed);
+    }
 }
 
 /// Rows changed by the latest statement that changed rows.

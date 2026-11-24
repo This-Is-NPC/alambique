@@ -69,6 +69,22 @@ unsafe extern "C" fn x_open(
 ) -> c_int {
     let base = BASE.load(Ordering::Acquire);
     let f = file as *mut File;
+    // A second read-write open of a file that a cell holds, also by ATTACH,
+    // is refused (design §15).
+    if flags & ffi::SQLITE_OPEN_MAIN_DB != 0
+        && flags & ffi::SQLITE_OPEN_READWRITE != 0
+        && !name.is_null()
+    {
+        let refused = guard("x_open_held", false, || {
+            // SAFETY: a main database has a NUL-terminated file name.
+            unsafe { CStr::from_ptr(name) }
+                .to_str()
+                .is_ok_and(|p| crate::held::refuse_open(Path::new(p)))
+        });
+        if refused {
+            return ffi::SQLITE_CANTOPEN;
+        }
+    }
     // SAFETY: SQLite passes `szOsFile` writable bytes (`register`); `base` is
     // the default VFS found there and `real(file)` is the room for its file.
     let rc = unsafe {

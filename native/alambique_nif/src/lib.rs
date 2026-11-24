@@ -10,6 +10,7 @@ mod error;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
 mod guard;
+mod held;
 mod lazy;
 mod lazy_nif;
 mod ltx;

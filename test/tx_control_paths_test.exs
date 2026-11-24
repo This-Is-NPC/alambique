@@ -11,7 +11,7 @@ defmodule Alambique.TxControlPathsTest do
 
   import Alambique.CellHelpers
 
-  alias Alambique.{Cell, Config, Fault, Feed, Sqlite, Tx}
+  alias Alambique.{Cell, Config, Fault, Feed, Foreign, Sqlite, Tx}
   alias Alambique.Cell.Db
   alias Alambique.Replication.{Native, Replicator}
   alias AlambiqueTestkit.GatedStore
@@ -200,7 +200,7 @@ defmodule Alambique.TxControlPathsTest do
       test "is a plain error and the cell keeps serving (#{mode})", env do
         c = boot(env, unquote(mode))
         cell_pid = pid(c)
-        {:ok, other} = Sqlite.open(path(c))
+        {:ok, other} = Foreign.open(path(c))
         :ok = Sqlite.execute(other, "BEGIN IMMEDIATE")
 
         result = Alambique.execute(c.inst, c.cell, "INSERT INTO t VALUES (7)")
@@ -221,8 +221,13 @@ defmodule Alambique.TxControlPathsTest do
 
   test "stamping the feed rows while another connection writes is an error, not a crash", env do
     c = boot(env, :stop)
-    {:ok, mine} = Db.open(path(c))
-    {:ok, other} = Sqlite.open(path(c))
+    # Asleep: while the cell holds its file, a second connection of the
+    # library on it is refused.
+    file = path(c)
+    assert Alambique.hibernate(c.inst, c.cell) == :ok
+    assert asleep?(c)
+    {:ok, mine} = Db.open(file)
+    {:ok, other} = Foreign.open(file)
     :ok = Sqlite.execute(other, "BEGIN IMMEDIATE")
 
     result = Alambique.Feed.Capture.stamp(mine, 99, 0)
@@ -436,7 +441,7 @@ defmodule Alambique.TxControlPathsTest do
 
     # A second connection that holds the write lock until it is told to leave.
     defp hold(path, parent, test) do
-      {:ok, other} = Sqlite.open(path)
+      {:ok, other} = Foreign.open(path)
       :ok = Sqlite.execute(other, "BEGIN IMMEDIATE")
       send(parent, {:held, self()})
 
@@ -678,7 +683,7 @@ defmodule Alambique.TxControlPathsTest do
     end
 
     defp write_by(c, :second_connection) do
-      {:ok, other} = Sqlite.open(path(c))
+      {:ok, other} = Foreign.open(path(c))
       result = Sqlite.execute(other, "INSERT INTO t VALUES (50)")
       Sqlite.close(other)
       result
@@ -701,7 +706,7 @@ defmodule Alambique.TxControlPathsTest do
     # A row that a second connection commits and checkpoints: a writer that
     # the library does not guard.
     defp write_by(c, :second_checkpoint) do
-      {:ok, other} = Sqlite.open(path(c))
+      {:ok, other} = Foreign.open(path(c))
       :ok = Sqlite.execute(other, "INSERT INTO t VALUES (50)")
       result = Sqlite.checkpoint(other)
       Sqlite.close(other)
@@ -757,22 +762,22 @@ defmodule Alambique.TxControlPathsTest do
       end
     end
 
+    # The frames are gone from the WAL, so no batch can carry them: the cell
+    # stops under both modes and the next wake restores what the store holds.
     for mode <- [:stop, :replicate] do
-      test "checkpoint: the row is answered as a cut, never durable, and gone at the next wake (#{mode})",
+      test "checkpoint: the row is found at the next cut and gone at the next wake (#{mode})",
            env do
         c = boot(env, unquote(mode))
         :ok = write_by(c, :second_checkpoint)
 
-        # The WAL is empty: nothing shows frames no write carries.
+        # The WAL is empty: only the wal-index header shows the writer.
         refute unreplicated?(c)
         assert rows(c) == [0, 1, 50]
 
-        assert {:ok, _} = Alambique.position(c.inst, c.cell)
+        assert Alambique.position(c.inst, c.cell) == {:error, :orphan_frames}
+        assert asleep?(c)
         assert store(c) == [0, 1]
         assert feed_now(c) == [0, 1]
-
-        assert Alambique.hibernate(c.inst, c.cell) == :ok
-        asleep?(c)
         assert rows(c) == [0, 1]
       end
     end
