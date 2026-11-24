@@ -346,7 +346,9 @@ cells without waking them.
   order of the batches apply; it runs only while serving, with a valid lease,
   not hydrating and, for the idle modes, with nothing pending or in flight.
   `feed_cleaned` advances when it commits; a failure retries with a backoff.
-  `cleanup_rows` bounds it at batch boundaries.
+  `cleanup_rows` bounds it at batch boundaries. A cleanup batch carries no
+  user write, so a read does not wait for it (§15); it waits for the batches
+  that do.
 - **Hand-over.** The cell reads the rows of acknowledged batches and sends
   them to the sender. With `hand_over_rows` it reads at most that many rows
   at a time, `ORDER BY txid, seq` from the position after the last row sent
@@ -405,6 +407,11 @@ and every earlier batch are durable in the store (§6), so the recovery
 point objective is zero. Writes that arrive during an upload form the next
 batch (group commit). `pipeline_depth` bounds the batches of one cell in
 flight, and answers come in TXID order. There is no asynchronous mode.
+
+A read that may see a write not yet acknowledged is answered after the newest
+batch that carries a write is durable. Batches without a user write, such as a
+feed cleanup (§13), do not hold it, so a slow or failing store does not stall
+the reads of an idle cell.
 
 ## 16. Lazy restore
 

@@ -216,6 +216,130 @@ defmodule Alambique.FeedCleanupTest do
     end
   end
 
+  describe "a read next to a cleanup batch" do
+    @rows_sql "SELECT id FROM notes ORDER BY id"
+
+    # Inserts row 1 with the segment puts held and lets that batch land, so the
+    # cleanup batch that follows is the one held next.
+    defp cleanup_in_flight(ctx, mode) do
+      {gate, ctx} = gated(ctx)
+      inst = start(ctx, cleanup: mode)
+      cell = unique_cell()
+      # The first batch carries the migration: let it and its cleanup pass.
+      insert(inst, cell, 0)
+      cleaned(inst, cell)
+      GatedStore.hold(gate, ~r{/0000/})
+      on_exit(fn -> catch_exit(GatedStore.open(gate)) end)
+
+      write =
+        Task.async(fn -> Alambique.execute(inst, cell, "INSERT INTO notes VALUES (1, 'x')") end)
+
+      eventually(fn -> GatedStore.held(gate) != [] end)
+      [key] = GatedStore.held(gate)
+      GatedStore.release(gate, key)
+      assert {:ok, _} = Task.await(write)
+
+      eventually(fn ->
+        match?(%{pipe: %{queue: [%{writes: 0, items: []}]}}, state(inst, cell)) and
+          GatedStore.held(gate) != []
+      end)
+
+      {gate, inst, cell}
+    end
+
+    for mode <- [:idle, :after_publish, :idle_or_write] do
+      test "#{mode}: a query is answered while the cleanup batch is held", ctx do
+        {gate, inst, cell} = cleanup_in_flight(ctx, unquote(mode))
+
+        query = Task.async(fn -> Alambique.query(inst, cell, @rows_sql) end)
+        assert {:ok, {:ok, %{rows: [[0], [1]]}}} = Task.yield(query, 1_000)
+
+        checked =
+          Task.async(fn -> Alambique.query(inst, cell, @rows_sql, [], verify_lease: true) end)
+
+        assert {:ok, {:ok, %{rows: [[0], [1]]}}} = Task.yield(checked, 1_000)
+        assert GatedStore.held(gate) != []
+
+        GatedStore.open(gate)
+        cleaned(inst, cell)
+      end
+    end
+
+    test "a query is answered while the store fails the cleanup batch", ctx do
+      {gate, inst, cell} = cleanup_in_flight(ctx, :idle_or_write)
+      [key] = GatedStore.held(gate)
+      assert :ok = GatedStore.fail(gate, key)
+
+      eventually(fn ->
+        match?(%{pipe: %{queue: [%{attempts: n}]}} when n > 0, state(inst, cell))
+      end)
+
+      query = Task.async(fn -> Alambique.query(inst, cell, @rows_sql) end)
+      assert {:ok, {:ok, %{rows: [[0], [1]]}}} = Task.yield(query, 1_000)
+
+      GatedStore.open(gate)
+      cleaned(inst, cell)
+    end
+
+    test "a query waits for a write batch queued after the cleanup batch", ctx do
+      {gate, inst, cell} = cleanup_in_flight(ctx, :idle_or_write)
+
+      write =
+        Task.async(fn -> Alambique.execute(inst, cell, "INSERT INTO notes VALUES (2, 'x')") end)
+
+      eventually(fn -> match?(%{pipe: %{queue: [_, _]}}, state(inst, cell)) end)
+
+      query = Task.async(fn -> Alambique.query(inst, cell, @rows_sql) end)
+
+      checked =
+        Task.async(fn -> Alambique.query(inst, cell, @rows_sql, [], verify_lease: true) end)
+
+      assert Task.yield(query, 300) == nil
+      assert Task.yield(checked, 0) == nil
+
+      GatedStore.open(gate)
+      assert {:ok, _} = Task.await(write)
+      assert {:ok, %{rows: [[0], [1], [2]]}} = Task.await(query)
+      assert {:ok, %{rows: [[0], [1], [2]]}} = Task.await(checked)
+    end
+
+    # `cleanup/1` runs when the cell is idle, so a cleanup behind a write batch
+    # is made by hand: committed, `unsent` set, and sent by `:flush`.
+    test "a query waits for a write batch queued before the cleanup batch", ctx do
+      {gate, ctx} = gated(ctx)
+      inst = start(ctx, cleanup: :in_write)
+      cell = unique_cell()
+      insert(inst, cell, 1)
+      published(inst, cell)
+      pid = cell_pid(inst, cell)
+      GatedStore.hold(gate, ~r{/0000/})
+      on_exit(fn -> catch_exit(GatedStore.open(gate)) end)
+
+      write =
+        Task.async(fn -> Alambique.execute(inst, cell, "INSERT INTO notes VALUES (2, 'x')") end)
+
+      eventually(fn -> GatedStore.held(gate) != [] end)
+
+      :sys.replace_state(pid, fn s ->
+        {:ok, s} = Alambique.Feed.Publisher.cleanup(s)
+        %{s | unsent: true}
+      end)
+
+      send(pid, :flush)
+
+      eventually(fn ->
+        match?(%{pipe: %{queue: [%{writes: 1}, %{writes: 0}]}}, state(inst, cell))
+      end)
+
+      query = Task.async(fn -> Alambique.query(inst, cell, @rows_sql) end)
+      assert Task.yield(query, 300) == nil
+
+      GatedStore.open(gate)
+      assert {:ok, _} = Task.await(write)
+      assert {:ok, %{rows: [[1], [2]]}} = Task.await(query)
+    end
+  end
+
   describe "the publication" do
     for mode <- [:idle, :after_publish, :idle_or_write] do
       test "#{mode} removes nothing before it is acknowledged", ctx do
