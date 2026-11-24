@@ -962,7 +962,14 @@ defmodule Alambique.Cell do
   # The items of a batch stay newest first, as `pending` keeps them.
   defp send_batch(%State{pending: items} = state) do
     writes = Enum.count(items, &match?({:write, _, _}, &1))
-    state = if writes > 0, do: Publisher.stamp(state), else: state
+
+    case if(writes > 0, do: Publisher.try_stamp(state), else: {:ok, state}) do
+      {:ok, state} -> upload_batch(state, items, writes)
+      {:error, reason} -> {:stop, {:stamp_failed, reason}, state}
+    end
+  end
+
+  defp upload_batch(state, items, writes) do
     started = System.monotonic_time()
     deadline = State.deadline(state)
 
@@ -1303,8 +1310,10 @@ defmodule Alambique.Cell do
 
   # The frames as a batch of their own, with the feed rows stamped.
   defp orphan_batch(state) do
-    state = Publisher.stamp(state)
-    flush_now(%{state | unsent: true})
+    case Publisher.try_stamp(state) do
+      {:ok, state} -> flush_now(%{state | unsent: true})
+      {:error, reason} -> {:stop, {:stamp_failed, reason}, state}
+    end
   end
 
   # A write failed and left committed frames (the WAL moved during its

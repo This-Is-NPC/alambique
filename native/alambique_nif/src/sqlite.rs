@@ -1088,8 +1088,10 @@ fn sqlite_begin_transaction<'a>(env: Env<'a>, conn: ResourceArc<Conn>) -> Term<'
                 return Err(Failure::Denied);
             }
             let _call = Call::new(ctl, db, &Limits::default());
-            exec(db, ctl, c"PRAGMA query_only = OFF; BEGIN IMMEDIATE")?;
+            // Before the statement: a BEGIN that fails must be judged with the
+            // WAL as it is now, not with the one of the previous transaction.
             ctl.txn_frames.store(ctl.wal_frames.load(Relaxed), Relaxed);
+            exec(db, ctl, c"PRAGMA query_only = OFF; BEGIN IMMEDIATE")?;
             let token = new_token();
             ctl.expect_txn.store(token, Relaxed);
             Ok((atoms::ok(), token).encode(env))

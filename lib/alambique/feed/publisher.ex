@@ -23,13 +23,22 @@ defmodule Alambique.Feed.Publisher do
   batch is uploaded, so every row of a batch gets the same TXID and time.
   """
   @spec stamp(State.t()) :: State.t()
-  def stamp(%State{config: %{feed_capture: false}} = state), do: state
-
   def stamp(state) do
+    case try_stamp(state) do
+      {:ok, state} -> state
+      {:error, reason} -> raise "the feed rows could not be stamped: #{inspect(reason)}"
+    end
+  end
+
+  @doc "Like `stamp/1`, with the failure as a value for the cell to stop on."
+  @spec try_stamp(State.t()) :: {:ok, State.t()} | {:error, term}
+  def try_stamp(%State{config: %{feed_capture: false}} = state), do: {:ok, state}
+
+  def try_stamp(state) do
     ts = max(State.now_ms(state), state.feed_floor)
     txid = Replicator.next_txid(state.repl)
-    :ok = Capture.stamp(state.conn, txid, ts)
-    %{state | feed_floor: ts}
+
+    with :ok <- Capture.stamp(state.conn, txid, ts), do: {:ok, %{state | feed_floor: ts}}
   end
 
   # Cleanup (design §13): the rows of published batches are removed either in

@@ -406,7 +406,7 @@ defmodule Alambique.Feed.Capture do
   batch they will be uploaded in, and saves the pending TXID of the next
   batch.
   """
-  @spec stamp(term, pos_integer, integer) :: :ok
+  @spec stamp(term, pos_integer, integer) :: :ok | {:error, term}
   def stamp(conn, txid, ts) do
     # All integers; the script is one dirty IO call (`Db.writable_script/2`).
     # The last statement writes only when the width of the TXIDs changes.
@@ -421,6 +421,7 @@ defmodule Alambique.Feed.Capture do
          ) do
       :ok -> :ok
       {:error, "no such table" <> _} -> :ok
+      {:error, _} = error -> error
     end
   end
 
