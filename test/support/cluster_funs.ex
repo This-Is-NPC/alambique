@@ -73,6 +73,10 @@ defmodule Alambique.ClusterFuns do
   @doc "A transaction that stops the whole VM while it runs in the cell, as a crashing NIF would."
   def poison, do: fn _tx -> System.halt(137) end
 
+  @doc "The process of `cell` on this node, or `nil` when it is not awake here."
+  def cell_pid(instance, cell),
+    do: Alambique.Cell.whereis(Alambique.Config.fetch!(instance), cell)
+
   @doc "Number of in-flight markers of the instance on this node that are busy."
   def busy_markers(instance) do
     instance
