@@ -502,7 +502,8 @@ defmodule Alambique do
       a write that finds rows waiting removes them as `:in_write` does, which
       bounds the table under constant load. A cell removes the published rows
       before it shrinks its page cache (`:idle_cache_after_ms`). A cleanup that
-      fails is tried again at growing intervals; it never stops the cell.
+      fails is tried again at growing intervals; it stops the cell only when it
+      leaves the connection unusable (`{:query_only, _}`, `{:rollback_failed, _}`).
     * `:cleanup_after_ms` - time without a call before the idle modes clean
       (default 1 000, a positive integer below `:idle_timeout_ms`; without a
       value, one less than a shorter `:idle_timeout_ms`).

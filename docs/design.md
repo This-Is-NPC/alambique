@@ -490,7 +490,15 @@ is that frames committed and not yet replicated imply a write in flight
   is the default because frames that no write accounts for are a defect to be
   seen, and discarding them restores a state the store holds and every
   caller already knows. A checkpoint with a deadline waits for the batch of
-  `:replicate` within the deadline.
+  `:replicate` within the deadline. A feed cleanup runs the check first even
+  with batches in flight: the frames of a batch in flight are encoded
+  already, so the frames the WAL still holds are no write's, and under
+  `:replicate` their batch goes behind those in flight without a wait.
+  A `{:query_only, _}` or `{:rollback_failed, _}` of any transaction of the
+  cell (a write, a feed cleanup, a migration, the trigger install, a wake)
+  stops the cell (`Db.fatal?/1`). A checkpoint is refused while the library's
+  transaction is open. What a caller sees of all this is listed in
+  [how-to-call-cells.md](how-to-call-cells.md#statement-rules-and-write-errors).
 
 ## 16. Lazy restore
 
