@@ -832,7 +832,13 @@ defmodule Alambique.Cell do
       else: {:ok, state}
   end
 
+  # Frames no write carries are accounted for first: the cleanup batch must
+  # not carry them, and its deletion would take their feed rows away unsent.
   defp cleanup(state) do
+    with {:ok, state} <- backstop(state), do: clean(state)
+  end
+
+  defp clean(state) do
     case Publisher.cleanup(state) do
       {:ok, state} ->
         Fault.point(:feed_after_cleanup, %{cell: state.id, txid: state.repl.txid})
