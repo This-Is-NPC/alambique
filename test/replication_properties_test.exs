@@ -197,7 +197,12 @@ defmodule Alambique.ReplicationPropertiesTest do
             commands <- list_of(rival_command_gen(), min_length: 1, max_length: 8),
             stale_last? <- boolean(),
             reach <- member_of([nil, 16, 17, 18]),
-            ops <- uniq_list_of(member_of([:get, :head, :list]), min_length: 1, max_length: 3),
+            ops <-
+              uniq_list_of(member_of([:get, :head, :list]),
+                min_length: 1,
+                max_length: 3,
+                max_tries: 100
+              ),
             times <- integer(1..4),
             max_runs: 30
           ) do
