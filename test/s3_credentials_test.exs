@@ -235,9 +235,12 @@ defmodule Alambique.Store.S3CredentialsTest do
       assert c.credentials == fun
     end
 
+    # The credentials expire in an hour. A request with a margin over an hour
+    # finds them due at once, so the next request calls the function again;
+    # the usual margin keeps them for the whole run.
     property "the token and the signature always come from the same credentials" do
       check all(steps <- list_of(member_of([:request, :expire, :margin]), min_length: 1)) do
-        {fun, _counter} = source(expires: fn -> DateTime.add(DateTime.utc_now(), 3_600) end)
+        {fun, counter} = source(expires: fn -> DateTime.add(DateTime.utc_now(), 3_600) end)
         test = self()
 
         # `:expire` makes the next request answer an expired-token error once.
@@ -252,19 +255,31 @@ defmodule Alambique.Store.S3CredentialsTest do
 
         base = [credentials: fun, req_options: stub(responder)]
 
-        for step <- steps do
-          case step do
-            :request ->
-              S3.get(config(base), "k")
+        # The calls the function should have had, and whether what it gave is
+        # still good (`:fresh`), due at once (`:due`) or not yet asked for (`nil`).
+        {expected, _cache} =
+          Enum.reduce(steps, {0, nil}, fn step, {expected, cache} ->
+            asked = if cache == :fresh, do: 0, else: 1
 
-            :expire ->
-              Process.put(:expire, true)
-              S3.get(config(base), "k")
+            case step do
+              :request ->
+                assert {:ok, _, _, _} = S3.get(config(base), "k")
+                {expected + asked, :fresh}
 
-            :margin ->
-              S3.get(config(base ++ [credentials_refresh_margin_ms: 7_200_000]), "k")
-          end
-        end
+              :expire ->
+                Process.put(:expire, true)
+                assert {:ok, _, _, _} = S3.get(config(base), "k")
+                {expected + asked + 1, :fresh}
+
+              :margin ->
+                assert {:ok, _, _, _} =
+                         S3.get(config(base ++ [credentials_refresh_margin_ms: 7_200_000]), "k")
+
+                {expected + asked, if(cache == :fresh, do: :fresh, else: :due)}
+            end
+          end)
+
+        assert calls(counter) == expected
 
         for request <- drain_seen() do
           {"AK" <> n, _, _} = SigV4.parse(header(request, "authorization"))
