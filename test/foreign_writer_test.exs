@@ -307,8 +307,7 @@ defmodule Alambique.ForeignWriterTest do
       Sqlite.close(conn)
     end
 
-    # The check of the connection reads the name as written; the VFS gets it
-    # decoded.
+    # The VFS refuses it when it opens the decoded name.
     test "ATTACH through an escaped URI is refused by the VFS", %{tmp_dir: dir} = env do
       c = boot(env, :stop)
       escaped = String.replace(path(c), "/", "%2F")
@@ -323,6 +322,86 @@ defmodule Alambique.ForeignWriterTest do
       Sqlite.close(other)
       assert rows(c) == [0, 1]
       assert {:ok, _} = Alambique.position(c.inst, c.cell)
+    end
+
+    # The spelling of the name must not matter: SQLite decodes a `file:` URI
+    # before it opens the file, and the file is what is held.
+    defp attach(%{tmp_dir: dir}, name, c) do
+      {:ok, other} = Sqlite.open(Path.join(dir, "other.db"), attach: true)
+
+      result =
+        with :ok <-
+               Sqlite.execute(other, "ATTACH DATABASE '#{name}' AS x",
+                 no_transaction_control: true
+               ) do
+          {:attached, Sqlite.execute(other, "CREATE TABLE x.u (a)")}
+        end
+
+      Sqlite.close(other)
+      assert rows(c) == [0, 1]
+      result
+    end
+
+    defp escape(string), do: URI.encode(string, &URI.char_unreserved?/1)
+    defp escape_one(string), do: String.replace(string, "c", "%63", global: false)
+
+    test "ATTACH of the file through the default VFS is refused in every spelling of its name",
+         %{tmp_dir: dir} = env do
+      c = boot(env, :stop)
+      file = path(c)
+      link = file <> ".link"
+      symlink = file <> ".symlink"
+      :ok = File.ln(file, link)
+      :ok = File.ln_s(file, symlink)
+      dots = String.duplicate("../", length(Path.split(File.cwd!())) - 1)
+      relative = dots <> String.trim_leading(file, "/")
+
+      refused = [
+        file,
+        "file:" <> file,
+        "file:" <> escape(file),
+        "file:" <> escape_one(file),
+        "file:" <> escape(file) <> "?cache=shared",
+        "file://localhost" <> file,
+        "file://localhost" <> escape(file),
+        "file:" <> file <> "%00junk",
+        "file:" <> file <> "?mode=rw",
+        "file:" <> file <> "?mode=ro&mode=rw",
+        "file:" <> file <> "?immutable=0&immutable=1",
+        "file:" <> file <> "?immutable=0",
+        relative,
+        "file:" <> relative,
+        "file:" <> escape(relative),
+        link,
+        "file:" <> escape(link),
+        symlink,
+        "file:" <> escape(symlink)
+      ]
+
+      for name <- refused do
+        result = attach(%{tmp_dir: dir}, name, c)
+        assert match?({:error, _}, result), "#{name} gave #{inspect(result)}"
+      end
+
+      assert {:ok, _} = Alambique.position(c.inst, c.cell)
+    end
+
+    test "ATTACH of the file through the default VFS stays allowed read-only",
+         %{tmp_dir: dir} = env do
+      c = boot(env, :stop)
+      file = path(c)
+
+      for name <- [
+            "file:" <> file <> "?mode=ro",
+            "file:" <> escape(file) <> "?mode=ro",
+            "file:" <> escape(file) <> "?mode=%72o",
+            "file:" <> file <> "?mode=rw&mode=ro",
+            "file:" <> file <> "?immutable=1",
+            "file://localhost" <> file <> "?immutable=1"
+          ] do
+        result = attach(%{tmp_dir: dir}, name, c)
+        assert match?({:attached, {:error, _}}, result), "#{name} gave #{inspect(result)}"
+      end
     end
 
     for vfs <- [:alambique, :default] do

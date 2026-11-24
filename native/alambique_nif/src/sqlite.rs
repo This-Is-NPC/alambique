@@ -384,7 +384,7 @@ fn attaches_held(name: *const c_char) -> bool {
     }
     // SAFETY: for ATTACH SQLite passes a NUL-terminated name.
     let name = unsafe { CStr::from_ptr(name) };
-    name.to_str().is_ok_and(held::attach_refused)
+    held::attach_refused(name.to_bytes())
 }
 
 /// Decides every statement of the connection when it is prepared, whatever
