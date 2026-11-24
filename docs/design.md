@@ -411,7 +411,11 @@ flight, and answers come in TXID order. There is no asynchronous mode.
 A read that may see a write not yet acknowledged is answered after the newest
 batch that carries a write is durable. Batches without a user write, such as a
 feed cleanup (§13), do not hold it, so a slow or failing store does not stall
-the reads of an idle cell.
+the reads of an idle cell. A read may therefore see a cleanup that is not yet
+durable. If the cell then crashes, the cleanup is undone: the published rows
+are back in the file, are published again under the same ids, and are cleaned
+again. `feed: [cleanup: :in_write]` is the strict setting: the rows leave the
+file only in the transaction of a user write, which reads wait for.
 
 ## 16. Lazy restore
 

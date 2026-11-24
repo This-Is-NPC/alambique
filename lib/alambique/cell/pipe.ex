@@ -63,26 +63,21 @@ defmodule Alambique.Cell.Pipe do
 
   @doc """
   Makes `items` (newest first, like the items of a batch) wait for the newest
-  batch; the queue must not be empty. The queue holds at most the pipeline
+  batch with a user write; batches behind it, which carry none, are not waited
+  for. `:none` when no batch has a write. The queue holds at most the pipeline
   depth, and the items go in front of the batch's, so the cost is that of
   `items` alone.
   """
-  @spec attach(t, list) :: t
-  def attach(%__MODULE__{queue: queue} = pipe, items) do
-    {last, rest} = List.pop_at(queue, -1)
-    %{pipe | queue: rest ++ [%{last | items: items ++ last.items}]}
-  end
-
-  @doc """
-  Like `attach/2`, for the newest batch with a user write; the queue must hold
-  one. Batches behind it, which carry none, are not waited for.
-  """
-  @spec attach_to_write(t, list) :: t
+  @spec attach_to_write(t, list) :: {:ok, t} | :none
   def attach_to_write(%__MODULE__{queue: queue} = pipe, items) do
-    {behind, rest} = Enum.split_while(Enum.reverse(queue), &(&1.writes == 0))
-    [last | older] = rest
-    last = %{last | items: items ++ last.items}
-    %{pipe | queue: Enum.reverse(older) ++ [last | Enum.reverse(behind)]}
+    case Enum.split_while(Enum.reverse(queue), &(&1.writes == 0)) do
+      {_, []} ->
+        :none
+
+      {behind, [last | older]} ->
+        last = %{last | items: items ++ last.items}
+        {:ok, %{pipe | queue: Enum.reverse(older) ++ [last | Enum.reverse(behind)]}}
+    end
   end
 
   @doc "Batch pids by pid, for selective receives."

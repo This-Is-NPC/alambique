@@ -461,9 +461,10 @@ defmodule Alambique.Cell do
   defp serve_call({:query, sql, params, ms}, from, state) do
     reply = Db.read(state.conn, sql, params, Db.limits(state.config, ms))
 
-    if write_in_flight?(state),
-      do: {:noreply, wait(state, {:read, from, reply})},
-      else: {:reply, reply, state}
+    case wait(state, {:read, from, reply}) do
+      {:ok, state} -> {:noreply, state}
+      :none -> {:reply, reply, state}
+    end
   end
 
   # A checked read (design §5) is answered only if the lease is still ours
@@ -472,14 +473,16 @@ defmodule Alambique.Cell do
   defp serve_call({:checked_query, sql, params, ms}, from, state) do
     reply = Db.read(state.conn, sql, params, Db.limits(state.config, ms))
 
-    if write_in_flight?(state) do
-      {:noreply, wait(state, {:checked_read, from, reply})}
-    else
-      case check_lease(state) do
-        :ok -> {:reply, reply, state}
-        :lost -> stop_serving(state, :lease_lost)
-        {:unreadable, reason} -> {:reply, {:error, {:lease_unreadable, reason}}, state}
-      end
+    case wait(state, {:checked_read, from, reply}) do
+      {:ok, state} ->
+        {:noreply, state}
+
+      :none ->
+        case check_lease(state) do
+          :ok -> {:reply, reply, state}
+          :lost -> stop_serving(state, :lease_lost)
+          {:unreadable, reason} -> {:reply, {:error, {:lease_unreadable, reason}}, state}
+        end
     end
   end
 
@@ -903,22 +906,20 @@ defmodule Alambique.Cell do
 
   defp idle?(state), do: state.pending == [] and state.pipe.queue == []
 
-  # A user write is pending or not yet acknowledged. Batches without one, the
-  # feed cleanups, do not count.
-  defp write_in_flight?(state),
-    do: state.pending != [] or Enum.any?(state.pipe.queue, &(&1.writes > 0))
-
   # Makes a read wait for the open batch when it has items, else for the newest
-  # batch with a write. Its release implies that every earlier write is
-  # acknowledged.
+  # batch with a user write; its release implies that every earlier write is
+  # acknowledged. `:none` when no user write is pending or unacknowledged: the
+  # batches without one, the feed cleanups, are not waited for.
   defp wait(%State{pending: []} = state, item) do
-    :atomics.add(state.load, 1, 1)
-    %{state | pipe: Pipe.attach_to_write(state.pipe, [item])}
+    with {:ok, pipe} <- Pipe.attach_to_write(state.pipe, [item]) do
+      :atomics.add(state.load, 1, 1)
+      {:ok, %{state | pipe: pipe}}
+    end
   end
 
   defp wait(state, item) do
     :atomics.add(state.load, 1, 1)
-    %{state | pending: [item | state.pending]}
+    {:ok, %{state | pending: [item | state.pending]}}
   end
 
   # Encodes the pending commits as the next batch. A full pipeline defers the
@@ -995,14 +996,19 @@ defmodule Alambique.Cell do
     end)
   end
 
-  # Items of a flush that changed nothing wait for the queue, if any.
-  defp release(%State{pipe: %{queue: []}} = state, items) do
-    verdict = check_reads(items, state)
-    answer(state, items, verdict)
-    if verdict == :lost, do: {:stop, :lease_lost, state}, else: {:ok, state}
-  end
+  # Items of a flush that changed nothing wait for the newest batch with a
+  # user write, if any.
+  defp release(state, items) do
+    case Pipe.attach_to_write(state.pipe, items) do
+      {:ok, pipe} ->
+        {:ok, %{state | pipe: pipe}}
 
-  defp release(state, items), do: {:ok, %{state | pipe: Pipe.attach(state.pipe, items)}}
+      :none ->
+        verdict = check_reads(items, state)
+        answer(state, items, verdict)
+        if verdict == :lost, do: {:stop, :lease_lost, state}, else: {:ok, state}
+    end
+  end
 
   # An upload process reported. A landed batch is acknowledged once every
   # batch before it has landed. A fencing conflict or a crashed upload stops
