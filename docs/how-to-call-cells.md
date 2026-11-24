@@ -131,6 +131,10 @@ and the `Alambique.Tx` functions is one statement.
   version, reason}}}`.
 - `{:error, {:stamp_failed, reason}}` is the reason of a cell that stopped
   because the feed rows of a batch could not be stamped.
+  The call that woke the cell gets it when the stamp of the wake's own
+  migration failed: the cell does not serve and its lease is released. A
+  migration of a serving cell gets `{:error, {:migrate_failed,
+  {:stamp_failed, reason}}}` and the cell stops.
 
 **Checkpoint.** `Alambique.checkpoint/3` answers `{:error, :busy}` when the
 uploads were not acknowledged within its `:deadline_ms`, also when the

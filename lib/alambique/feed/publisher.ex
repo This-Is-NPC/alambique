@@ -20,17 +20,9 @@ defmodule Alambique.Feed.Publisher do
   @doc """
   Stamps the rows that the transactions of the coming batch wrote with its
   TXID and a time that never goes back for this cell. Called right before the
-  batch is uploaded, so every row of a batch gets the same TXID and time.
+  batch is uploaded, so every row of a batch gets the same TXID and time. The
+  failure is a value, for the caller to stop on.
   """
-  @spec stamp(State.t()) :: State.t()
-  def stamp(state) do
-    case try_stamp(state) do
-      {:ok, state} -> state
-      {:error, reason} -> raise "the feed rows could not be stamped: #{inspect(reason)}"
-    end
-  end
-
-  @doc "Like `stamp/1`, with the failure as a value for the cell to stop on."
   @spec try_stamp(State.t()) :: {:ok, State.t()} | {:error, term}
   def try_stamp(%State{config: %{feed_capture: false}} = state), do: {:ok, state}
 
