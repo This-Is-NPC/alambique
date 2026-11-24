@@ -592,8 +592,8 @@ defmodule Alambique.Cell do
         Fault.point(:cell_after_commit, %{cell: state.id, txid: state.repl.txid})
         if isolated?, do: encode_now(state), else: {:noreply, queue_flush(state)}
 
-      {:error, _} = error ->
-        {:reply, error, state}
+      {:error, reason} = error ->
+        if orphan?(state), do: orphaned_write(state, from, reason), else: {:reply, error, state}
     end
   end
 
@@ -1238,7 +1238,66 @@ defmodule Alambique.Cell do
 
   # Encodes what is pending and waits until every batch is acknowledged.
   defp drain(state) do
-    with {:ok, state} <- flush_now(state), do: settle(state)
+    with {:ok, state} <- flush_now(state),
+         {:ok, state} <- settle(state),
+         do: backstop(state)
+  end
+
+  # Committed frames that no write carries (design §15): nothing is pending
+  # or queued, yet the WAL holds frames no batch has encoded. The write path
+  # keeps this from happening; the check is for what it cannot foresee. It
+  # looks at the WAL file, so it runs where a cut or a sleep is reported, and
+  # after a write that failed.
+  defp orphan?(%State{conn: conn, unsent: false} = state) when conn != nil,
+    do: idle?(state) and Replicator.unreplicated?(state.repl)
+
+  defp orphan?(_state), do: false
+
+  # What `sql: [orphan_frames:]` says: `:stop` stops the cell, which discards
+  # the local file (the marker is gone while the cell is awake), so the next
+  # wake restores what the store holds; `:replicate` sends them as a batch
+  # of their own, with the feed rows stamped, and goes on once it is durable.
+  defp backstop(state) do
+    if orphan?(state) do
+      Logger.error("Alambique cell #{state.id} had committed frames no write carries")
+
+      case state.config.sql.orphan_frames do
+        :stop -> {:stop, :orphan_frames, state}
+        :replicate -> replicate_orphans(state)
+      end
+    else
+      {:ok, state}
+    end
+  end
+
+  defp replicated(state),
+    do: if(orphan?(state), do: {:stop, :orphan_frames, state}, else: {:ok, state})
+
+  defp replicate_orphans(state) do
+    state = Publisher.stamp(state)
+
+    with {:ok, state} <- flush_now(%{state | unsent: true}),
+         {:ok, state} <- settle(state) do
+      replicated(state)
+    end
+  end
+
+  # A write failed and left committed frames. `:stop` answers the caller with
+  # its error and stops. `:replicate` parks the caller as a write: the stamp,
+  # the reads' wait and the batch apply, and it is answered after the batch
+  # with `{:error, {:committed, reason}}`, because its rows are durable then.
+  defp orphaned_write(state, from, reason) do
+    Logger.error("Alambique cell #{state.id} had committed frames no write carries")
+
+    case state.config.sql.orphan_frames do
+      :stop ->
+        stop_serving(state, :orphan_frames, {:error, reason})
+
+      :replicate ->
+        item = {:write, from, {:error, {:committed, reason}}}
+        :atomics.add(state.load, 1, 1)
+        {:noreply, queue_flush(%{state | pending: [item | state.pending]})}
+    end
   end
 
   # Like `drain/1`, but gives up at the deadline and leaves the queue as it
@@ -1248,7 +1307,7 @@ defmodule Alambique.Cell do
     with {:ok, state} <- flush_now(state), do: settle_within(state, limit)
   end
 
-  defp settle_within(%State{pipe: %{queue: []}} = state, _limit), do: {:ok, state}
+  defp settle_within(%State{pipe: %{queue: []}} = state, _limit), do: backstop(state)
 
   defp settle_within(state, limit) do
     case await(state, max(limit - System.monotonic_time(:millisecond), 0)) do
@@ -1304,8 +1363,12 @@ defmodule Alambique.Cell do
   defp hibernate(state, why, deadline, release_ms \\ nil) do
     started = System.monotonic_time()
 
-    with {:ok, state} <- drain(state) do
-      state = state |> Publisher.flush() |> finish_local()
+    with {:ok, state} <- drain(state),
+         state = Publisher.flush(state),
+         # Never answer a release with `:ok` while frames are unreplicated,
+         # whatever the option says.
+         {:ok, state} <- replicated(state) do
+      state = finish_local(state)
       {compacted, tail, spent} = compact_tail(state, why, deadline, release_ms)
       released = release(state)
 

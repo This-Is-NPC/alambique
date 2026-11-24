@@ -417,6 +417,40 @@ are back in the file, are published again under the same ids, and are cleaned
 again. `feed: [cleanup: :in_write]` is the strict setting: the rows leave the
 file only in the transaction of a user write, which reads wait for.
 
+A committed frame that no batch carries would break this: a reader could
+see it, a position could count it, and a crash would lose it. The invariant
+is that frames committed and not yet replicated imply a write in flight
+(pending or in a queued batch). Three layers keep it.
+
+- The text of a transaction function cannot end its transaction. The
+  authorizer of the native library (`SQLITE_TRANSACTION`) refuses `BEGIN`,
+  `COMMIT`, `END` and `ROLLBACK` in a call that carries user text:
+  `Alambique.Tx.query/3`, `execute/3` and the script of `script/2`. The
+  library's own transaction statements carry no such flag. Savepoints work.
+  A text holds one statement; a tail with another statement is refused
+  (`{:multiple_statements, tail}`), and the splitter of scripts reads words as
+  SQLite does (letters, digits, `_`, `$`, UTF-8), so `a$case` is no `CASE`.
+- SQLite can still end a transaction itself: a conflict resolved with
+  `ROLLBACK`, `RAISE(ROLLBACK)`, an interrupt or timeout, an I/O error.
+  `Db.transaction` marks the connection while the transaction is open, and
+  the native library looks at `sqlite3_get_autocommit` under the lock of
+  every call on it, before the statement: once the transaction is gone the
+  statement returns `{:error, :transaction_ended}` and does not run. It
+  covers the library's own statements too, such as the `user_version` after a
+  migration step.
+- The cell checks the rest. When nothing is pending or queued it asks the WAL
+  for unreplicated frames after a write that failed, at every cut
+  (`position/3`, a drain, a checkpoint) and before a hibernation; a
+  hibernation never answers `:ok` while there are any. With `sql:
+  [orphan_frames: :stop]` (the default) the cell stops: the marker of its
+  local file is gone while it is awake, so the next wake restores what the
+  store holds, which is what the caller was told. With `:replicate` it stamps
+  the feed rows and uploads the frames as a batch of their own before it goes
+  on. A write that failed is then parked as a write and answered after the
+  batch with `{:error, {:committed, reason}}`. `:stop` is the default because
+  frames that no write accounts for are a defect to be seen, and discarding
+  them restores a state the store holds and every caller already knows.
+
 ## 16. Lazy restore
 
 A waking cell with no reusable local file (§7) can serve before its file is
