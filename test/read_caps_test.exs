@@ -36,7 +36,11 @@ defmodule Alambique.ReadCapsTest do
       store = {MemoryStore, MemoryStore.config(pid)}
       ctx = ctx(store, new_world())
 
-      check all(size <- integer(0..300), cap <- integer(1..300)) do
+      # A size one under, at and one over the cap is as likely as any other.
+      check all(
+              cap <- integer(1..300),
+              size <- one_of([integer(0..300), map(member_of([-1, 0, 1]), &(cap + &1))])
+            ) do
         key = "p/#{size}"
         {m, c} = store
         {:ok, _} = m.put(c, key, :binary.copy("x", size), :none, %{})
