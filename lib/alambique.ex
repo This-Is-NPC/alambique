@@ -621,7 +621,10 @@ defmodule Alambique do
   @doc """
   Runs a read statement on the cell and returns its columns and rows.
 
-  Parameters are bound as in `Alambique.Tx`. The statement may only read: one
+  Parameters are bound as in `Alambique.Tx`. The text is one statement; text
+  after it that holds another statement is refused with
+  `{:error, {:multiple_statements, tail}}` (the start of the tail), and
+  nothing runs. Comments, spaces and `;` may follow. The statement may only read: one
   that would write (DML, DDL, `ATTACH`, `VACUUM`, a transaction or savepoint
   statement, a `PRAGMA` that sets a value or checkpoints) gives
   `{:error, :read_only}`. Only the `PRAGMA`s that describe the schema
@@ -727,7 +730,8 @@ defmodule Alambique do
   `{:error, :result_too_large}` for the `RETURNING` rows,
   `{:error, {:bad_params, message}}`); the write then rolls back and the cell
   keeps serving. So does `{:error, :disk_full}`, when the disk has no room for
-  the write.
+  the write. The text is one statement: another statement after it is refused
+  with `{:error, {:multiple_statements, tail}}` and nothing runs.
 
   Options: `:timeout`, `:statement_timeout_ms` (as in `query/5`),
   `:idempotent` (default `false`, see "Calls") and `:isolated` (default
@@ -750,6 +754,13 @@ defmodule Alambique do
   one that is interrupted at its deadline returns
   `{:error, :statement_timeout}` and SQLite rolls the transaction back, so the
   function should return the error (the call then answers with it).
+
+  The function cannot end its transaction: `BEGIN`, `COMMIT`, `END` and
+  `ROLLBACK` in the text of `Alambique.Tx.execute/3`, `query/3` or `script/2`
+  give `{:error, :not_authorized}` and the transaction goes on (`SAVEPOINT`,
+  `ROLLBACK TO` and `RELEASE` work). Each of those calls takes one statement:
+  another statement after it gives `{:error, {:multiple_statements, tail}}`.
+  Use `Alambique.Tx.rollback/2` to abort.
 
   Options: `:timeout`, `:statement_timeout_ms` (as in `query/5`, for each
   statement of `fun`), `:idempotent` (default `false`, see "Calls") and
