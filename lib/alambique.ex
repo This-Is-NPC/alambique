@@ -269,18 +269,19 @@ defmodule Alambique do
       a cell called a little less often than `:idle_cache_after_ms` meets a
       cold cache on every call. `:idle_gc` (default `true`) makes the cell
       also collect its own garbage when the shrink happens, so the memory
-      left by its last calls (after a large transaction, about 1.5 MiB, down
-      to about 14 KiB) is returned; the cost is one collection of the cell
-      process, with no measurable cost on the next call. It does nothing while
-      `:idle_cache_after_ms` is `nil`; `false` shrinks the cache but keeps
-      the garbage. With a
-      budget, every awake cell reports what its connection holds (page cache,
-      schema and prepared statements) after each call and message; a call
-      that would wake a cell while the total is at or over `:max_bytes`
-      hibernates the least recently used cells that have no caller waiting
-      until it is under, and gives `{:error, :overloaded}` if none is left to
-      hibernate. The cell that wakes may take the total past the budget as its
-      cache fills; the next wake makes room.
+      left by its last calls is returned: with `:cache_kib` 512 and
+      `:idle_cache_kib` 64, an idle cell that ran one transaction of 4,500
+      rows holds about 3.2 MiB of anonymous memory with `false` and about
+      0.45 MiB with `true`. The cost is one collection of the cell process,
+      with no measurable cost on the next call. It does nothing while
+      `:idle_cache_after_ms` is `nil`; `false` shrinks the cache but keeps the
+      garbage. With a budget, every awake cell reports what its connection
+      holds (page cache, schema and prepared statements) after each call and
+      message; a call that would wake a cell while the total is at or over
+      `:max_bytes` hibernates the least recently used cells that have no
+      caller waiting until it is under, and gives `{:error, :overloaded}` if
+      none is left to hibernate. The cell that wakes may take the total past
+      the budget as its cache fills; the next wake makes room.
     * `:relocate` - `:fence_attempts` (default 5), `:timeout_ms` (default
       60 000; the `:timeout` of `relocate/4` overrides it) and `:poll_ms` (wait
       between tries for a hibernating owner, default 100).
