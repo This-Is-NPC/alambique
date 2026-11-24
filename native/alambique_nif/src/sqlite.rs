@@ -33,7 +33,7 @@ mod atoms {
         ok, error, blob, nil, undefined, idle, transaction,
         connection_closed, argument_error, busy, disk_full,
         statement_timeout, result_too_large, not_authorized, multiple_statements, transaction_ended, cache_used,
-        schema_used, stmt_used, lookaside_used, nul_in_statement, not_ddl,
+        schema_used, stmt_used, lookaside_used, nul_in_statement, not_ddl, query_only,
     }
 }
 
@@ -70,6 +70,9 @@ pub(crate) struct Control {
     expect_txn: AtomicU64,
     /// Set while `sqlite_finish_transaction` runs its `COMMIT` or `ROLLBACK`.
     finishing: AtomicBool,
+    /// Test builds: the next `PRAGMA query_only = ON` after a commit fails.
+    #[cfg(feature = "test-panic")]
+    fail_query_only: AtomicBool,
     /// Frames in the WAL after the latest commit on the connection (the WAL
     /// hook), and the value when the transaction of the library began.
     wal_frames: AtomicU64,
@@ -91,6 +94,8 @@ impl Control {
             no_txn_control: AtomicBool::new(false),
             expect_txn: AtomicU64::new(0),
             finishing: AtomicBool::new(false),
+            #[cfg(feature = "test-panic")]
+            fail_query_only: AtomicBool::new(false),
             wal_frames: AtomicU64::new(0),
             txn_frames: AtomicU64::new(0),
             deadline: AtomicU64::new(0),
@@ -105,6 +110,14 @@ impl Control {
 pub struct Conn {
     db: RwLock<Option<DbPtr>>,
     control: Box<Control>,
+}
+
+impl Conn {
+    /// Makes the pragma after the next commit fail (`test-panic` builds).
+    #[cfg(feature = "test-panic")]
+    pub(crate) fn fail_next_query_only(&self) {
+        self.control.fail_query_only.store(true, Relaxed);
+    }
 }
 
 #[rustler::resource_impl]
@@ -149,11 +162,17 @@ enum Failure {
     TransactionEnded,
     Busy,
     DiskFull,
+    /// The `COMMIT` ran and the `PRAGMA query_only = ON` after it failed.
+    QueryOnly(Box<Failure>),
 }
 
 impl Failure {
     fn term<'a>(self, env: Env<'a>) -> Term<'a> {
-        let reason = match self {
+        (atoms::error(), self.reason(env)).encode(env)
+    }
+
+    fn reason<'a>(self, env: Env<'a>) -> Term<'a> {
+        match self {
             Failure::Closed => atoms::connection_closed().encode(env),
             Failure::Message(m) => m.encode(env),
             Failure::Argument(m) => (atoms::argument_error(), m).encode(env),
@@ -166,8 +185,8 @@ impl Failure {
             Failure::NulInStatement => atoms::nul_in_statement().encode(env),
             Failure::Busy => atoms::busy().encode(env),
             Failure::DiskFull => atoms::disk_full().encode(env),
-        };
-        (atoms::error(), reason).encode(env)
+            Failure::QueryOnly(inner) => (atoms::query_only(), inner.reason(env)).encode(env),
+        }
     }
 }
 
@@ -1094,7 +1113,9 @@ fn new_token() -> u64 {
 /// armed until the statement succeeded, so a failed one can be followed by a
 /// rollback. A `COMMIT` that finds the transaction gone gives
 /// `{:error, :transaction_ended}`; a `ROLLBACK` of one that is gone disarms
-/// and gives `:ok`.
+/// and gives `:ok`. A `COMMIT` is followed, in the same call, by `PRAGMA
+/// query_only = ON`; when that fails the write is committed, the connection
+/// is disarmed and the reply is `{:error, {:query_only, reason}}`.
 #[rustler::nif(schedule = "DirtyIo")]
 fn sqlite_finish_transaction<'a>(
     env: Env<'a>,
@@ -1123,10 +1144,22 @@ fn sqlite_finish_transaction<'a>(
                 result?;
             }
             ctl.expect_txn.store(0, Relaxed);
+            if commit {
+                let _call = Call::new(ctl, db, &Limits::default());
+                query_only(db, ctl).map_err(|f| Failure::QueryOnly(Box::new(f)))?;
+            }
             Ok(atoms::ok().encode(env))
         })
     };
     reply(env, run())
+}
+
+fn query_only(db: *mut ffi::sqlite3, ctl: &Control) -> Result<(), Failure> {
+    #[cfg(feature = "test-panic")]
+    if ctl.fail_query_only.swap(false, Relaxed) {
+        return Err(Failure::Message("injected".into()));
+    }
+    exec(db, ctl, c"PRAGMA query_only = ON")
 }
 
 /// Whether a commit reached the WAL since the transaction of the library

@@ -456,8 +456,11 @@ is that frames committed and not yet replicated imply a write in flight
   every call on it, before the statement: once the transaction is gone the
   statement returns `{:error, :transaction_ended}` and does not run. It
   covers the library's own statements too, such as the `user_version` after a
-  migration step. The `COMMIT` runs alone and the `PRAGMA query_only = ON` is
-  a call of its own after it. When that pragma fails the write is committed
+  migration step. `finish_transaction/3` runs the `COMMIT` and then the
+  `PRAGMA query_only = ON` as two statements of one native call (a write
+  stays within six SQLite calls, §6), and tells the failures apart: a failed
+  `COMMIT` is a rollback, a failed pragma after it is `{:error, {:query_only,
+  reason}}`. When that pragma fails the write is committed
   and the connection is in an unknown mode, so the cell stops: the caller gets
   `{:error, {:query_only, reason}}` and, with `sql: [orphan_frames: :stop]`,
   the store and the next wake do not have the row; with `:replicate` the

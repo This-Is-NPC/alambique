@@ -55,6 +55,14 @@ fn panic_drops() -> u64 {
     DROPS.load(Ordering::SeqCst)
 }
 
+/// Makes the `PRAGMA query_only = ON` that follows the next commit of
+/// `sqlite_finish_transaction` on `conn` fail.
+#[rustler::nif]
+fn fail_next_query_only(conn: ResourceArc<sqlite::Conn>) -> Atom {
+    conn.fail_next_query_only();
+    rustler::types::atom::ok()
+}
+
 /// Opens a database through the Alambique VFS, with the authorizer of the
 /// real connections, and runs statements while a panic is armed at `site`.
 /// Returns the result codes of the open and of the statements.

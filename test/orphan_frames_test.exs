@@ -12,7 +12,7 @@ defmodule Alambique.OrphanFramesTest do
 
   alias Alambique.{Cell, Config, Feed, Tx}
   alias Alambique.Cell.Db
-  alias Alambique.Replication.Replicator
+  alias Alambique.Replication.{Native, Replicator}
 
   @moduletag capture_log: true
 
@@ -130,7 +130,7 @@ defmodule Alambique.OrphanFramesTest do
 
       test "the pragma after a commit fails: the cell stops and every answer agrees", %{c: c} do
         Alambique.Fault.install(fn
-          :db_after_commit, _ -> {:error, :injected}
+          :db_before_commit, %{conn: conn} -> Native.fail_next_query_only(conn)
           _, _ -> :ok
         end)
 
@@ -148,11 +148,11 @@ defmodule Alambique.OrphanFramesTest do
         # What the caller was told is what the store holds and the next wake serves.
         case unquote(mode) do
           :stop ->
-            assert result == {:error, {:query_only, :injected}}
+            assert result == {:error, {:query_only, "injected"}}
             assert store(c) == [0, 1]
 
           :replicate ->
-            assert result == {:error, {:committed, {:query_only, :injected}}}
+            assert result == {:error, {:committed, {:query_only, "injected"}}}
             assert store(c) == [0, 1, 7]
             assert feed_keys(c, 7) |> Enum.count(&(&1 == 7)) == 1
         end
