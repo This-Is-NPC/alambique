@@ -3,12 +3,17 @@ defmodule Alambique.ReadOnlyPropertiesTest do
   The read path never writes (design §5): whatever the spelling of a
   statement that would write, `Alambique.query/4` refuses it with
   `{:error, :read_only}` and the cell, its session settings and the files
-  around it stay as they were. Reads in the same spellings succeed.
+  around it stay as they were. Reads in the same spellings succeed. A call
+  that may only read allows the pragmas that read or describe the schema and
+  refuses the others, also on a connection that may write.
   """
   use ExUnit.Case, async: false
   use ExUnitProperties
 
   import Alambique.CellHelpers
+
+  alias Alambique.Cell.Db
+  alias Alambique.Sqlite
 
   @moduletag capture_log: true
 
@@ -91,6 +96,53 @@ defmodule Alambique.ReadOnlyPropertiesTest do
       )
     )
   end
+
+  # Pragmas in a read-only call on a connection that may write, by what the
+  # authorizer does with them: the ones that read or describe the schema are
+  # allowed; a value to set, an argument that is not introspection, a
+  # checkpoint, or leaving WAL mode is refused.
+  @allowed_pragmas [
+    "pragma database_list",
+    "pragma compile_options",
+    "pragma user_version",
+    "pragma cache_size",
+    "pragma foreign_keys",
+    "pragma synchronous",
+    "pragma journal_mode",
+    "pragma wal_autocheckpoint",
+    "pragma page_size",
+    "pragma schema_version",
+    "pragma query_only",
+    "pragma recursive_triggers",
+    "pragma encoding",
+    "pragma busy_timeout",
+    "pragma table_info(t)",
+    "pragma table_xinfo(t)",
+    "pragma index_list(t)",
+    "pragma index_info(i)",
+    "pragma foreign_key_list(t)"
+  ]
+
+  @refused_pragmas [
+    "pragma cache_size = -100",
+    "pragma cache_size(-100)",
+    "pragma foreign_keys = 0",
+    "pragma user_version = 3",
+    "pragma user_version(3)",
+    "pragma synchronous = off",
+    "pragma recursive_triggers = 0",
+    "pragma busy_timeout = 10",
+    "pragma temp_store = 2",
+    "pragma query_only = off",
+    "pragma journal_mode = wal",
+    "pragma journal_mode = delete",
+    "pragma journal_mode(wal)",
+    "pragma wal_autocheckpoint = 100",
+    "pragma wal_autocheckpoint(10)",
+    "pragma wal_checkpoint",
+    "pragma wal_checkpoint(truncate)",
+    "pragma wal_checkpoint(passive)"
+  ]
 
   defp mixed_case(word) do
     bind(list_of(boolean(), length: String.length(word)), fn flags ->
@@ -208,5 +260,40 @@ defmodule Alambique.ReadOnlyPropertiesTest do
     end
 
     assert {:ok, %{rows: [[1]]}} = Alambique.query(inst, cell, "SELECT count(*) FROM t")
+  end
+
+  property "a pragma of a call that may only read is allowed or refused as the table says", ctx do
+    schema = "CREATE TABLE t (n INTEGER PRIMARY KEY, v TEXT); CREATE INDEX i ON t (v)"
+    {:ok, plain} = Sqlite.open(Path.join(ctx.dir, "plain.db"))
+    :ok = Sqlite.execute(plain, schema)
+    {:ok, gated} = Db.open(Path.join(ctx.dir, "gated.db"))
+    :ok = Db.writable_script(gated, schema)
+
+    pragmas =
+      Enum.map(@allowed_pragmas, &{:allowed, &1}) ++ Enum.map(@refused_pragmas, &{:refused, &1})
+
+    try do
+      check all(
+              {class, pragma} <- member_of(pragmas),
+              # A plain connection writes; a gated one does in a flagged call.
+              kind <- member_of([:plain, :flagged]),
+              sql <- wrapped(spell([pragma]), false),
+              max_runs: 300
+            ) do
+        result =
+          case kind do
+            :plain -> Db.read(plain, sql, [])
+            :flagged -> Db.read(gated, sql, [], write: true)
+          end
+
+        refused? = result == {:error, :read_only}
+
+        assert refused? == (class == :refused),
+               "#{kind} #{class} #{sql} gave #{inspect(result)}"
+      end
+    after
+      Sqlite.close(plain)
+      Db.close(gated)
+    end
   end
 end
