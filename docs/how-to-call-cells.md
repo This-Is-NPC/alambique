@@ -75,8 +75,8 @@ not raise it.
 
 ### Statement rules and write errors
 
-This is the complete list of what changed for callers in transaction control
-since v0.16.1. The reasons are in [design.md](design.md), section 15.
+These rules hold for the statements a function runs and for the answers a
+write can give. The reasons are in [design.md](design.md), section 15.
 
 **Statements.** Each text given to `Alambique.execute/5`, `Alambique.query/5`
 and the `Alambique.Tx` functions is one statement.
@@ -88,8 +88,7 @@ and the `Alambique.Tx` functions is one statement.
   open. `SAVEPOINT`, `RELEASE` and `ROLLBACK TO` work; `Tx.rollback/2` aborts.
 - Text after the first statement that holds another statement gives
   `{:error, {:multiple_statements, tail}}` (the start of the tail) and nothing
-  runs. Spaces, comments and `;` may follow. Before, the rest was dropped
-  without a word.
+  runs. Spaces, comments and `;` may follow.
 - Text with a NUL byte gives `{:error, :nul_in_statement}` and nothing runs.
 - `Tx.script/2` runs the statements as SQLite delimits them. A statement that
   does not start with `CREATE`, `DROP` or `ALTER` (after blanks, comments and a
@@ -98,8 +97,8 @@ and the `Alambique.Tx` functions is one statement.
   them with a savepoint, while `Alambique.Sqlite.script/2` on a connection of
   your own does not. `Alambique.Sqlite.ddl?/1` is the one check of what counts
   as schema, also for `Tx.execute/3`.
-- The rows of `CREATE TABLE ... AS SELECT` are not captured by the change feed
-  (see [how-to-consume-the-change-feed.md](how-to-consume-the-change-feed.md)).
+- The rows of `CREATE TABLE ... AS SELECT` are not in the change feed; see
+  [known-limitations.md](known-limitations.md).
 
 **Answers of a write.**
 
@@ -129,12 +128,11 @@ and the `Alambique.Tx` functions is one statement.
   The same two results stop the cell in a feed cleanup and in a migration of a
   serving cell, whose caller gets `{:error, {:migrate_failed, {:migration,
   version, reason}}}`.
-- `{:error, {:stamp_failed, reason}}` is the reason of a cell that stopped
-  because the feed rows of a batch could not be stamped.
-  The call that woke the cell gets it when the stamp of the wake's own
-  migration failed: the cell does not serve and its lease is released. A
-  migration of a serving cell gets `{:error, {:migrate_failed,
-  {:stamp_failed, reason}}}` and the cell stops.
+- `{:error, {:stamp_failed, reason}}`: the feed rows of a batch could not be
+  stamped, and the cell stops. The call that woke the cell gets it when the
+  stamp of the wake's own migration failed: the cell does not serve and its
+  lease is released. A migration of a serving cell gets `{:error,
+  {:migrate_failed, {:stamp_failed, reason}}}`.
 
 **Checkpoint.** `Alambique.checkpoint/3` answers `{:error, :busy}` when the
 uploads were not acknowledged within its `:deadline_ms`, also when the
@@ -142,18 +140,18 @@ batch of `orphan_frames: :replicate` is among them.
 `Alambique.Sqlite.checkpoint/1` gives `{:error, :not_authorized}` while the
 transaction of the library is open on that connection.
 
-**Option.** `sql: [orphan_frames: :stop | :replicate]`, default `:stop`: what
-the cell does with committed frames no write accounts for. `:stop` stops the
-cell; `:replicate` uploads them as a batch of their own, with their feed rows
+**`sql: [orphan_frames: :stop | :replicate]`** (default `:stop`) says what the
+cell does with committed frames no write accounts for. `:stop` stops the cell;
+`:replicate` uploads them as a batch of their own, with their feed rows
 stamped, and goes on. A cell checks for them at every cut, before a
 hibernation and before every feed cleanup.
 
-**Library functions.** `Alambique.Sqlite.begin_transaction/1` opens the
-transaction and arms the connection; `Alambique.Sqlite.finish_transaction/3`
-ends it with the token that call returned. They replace any way of toggling
-transaction control on a connection, and the transaction function has no
-token. `Alambique.Sqlite.wal_advanced?/1` says whether a commit reached the
-WAL since the begin.
+**`Alambique.Sqlite.begin_transaction/1` and `finish_transaction/3`.** The
+first opens the transaction and arms the connection; the second ends it with
+the token the first returned. They are the only way to begin and end a
+transaction on a connection, and the transaction function has no token.
+`Alambique.Sqlite.wal_advanced?/1` says whether a commit reached the WAL since
+the begin.
 
 ## 3. Find and list cells
 
