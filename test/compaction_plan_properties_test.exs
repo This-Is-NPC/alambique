@@ -2,7 +2,8 @@ defmodule Alambique.CompactionPlanPropertiesTest do
   @moduledoc """
   Planning is stable (design §9): once a pass merged what the chain allows and
   marked the superseded files, the next pass plans nothing, however long the
-  chain, so a deleted file is never written again.
+  chain, so a deleted file is never written again. A pass merges every
+  complete block of the chain, and only those.
   """
   use ExUnit.Case, async: true
   use ExUnitProperties
@@ -28,6 +29,25 @@ defmodule Alambique.CompactionPlanPropertiesTest do
     segments -- dead
   end
 
+  defp keys(segments), do: MapSet.new(segments, &{&1.level, &1.min, &1.max})
+
+  # The files that remain after the passes over TXIDs `1..txids`: every
+  # single TXID, and from each level up the complete blocks that no complete
+  # block above has taken over.
+  defp remaining(txids, fanout, max_level) do
+    singles = for t <- 1..txids, do: {0, t, t}
+
+    blocks =
+      for level <- 1..max_level//1,
+          span = Integer.pow(fanout, level),
+          j <- 0..(div(txids, span) - 1)//1,
+          level == max_level or div(j, fanout) >= div(txids, span * fanout) do
+        {level, j * span + 1, (j + 1) * span}
+      end
+
+    MapSet.new(singles ++ blocks)
+  end
+
   property "a pass after a pass plans nothing" do
     check all(
             fanout <- member_of([2, 3, 4]),
@@ -37,6 +57,8 @@ defmodule Alambique.CompactionPlanPropertiesTest do
           ) do
       start = for t <- 1..txids, do: seg(0, t, t)
       done = Enum.reduce(1..passes, start, fn _, acc -> pass(acc, fanout, max_level) end)
+
+      assert keys(done) == remaining(txids, fanout, max_level)
 
       index = Plan.index(done)
       head = index |> Plan.chain(0) |> Plan.head(0)
