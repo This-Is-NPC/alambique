@@ -11,21 +11,27 @@ defmodule Alambique.FailoverPropertiesTest do
       acknowledged, and no write appears twice;
     * acknowledged batches never overlap in epochs: a higher epoch never
       acknowledges before a lower one, and no epoch acknowledges from two nodes;
-    * every cell is served again within a bound set by the lease expiry.
+    * every cell is served again within a bound set by the lease expiry;
+    * no write is acknowledged before its segment is in the store, also with
+      the puts of a cell held while writes arrive (an acknowledgement is
+      checked at the instant it is given), and a segment of a newer epoch that
+      is already at the next TXID stops the write instead of being overwritten.
   """
   use ExUnit.Case, async: false
   use ExUnitProperties
 
   import Alambique.CellHelpers, only: [eventually: 2]
 
-  alias Alambique.ClusterFuns
-  alias AlambiqueTestkit.Cluster
+  alias Alambique.{AckGuard, ClusterFuns, HeldWrites, Placement}
+  alias Alambique.Replication.Keys
+  alias AlambiqueTestkit.{Cluster, GatedStore}
 
   @moduletag :cluster
   @moduletag timeout: 900_000
 
   @names [:n1, :n2, :n3]
   @cells ["c0", "c1", "c2"]
+  @prefix "cluster"
   @ttl_ms 2_000
   @skew_ms 400
   @call_timeout_ms 3_000
@@ -46,6 +52,7 @@ defmodule Alambique.FailoverPropertiesTest do
       {2, tuple({constant(:hibernate), node, cell})},
       {2, tuple({constant(:move), node, cell, node})},
       {2, tuple({constant(:write_kill), node, cell})},
+      {3, tuple({constant(:held), node, cell, integer(2..3)})},
       {3, tuple({constant(:kill), node})},
       {3, tuple({constant(:restart), node})},
       {2,
@@ -68,19 +75,56 @@ defmodule Alambique.FailoverPropertiesTest do
             max_runs: 20,
             max_shrinking_steps: 0
           ) do
+      {:ok, gate} = GatedStore.start_link()
+
       {:ok, cluster} =
         Cluster.start_link(
-          names: @names,
-          ttl_ms: @ttl_ms,
-          skew_margin_ms: @skew_ms,
-          op_timeout_ms: 1_500,
-          migrations: ClusterFuns.schema()
+          cluster_opts(@names) ++
+            [
+              placement: fn shared ->
+                {Placement.Single, [store: GatedStore.wrap(gate, shared), prefix: @prefix]}
+              end
+            ]
         )
 
+      guard = AckGuard.attach_peers(%{"default" => {Cluster.store(cluster), @prefix}})
+
       try do
-        run = Enum.reduce(ops, new_run(), &step(cluster, &1, &2))
+        for name <- @names, do: watch(cluster, name, guard)
+        run = Enum.reduce(ops, new_run(gate, guard), &step(cluster, &1, &2))
         settle(cluster, run)
+
+        assert AckGuard.violations(guard) == [],
+               "acknowledged before the put landed: #{inspect(AckGuard.violations(guard))}"
+
+        if Enum.any?(Map.values(run.acked), &(&1 != [])),
+          do: assert(AckGuard.acks(guard) != [], "the guard saw no acknowledgement")
+
         verify(cluster, run)
+      after
+        Process.unlink(cluster)
+        Cluster.stop(cluster)
+        AckGuard.detach(guard)
+        GenServer.stop(gate)
+      end
+    end
+  end
+
+  # The segment a cell would put at the next TXID is already in the store with
+  # the epoch of the cell or a newer one: the put is refused, the write is not
+  # acknowledged and the object stays as it was (design §6).
+  property "a segment of the same or a newer epoch at the next TXID is not overwritten" do
+    check all(
+            cell <- member_of(@cells),
+            writes <- integer(1..3),
+            ahead <- integer(0..2),
+            max_runs: 5,
+            max_shrinking_steps: 0
+          ) do
+      {:ok, cluster} = Cluster.start_link(cluster_opts([:n1, :n2]))
+
+      try do
+        refuse_taken_txid(cluster, cell, writes, ahead)
       after
         Process.unlink(cluster)
         Cluster.stop(cluster)
@@ -88,23 +132,59 @@ defmodule Alambique.FailoverPropertiesTest do
     end
   end
 
+  defp cluster_opts(names) do
+    [
+      names: names,
+      ttl_ms: @ttl_ms,
+      skew_margin_ms: @skew_ms,
+      op_timeout_ms: 1_500,
+      migrations: ClusterFuns.schema()
+    ]
+  end
+
+  # Peers report their acknowledgements to the guard; a restarted peer needs it again.
+  defp watch(cluster, name, guard),
+    do: Cluster.call(cluster, name, AckGuard, :watch, [guard])
+
   # Scenario
 
-  defp new_run, do: %{seq: 0, acked: %{}, attempted: %{}, dead: MapSet.new()}
+  defp new_run(gate, guard),
+    do: %{seq: 0, acked: %{}, attempted: %{}, dead: MapSet.new(), gate: gate, guard: guard}
 
-  defp step(cluster, {:write, node, cell}, run) do
-    n = run.seq + 1
+  defp execute(cluster, node, cell, n, timeout \\ @call_timeout_ms) do
     inst = Cluster.instance(cluster)
-    args = [inst, cell, "INSERT INTO log (n) VALUES (?)", [n], [timeout: @call_timeout_ms]]
+    args = [inst, cell, "INSERT INTO log (n) VALUES (?)", [n], [timeout: timeout]]
+    Cluster.call(cluster, node, Alambique, :execute, args, timeout + 2_000)
+  end
 
-    acked? =
-      match?(
-        {:ok, {:ok, _}},
-        Cluster.call(cluster, node, Alambique, :execute, args, @call_timeout_ms + 2_000)
-      )
-
+  # Records the write `n` and whether `answer` acknowledged it.
+  defp account(run, cell, n, answer) do
     run = %{run | seq: n, attempted: Map.update(run.attempted, cell, [n], &(&1 ++ [n]))}
-    if acked?, do: %{run | acked: Map.update(run.acked, cell, [n], &(&1 ++ [n]))}, else: run
+
+    if match?({:ok, {:ok, _}}, answer),
+      do: %{run | acked: Map.update(run.acked, cell, [n], &(&1 ++ [n]))},
+      else: run
+  end
+
+  defp step(cluster, {:write, node, cell}, run),
+    do: account(run, cell, run.seq + 1, execute(cluster, node, cell, run.seq + 1))
+
+  # Writes whose puts are held while the cell is served by whoever owns it now
+  # (after takeovers and moves of earlier steps): none is answered before its
+  # put, and the put of every batch before it, landed.
+  defp step(cluster, {:held, node, cell, count}, run) do
+    run = step(cluster, {:write, node, cell}, run)
+    ns = Enum.to_list((run.seq + 1)..(run.seq + count))
+
+    write = &execute(cluster, node, cell, &1)
+
+    case HeldWrites.run_on(cluster, run.gate, node, cell, run.dead, ns, write) do
+      :none ->
+        run
+
+      answers ->
+        Enum.reduce(answers, run, fn {n, answer}, run -> account(run, cell, n, answer) end)
+    end
   end
 
   # A write whose acknowledgement is followed at once by the death of the
@@ -144,8 +224,7 @@ defmodule Alambique.FailoverPropertiesTest do
   end
 
   defp step(cluster, {:restart, node}, run) do
-    if node in run.dead, do: Cluster.restart(cluster, node)
-    %{run | dead: MapSet.delete(run.dead, node)}
+    restart(cluster, node, run)
   end
 
   defp step(cluster, {:store_fault, node, kind, times}, run) do
@@ -187,12 +266,60 @@ defmodule Alambique.FailoverPropertiesTest do
 
   defp both_alive?(run, a, b), do: a not in run.dead and b not in run.dead
 
+  defp restart(cluster, node, run) do
+    if node in run.dead do
+      Cluster.restart(cluster, node)
+      watch(cluster, node, run.guard)
+    end
+
+    %{run | dead: MapSet.delete(run.dead, node)}
+  end
+
   defp settle(cluster, run) do
     Cluster.heal_all(cluster)
-    for node <- run.dead, do: Cluster.restart(cluster, node)
+    for node <- run.dead, do: restart(cluster, node, run)
   end
 
   # Checks
+
+  # `writes` acknowledged writes, then the object of the next TXID put by
+  # another writer, `ahead` epochs ahead of the cell's last one.
+  defp refuse_taken_txid(cluster, cell, writes, ahead) do
+    inst = Cluster.instance(cluster)
+    {module, config} = Cluster.store(cluster)
+
+    for n <- 1..writes,
+        do: assert({:ok, {:ok, _}} = execute(cluster, :n1, cell, n, 10_000))
+
+    {:ok, keys, _} = module.list(config, Keys.level_prefix(@prefix, cell, 0), nil, 1_000)
+    head = Enum.max(keys)
+    txid = head |> Path.basename() |> String.split("-") |> hd() |> String.to_integer(16)
+    {:ok, body, _etag, meta} = module.get(config, head)
+    other = Map.put(meta, "epoch", Integer.to_string(String.to_integer(meta["epoch"]) + ahead))
+    next = Keys.segment(@prefix, cell, 0, txid + 1, txid + 1)
+    assert {:ok, _} = module.put(config, next, body, :if_none_match, other)
+
+    answer = execute(cluster, :n2, cell, writes + 1)
+
+    refute match?({:ok, {:ok, _}}, answer),
+           "a write was acknowledged over an object of epoch +#{ahead}: #{inspect(answer)}"
+
+    assert {:ok, kept, _etag, kept_meta} = module.get(config, next)
+    assert {kept, kept_meta} == {body, other}, "the object of the other writer was overwritten"
+
+    # The cell serves again once the object is gone; nothing but what it
+    # acknowledged, and at most the refused write, is in it.
+    :ok = module.delete(config, next)
+
+    rows =
+      eventually(
+        fn -> Enum.find_value([:n1, :n2], &try_read(cluster, &1, inst, cell)) end,
+        @available_within_ms
+      )
+
+    assert Enum.take(rows, writes) == Enum.to_list(1..writes)
+    assert rows -- Enum.to_list(1..(writes + 1)) == []
+  end
 
   defp verify(cluster, run) do
     inst = Cluster.instance(cluster)
