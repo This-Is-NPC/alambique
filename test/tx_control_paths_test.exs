@@ -1,12 +1,11 @@
-defmodule Alambique.TxControlSecondReviewTest do
+defmodule Alambique.TxControlPathsTest do
   @moduledoc """
-  Gaps around a write of design §15 that the first reproductions did not
-  reach: a transaction that never began, the paths of the cell that run
-  transactions without a user write, a schema statement that starts with a
-  byte order mark, a feed cleanup that runs behind a batch in flight, the end
-  of the protection once the connection is disarmed, and what a stopped cell
-  leaves behind. A test that asserts the behaviour a defect denies is skipped
-  while the defect is open; the others pass.
+  Paths around a write (design §15): a transaction that never began, the
+  paths of the cell that run transactions without a user write, a schema
+  statement that starts with a byte order mark, a feed cleanup that runs
+  behind a batch in flight, the connection once it is disarmed, and what a
+  stopped cell leaves behind. The two tests tagged `:skip` assert behaviour
+  that is not enforced yet.
   """
   use ExUnit.Case, async: false
 
@@ -676,7 +675,8 @@ defmodule Alambique.TxControlSecondReviewTest do
       Sqlite.checkpoint(conn(c))
     end
 
-    # Skipped: the connection of a finished write still writes outside the library.
+    # Skipped: not enforced yet. The connection of a finished write can still
+    # write outside the library.
     @tag :skip
     test "the handle of a write that returned cannot write later", env do
       c = boot(env, :stop)
@@ -684,7 +684,8 @@ defmodule Alambique.TxControlSecondReviewTest do
       assert rows(c) == [0, 1]
     end
 
-    # Skipped: a checkpoint has no state check and moves uncaptured frames into the file.
+    # Skipped: not enforced yet. A checkpoint has no state check and moves
+    # uncaptured frames into the file.
     @tag :skip
     test "a checkpoint outside a write never leaves a row that the store lacks, answered as a cut",
          env do
