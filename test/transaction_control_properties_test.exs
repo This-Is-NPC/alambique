@@ -1,8 +1,12 @@
 defmodule Alambique.TransactionControlPropertiesTest do
   @moduledoc """
   Whatever a transaction function runs (transaction control in odd spellings,
-  several statements in one text, scripts that try to smuggle a COMMIT, a
-  conflict that rolls back), with the store holding the uploads:
+  several statements in one text, scripts that try to smuggle a COMMIT or an
+  INSERT behind a variable token or a BOM, a NUL byte, `end` as an
+  identifier, statements run directly on the connection of the handle, a
+  transaction ended behind the library's back, a conflict that rolls back),
+  with the store holding the uploads, a write of another caller in flight when
+  the function runs, and idle feed cleanups between the steps:
 
     * I1: committed frames no batch carries imply a write in flight;
     * I2: a read never returns a row the store does not hold, and the row is
@@ -16,7 +20,7 @@ defmodule Alambique.TransactionControlPropertiesTest do
 
   import Alambique.CellHelpers
 
-  alias Alambique.{Cell, Config, Feed, Tx}
+  alias Alambique.{Cell, Config, Feed, Sqlite, Tx}
   alias Alambique.Replication.Replicator
   alias AlambiqueTestkit.GatedStore
 
@@ -42,6 +46,10 @@ defmodule Alambique.TransactionControlPropertiesTest do
     "RELEASE SAVEPOINT s"
   ]
   @idents ["a$case", "écase", "x$end", "b_begin", "ünicode$end", "plain"]
+  @bom <<0xEF, 0xBB, 0xBF>>
+  # A variable token that the splitter of a migration reads as a quote or a
+  # comment, with what closes it for SQLite.
+  @variables [{"$a(')", "--'"}, {":a(--)", ""}, {"@a(/*)", "/* x */"}, {"$a::b(')", "--'"}]
 
   defp control do
     gen all(
@@ -67,7 +75,14 @@ defmodule Alambique.TransactionControlPropertiesTest do
       constant(:insert),
       constant(:conflict),
       map(control(), &{:multi, &1}),
-      map({member_of(@idents), control()}, &{:smuggle, &1})
+      map({member_of(@idents), control()}, &{:smuggle, &1}),
+      map({member_of(@variables), member_of(["", "COMMIT; "])}, &{:variable, &1}),
+      map(member_of(["COMMIT", "INSERT INTO t VALUES (7000)"]), &{:bom, &1}),
+      map(member_of(["", "; DELETE FROM t", "; COMMIT"]), &{:nul, &1}),
+      constant(:end_column),
+      constant(:trailing_bom),
+      map(control(), &{:direct, &1}),
+      constant(:lifted)
     ])
   end
 
@@ -89,6 +104,47 @@ defmodule Alambique.TransactionControlPropertiesTest do
   defp run(tx, {:multi, text}, n),
     do: Tx.execute(tx, "INSERT INTO t VALUES (#{n}); #{text}; INSERT INTO t VALUES (#{n + 1000})")
 
+  # The splitter of a migration reads the variable's text as a quote or a
+  # comment; SQLite does not.
+  defp run(tx, {:variable, {{token, closer}, control}}, n) do
+    Tx.script(
+      tx,
+      "CREATE TABLE s#{n} AS SELECT #{token} AS x; #{control}" <>
+        "INSERT INTO t VALUES (#{n + 4000});\n#{closer}"
+    )
+  end
+
+  defp run(tx, {:bom, text}, n) do
+    Tx.script(
+      tx,
+      "CREATE TABLE b#{n} (x); " <>
+        "CREATE TRIGGER bt#{n} AFTER INSERT ON b#{n} BEGIN SELECT 1;#{@bom}END; " <>
+        "#{text}; INSERT INTO t VALUES (#{n + 3000})"
+    )
+  end
+
+  defp run(tx, {:nul, rest}, n), do: Tx.execute(tx, "INSERT INTO t VALUES (#{n})\0#{rest}")
+  defp run(tx, :trailing_bom, n), do: Tx.script(tx, "CREATE TABLE e#{n} (x);#{@bom}")
+
+  defp run(tx, :end_column, n) do
+    Tx.script(
+      tx,
+      "CREATE TABLE c#{n} (end, x); " <>
+        "CREATE TRIGGER ct#{n} AFTER INSERT ON c#{n} BEGIN UPDATE c#{n} SET x = new.end; SELECT 1; END"
+    )
+  end
+
+  # A statement run on the connection of the handle, not through it.
+  defp run(tx, {:direct, text}, _n), do: Sqlite.execute(tx.conn, text)
+
+  # The transaction ends behind the library's back, as a defect of the library
+  # would: the connection refuses it until the flag of the library is lifted.
+  defp run(tx, :lifted, n) do
+    _ = Tx.execute(tx, "INSERT INTO t VALUES (#{n})")
+    :ok = Sqlite.expect_transaction(tx.conn, false)
+    Sqlite.execute(tx.conn, "COMMIT")
+  end
+
   defp run(tx, {:smuggle, {ident, text}}, n) do
     Tx.script(
       tx,
@@ -106,7 +162,11 @@ defmodule Alambique.TransactionControlPropertiesTest do
     store = GatedStore.wrap(gate, env.store)
 
     inst =
-      start_instance(%{env | store: store}, migrations: @schema, compaction: false)
+      start_instance(%{env | store: store},
+        migrations: @schema,
+        compaction: false,
+        feed: [cleanup: :idle, cleanup_after_ms: 50]
+      )
 
     %{env: env, gate: gate, inst: inst, raw: env.store}
   end
@@ -142,6 +202,19 @@ defmodule Alambique.TransactionControlPropertiesTest do
     :exit, _ -> false
   end
 
+  defp cleaned?(ctx, cell) do
+    case pid(ctx, cell) do
+      pid when is_pid(pid) ->
+        s = :sys.get_state(pid, 2_000)
+        s.feed_cleaned == s.feed_published
+
+      _ ->
+        true
+    end
+  catch
+    :exit, _ -> true
+  end
+
   defp wipe(ctx, cell) do
     path = Alambique.Cell.Local.db_path(Config.fetch!(ctx.inst), cell)
     File.rm_rf!(Path.dirname(path))
@@ -163,6 +236,8 @@ defmodule Alambique.TransactionControlPropertiesTest do
     check all(
             ops <- list_of(op(), min_length: 1, max_length: 8),
             sleep? <- boolean(),
+            inflight? <- boolean(),
+            clean? <- boolean(),
             max_runs: 40
           ) do
       :counters.add(counter, 1, 1)
@@ -170,6 +245,16 @@ defmodule Alambique.TransactionControlPropertiesTest do
       GatedStore.open(ctx.gate)
       {:ok, _} = Alambique.execute(ctx.inst, cell, "INSERT INTO t VALUES (0)")
       GatedStore.hold(ctx.gate, Regex.compile!(Regex.escape(cell) <> "/0000/"))
+
+      # Another caller's write is in flight when the function runs.
+      inflight =
+        if inflight? do
+          other =
+            Task.async(fn -> Alambique.execute(ctx.inst, cell, "INSERT INTO t VALUES (900)") end)
+
+          eventually(fn -> :sys.get_state(pid(ctx, cell)).pipe.queue != [] end)
+          other
+        end
 
       task = Task.async(fn -> Alambique.transaction(ctx.inst, cell, function(ops)) end)
       _ = Task.yield(task, 300)
@@ -181,6 +266,14 @@ defmodule Alambique.TransactionControlPropertiesTest do
 
       if seen != :blocked,
         do: assert(seen -- held == [], "I2: #{inspect(ops)} saw #{inspect(seen)}")
+
+      # Idle cleanups run between the steps, and must not carry frames of a
+      # failed write or lose their feed rows.
+      if clean? do
+        GatedStore.open(ctx.gate)
+        _ = Task.yield(task, 3_000)
+        eventually(fn -> cleaned?(ctx, cell) end)
+      end
 
       after_wake =
         if sleep? do
@@ -203,6 +296,8 @@ defmodule Alambique.TransactionControlPropertiesTest do
       durable = stored(ctx, cell)
       assert after_wake == durable, "I3: #{inspect(ops)}"
       if seen != :blocked, do: assert(seen -- after_wake == [], "I2 later: #{inspect(ops)}")
+
+      if inflight, do: Task.shutdown(inflight, 2_000)
 
       # I4: every durable row is in the feed once.
       counts = feed_counts(ctx, cell, durable)
