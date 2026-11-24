@@ -93,7 +93,7 @@ pub(crate) struct Control {
     /// Test builds: a statement run on a separate connection of the same file
     /// just before `BEGIN IMMEDIATE` (a foreign commit at the worst moment).
     #[cfg(feature = "test-panic")]
-    before_begin: Mutex<Option<(String, String)>>,
+    after_check: Mutex<Option<(String, String)>>,
     /// `now_us()` after which the running statement is stopped; 0 for none.
     deadline: AtomicU64,
     /// The progress handler stopped a statement at the deadline.
@@ -130,7 +130,7 @@ impl Control {
             #[cfg(feature = "test-panic")]
             header_unreadable: AtomicBool::new(false),
             #[cfg(feature = "test-panic")]
-            before_begin: Mutex::new(None),
+            after_check: Mutex::new(None),
             deadline: AtomicU64::new(0),
             timed_out: AtomicBool::new(false),
             allow_attach,
@@ -1470,13 +1470,13 @@ fn sqlite_begin_transaction<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64)
             // WAL as it is now, not with the one of the previous transaction.
             ctl.txn_frames.store(ctl.wal_frames.load(Relaxed), Relaxed);
             exec(db, ctl, c"PRAGMA query_only = OFF")?;
-            #[cfg(feature = "test-panic")]
-            foreign_before_begin(ctl);
             exec(db, ctl, c"BEGIN IMMEDIATE")?;
             // The write lock is ours: no commit or restart can follow the
             // check before the write is done (design §15).
             if ctl.watched {
                 let verdict = ctl.check_wal(db);
+                #[cfg(feature = "test-panic")]
+                foreign_after_check(ctl);
                 if verdict != Verdict::Same {
                     exec(db, ctl, c"ROLLBACK")?;
                     return Err(Failure::ForeignWrite);
@@ -1714,11 +1714,12 @@ fn sqlite_foreign_write<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64, mod
 }
 
 /// Test builds: runs the statement of `set_foreign_commit` on a separate
-/// connection of the same file, as another process would.
+/// connection of the same file, as another process would, right after the
+/// begin compared the wal-index header.
 #[cfg(feature = "test-panic")]
-fn foreign_before_begin(ctl: &Control) {
+fn foreign_after_check(ctl: &Control) {
     let hook = ctl
-        .before_begin
+        .after_check
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .take();
@@ -1729,11 +1730,12 @@ fn foreign_before_begin(ctl: &Control) {
 
 #[cfg(feature = "test-panic")]
 impl Conn {
-    /// The next `begin` runs `sql` on a separate connection of `path` first.
+    /// The next `begin` runs `sql` on a separate connection of `path` right
+    /// after it compared the wal-index header.
     pub(crate) fn set_foreign_commit(&self, path: String, sql: String) {
         *self
             .control
-            .before_begin
+            .after_check
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some((path, sql));
     }

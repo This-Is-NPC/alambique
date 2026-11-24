@@ -148,24 +148,16 @@ defmodule Alambique.ForeignWriterTest do
     end
 
     for mode <- [:stop, :replicate] do
-      test "committed between the check and the begin: the write does not run (#{mode})", env do
+      test "a commit right after the check is refused by the write lock (#{mode})", env do
         c = boot(env, unquote(mode))
         :ok = Native.set_foreign_commit(conn_ref(c), path(c), "INSERT INTO t VALUES (60)")
 
-        result = Alambique.execute(c.inst, c.cell, "INSERT INTO t VALUES (7)")
+        assert {:ok, _} = Alambique.execute(c.inst, c.cell, "INSERT INTO t VALUES (7)")
 
-        case unquote(mode) do
-          :stop ->
-            assert result == {:error, :orphan_frames}
-            assert asleep?(c)
-            assert store(c) == [0, 1]
-            assert rows(c) == [0, 1]
-
-          :replicate ->
-            assert {:ok, _} = result
-            assert store(c) == [0, 1, 7, 60]
-            assert rows(c) == [0, 1, 7, 60]
-        end
+        assert rows(c) == [0, 1, 7]
+        assert store(c) == [0, 1, 7]
+        assert Enum.count(eventually(fn -> feed_now(c) end), &(&1 == 7)) == 1
+        refute 60 in feed_now(c)
       end
     end
   end
