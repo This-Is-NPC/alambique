@@ -199,8 +199,6 @@ defmodule Alambique.TxControlSecondReviewTest do
 
   describe "a write whose BEGIN fails" do
     for mode <- [:stop, :replicate] do
-      # Skipped: BEGIN fails after an earlier commit and the stale WAL snapshot is judged an orphan.
-      @tag :skip
       test "is a plain error and the cell keeps serving (#{mode})", env do
         c = boot(env, unquote(mode))
         cell_pid = pid(c)
@@ -221,6 +219,20 @@ defmodule Alambique.TxControlSecondReviewTest do
         assert store(c) == [0, 1, 8]
       end
     end
+  end
+
+  test "stamping the feed rows while another connection writes is an error, not a crash", env do
+    c = boot(env, :stop)
+    {:ok, mine} = Db.open(path(c))
+    {:ok, other} = Sqlite.open(path(c))
+    :ok = Sqlite.execute(other, "BEGIN IMMEDIATE")
+
+    result = Alambique.Feed.Capture.stamp(mine, 99, 0)
+
+    :ok = Sqlite.execute(other, "ROLLBACK")
+    Sqlite.close(other)
+    Sqlite.close(mine)
+    assert {:error, _} = result
   end
 
   # The cell must not go on serving with a connection that may write or a
