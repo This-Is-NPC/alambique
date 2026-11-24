@@ -17,15 +17,21 @@ defmodule Alambique.TakeoverPropertiesTest do
       below the head the new owner woke with, so the fence did not let it in;
     * a checked read never misses a write acknowledged before it was issued;
     * a plain read misses an acknowledged write only on a cell whose epoch
-      was already replaced, and only within the documented window.
+      was already replaced, and only within the documented window;
+    * a write is acknowledged only once its segment is in the store, also when
+      the later of two batches in flight lands first, and an owner that was
+      taken over does not answer a checked read once its batch landed;
+    * until a fault, a kill or a drain, the instance that owns a cell
+      acknowledges every write to it.
   """
   use ExUnit.Case, async: false
   use ExUnitProperties
 
   import Alambique.CellHelpers
 
-  alias Alambique.{Cell, Config, Membership}
-  alias AlambiqueTestkit.{CrashPoints, MemoryStore}
+  alias Alambique.{AckGuard, Cell, Config, HeldWrites, Membership}
+  alias Alambique.Replication.Keys
+  alias AlambiqueTestkit.{CrashPoints, GatedStore, MemoryStore}
 
   @moduletag timeout: 600_000
   @moduletag capture_log: true
@@ -77,6 +83,8 @@ defmodule Alambique.TakeoverPropertiesTest do
       # The wrong suspicion: a write, a takeover, a write by the new owner, and
       # reads on the old one.
       {6, tuple({constant(:handover), user, taker, cell, member_of(waits)})},
+      {3, tuple({constant(:held_pair), user, cell})},
+      {3, tuple({constant(:stale_checked), user, taker, cell})},
       {2, tuple({constant(:hibernate), user, cell})},
       {2, tuple({constant(:kill), user, cell})},
       {1, tuple({constant(:drain), user})},
@@ -124,11 +132,15 @@ defmodule Alambique.TakeoverPropertiesTest do
     handler = {__MODULE__, tag}
     :telemetry.attach_many(handler, @events, &__MODULE__.record/4, log)
 
+    {:ok, gate} = GatedStore.start_link()
+    guard = AckGuard.attach(ctx.store, prefix, &(&1 in @cells))
+    gated = %{ctx | store: GatedStore.wrap(gate, ctx.store)}
+
     insts =
       for who <- @who, into: %{} do
         name = :"#{who}#{tag}"
 
-        start_instance(ctx,
+        start_instance(gated,
           name: name,
           prefix: prefix,
           migrations: @schema,
@@ -151,6 +163,12 @@ defmodule Alambique.TakeoverPropertiesTest do
       acked: %{},
       attempted: %{},
       faulty?: false,
+      calm?: true,
+      disturbed: MapSet.new(),
+      owner: %{},
+      prefix: prefix,
+      gate: gate,
+      guard: guard,
       takeovers: []
     }
 
@@ -159,6 +177,8 @@ defmodule Alambique.TakeoverPropertiesTest do
       settle(ctx, run, prefix)
       verify_log(run)
     after
+      AckGuard.detach(guard)
+      GenServer.stop(gate)
       :telemetry.detach(handler)
       CrashPoints.reset()
       MemoryStore.clear(ctx.store_config)
@@ -219,15 +239,103 @@ defmodule Alambique.TakeoverPropertiesTest do
     n = run.seq + 1
     run = %{run | seq: n, attempted: Map.update(run.attempted, cell, [n], &[n | &1])}
 
-    case Alambique.execute(inst(run, who), cell, "INSERT INTO t (n) VALUES (?)", [n], call_opts()) do
-      {:ok, _} ->
-        ack = {n, now()}
-        %{run | acked: Map.update(run.acked, cell, [ack], &[ack | &1])}
+    answer =
+      Alambique.execute(inst(run, who), cell, "INSERT INTO t (n) VALUES (?)", [n], call_opts())
 
-      {:error, _} ->
+    account(run, who, cell, n, answer)
+  end
+
+  # Two writes of one owner whose puts are held, the later one landing first.
+  defp step({:held_pair, who, cell}, run) do
+    run = step({:write, who, cell}, run)
+    pid = Cell.whereis(Config.fetch!(inst(run, who)), cell)
+
+    if pid && run.owner[cell] == who do
+      ns = [run.seq + 1, run.seq + 2]
+
+      run = %{
         run
+        | seq: run.seq + 2,
+          attempted: Map.update(run.attempted, cell, Enum.reverse(ns), &(Enum.reverse(ns) ++ &1))
+      }
+
+      answers =
+        HeldWrites.run(run.gate, cell, pid, 8, ns, fn n ->
+          Alambique.execute(
+            inst(run, who),
+            cell,
+            "INSERT INTO t (n) VALUES (?)",
+            [n],
+            call_opts()
+          )
+        end)
+
+      Enum.reduce(answers, run, fn {n, answer}, run -> account(run, who, cell, n, answer) end)
+    else
+      run
     end
   end
+
+  # The owner has a write in flight, with a checked read waiting behind it,
+  # whose put landed but whose answer was lost. It is taken over while the cell
+  # puts the batch again, and the new owner writes. When the put is found, the
+  # write is acknowledged (it is below the head the new owner woke with), but
+  # the old cell does not answer the checked read: the lease it is checked
+  # against is lost. The caller gets no answer or, from the new owner, a state
+  # with the write of the new owner.
+  defp step({:stale_checked, who, taker, cell}, run) when who != taker do
+    run = step({:write, who, cell}, run)
+    pid = Cell.whereis(Config.fetch!(inst(run, who)), cell)
+
+    if (run.calm? and pid) && run.owner[cell] == who do
+      n = run.seq + 1
+      run = %{run | seq: n, attempted: Map.update(run.attempted, cell, [n], &[n | &1])}
+      head = :sys.get_state(pid).repl.txid
+      key = Keys.segment(run.prefix, cell, 0, head + 1, head + 1)
+      GatedStore.hold(run.gate, Regex.compile!("^" <> Regex.escape(key) <> "$"))
+      write = Task.async(fn -> execute(run, who, cell, n) end)
+      eventually(fn -> key in GatedStore.held(run.gate) end)
+      read = Task.async(fn -> checked_query(run, who, cell) end)
+      eventually(fn -> checked_waits?(pid) end)
+
+      # The put lands, the cell is told it failed and puts it again.
+      GatedStore.lose_ack(run.gate, key)
+      eventually(fn -> key in GatedStore.held(run.gate) end)
+      run = %{run | disturbed: MapSet.put(run.disturbed, cell)}
+      taken = Alambique.take_over(inst(run, taker), cell, {:suspect, who}, call_opts())
+      newest = n + 1
+
+      run = %{
+        run
+        | seq: newest,
+          attempted: Map.update(run.attempted, cell, [newest], &[newest | &1])
+      }
+
+      newest_answer = execute(run, taker, cell, newest)
+      GatedStore.release(run.gate, key)
+      GatedStore.open(run.gate)
+
+      answer = Task.await(write, 15_000)
+      checked = Task.await(read, 15_000)
+
+      with {:ok, _} <- taken,
+           {:ok, %{rows: rows}} <- checked,
+           {:ok, _} <- newest_answer do
+        assert newest in List.flatten(rows),
+               "#{cell}: the old owner answered a checked read without the write #{newest} " <>
+                 "of the owner that took it over: #{inspect(rows)}"
+      end
+
+      # In the order of the chain: the write of the old owner is below the fence.
+      run
+      |> account(who, cell, n, answer)
+      |> account(taker, cell, newest, newest_answer)
+    else
+      run
+    end
+  end
+
+  defp step({:stale_checked, _who, _taker, _cell}, run), do: run
 
   defp step({:read, who, cell}, run) do
     name = inst(run, who)
@@ -237,12 +345,11 @@ defmodule Alambique.TakeoverPropertiesTest do
     case Alambique.query(name, cell, "SELECT n FROM t", [], call_opts()) do
       {:ok, %{rows: rows}} ->
         check_plain_read(run, cell, pid, issued, List.flatten(rows))
+        %{run | owner: Map.put(run.owner, cell, who)}
 
       {:error, _} ->
-        :ok
+        run
     end
-
-    run
   end
 
   defp step({:checked_read, who, cell}, run) do
@@ -256,18 +363,19 @@ defmodule Alambique.TakeoverPropertiesTest do
         assert missed == [],
                "a checked read of #{cell} missed acknowledged writes #{inspect(missed)}"
 
-      {:error, _} ->
-        :ok
-    end
+        %{run | owner: Map.put(run.owner, cell, who)}
 
-    run
+      {:error, _} ->
+        run
+    end
   end
 
   defp step({:take_over, who, cell}, run) do
     started = System.unique_integer([:monotonic])
+    run = %{run | disturbed: MapSet.put(run.disturbed, cell)}
 
     case Alambique.take_over(inst(run, who), cell, {:suspect, who}, call_opts()) do
-      {:ok, _} -> record_takeover(run, cell, started)
+      {:ok, _} -> record_takeover(%{run | owner: Map.put(run.owner, cell, who)}, cell, started)
       {:error, _} -> run
     end
   end
@@ -281,24 +389,24 @@ defmodule Alambique.TakeoverPropertiesTest do
     with pid when is_pid(pid) <- Cell.whereis(Config.fetch!(inst(run, who)), cell),
          do: Process.exit(pid, :kill)
 
-    run
+    %{run | calm?: false}
   end
 
   defp step({:drain, who}, run) do
     config = Config.fetch!(inst(run, who))
     Alambique.drain(inst(run, who), timeout: @call_timeout_ms)
     Membership.join(config)
-    run
+    %{run | calm?: false}
   end
 
   defp step({:fault, kind, ops, times, ms}, run) do
     MemoryStore.inject(run.store, kind: kind, ops: ops, times: times, ms: ms)
-    %{run | faulty?: true}
+    %{run | faulty?: true, calm?: false}
   end
 
   defp step({:crash, point, action}, run) do
     CrashPoints.arm(point, action, times: 1)
-    %{run | faulty?: true}
+    %{run | faulty?: true, calm?: false}
   end
 
   defp step({:pass, ms}, run), do: tap(run, fn _ -> Process.sleep(ms) end)
@@ -314,6 +422,55 @@ defmodule Alambique.TakeoverPropertiesTest do
     case epochs do
       [] -> run
       _ -> %{run | takeovers: [{cell, Enum.max(epochs), returned} | run.takeovers]}
+    end
+  end
+
+  # Helpers of the steps
+
+  defp execute(run, who, cell, n),
+    do: Alambique.execute(inst(run, who), cell, "INSERT INTO t (n) VALUES (?)", [n], call_opts())
+
+  defp checked_query(run, who, cell) do
+    Alambique.query(
+      inst(run, who),
+      cell,
+      "SELECT n FROM t",
+      [],
+      [verify_lease: true] ++ call_opts()
+    )
+  catch
+    :exit, reason -> {:exit, reason}
+  end
+
+  # A checked read waits in the newest batch of the cell.
+  defp checked_waits?(pid) do
+    pid
+    |> :sys.get_state()
+    |> Map.fetch!(:pipe)
+    |> Map.fetch!(:queue)
+    |> Enum.any?(fn batch -> Enum.any?(batch.items, &match?({:checked_read, _, _}, &1)) end)
+  catch
+    :exit, _ -> false
+  end
+
+  # What the model says of the answer to write `n`: the owner of a cell that
+  # nothing has disturbed acknowledges it.
+  defp account(run, who, cell, n, answer) do
+    case answer do
+      {:ok, _} ->
+        ack = {n, now()}
+
+        %{
+          run
+          | acked: Map.update(run.acked, cell, [ack], &[ack | &1]),
+            owner: Map.put(run.owner, cell, who)
+        }
+
+      {:error, _} ->
+        refute run.calm? and cell not in run.disturbed and run.owner[cell] in [nil, who],
+               "#{who} was refused its write to the calm cell #{cell}: #{inspect(answer)}"
+
+        run
     end
   end
 
@@ -433,6 +590,9 @@ defmodule Alambique.TakeoverPropertiesTest do
 
   defp verify_log(run) do
     entries = entries(run)
+
+    assert AckGuard.violations(run.guard) == [],
+           "acknowledged before the put landed: #{inspect(AckGuard.violations(run.guard))}"
 
     commits =
       for {_, at, {:commit, cell, txid, epoch, pid}} <- entries, do: {cell, txid, epoch, pid, at}
