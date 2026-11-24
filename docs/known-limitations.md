@@ -20,9 +20,14 @@ about it, and where the evidence is.
   up to a TXID before the gap. Alambique does not apply files written by
   Litestream. See
   [segment-format.md](segment-format.md#litestream-compatibility).
+- The rows that `CREATE TABLE ... AS SELECT` writes are in the cell and in its
+  store but not in the change feed: the triggers of the new table exist only
+  once the statement has ended. Create the table, then fill it with
+  `INSERT ... SELECT` in a write; those rows are in the feed
+  ([how-to-consume-the-change-feed.md](how-to-consume-the-change-feed.md)).
 
 ## Load measurements
 
 The cost of one cell, as measured under load, is in
 [cost-of-a-cell.md](cost-of-a-cell.md). Not measured under load:
-`lazy_restore: [verify_reads: true]`, and the memory of an awake cell.
+`lazy_restore: [verify_reads: true]`, and the memory of a busy awake cell.
