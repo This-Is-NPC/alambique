@@ -2,7 +2,8 @@ defmodule Alambique.FeedCleanupPropertiesTest do
   @moduledoc """
   The feed under every cleanup mode (design §13). Random scenarios mix writes
   of random sizes, publications held and released, quiet periods, kills and
-  hibernations of one cell, with the cleanup bounded or not. After the cell has
+  hibernations of one cell, with the cleanup bounded or not and the hand-over
+  to the sender in pieces or not. After the cell has
   published what it holds, the records, deduplicated by id, are every captured
   change exactly once and in order, a repeated record is identical to its
   first, and no change has two ids.
@@ -43,11 +44,12 @@ defmodule Alambique.FeedCleanupPropertiesTest do
     check all(
             cleanup <- member_of([:in_write, :idle, :after_publish, :idle_or_write]),
             rows <- member_of([nil, 2, 5]),
+            pieces <- member_of([nil, 2, 3]),
             ops <- list_of(op(), min_length: 6, max_length: 16),
             max_runs: 20,
             max_shrinking_steps: 0
           ) do
-      scenario(ctx, runs, cleanup, rows, ops)
+      scenario(ctx, runs, {cleanup, rows, pieces}, ops)
     end
   end
 
@@ -59,6 +61,7 @@ defmodule Alambique.FeedCleanupPropertiesTest do
     check all(
             cleanup <- member_of([:idle, :after_publish, :idle_or_write]),
             rows <- member_of([nil, 2]),
+            pieces <- member_of([nil, 2, 3]),
             ops <- list_of(op(), min_length: 6, max_length: 12),
             kill_at <- integer(0..12),
             crash_at <- integer(0..12),
@@ -70,7 +73,7 @@ defmodule Alambique.FeedCleanupPropertiesTest do
         |> List.insert_at(kill_at, :kill)
         |> List.insert_at(crash_at, :crash_in_cleanup)
 
-      scenario(ctx, runs, cleanup, rows, ops)
+      scenario(ctx, runs, {cleanup, rows, pieces}, ops)
     end
   end
 
@@ -133,7 +136,7 @@ defmodule Alambique.FeedCleanupPropertiesTest do
     n
   end
 
-  defp scenario(ctx, runs, cleanup, rows, ops) do
+  defp scenario(ctx, runs, {cleanup, rows, pieces}, ops) do
     :counters.add(runs, 1, 1)
     n = :counters.get(runs, 1)
     {:ok, gate} = GatedStore.start_link()
@@ -151,6 +154,7 @@ defmodule Alambique.FeedCleanupPropertiesTest do
           cleanup: cleanup,
           cleanup_after_ms: 40,
           cleanup_rows: rows,
+          hand_over_rows: pieces,
           publish_retry_ms: 10,
           publish_retry_max_ms: 40,
           stop_publish_ms: 200,

@@ -324,6 +324,27 @@ node left, once.
 
 The module documentation of `Alambique.Feed.Record` describes the body.
 
+## 13. Keep a large transaction from stalling its cell
+
+When a batch is acknowledged, the cell reads the captured rows of the batches
+that were acknowledged and hands them to its publisher. For a batch of
+thousands of rows this read runs in the cell's process, and a call that arrives
+right after a large transaction waits for it. In a measurement of one batch of
+4 500 rows the read took 2.7 to 3.4 ms, 91 to 92 % of the hand-over.
+
+`feed: [hand_over_rows: n]` (default `nil`, no bound) hands the rows over in
+pieces of at most `n`. Between two pieces the cell serves the calls in its
+mailbox. A batch larger than `n` is cut inside, in the order of its changes,
+and the publisher joins the pieces before it queues the batch, so record ids
+(`cell:txid:n`) and objects are the same as without the bound. If the
+publisher ends in the middle of a batch, the cell hands over that batch again
+from its start. A cell that stops hands over everything without serving calls,
+for at most `stop_publish_ms`; if that time passes, it gives up and the rows
+stay in the file for the next owner, as for any batch that was not published.
+
+The bound has a cost: each piece is a query on the cell's file. How small to
+set it for a given workload is not measured yet.
+
 ## Troubleshooting
 
 - **`read` returns `{:ok, [], position}` for a long time.** Objects younger

@@ -67,6 +67,11 @@ defmodule Alambique.Cell.State do
     feed_sent: 0,
     feed_backlog: 0,
     feed_capped: false,
+    # The position `{txid, seq}` of a batch whose rows are handed over in
+    # pieces (`feed.hand_over_rows`), the ref of the message that continues
+    # it, and nil for none.
+    feed_part: nil,
+    feed_tick: nil,
     # The `:feed_cleanup` timer (`nil` when none is armed) and the failed
     # cleanups since the last one that committed.
     feed_cleanup: nil,

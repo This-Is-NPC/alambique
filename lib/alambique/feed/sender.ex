@@ -44,6 +44,7 @@ defmodule Alambique.Feed.Sender do
         failures: 0,
         logged: nil,
         flush: nil,
+        part: [],
         size: args.config.feed.object_batches
       })
     )
@@ -101,7 +102,18 @@ defmodule Alambique.Feed.Sender do
 
   defp enqueue(w, batches) do
     arrived = System.monotonic_time(:millisecond)
-    %{w | queue: Enum.reduce(batches, w.queue, &:queue.in(Map.put(&1, :arrived, arrived), &2))}
+    Enum.reduce(batches, w, &accept(&2, &1, arrived))
+  end
+
+  # A batch handed over in pieces (`feed.hand_over_rows`) is queued once its
+  # last piece came, so ids and objects are those of a batch that came whole.
+  defp accept(w, %{partial: true} = piece, _arrived),
+    do: %{w | part: [piece.changes | w.part]}
+
+  defp accept(w, batch, arrived) do
+    changes = Enum.concat(Enum.reverse([batch.changes | w.part]))
+    batch = %{batch | changes: changes} |> Map.delete(:partial) |> Map.put(:arrived, arrived)
+    %{w | part: [], queue: :queue.in(batch, w.queue)}
   end
 
   # While the group is short, waits up to `linger_ms` from the oldest queued
