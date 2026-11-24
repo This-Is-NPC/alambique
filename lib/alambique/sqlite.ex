@@ -60,6 +60,13 @@ defmodule Alambique.Sqlite do
   deadline of every `run/4` and `execute/3` call that sets none. A statement
   over it gives `{:error, :statement_timeout}`, and `:gated` (default `false`)
   for a gated connection, which `open/2` then returns as a handle.
+
+  A read-write connection on a database file that a cell holds open
+  read-write is refused with `{:error, :held_by_cell}`, whether it goes
+  through the file name, a hard link, SQLite's own VFS or a `vfs=` URI; so is
+  an `ATTACH` of it. Reading (`readonly: true`) stays allowed. Another OS
+  process, a raw write of the file and code that opened it before the cell
+  woke are not prevented; the cell finds their writes (design §15).
   """
   @spec open(Path.t(), keyword) :: {:ok, conn} | {:error, term}
   def open(path, opts \\ []) do
@@ -187,6 +194,10 @@ defmodule Alambique.Sqlite do
   prepared (design §6). `{:error, :busy}` when a reader kept it from
   finishing, and `{:error, :not_authorized}` while the transaction of
   `begin_transaction/1` is open or without the secret of a gated connection.
+  On a cell's own connection it is `{:error, :foreign_write}` when the
+  wal-index header is not what the connection's own writes left: the
+  checkpoint does not run, or, when something wrote while it took the lock,
+  has run and the file holds what the WAL does not.
   """
   @spec checkpoint(conn) :: :ok | {:error, term}
   def checkpoint(conn), do: Native.sqlite_checkpoint(ref(conn), key(conn))
@@ -211,7 +222,10 @@ defmodule Alambique.Sqlite do
   the size of the WAL for `wal_advanced?/1`. Only the holder of the token can
   end the transaction, so the function of a transaction, which gets the
   connection but not the token, cannot. On a gated connection it needs the
-  secret.
+  secret. On a cell's own connection the header of the wal-index is compared
+  with what the connection's own writes left once the write lock is held; when
+  it differs the transaction is rolled back, nothing runs and the result is
+  `{:error, :foreign_write}`.
   """
   @spec begin_transaction(conn) :: {:ok, non_neg_integer} | {:error, term}
   def begin_transaction(conn), do: Native.sqlite_begin_transaction(ref(conn), key(conn))
@@ -237,6 +251,31 @@ defmodule Alambique.Sqlite do
   """
   @spec wal_advanced?(conn) :: boolean | {:error, term}
   def wal_advanced?(conn), do: Native.sqlite_wal_advanced(ref(conn))
+
+  @doc """
+  Compares the wal-index header of a cell's connection with what its own
+  commits and checkpoints left (design §15): `:none` when nothing else wrote,
+  `:advanced` when something else committed (its frames follow in the WAL),
+  `:restarted` when the WAL restarted or the header cannot be read, so frames
+  may be gone from the WAL. A connection that is not a cell's own read-write
+  one has nothing to compare: `:none`.
+  """
+  @spec foreign_write(conn) :: :none | :advanced | :restarted | {:error, term}
+  def foreign_write(conn), do: Native.sqlite_foreign_write(ref(conn), key(conn), 0)
+
+  @doc """
+  Takes the header that the latest `foreign_write/1` saw as accounted for,
+  once the frames it found are replicated.
+  """
+  @spec accept_foreign_write(conn) :: :ok | {:error, term}
+  def accept_foreign_write(conn), do: Native.sqlite_foreign_write(ref(conn), key(conn), 1)
+
+  @doc """
+  Takes the header as it is as the one `foreign_write/1` compares with. A cell
+  does it once its connection is set up.
+  """
+  @spec baseline_wal(conn) :: :ok | {:error, term}
+  def baseline_wal(conn), do: Native.sqlite_foreign_write(ref(conn), key(conn), 2)
 
   @doc """
   Runs a user's script of schema statements, each as SQLite delimits it.

@@ -580,7 +580,7 @@ defmodule Alambique.Cell do
   defp isolated({:execute, sql, params, ms}, from, state),
     do: write(state, from, execute_fun(sql, params), ms, true)
 
-  defp write(state, from, fun, ms, isolated? \\ false) do
+  defp write(state, from, fun, ms, isolated? \\ false, retried? \\ false) do
     txid = Replicator.next_txid(state.repl)
 
     case Db.transaction(state.conn, txid, Publisher.wrap(state, fun),
@@ -602,6 +602,10 @@ defmodule Alambique.Cell do
 
       {:error, {:rollback_failed, _} = reason} ->
         stop_serving(state, reason, {:error, reason})
+
+      # The write did not run: something else wrote to the file.
+      {:error, :foreign_write} ->
+        foreign_write(state, from, {fun, ms, isolated?}, retried?)
 
       {:error, reason} = error ->
         if Sqlite.wal_advanced?(state.conn),
@@ -1279,15 +1283,26 @@ defmodule Alambique.Cell do
 
   # Committed frames that no write carries (design §15): no write waits for a
   # batch, yet the WAL holds frames no batch has encoded. The write path keeps
-  # this from happening; the check is for what it cannot foresee. It looks at
+  # this from happening; the check is for what it cannot foresee. It compares
+  # the wal-index header with what the cell's own writes left, and looks at
   # the WAL file, so it runs where a cut or a sleep is reported and before every
   # feed cleanup, whether batches are in flight or not: the frames of a batch
   # in flight are encoded already. A write that failed is judged by the
   # position of the WAL at its start instead (`Sqlite.wal_advanced?/1`).
-  defp orphan?(%State{conn: conn, unsent: false, pending: []} = state) when conn != nil,
-    do: Replicator.unreplicated?(state.repl)
+  # `:frames` are in the WAL and a batch can carry them; `:lost` says the WAL
+  # restarted or the header cannot be read, so no batch can: the cell stops
+  # whatever `sql: [orphan_frames:]` says.
+  defp orphan(%State{conn: conn, unsent: false, pending: []} = state) when conn != nil do
+    case Sqlite.foreign_write(conn) do
+      :none -> if Replicator.unreplicated?(state.repl), do: :frames, else: false
+      :advanced -> :frames
+      _restarted_or_error -> :lost
+    end
+  end
 
-  defp orphan?(_state), do: false
+  defp orphan(_state), do: false
+
+  defp orphan?(state), do: orphan(state) != false
 
   # What `sql: [orphan_frames:]` says: `:stop` stops the cell, which discards
   # the local file (the marker is gone while the cell is awake), so the next
@@ -1296,16 +1311,19 @@ defmodule Alambique.Cell do
   # A cleanup does not wait for the batches (`wait?: false`): the orphan batch
   # goes behind those in flight.
   defp backstop(state, wait? \\ true) do
-    if orphan?(state) do
-      log_orphans(state)
+    case orphan(state) do
+      false ->
+        {:ok, state}
 
-      case state.config.sql.orphan_frames do
-        :stop -> {:stop, :orphan_frames, state}
-        :replicate when wait? -> replicate_orphans(state)
-        :replicate -> orphan_batch(state)
-      end
-    else
-      {:ok, state}
+      found ->
+        log_orphans(state)
+
+        case {found, state.config.sql.orphan_frames} do
+          {:lost, _} -> {:stop, :orphan_frames, state}
+          {:frames, :stop} -> {:stop, :orphan_frames, state}
+          {:frames, :replicate} when wait? -> replicate_orphans(state)
+          {:frames, :replicate} -> orphan_batch(state)
+        end
     end
   end
 
@@ -1322,11 +1340,35 @@ defmodule Alambique.Cell do
     end
   end
 
-  # The frames as a batch of their own, with the feed rows stamped.
+  # The frames as a batch of their own, with the feed rows stamped. The header
+  # the check saw is accounted for first: the stamp is a commit of the cell's
+  # own, and the batch encodes the WAL after the check.
   defp orphan_batch(state) do
+    Sqlite.accept_foreign_write(state.conn)
+
     case Publisher.try_stamp(state) do
       {:ok, state} -> flush_now(%{state | unsent: true})
       {:error, reason} -> {:stop, {:stamp_failed, reason}, state}
+    end
+  end
+
+  # The connection found a header its own writes do not account for before the
+  # write began (`Db.transaction/4`) and did not run it. `:stop` stops the
+  # cell and the caller gets `{:error, :orphan_frames}`. `:replicate` makes
+  # the frames a batch, when they are in the WAL, and runs the write again;
+  # a WAL that restarted, or a second refusal, stops the cell.
+  defp foreign_write(state, from, {fun, ms, isolated?}, retried?) do
+    log_orphans(state)
+
+    found = Sqlite.foreign_write(state.conn)
+
+    if found == :advanced and state.config.sql.orphan_frames == :replicate and not retried? do
+      case with({:ok, state} <- orphan_batch(state), do: settle(state)) do
+        {:ok, state} -> write(state, from, fun, ms, isolated?, true)
+        {:stop, reason, state} -> stop_serving(state, reason, {:error, reason})
+      end
+    else
+      stop_serving(state, :orphan_frames, {:error, :orphan_frames})
     end
   end
 
@@ -1375,14 +1417,14 @@ defmodule Alambique.Cell do
   defp settle_within(state, limit, replicated? \\ false)
 
   defp settle_within(%State{pipe: %{queue: []}} = state, limit, replicated?) do
-    cond do
-      not orphan?(state) ->
+    case orphan(state) do
+      false ->
         {:ok, state}
 
-      replicated? or state.config.sql.orphan_frames == :stop ->
+      found when found == :lost or replicated? or state.config.sql.orphan_frames == :stop ->
         {:stop, :orphan_frames, state}
 
-      true ->
+      :frames ->
         log_orphans(state)
         with {:ok, state} <- orphan_batch(state), do: settle_within(state, limit, true)
     end

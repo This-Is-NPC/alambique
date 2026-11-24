@@ -34,7 +34,8 @@ defmodule Alambique.Cell.Db do
          :ok <- cache_size(conn, cache_kib),
          :ok <- Sqlite.execute(conn, "PRAGMA synchronous = NORMAL", write: true),
          :ok <- Sqlite.execute(conn, "PRAGMA recursive_triggers = ON", write: true),
-         :ok <- read_only(conn) do
+         :ok <- read_only(conn),
+         :ok <- Sqlite.baseline_wal(conn) do
       {:ok, conn}
     else
       {:error, _} = error -> error

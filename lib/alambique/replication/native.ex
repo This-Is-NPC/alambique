@@ -200,6 +200,8 @@ defmodule Alambique.Replication.Native do
   @doc false
   def sqlite_wal_advanced(_conn), do: nif_error()
   @doc false
+  def sqlite_foreign_write(_conn, _key, _mode), do: nif_error()
+  @doc false
   def sqlite_script(_conn, _sql), do: nif_error()
   @doc false
   def sqlite_starts_ddl(_sql), do: nif_error()
@@ -234,6 +236,14 @@ defmodule Alambique.Replication.Native do
     def fail_next_query_only(_conn), do: nif_error()
     @doc false
     def commit_behind_back(_conn), do: nif_error()
+    @doc false
+    def foreign_exec(_path, _sql), do: nif_error()
+    @doc false
+    def foreign_open(_path), do: nif_error()
+    @doc false
+    def set_foreign_commit(_conn, _path, _sql), do: nif_error()
+    @doc false
+    def set_header_unreadable(_conn, _on), do: nif_error()
   end
 
   defp nif_error, do: :erlang.nif_error(:nif_not_loaded)
