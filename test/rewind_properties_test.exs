@@ -12,6 +12,8 @@ defmodule Alambique.RewindPropertiesTest do
       rows of its target, never anything in between;
     * a sampler that reads the cell while a rewind runs only ever sees one of
       those two states;
+    * a target at the head, past it, or a timestamp later than the head is
+      refused with `{:target_not_behind, head}` and the cell is unchanged;
     * no write acknowledged after a rewind is lost or reordered;
     * the feed, replayed with the undone records of each rewind removed and
       deduplicated by id, holds the rows of the cell (F1).
@@ -50,6 +52,7 @@ defmodule Alambique.RewindPropertiesTest do
       {10, tuple({constant(:write), node, cell})},
       {5, tuple({constant(:snap), node, cell})},
       {8, tuple({constant(:rewind), node, cell, integer(0..20)})},
+      {3, tuple({constant(:rewind_ahead), node, cell, member_of([0, 1, 5, :timestamp])})},
       {3, tuple({constant(:crash_point), node, member_of(@crash_points)})},
       {2, tuple({constant(:hibernate), node, cell})},
       {2, tuple({constant(:kill), node})},
@@ -133,6 +136,34 @@ defmodule Alambique.RewindPropertiesTest do
     end
   end
 
+  # A target the cell is not ahead of is no rewind: the named answer, whatever
+  # the kind of target, and the cell keeps its rows.
+  defp step(cluster, {:rewind_ahead, node, cell, ahead}, run) do
+    if node in run.dead do
+      run
+    else
+      inst = Cluster.instance(cluster)
+      Cluster.heal_all(cluster)
+      pre = read_when_available(cluster, inst, cell)
+
+      head =
+        eventually(
+          fn -> Enum.find_value(@names, &head_of(cluster, &1, inst, cell)) end,
+          @available_within_ms
+        )
+
+      args = [inst, cell, ahead_target(head, ahead), [timeout: @rewind_timeout_ms]]
+      outcome = Cluster.call(cluster, node, Alambique, :rewind, args, @rewind_timeout_ms + 3_000)
+
+      assert {:ok, {:error, {:target_not_behind, at}}} = outcome,
+             "cell #{cell}: target #{inspect(ahead)} at head #{head} gave #{inspect(outcome)}"
+
+      assert at >= head
+      assert read_when_available(cluster, inst, cell) == pre
+      run
+    end
+  end
+
   defp step(cluster, {:crash_point, node, point}, run) do
     unless node in run.dead,
       do: Cluster.call(cluster, node, CrashPoints, :arm, [point, :kill, [times: 1]])
@@ -199,6 +230,18 @@ defmodule Alambique.RewindPropertiesTest do
 
       run = %{run | rewinds: run.rewinds + 1}
       put_in(run.cells[cell], %{run.cells[cell] | base: now, since: []})
+    end
+  end
+
+  defp ahead_target(_head, :timestamp), do: {:timestamp, System.os_time(:millisecond) + 3_600_000}
+  defp ahead_target(head, ahead), do: {:txid, head + ahead}
+
+  defp head_of(cluster, node, inst, cell) do
+    args = [inst, cell, [timeout: @call_timeout_ms]]
+
+    case Cluster.call(cluster, node, Alambique, :position, args, @call_timeout_ms + 2_000) do
+      {:ok, {:ok, %{txid: txid}}} -> txid
+      _ -> nil
     end
   end
 
