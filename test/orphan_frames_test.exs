@@ -34,8 +34,7 @@ defmodule Alambique.OrphanFramesTest do
 
   # Rows committed on the connection of the cell, outside any write.
   defp orphan(c, n) do
-    %{conn: conn} = :sys.get_state(pid(c))
-    :ok = Db.writable_script(conn, "INSERT INTO t VALUES (#{n})")
+    :ok = in_cell(pid(c), &Db.writable_script(&1.conn, "INSERT INTO t VALUES (#{n})"))
     assert unreplicated?(c)
   end
 

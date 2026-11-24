@@ -28,12 +28,13 @@ defmodule Alambique.Cell.Db do
   def open(path, opts \\ []) do
     {cache_kib, opts} = Keyword.pop(opts, :cache_kib)
 
-    with {:ok, conn} <- Sqlite.open(path, [vfs: :alambique] ++ opts),
-         {:ok, %{rows: [["wal"]]}} <- Sqlite.run(conn, "PRAGMA journal_mode = WAL", []),
+    with {:ok, conn} <- Sqlite.open(path, [vfs: :alambique, gated: true] ++ opts),
+         {:ok, %{rows: [["wal"]]}} <-
+           Sqlite.run(conn, "PRAGMA journal_mode = WAL", [], write: true),
          :ok <- cache_size(conn, cache_kib),
-         :ok <- Sqlite.execute(conn, "PRAGMA synchronous = NORMAL"),
-         :ok <- Sqlite.execute(conn, "PRAGMA recursive_triggers = ON"),
-         :ok <- Sqlite.execute(conn, "PRAGMA query_only = ON") do
+         :ok <- Sqlite.execute(conn, "PRAGMA synchronous = NORMAL", write: true),
+         :ok <- Sqlite.execute(conn, "PRAGMA recursive_triggers = ON", write: true),
+         :ok <- read_only(conn) do
       {:ok, conn}
     else
       {:error, _} = error -> error
@@ -42,7 +43,7 @@ defmodule Alambique.Cell.Db do
   end
 
   defp cache_size(_conn, nil), do: :ok
-  defp cache_size(conn, kib), do: Sqlite.execute(conn, "PRAGMA cache_size = -#{kib}")
+  defp cache_size(conn, kib), do: Sqlite.execute(conn, "PRAGMA cache_size = -#{kib}", write: true)
 
   @doc """
   Opens a replica file (design §14) for reading only. The file never changes
@@ -54,8 +55,8 @@ defmodule Alambique.Cell.Db do
   def open_read_only(path, opts \\ []) do
     uri = "file:" <> URI.encode(path, &(URI.char_unreserved?(&1) or &1 == ?/)) <> "?immutable=1"
 
-    with {:ok, conn} <- Sqlite.open(uri, [readonly: true] ++ opts),
-         :ok <- Sqlite.execute(conn, "PRAGMA query_only = ON") do
+    with {:ok, conn} <- Sqlite.open(uri, [readonly: true, gated: true] ++ opts),
+         :ok <- read_only(conn) do
       {:ok, conn}
     end
   end
@@ -68,7 +69,7 @@ defmodule Alambique.Cell.Db do
   """
   @spec open_reader(Path.t(), pos_integer) :: {:ok, Sqlite.conn()} | {:error, term}
   def open_reader(path, cache_kib) do
-    with {:ok, conn} <- Sqlite.open(path, readonly: true, vfs: :alambique) do
+    with {:ok, conn} <- Sqlite.open(path, readonly: true, vfs: :alambique, gated: true) do
       case cache_size(conn, cache_kib) do
         :ok ->
           {:ok, conn}
@@ -80,7 +81,7 @@ defmodule Alambique.Cell.Db do
     end
   end
 
-  @spec close(Sqlite.conn()) :: :ok
+  @spec close(Sqlite.conn()) :: :ok | {:error, term}
   def close(conn), do: Sqlite.close(conn)
 
   @doc """
@@ -153,18 +154,6 @@ defmodule Alambique.Cell.Db do
     end
   end
 
-  @doc "Runs `fun` with the connection writable."
-  @spec writable(Sqlite.conn(), (-> result)) :: result when result: var
-  def writable(conn, fun) do
-    :ok = Sqlite.execute(conn, "PRAGMA query_only = OFF")
-
-    try do
-      fun.()
-    after
-      Sqlite.execute(conn, "PRAGMA query_only = ON")
-    end
-  end
-
   @doc """
   Runs a script with the connection writable, in one call on the dirty IO
   pool: `sql` between the two pragmas. A script that fails still leaves the
@@ -172,7 +161,9 @@ defmodule Alambique.Cell.Db do
   """
   @spec writable_script(Sqlite.conn(), String.t()) :: :ok | {:error, term}
   def writable_script(conn, sql) do
-    case Sqlite.execute(conn, "PRAGMA query_only = OFF; #{sql}; PRAGMA query_only = ON") do
+    case Sqlite.execute(conn, "PRAGMA query_only = OFF; #{sql}; PRAGMA query_only = ON",
+           write: true
+         ) do
       :ok ->
         :ok
 
@@ -232,7 +223,7 @@ defmodule Alambique.Cell.Db do
     end
   end
 
-  defp read_only(conn), do: Sqlite.execute(conn, "PRAGMA query_only = ON")
+  defp read_only(conn), do: Sqlite.execute(conn, "PRAGMA query_only = ON", write: true)
 
   @doc """
   Whether the `{:error, reason}` of `transaction/4` leaves a connection that
@@ -247,7 +238,7 @@ defmodule Alambique.Cell.Db do
 
   defp transact(conn, token, txid, fun, opts) do
     tx = %Tx{
-      conn: conn,
+      conn: Sqlite.ref(conn),
       txid: txid,
       ref: make_ref(),
       capture: Keyword.get(opts, :capture, true),
@@ -275,7 +266,7 @@ defmodule Alambique.Cell.Db do
   end
 
   defp finish({:commit, value}, conn, token) do
-    Fault.point(:db_before_commit, %{conn: conn})
+    Fault.point(:db_before_commit, %{conn: Sqlite.ref(conn)})
 
     case Sqlite.finish_transaction(conn, token, :commit) do
       :ok -> {:ok, value}
@@ -300,7 +291,7 @@ defmodule Alambique.Cell.Db do
   # that was closed: the cell stops.
   defp rollback(conn, token) do
     result =
-      case Fault.point(:db_before_rollback, conn) do
+      case Fault.point(:db_before_rollback, Sqlite.ref(conn)) do
         {:error, _} = injected -> injected
         _ -> Sqlite.finish_transaction(conn, token, :rollback)
       end

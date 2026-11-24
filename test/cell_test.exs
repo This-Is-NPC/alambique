@@ -83,18 +83,22 @@ defmodule Alambique.CellTest do
             "INSERT INTO t SELECT n, hex(randomblob(100)) FROM c"
     @scan "SELECT count(v) FROM t"
 
-    # Reads the connection from the test process: a call would restore the cache.
-    defp conn(inst, cell),
-      do: :sys.get_state(Alambique.Cell.whereis(Alambique.Config.fetch!(inst), cell)).conn
+    # Reads the connection from the process of the cell, which owns it, without
+    # a call: a call would restore the cache.
+    defp conn(inst, cell), do: Alambique.Cell.whereis(Alambique.Config.fetch!(inst), cell)
 
-    defp cache_size(conn) do
-      {:ok, %{rows: [[kib]]}} = Alambique.Sqlite.run(conn, "PRAGMA cache_size", [])
-      kib
+    defp cache_size(pid) do
+      in_cell(pid, fn state ->
+        {:ok, %{rows: [[kib]]}} = Alambique.Sqlite.run(state.conn, "PRAGMA cache_size", [])
+        kib
+      end)
     end
 
-    defp cache_used(conn) do
-      {:ok, %{cache_used: bytes}} = Alambique.Sqlite.memory(conn)
-      bytes
+    defp cache_used(pid) do
+      in_cell(pid, fn state ->
+        {:ok, %{cache_used: bytes}} = Alambique.Sqlite.memory(state.conn)
+        bytes
+      end)
     end
 
     defp filled(ctx, awake) do
@@ -139,10 +143,10 @@ defmodule Alambique.CellTest do
       {inst, cell} = filled(ctx, cache_kib: 512)
       pid = Alambique.Cell.whereis(Alambique.Config.fetch!(inst), cell)
 
-      assert %{idle_cache: nil, conn: conn} = :sys.get_state(pid)
+      assert %{idle_cache: nil} = :sys.get_state(pid)
       assert {:ok, %{rows: [[4000]]}} = Alambique.query(inst, cell, @scan)
       assert %{idle_cache: nil} = :sys.get_state(pid)
-      assert cache_size(conn) == -512
+      assert cache_size(pid) == -512
     end
 
     test "the cell still hibernates at idle_timeout_ms", ctx do

@@ -29,26 +29,24 @@ defmodule Alambique.Rewind.Reconcile do
   @spec run(Sqlite.conn(), Path.t(), opts) ::
           {:ok, %{kept: [String.t()], pages: pos_integer}} | {:error, term}
   def run(conn, current, opts) do
-    Db.writable(conn, fn ->
-      # Read-only and by URI: attaching a path that is gone must fail, where a
-      # plain `ATTACH` would create an empty database and the host tables would
-      # be carried over empty.
-      case Sqlite.execute(conn, "ATTACH DATABASE #{literal(uri(current))} AS cur") do
-        :ok ->
-          try do
-            with {:ok, kept} <-
-                   Db.transaction(conn, opts.txid, &transact(&1, opts), capture: false),
-                 {:ok, %{rows: [[pages]]}} <- Db.run(conn, "PRAGMA page_count", []) do
-              {:ok, %{kept: kept, pages: pages}}
-            end
-          after
-            Sqlite.execute(conn, "DETACH DATABASE cur")
+    # Read-only and by URI: attaching a path that is gone must fail, where a
+    # plain `ATTACH` would create an empty database and the host tables would
+    # be carried over empty.
+    case Sqlite.execute(conn, "ATTACH DATABASE #{literal(uri(current))} AS cur", write: true) do
+      :ok ->
+        try do
+          with {:ok, kept} <-
+                 Db.transaction(conn, opts.txid, &transact(&1, opts), capture: false),
+               {:ok, %{rows: [[pages]]}} <- Db.run(conn, "PRAGMA page_count", []) do
+            {:ok, %{kept: kept, pages: pages}}
           end
+        after
+          Sqlite.execute(conn, "DETACH DATABASE cur", write: true)
+        end
 
-        {:error, reason} ->
-          {:error, {:attach, reason}}
-      end
-    end)
+      {:error, reason} ->
+        {:error, {:attach, reason}}
+    end
   end
 
   defp transact(tx, opts) do

@@ -173,11 +173,13 @@ defmodule Alambique.Replication.Native do
   # SQLite (see `Alambique.Sqlite`)
 
   @doc false
-  def sqlite_open(_path, _readonly, _vfs, _attach, _timeout_ms), do: nif_error()
+  def sqlite_open(_path, _readonly, _vfs, _attach, _timeout_ms, _gated), do: nif_error()
   @doc false
-  def sqlite_close(_conn), do: nif_error()
+  def sqlite_close(_conn, _key), do: nif_error()
   @doc false
-  def sqlite_execute(_conn, _sql, _no_txn_control), do: nif_error()
+  def sqlite_assign(_conn, _key, _pid), do: nif_error()
+  @doc false
+  def sqlite_execute(_conn, _sql, _no_txn_control, _key), do: nif_error()
   @doc false
   def sqlite_run(_conn, _sql, _params, _limits), do: nif_error()
   @doc false
@@ -188,11 +190,11 @@ defmodule Alambique.Replication.Native do
   def sqlite_changes(_conn), do: nif_error()
 
   @doc false
-  def sqlite_checkpoint(_conn), do: nif_error()
+  def sqlite_checkpoint(_conn, _key), do: nif_error()
   @doc false
   def sqlite_transaction_status(_conn), do: nif_error()
   @doc false
-  def sqlite_begin_transaction(_conn), do: nif_error()
+  def sqlite_begin_transaction(_conn, _key), do: nif_error()
   @doc false
   def sqlite_finish_transaction(_conn, _token, _commit), do: nif_error()
   @doc false
