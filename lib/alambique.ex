@@ -329,10 +329,11 @@ defmodule Alambique do
       upload, default 500) and `:retry_backoff_max_ms` (the wait doubles up to
       this, default 5 000). The cell keeps the batch and uploads it again for
       as long as its lease is valid; only the loss of the lease stops it.
-    * `:breaker` - the circuit breaker of each store (design §3): `:failures`
-      (failures in a row that open it, default 5), `:cooldown_ms` (how long it
-      refuses requests before it lets one probe through, default 5 000, plus up
-      to 20 % at random) and `:probe_timeout_ms` (how long a probe that never
+    * `:breaker` - the circuit breaker of each store (design §3), one state
+      for the feed objects and one for everything else, both with these
+      settings: `:failures` (failures in a row that open it, default 5),
+      `:cooldown_ms` (how long it refuses requests before it lets one probe
+      through, default 5 000, plus up to 20 % at random) and `:probe_timeout_ms` (how long a probe that never
       answers holds the place of the probe, default 10 000). While it is open a
       store request answers `{:error, :store_unavailable}` without reaching the
       store. Only what the store did counts as a failure: a request that never
@@ -1174,7 +1175,9 @@ defmodule Alambique do
   @doc """
   The circuit breaker of each store location of the instance (design §3), read
   from its state without a request to the store: a map from the location id
-  (`Alambique.Location.id`) to `%{state, since_ms, failures}`.
+  (`Alambique.Location.id`) to `%{state, since_ms, failures, feed}`. `feed` is
+  the state of the breaker that guards the objects of the change feed, apart
+  from the one that guards everything else, in the same three fields.
 
     * `:state` - `:closed`, `:open` (requests fail with `:store_unavailable`)
       or `:half_open` (the cool-down passed: the next request is the probe, or
@@ -1187,15 +1190,22 @@ defmodule Alambique do
       opens at `breaker: [failures:]`), the run that opened it otherwise. A
       success resets it.
 
-  A location that has not been used yet is closed with no failures. The
-  breaker cannot be disabled. The reason of the last failure is not kept. An
-  unknown instance raises `ArgumentError`.
+  A location that has not been used yet is closed with no failures. A store
+  that fails only for feed objects opens `feed` and leaves the rest closed;
+  one that fails for everything opens both. The breaker cannot be disabled.
+  The reason of the last failure is not kept. An unknown instance raises
+  `ArgumentError`.
   """
   @spec breaker_status(instance) :: %{
           String.t() => %{
             state: :closed | :open | :half_open,
             since_ms: integer,
-            failures: non_neg_integer
+            failures: non_neg_integer,
+            feed: %{
+              state: :closed | :open | :half_open,
+              since_ms: integer,
+              failures: non_neg_integer
+            }
           }
         }
   def breaker_status(instance), do: Alambique.Store.Breaker.statuses(Config.fetch!(instance))

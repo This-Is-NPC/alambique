@@ -2,7 +2,11 @@ defmodule Alambique.Store.Breaker do
   @moduledoc false
   # Circuit breaker of one store (design §3). It wraps the guarded store of a
   # location, so every request of the instance that goes to it shares one state
-  # in an `:atomics` array, read without a message:
+  # in an `:atomics` array, read without a message. A location has two states
+  # of the same settings: the default one guards segments, snapshots, leases
+  # and listings, and the feed one (`scope/2`) guards the objects of the change
+  # feed, so a store that fails only for the feed does not refuse a commit.
+  # A state is:
   #
   #   1. `open_until`: monotonic ms until which requests fail fast; 0 is closed.
   #   2. consecutive failures while closed.
@@ -88,29 +92,50 @@ defmodule Alambique.Store.Breaker do
   The guarded store of `location`, behind the breaker that every context of the
   instance shares for it (kept in `config.breakers`, created on first use). An
   instance without the table, such as a context built in a test, has none.
+  The feed state of the location travels with it, for `scope/2`.
   """
   @spec guard(map, Alambique.Location.t()) :: {module, term}
   def guard(config, %{id: id, store: store}) do
     guarded = {Alambique.Store.Guard, store}
 
     case :ets.whereis(config.breakers) do
-      :undefined -> guarded
-      _ -> {__MODULE__, %{store: guarded, breaker: shared(config, id)}}
+      :undefined ->
+        guarded
+
+      _ ->
+        {default, feed} = shared(config, id)
+        {__MODULE__, %{store: guarded, breaker: default, feed: feed}}
     end
   end
 
   defp shared(config, id) do
     case :ets.lookup(config.breakers, id) do
-      [{_, breaker}] ->
-        breaker
+      [{_, default, feed}] ->
+        {default, feed}
 
       [] ->
-        fresh = new(config.breaker, %{instance: config.name, location: id})
-        :ets.insert_new(config.breakers, {id, fresh})
-        [{_, breaker}] = :ets.lookup(config.breakers, id)
-        breaker
+        meta = %{instance: config.name, location: id}
+        default = new(config.breaker, Map.put(meta, :class, :default))
+        feed = new(config.breaker, Map.put(meta, :class, :feed))
+        :ets.insert_new(config.breakers, {id, default, feed})
+        [{_, default, feed}] = :ets.lookup(config.breakers, id)
+        {default, feed}
     end
   end
+
+  @doc """
+  `store` with the feed state of its breaker in place of the default one: the
+  requests of the feed publisher count and wait on it alone. A store without
+  a feed state (no breaker, or one built by hand) is returned as it is.
+  """
+  @spec scope({module, term}, :feed) :: {module, term}
+  def scope({__MODULE__, %{feed: feed} = guarded}, :feed),
+    do: {__MODULE__, %{guarded | breaker: feed}}
+
+  def scope({Alambique.Store.Metered, %{store: store} = metered}, :feed),
+    do: {Alambique.Store.Metered, %{metered | store: scope(store, :feed)}}
+
+  def scope(store, :feed), do: store
 
   @doc false
   def monotonic_ms, do: System.monotonic_time(:millisecond)
@@ -151,7 +176,8 @@ defmodule Alambique.Store.Breaker do
 
   @doc """
   `status/1` of every location of the instance: those with a breaker, and the
-  locations of the placement that have none yet, which are closed.
+  locations of the placement that have none yet, which are closed. The state of
+  the feed is under `:feed`.
   """
   @spec statuses(map) :: %{String.t() => map}
   def statuses(config) do
@@ -167,10 +193,14 @@ defmodule Alambique.Store.Breaker do
         _ -> []
       end
 
-    fresh = new(config.breaker, %{})
+    closed = status(new(config.breaker, %{}))
 
-    Map.new(unused, &{&1, status(fresh)})
-    |> Map.merge(Map.new(known, fn {id, breaker} -> {id, status(breaker)} end))
+    Map.new(unused, &{&1, Map.put(closed, :feed, closed)})
+    |> Map.merge(
+      Map.new(known, fn {id, default, feed} ->
+        {id, Map.put(status(default), :feed, status(feed))}
+      end)
+    )
   end
 
   @doc "Whether `breaker` is open or half-open."

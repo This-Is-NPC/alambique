@@ -10,6 +10,10 @@ defmodule Alambique.Feed.Sender do
   # keeps accepting batches meanwhile; the cell bounds how many it hands over.
   # It ends with the cell and hibernates while idle. What it did not publish
   # stays in the cell's file for the next owner.
+  #
+  # Its store requests (the puts and the heads of the objects) go through the
+  # feed state of the breaker (`Breaker.scope/2`), so a store that fails only
+  # for them opens that state and not the one the commits use.
 
   require Logger
 
@@ -17,6 +21,7 @@ defmodule Alambique.Feed.Sender do
   alias Alambique.Cell.State
   alias Alambique.Feed.{Keys, Pieces, Record}
   alias Alambique.Replication.Retry
+  alias Alambique.Store.Breaker
 
   @doc "Starts the sender of the calling cell, linked to it."
   @spec start(State.t()) :: pid
@@ -24,7 +29,7 @@ defmodule Alambique.Feed.Sender do
     args = %{
       cell: self(),
       id: state.id,
-      ctx: state.repl_ctx,
+      ctx: %{state.repl_ctx | store: Breaker.scope(state.repl_ctx.store, :feed)},
       config: state.config,
       prefix: state.location.prefix,
       epoch: state.lease.epoch,
