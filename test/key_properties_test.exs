@@ -134,6 +134,7 @@ defmodule Alambique.KeyPropertiesTest do
         assert Keys.parse(prefix, cell, [key.(level, max + 1, max)]) == {[], []}
         assert Keys.parse(prefix, cell, [key.(level, 0, max)]) == {[], []}
         assert Keys.parse(prefix, cell, [key.(above, min, max)]) == {[], []}
+        assert Keys.parse(prefix, cell, [key.(above, 1, max)]) == {[], []}
         assert Keys.parse(prefix, cell, [key.(9, 2 + min, 2 + max)]) == {[], []}
 
         upper = Keys.files_prefix(prefix, cell) <> "0000/000000000000000A-000000000000000B.ltx"
