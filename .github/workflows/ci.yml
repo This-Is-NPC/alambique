@@ -168,7 +168,8 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Rust unit tests of the NIF crate; scripts/check only lints it.
+  # Rust unit tests of the NIF crate, and the proof that its release build has no
+  # test-only NIF (a second, release build); scripts/check only lints it.
   native:
     runs-on: ubuntu-latest
     timeout-minutes: 15 # default 15
@@ -182,6 +183,7 @@ jobs:
           cache-name: native
           mix: "false"
       - run: mise run test:native
+      - run: mise run check:release-nif
 
   # The store contract tests against a SeaweedFS container, then the pinned
   # Litestream restoring what Alambique replicated to it. Docker is on the

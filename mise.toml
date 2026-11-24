@@ -64,6 +64,10 @@ run = "mix test"
 description = "Run the Rust unit tests of the native crate"
 run = "scripts/test-native"
 
+[tasks."check:release-nif"]
+description = "Check that a release build of the NIF has no test-only NIF (the names of src/test_panic.rs); --with-feature builds with test-panic and expects them present"
+run = "scripts/check-release-nif"
+
 [tasks."test:coverage"]
 description = "Measure line coverage of the Elixir code and of the NIF the BEAM loads over the default suite; fails below $ALAMBIQUE_COVERAGE_MIN percent (default 90) in either"
 run = "scripts/test-coverage"

@@ -32,6 +32,10 @@ A panic that reaches the VM stops it, so panics become errors. The crate uses
 `panic = "unwind"`, and each SQLite callback and each `Drop` runs under `guard`,
 which returns the callback's failure value.
 
+The NIFs that panic on purpose exist only in test builds (cargo feature
+`test-panic`). `mise run check:release-nif` builds the release NIF and fails if
+the shared object contains one of their names.
+
 ## 3. Store behaviour
 
 `Alambique.Store` is the only interface to object storage: conditional `put`,

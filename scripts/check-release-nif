@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Check that a release build of the NIF has no test-only entry (design §2.1).
+#
+# Builds the crate in release mode without the `test-panic` feature into its own
+# target subdirectory (the test artifact stays untouched) and fails if the shared
+# object contains the name of a NIF defined in src/test_panic.rs. The names are
+# read from that file, so a new test-only NIF is covered.
+#
+#   --with-feature   build with `test-panic` and fail unless every name is
+#                    present: shows the inspection can fail (not part of the gate)
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+crate="$root/native/alambique_nif"
+source_file="$crate/src/test_panic.rs"
+expect=absent
+features=()
+if [[ "${1:-}" == --with-feature ]]; then
+  expect=present
+  features=(--features test-panic)
+fi
+
+# The function name on the line after each #[rustler::nif ...] attribute.
+mapfile -t names < <(awk '/#\[rustler::nif/ { want = 1; next }
+  want && /fn [a-z_0-9]+/ { sub(/.*fn /, ""); sub(/\(.*/, ""); print; want = 0 }' "$source_file")
+if ((${#names[@]} == 0)); then
+  echo "check-release-nif: no NIF found in $source_file" >&2
+  exit 2
+fi
+
+target="${CARGO_TARGET_DIR:-$crate/target}/release-check-$expect"
+cargo build --release --manifest-path "$crate/Cargo.toml" --target-dir "$target" "${features[@]}"
+lib="$target/release/libalambique_nif.so"
+
+# Rustler keeps each NIF name as a string of the init table; symbols are listed too.
+dump="$(mktemp)"
+trap 'rm -f "$dump"' EXIT
+{ strings -a "$lib"; nm -D "$lib" 2>/dev/null || true; } >"$dump"
+
+status=0
+for name in "${names[@]}"; do
+  if grep -qw -- "$name" "$dump"; then found=present; else found=absent; fi
+  echo "$name: $found"
+  [[ "$found" == "$expect" ]] || status=1
+done
+if ((status)); then
+  echo "check-release-nif: failed (expected every test-only NIF $expect)" >&2
+else
+  echo "check-release-nif: passed (${#names[@]} test-only NIFs $expect)"
+fi
+exit "$status"
