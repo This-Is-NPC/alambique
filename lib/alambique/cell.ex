@@ -842,7 +842,7 @@ defmodule Alambique.Cell do
   # Frames no write carries are accounted for first: the cleanup batch must
   # not carry them, and its deletion would take their feed rows away unsent.
   defp cleanup(state) do
-    with {:ok, state} <- backstop(state), do: clean(state)
+    with {:ok, state} <- backstop(state, false), do: clean(state)
   end
 
   defp clean(state) do
@@ -1271,15 +1271,15 @@ defmodule Alambique.Cell do
          do: backstop(state)
   end
 
-  # Committed frames that no write carries (design §15): nothing is pending
-  # or queued, yet the WAL holds frames no batch has encoded. The write path
-  # keeps this from happening; the check is for what it cannot foresee. It
-  # looks at the WAL file, so it runs where a cut or a sleep is reported and
-  # before a feed cleanup. A write that failed is judged by the position of the
-  # WAL at its start instead (`Sqlite.wal_advanced?/1`), so a batch in flight
-  # does not hide what it left.
-  defp orphan?(%State{conn: conn, unsent: false} = state) when conn != nil,
-    do: idle?(state) and Replicator.unreplicated?(state.repl)
+  # Committed frames that no write carries (design §15): no write waits for a
+  # batch, yet the WAL holds frames no batch has encoded. The write path keeps
+  # this from happening; the check is for what it cannot foresee. It looks at
+  # the WAL file, so it runs where a cut or a sleep is reported and before every
+  # feed cleanup, whether batches are in flight or not: the frames of a batch
+  # in flight are encoded already. A write that failed is judged by the
+  # position of the WAL at its start instead (`Sqlite.wal_advanced?/1`).
+  defp orphan?(%State{conn: conn, unsent: false, pending: []} = state) when conn != nil,
+    do: Replicator.unreplicated?(state.repl)
 
   defp orphan?(_state), do: false
 
@@ -1287,13 +1287,16 @@ defmodule Alambique.Cell do
   # the local file (the marker is gone while the cell is awake), so the next
   # wake restores what the store holds; `:replicate` sends them as a batch
   # of their own, with the feed rows stamped, and goes on once it is durable.
-  defp backstop(state) do
+  # A cleanup does not wait for the batches (`wait?: false`): the orphan batch
+  # goes behind those in flight.
+  defp backstop(state, wait? \\ true) do
     if orphan?(state) do
       log_orphans(state)
 
       case state.config.sql.orphan_frames do
         :stop -> {:stop, :orphan_frames, state}
-        :replicate -> replicate_orphans(state)
+        :replicate when wait? -> replicate_orphans(state)
+        :replicate -> orphan_batch(state)
       end
     else
       {:ok, state}

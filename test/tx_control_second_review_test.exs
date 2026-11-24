@@ -512,8 +512,6 @@ defmodule Alambique.TxControlSecondReviewTest do
     end
 
     for mode <- [:stop, :replicate] do
-      # Skipped: the :after_publish cleanup runs behind a batch in flight and takes frames no write made.
-      @tag :skip
       test "judges frames no write made before its batch carries them (#{mode})", env do
         {c, writer} = cleanup_behind_batch(env, unquote(mode))
 
@@ -533,7 +531,7 @@ defmodule Alambique.TxControlSecondReviewTest do
         # that nobody judged: under `:stop` the cell is already gone.
         if unquote(mode) == :stop do
           assert reached?(fn -> pid(c) == nil end, 2_000),
-                 "the cleanup batch took the frames: unreplicated is #{unreplicated?(c)}"
+                 "the cell is still serving: the cleanup batch took the frames no write made"
         end
 
         GatedStore.open(c.gate)
