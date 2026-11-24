@@ -160,6 +160,19 @@ defmodule Alambique.CellTest do
       assert {_, %{reason: :idle}} = await_event([:alambique, :cell, :hibernate], cell)
     end
 
+    # Leaves several MB of garbage on the heap of the cell and returns its
+    # size, so a collection that happens meanwhile does not decide the test.
+    defp garbage(inst, cell, pid) do
+      for _ <- 1..3 do
+        assert {:ok, %{rows: rows}} = Alambique.query(inst, cell, "SELECT n, v FROM t")
+        assert length(rows) == 4000
+      end
+
+      {:memory, before} = Process.info(pid, :memory)
+      assert before > 2_000_000
+      before
+    end
+
     test "an idle cell collects the garbage of its last calls", ctx do
       inst =
         start_instance(ctx,
@@ -170,13 +183,11 @@ defmodule Alambique.CellTest do
 
       cell = unique_cell()
       assert {:ok, _} = Alambique.execute(inst, cell, @fill)
-      assert {:ok, %{rows: rows}} = Alambique.query(inst, cell, "SELECT n, v FROM t")
-      assert length(rows) == 4000
       pid = Alambique.Cell.whereis(Alambique.Config.fetch!(inst), cell)
-      {:memory, before} = Process.info(pid, :memory)
-      assert before > 1_000_000
+      before = garbage(inst, cell, pid)
 
-      eventually(fn -> elem(Process.info(pid, :memory), 1) < 200_000 end)
+      # Most of the heap goes, and what stays is small in absolute terms.
+      eventually(fn -> elem(Process.info(pid, :memory), 1) < min(200_000, before / 10) end)
     end
 
     test "idle_gc: false shrinks the cache but keeps the garbage", ctx do
@@ -189,15 +200,12 @@ defmodule Alambique.CellTest do
 
       cell = unique_cell()
       assert {:ok, _} = Alambique.execute(inst, cell, @fill)
-      assert {:ok, %{rows: rows}} = Alambique.query(inst, cell, "SELECT n, v FROM t")
-      assert length(rows) == 4000
       pid = Alambique.Cell.whereis(Alambique.Config.fetch!(inst), cell)
-      {:memory, before} = Process.info(pid, :memory)
-      assert before > 1_000_000
+      before = garbage(inst, cell, pid)
 
       conn = conn(inst, cell)
       eventually(fn -> cache_size(conn) == -16 end)
-      assert elem(Process.info(pid, :memory), 1) > 1_000_000
+      assert elem(Process.info(pid, :memory), 1) > before / 2
     end
 
     test "the admission total drops after the shrink", ctx do
