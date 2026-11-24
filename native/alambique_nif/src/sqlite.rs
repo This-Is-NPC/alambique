@@ -57,6 +57,10 @@ fn now_us() -> u64 {
 pub(crate) struct Control {
     /// Set for the duration of a read-only call (`Call`).
     read_only: AtomicBool,
+    /// Set for the duration of a call that runs a user's text: BEGIN, COMMIT,
+    /// END and ROLLBACK are refused, so the text cannot end the transaction
+    /// of the cell's write (`Call`).
+    no_txn_control: AtomicBool,
     /// `now_us()` after which the running statement is stopped; 0 for none.
     deadline: AtomicU64,
     /// The progress handler stopped a statement at the deadline.
@@ -71,6 +75,7 @@ impl Control {
     pub(crate) fn new(allow_attach: bool, default_timeout_ms: u64) -> Self {
         Control {
             read_only: AtomicBool::new(false),
+            no_txn_control: AtomicBool::new(false),
             deadline: AtomicU64::new(0),
             timed_out: AtomicBool::new(false),
             allow_attach,
@@ -201,6 +206,9 @@ const INTROSPECTION: [&[u8]; 16] = [
 ///   file is another cell's data or a file the SQL creates.
 /// - In a read-only call: transaction and savepoint statements, and every
 ///   pragma with an argument except the introspection ones.
+/// - In a call that runs a user's text (`no_txn_control`): `BEGIN`, `COMMIT`,
+///   `END` and `ROLLBACK` (`SQLITE_TRANSACTION`). Savepoints stay: `ROLLBACK
+///   TO` and `RELEASE` are `SQLITE_SAVEPOINT` and never end the transaction.
 pub(crate) unsafe extern "C" fn authorize(
     ctx: *mut std::ffi::c_void,
     action: c_int,
@@ -215,7 +223,8 @@ pub(crate) unsafe extern "C" fn authorize(
         let read_only = ctl.read_only.load(Relaxed);
         let allowed = match action {
             ffi::SQLITE_ATTACH | ffi::SQLITE_DETACH => ctl.allow_attach && !read_only,
-            ffi::SQLITE_TRANSACTION | ffi::SQLITE_SAVEPOINT => !read_only,
+            ffi::SQLITE_TRANSACTION => !read_only && !ctl.no_txn_control.load(Relaxed),
+            ffi::SQLITE_SAVEPOINT => !read_only,
             ffi::SQLITE_PRAGMA if !name.is_null() => {
                 // SAFETY: for a pragma SQLite passes NUL-terminated names,
                 // `arg` possibly null.
@@ -296,6 +305,7 @@ impl Drop for Slot {
 #[derive(Clone, Copy, Default)]
 struct Limits {
     read_only: bool,
+    no_txn_control: bool,
     timeout_ms: u64,
     max_rows: u64,
     max_bytes: u64,
@@ -313,6 +323,7 @@ impl<'a> Call<'a> {
     fn new(ctl: &'a Control, db: *mut ffi::sqlite3, limits: &Limits) -> Self {
         ctl.timed_out.store(false, Relaxed);
         ctl.read_only.store(limits.read_only, Relaxed);
+        ctl.no_txn_control.store(limits.no_txn_control, Relaxed);
         let timeout_ms = if limits.timeout_ms > 0 {
             limits.timeout_ms
         } else {
@@ -334,6 +345,7 @@ impl<'a> Call<'a> {
 impl Drop for Call<'_> {
     fn drop(&mut self) {
         self.ctl.read_only.store(false, Relaxed);
+        self.ctl.no_txn_control.store(false, Relaxed);
         self.ctl.deadline.store(0, Relaxed);
         if let Some(old) = self.length {
             // SAFETY: as in `new`; the lock is still held.
@@ -731,15 +743,25 @@ fn sqlite_close(conn: ResourceArc<Conn>) -> Atom {
     atoms::ok()
 }
 
-/// Runs one or more statements without reading rows.
+/// Runs one or more statements without reading rows. `no_txn_control` says
+/// the text is a user's: transaction control is refused (see `authorize`).
 #[rustler::nif(schedule = "DirtyIo")]
-fn sqlite_execute<'a>(env: Env<'a>, conn: ResourceArc<Conn>, sql: Binary) -> Term<'a> {
+fn sqlite_execute<'a>(
+    env: Env<'a>,
+    conn: ResourceArc<Conn>,
+    sql: Binary,
+    no_txn_control: bool,
+) -> Term<'a> {
     let _t = crate::stats::SQLITE_CALLS.time();
     let run = || -> Outcome<'a> {
         let sql = CString::new(sql.as_slice())
             .map_err(|_| Failure::Message("sql contains a nul byte".into()))?;
         with_db(&conn, |db| {
-            let _call = Call::new(&conn.control, db, &Limits::default());
+            let limits = Limits {
+                no_txn_control,
+                ..Limits::default()
+            };
+            let _call = Call::new(&conn.control, db, &limits);
             // SAFETY: `db` is live and `sql` is NUL-terminated.
             let rc = unsafe {
                 ffi::sqlite3_exec(db, sql.as_ptr(), None, ptr::null_mut(), ptr::null_mut())
@@ -757,8 +779,8 @@ fn sqlite_execute<'a>(env: Env<'a>, conn: ResourceArc<Conn>, sql: Binary) -> Ter
 }
 
 /// Prepares, binds, runs and finalizes one statement: `{:ok, columns, rows}`.
-/// `limits` is `{read_only, timeout_ms, max_rows, max_bytes, max_concurrent}`,
-/// 0 for no limit; over `max_concurrent` user statements running the call
+/// `limits` is `{read_only, timeout_ms, max_rows, max_bytes, max_concurrent,
+/// no_txn_control}`, 0 for no limit (`no_txn_control` as in `sqlite_execute`); over `max_concurrent` user statements running the call
 /// gives `{:error, :busy}` without touching the connection.
 #[rustler::nif(schedule = "DirtyIo")]
 fn sqlite_run<'a>(
@@ -766,12 +788,13 @@ fn sqlite_run<'a>(
     conn: ResourceArc<Conn>,
     sql: Binary,
     params: Term<'a>,
-    limits: (bool, u64, u64, u64, u64),
+    limits: (bool, u64, u64, u64, u64, bool),
 ) -> Term<'a> {
     let _t = crate::stats::SQLITE_CALLS.time();
     let max_concurrent = limits.4;
     let limits = Limits {
         read_only: limits.0,
+        no_txn_control: limits.5,
         timeout_ms: limits.1,
         max_rows: limits.2,
         max_bytes: limits.3,
@@ -1013,6 +1036,82 @@ mod tests {
         ctl.read_only.store(false, Relaxed);
         assert!(run(db, "PRAGMA recursive_triggers(0)").is_ok());
 
+        // A user's text cannot end the transaction; savepoints are allowed.
+        ctl.no_txn_control.store(true, Relaxed);
+        for sql in [
+            "BEGIN",
+            "BEGIN IMMEDIATE",
+            "COMMIT",
+            "END",
+            "END TRANSACTION",
+            "ROLLBACK",
+        ] {
+            assert!(run(db, sql).is_err(), "{sql}");
+        }
+        for sql in [
+            "SAVEPOINT s",
+            "ROLLBACK TO s",
+            "RELEASE s",
+            "INSERT INTO t VALUES (1)",
+        ] {
+            assert!(run(db, sql).is_ok(), "{sql}");
+        }
+        ctl.no_txn_control.store(false, Relaxed);
+        assert!(run(db, "BEGIN").is_ok());
+        assert!(run(db, "ROLLBACK").is_ok());
+
+        // SAFETY: `db` is live and not used afterwards.
+        unsafe { close_v2(db) };
+    }
+
+    type Seen = Vec<(c_int, Option<String>, Option<String>)>;
+
+    unsafe extern "C" fn record(
+        ctx: *mut std::ffi::c_void,
+        action: c_int,
+        a: *const c_char,
+        b: *const c_char,
+        _: *const c_char,
+        _: *const c_char,
+    ) -> c_int {
+        let text = |p: *const c_char| {
+            // SAFETY: SQLite passes NUL-terminated strings or null.
+            (!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+        };
+        // SAFETY: the context is the `Seen` of the test.
+        unsafe { &mut *(ctx as *mut Seen) }.push((action, text(a), text(b)));
+        ffi::SQLITE_OK
+    }
+
+    /// The layout `authorize` relies on: transaction control is
+    /// `SQLITE_TRANSACTION` named BEGIN, COMMIT or ROLLBACK (END is a COMMIT);
+    /// savepoints are `SQLITE_SAVEPOINT` named BEGIN, RELEASE or ROLLBACK
+    /// with the savepoint's name second.
+    #[test]
+    #[cfg_attr(miri, ignore = "calls SQLite")]
+    fn the_authorizer_arguments_of_transaction_control() {
+        let db = mem();
+        let mut seen: Seen = Vec::new();
+        let ctx = &mut seen as *mut Seen as *mut std::ffi::c_void;
+        // SAFETY: `db` is live and `seen` outlives it.
+        unsafe { ffi::sqlite3_set_authorizer(db, Some(record), ctx) };
+        let name = |s: &str| Some(s.to_string());
+        let txn = ffi::SQLITE_TRANSACTION;
+        let sp = ffi::SQLITE_SAVEPOINT;
+
+        for (sql, expected) in [
+            ("BEGIN", (txn, name("BEGIN"), None)),
+            ("COMMIT", (txn, name("COMMIT"), None)),
+            ("END", (txn, name("COMMIT"), None)),
+            ("ROLLBACK", (txn, name("ROLLBACK"), None)),
+            ("SAVEPOINT s", (sp, name("BEGIN"), name("s"))),
+            ("RELEASE s", (sp, name("RELEASE"), name("s"))),
+            ("ROLLBACK TO s", (sp, name("ROLLBACK"), name("s"))),
+        ] {
+            seen.clear();
+            let _ = run(db, sql);
+            assert_eq!(seen.first(), Some(&expected), "{sql}");
+        }
         // SAFETY: `db` is live and not used afterwards.
         unsafe { close_v2(db) };
     }

@@ -98,7 +98,7 @@ defmodule Alambique.TxControlReproTest do
     %{path: path} = wal(env)
     Process.exit(pid(env), :kill)
     eventually(fn -> Alambique.owner(env.inst, env.cell) == :none end)
-    if wipe?, do: Enum.each([path, path <> "-wal", path <> "-shm"], &File.rm/1)
+    if wipe?, do: File.rm_rf!(Path.dirname(path))
     GatedStore.open(env.gate)
 
     {:ok, %{rows: rows}} = Alambique.query(env.inst, env.cell, @all, [], timeout: 20_000)
@@ -111,7 +111,7 @@ defmodule Alambique.TxControlReproTest do
     result = Alambique.hibernate(env.inst, env.cell)
     eventually(fn -> Alambique.owner(env.inst, env.cell) == :none end)
     stored = store_ids(env)
-    if wipe?, do: Enum.each([path, path <> "-wal", path <> "-shm"], &File.rm/1)
+    if wipe?, do: File.rm_rf!(Path.dirname(path))
     {:ok, %{rows: rows}} = Alambique.query(env.inst, env.cell, @all, [], timeout: 20_000)
     {result, stored, ids(rows)}
   end
@@ -253,21 +253,27 @@ defmodule Alambique.TxControlReproTest do
       check(obs)
     end
 
-    test "COMMIT: the caller is not told the write failed while its rows are committed", env do
+    test "COMMIT is refused, and the rows of the function stay a write in flight", env do
       env = boot(env)
+      test = self()
 
       {task, result} =
         write(env, fn tx ->
           {:ok, _} = ins(tx, 1)
-          Tx.execute(tx, "COMMIT")
+          send(test, {:commit, Tx.execute(tx, "COMMIT")})
+          :done
         end)
 
-      {:ok, %{rows: rows}} = Alambique.query(env.inst, env.cell, @all, [], timeout: 1_000)
+      assert_received {:commit, {:error, :not_authorized}}
+      reader = read(env)
+      wal = wal(env)
+      stored = store_ids(env)
       finish(env, {task, result})
 
-      # Either the write is rejected and absent, or it is a write in flight.
-      assert result == {:error, :transaction_ended} and ids(rows) == [],
-             inspect(%{result: result, local_rows: rows})
+      # Nothing is acknowledged or visible before the put; the rows are held
+      # by the batch, not committed behind its back.
+      assert result == :blocked and reader == :blocked and wal.in_flight and stored == [],
+             inspect(%{result: result, reader: reader, wal: wal, stored: stored})
     end
   end
 
@@ -306,9 +312,10 @@ defmodule Alambique.TxControlReproTest do
       stored = store_ids(env)
       finish(env, written)
 
-      assert {:ok, %{txid: txid}} = position
-      # Every write committed before the call is at or below the cut.
-      assert stored == [1], inspect(%{position: position, txid: txid, stored: stored})
+      # The row of the write in flight is not durable: no cut is reported
+      # until it is.
+      refute match?({:ok, _}, position) and stored == [],
+             inspect(%{position: position, stored: stored})
     end
   end
 
@@ -450,7 +457,7 @@ defmodule Alambique.TxControlReproTest do
         {task, result} = write(env, fn tx -> Tx.script(tx, script) end)
         finish(env, {task, result})
 
-        assert match?({:error, _}, result), inspect(result)
+        assert {:ok, {:error, {:not_ddl, _}}} = result
         assert {:ok, %{rows: [[0]]}} = Alambique.query(env.inst, env.cell, "SELECT max(n) FROM t")
       end
     end

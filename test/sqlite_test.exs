@@ -184,6 +184,34 @@ defmodule Alambique.SqliteTest do
       Sqlite.close(other)
     end
 
+    test "a user's text cannot end the transaction, and the flag is per call", %{conn: conn} do
+      :ok = Sqlite.execute(conn, "CREATE TABLE u (a)")
+      :ok = Sqlite.execute(conn, "BEGIN")
+      flag = [no_transaction_control: true]
+
+      for sql <- ["COMMIT", "END", "end transaction", "ROLLBACK", "BEGIN", "/* c */ commit"] do
+        assert {:error, :not_authorized} = run(conn, sql, flag), sql
+        assert {:error, :not_authorized} = Sqlite.execute(conn, sql, flag), sql
+      end
+
+      assert {:error, :not_authorized} =
+               Sqlite.execute(
+                 conn,
+                 "INSERT INTO u VALUES (1); COMMIT; INSERT INTO u VALUES (2)",
+                 flag
+               )
+
+      assert {:ok, :transaction} = Sqlite.transaction_status(conn)
+
+      # Savepoints are not refused, and the next call has no flag.
+      assert {:ok, _} = run(conn, "SAVEPOINT s", flag)
+      assert {:ok, _} = run(conn, "INSERT INTO u VALUES (3)", flag)
+      assert {:ok, _} = run(conn, "ROLLBACK TO s", flag)
+      assert {:ok, _} = run(conn, "RELEASE s", flag)
+      assert {:ok, _} = run(conn, "COMMIT", [])
+      assert {:ok, :idle} = Sqlite.transaction_status(conn)
+    end
+
     test "a call can be read only, bounded in time and bounded in result size", %{conn: conn} do
       :ok = Sqlite.execute(conn, "CREATE TABLE b (a); INSERT INTO b VALUES (1), (2), (3)")
 
@@ -356,7 +384,7 @@ defmodule Alambique.SqliteTest do
       assert {:ok, {:error, "UNIQUE constraint failed: d.a"}} =
                Db.transaction(cell, 6, fn tx -> Tx.execute(tx, "INSERT INTO d VALUES (1)") end)
 
-      assert {:error, :transaction_ended} =
+      assert {:ok, {:error, :not_authorized}} =
                Db.transaction(cell, 6, fn tx -> Tx.execute(tx, "COMMIT") end)
 
       assert {:ok, %{rows: [[1]]}} = rows.()

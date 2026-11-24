@@ -204,7 +204,8 @@ defmodule Alambique.Cell.Db do
   `select:` is the feed selection (`feed` of the instance configuration) that decides which tables and columns the triggers capture.
   `isolated: true` says that the transaction owns its batch (`Alambique.Tx.before/1`).
   `limits:` are the options of `Alambique.Sqlite.run/4` for the statements
-  the function runs through its handle.
+  the function runs through its handle. Those statements cannot run `BEGIN`,
+  `COMMIT`, `END` or `ROLLBACK` (`{:error, :not_authorized}`).
   """
   @spec transaction(Sqlite.conn(), pos_integer, (Tx.t() -> term), keyword) ::
           {:ok, term} | {:error, term}
@@ -283,9 +284,12 @@ defmodule Alambique.Cell.Db do
     read_only(conn)
   end
 
-  @doc "Runs a multi-statement script such as a migration."
-  @spec script(Sqlite.conn(), String.t()) :: :ok | {:error, term}
-  def script(conn, sql), do: Sqlite.execute(conn, sql)
+  @doc """
+  Runs a multi-statement script such as a migration. `opts` are those of
+  `Alambique.Sqlite.execute/3`.
+  """
+  @spec script(Sqlite.conn(), String.t(), keyword) :: :ok | {:error, term}
+  def script(conn, sql, opts \\ []), do: Sqlite.execute(conn, sql, opts)
 
   @doc "Current `PRAGMA user_version`."
   @spec user_version(Sqlite.conn()) :: {:ok, non_neg_integer} | {:error, term}

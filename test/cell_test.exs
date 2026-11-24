@@ -496,7 +496,9 @@ defmodule Alambique.CellTest do
 
       assert {:error, _} = Alambique.execute(inst, cell, "INSERT INTO t (n) VALUES (1)")
 
-      assert {:error, :transaction_ended} =
+      # A function cannot end its transaction: the statement is refused and
+      # the transaction goes on.
+      assert {:ok, {:error, :not_authorized}} =
                Alambique.transaction(inst, cell, fn tx -> Tx.execute(tx, "COMMIT") end)
 
       assert {:ok, %{rows: [[1], [2]]}} = numbers(inst, cell)

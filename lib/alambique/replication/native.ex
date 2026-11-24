@@ -177,7 +177,7 @@ defmodule Alambique.Replication.Native do
   @doc false
   def sqlite_close(_conn), do: nif_error()
   @doc false
-  def sqlite_execute(_conn, _sql), do: nif_error()
+  def sqlite_execute(_conn, _sql, _no_txn_control), do: nif_error()
   @doc false
   def sqlite_run(_conn, _sql, _params, _limits), do: nif_error()
   @doc false
