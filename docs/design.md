@@ -433,8 +433,51 @@ file only in the transaction of a user write, which reads wait for.
 A committed frame that no batch carries would break this: a reader could
 see it, a position could count it, and a crash would lose it. The invariant
 is that frames committed and not yet replicated imply a write in flight
-(pending or in a queued batch). Three layers keep it.
+(pending or in a queued batch). Four layers keep it.
 
+- Only the library writes on the connection of a cell. The process that opens
+  a connection is its opener, and one process, the opener until it names
+  another with `Alambique.Sqlite.assign/2`, is its user. Every call of the
+  native library on a connection checks the calling process: the user runs
+  statements and reads the state of the connection; the opener closes it,
+  interrupts it, reads its memory and names the user; any other process gets
+  `{:error, :not_owner}`. The check is `enif_self` against the two pids; on a
+  dirty scheduler it is the calling process (`test/connection_owner_test.exs`
+  calls the dirty entries from many processes at once). The sender of
+  `feed: [hand_over: :sender]` is the user of the reader the cell opened and
+  closes: the cell names the sender before it hands a range over, the sender
+  reads, and the cell closes the reader under a running read. The resource
+  monitors its opener and closes the connection when the opener ends, so a
+  handle that another process keeps does not keep the file, the lock or the
+  open transaction of a dead cell.
+  A connection that `Alambique.Cell.Db` opens is gated: outside the library's
+  transaction it allows only reading. The authorizer decides every action
+  code of SQLite and refuses a code it does not know. Reads, selects, functions
+  and recursive queries are allowed; a pragma is allowed when it only reads
+  (the introspection pragmas with any argument, a fixed list of reading
+  pragmas without one); every other action is allowed only while the library's
+  transaction is armed or in a call that carries the secret of the connection:
+  inserts, updates, deletes, every `CREATE`, `DROP`, `ALTER`, `REINDEX` and
+  `ANALYZE`, virtual tables, savepoints, transaction control, `ATTACH`,
+  `DETACH` (and `VACUUM`, which raises them) and every pragma that sets
+  something, `PRAGMA optimize` and `incremental_vacuum` included. `ATTACH`,
+  `DETACH` and `VACUUM` also need `attach: true`. `PRAGMA query_only` stays on
+  outside a transaction as a second barrier.
+  The secret is a random 64-bit value that the native open returns once, in
+  the `Alambique.Sqlite.Handle` that `Db.open` returns. The state of the cell
+  holds it; the `%Alambique.Tx{}`, the telemetry metadata and the contexts of
+  the fault points hold the bare reference, and the struct does not print it.
+  `close`, `checkpoint`, `begin_transaction`, `assign` and a call with
+  `write: true` need it, so a handle kept by a write, used later by a handler
+  that runs in the cell process, can read and nothing else. While the
+  transaction is armed even the secret does not close, begin, checkpoint or
+  write outside it: user code is running in the owner process. The library's
+  own writes outside a transaction carry the secret as an argument of the
+  call they make: the pragmas of an open, the cache size, the stamp of the
+  feed rows, the `ATTACH` of a rewind. Not defended: code that reads or
+  replaces the state of the cell process (`:sys.get_state/1`,
+  `:sys.replace_state/2`, a debugger), writes of the database file by other
+  means, and other native code in the VM.
 - A transaction function cannot end its transaction. The authorizer of the
   native library (`SQLITE_TRANSACTION`) refuses `BEGIN`, `COMMIT`, `END` and
   `ROLLBACK` in a call that carries user text (`Alambique.Tx.query/3`,
@@ -449,9 +492,7 @@ is that frames committed and not yet replicated imply a write in flight
   the `%Alambique.Tx{}` of the function holds the connection, and nothing
   public that takes the connection can end, restart or disarm the
   transaction (a wrong token is `{:error, :not_authorized}`, so is a second
-  `begin_transaction/1`). A function that closes the connection loses its
-  write (SQLite rolls it back) and the cell stops with `{:rollback_failed,
-  :connection_closed}`. Savepoints work.
+  `begin_transaction/1`), and closing it is refused too. Savepoints work.
   A text holds one statement; a tail with another statement
   is refused (`{:error, {:multiple_statements, tail}}`) and a NUL byte in any
   text is refused (`{:error, :nul_in_statement}`), both before anything runs.

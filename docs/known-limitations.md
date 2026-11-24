@@ -20,6 +20,11 @@ about it, and where the evidence is.
   up to a TXID before the gap. Alambique does not apply files written by
   Litestream. See
   [segment-format.md](segment-format.md#litestream-compatibility).
+- The protection of a cell's connection holds against code that uses the
+  connection of a write, not against code that reads or replaces the state of
+  the cell process (`:sys.get_state/1`, `:sys.replace_state/2`, a debugger)
+  or writes the database file by other means. A kept handle can read and
+  nothing else ([design.md](design.md), section 15).
 - The rows that `CREATE TABLE ... AS SELECT` writes are in the cell and in its
   store but not in the change feed: the triggers of the new table exist only
   once the statement has ended. Create the table, then fill it with
