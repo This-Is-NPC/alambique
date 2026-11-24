@@ -27,8 +27,8 @@ defmodule Alambique.CellNifCallsTest do
     Process.sleep(200)
     calls = NativeStats.read().sqlite_calls - before
 
-    # Begin, the feed cleanup, the statement, the status check, commit and
-    # the stamp of the feed rows: 10 calls before they shared pragma calls.
+    # Begin, the feed cleanup, the statement, the finish (commit and pragma),
+    # the stamp of the feed rows and the read of the captured rows.
     assert calls <= 6, "#{calls} SQLite calls for one write"
   end
 end

@@ -117,6 +117,15 @@ while the lease is valid. The retry is safe because the key depends only on the
 TXID. The cell stops when the lease runs out, on `:taken` (`:fenced`), or on a
 lost lease. Writers of a sent batch get `:outcome_unknown`.
 
+**SQLite calls of a write.** Each call is one native call on a dirty IO
+scheduler. With the default feed a write makes six: the begin
+(`PRAGMA query_only = OFF; BEGIN IMMEDIATE`); the delete of the feed rows
+already published, when there are any; the statement; the finish (`COMMIT`
+then `PRAGMA query_only = ON`); the stamp of the feed rows with the TXID and
+time of the batch; and the read of the captured rows that the cell hands to
+the publisher (`hand_over: :cell`). With `feed: false` a write makes three:
+the begin, the statement and the finish.
+
 **Put rule.** After `:precondition_failed` the writer compares the object's
 epoch with the segment before it. The same bytes mean an earlier attempt landed.
 A lower epoch is a zombie from a fenced-out owner and may be overwritten.
@@ -461,8 +470,8 @@ is that frames committed and not yet replicated imply a write in flight
   statement returns `{:error, :transaction_ended}` and does not run. It
   covers the library's own statements too, such as the `user_version` after a
   migration step. `finish_transaction/3` runs the `COMMIT` and then the
-  `PRAGMA query_only = ON` as two statements of one native call (a write
-  stays within six SQLite calls, §6), and tells the failures apart: a failed
+  `PRAGMA query_only = ON` as two statements of one native call (the calls of
+  a write are listed in §6), and tells the failures apart: a failed
   `COMMIT` is a rollback, a failed pragma after it is `{:error, {:query_only,
   reason}}`. When that pragma fails the write is committed
   and the connection is in an unknown mode, so the cell stops: the caller gets
@@ -474,7 +483,7 @@ is that frames committed and not yet replicated imply a write in flight
 - The cell checks the rest. The native library keeps the size of the WAL
   (the WAL hook) and notes it when the connection is armed; a write that failed is an
   orphan when the WAL moved during its transaction, whether or not a batch is
-  queued or in flight (one native call, about 135 ns). At every cut
+  queued or in flight (one native call, on the order of 100 ns). At every cut
   (`position/3`, a drain, a checkpoint), before a hibernation and before a
   feed cleanup, the cell also asks the WAL for unreplicated frames when
   nothing is pending or queued; a hibernation never answers `:ok` while there
@@ -486,10 +495,9 @@ is that frames committed and not yet replicated imply a write in flight
   of their own before it goes on; exactly the write that left them is parked
   as a write and answered after the batch with `{:error, {:committed,
   reason}}`, and reads wait for that batch. A write that failed without
-  moving the WAL gets its plain error, whatever older frames exist. `:stop`
-  is the default because frames that no write accounts for are a defect to be
-  seen, and discarding them restores a state the store holds and every
-  caller already knows. A checkpoint with a deadline waits for the batch of
+  moving the WAL gets its plain error, whatever older frames exist. With
+  `:stop` the cell discards the frames, so its state is the one the store
+  holds and every caller was told. A checkpoint with a deadline waits for the batch of
   `:replicate` within the deadline. A feed cleanup runs the check first even
   with batches in flight: the frames of a batch in flight are encoded
   already, so the frames the WAL still holds are no write's, and under
