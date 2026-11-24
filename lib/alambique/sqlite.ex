@@ -147,6 +147,16 @@ defmodule Alambique.Sqlite do
   def expect_transaction(conn, on), do: Native.sqlite_expect_transaction(conn, on)
 
   @doc """
+  Runs a user's script of schema statements, each as SQLite delimits it.
+  A statement that does not start with `CREATE`, `DROP` or `ALTER` is refused
+  with `{:error, {:not_ddl, statement}}` before it runs, and nothing after it
+  runs; `BEGIN`, `COMMIT`, `END` and `ROLLBACK` are refused as in `run/4`.
+  Statements before a refused one have run: the caller undoes them.
+  """
+  @spec script(conn, iodata) :: :ok | {:error, term}
+  def script(conn, sql), do: Native.sqlite_script(conn, IO.iodata_to_binary(sql))
+
+  @doc """
   Bytes the connection holds, by purpose: `:cache_used` (page cache),
   `:schema_used`, `:stmt_used` (prepared statements) and `:lookaside_used`.
   """
