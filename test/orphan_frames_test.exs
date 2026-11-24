@@ -150,6 +150,34 @@ defmodule Alambique.OrphanFramesTest do
     end
   end
 
+  # The last look before a release, past the drain: frames made while the
+  # cell hands its feed rows over are not released as `:ok`, whatever the option.
+  for mode <- [:stop, :replicate] do
+    test "hibernate refuses frames made after the drain (#{mode})", env do
+      c = boot(env, unquote(mode))
+      %{conn: conn} = :sys.get_state(pid(c))
+      test = self()
+
+      Alambique.Fault.install(fn
+        :feed_before_stop_flush, _ ->
+          :ok = Db.writable_script(conn, "INSERT INTO t VALUES (5)")
+          send(test, :injected)
+
+        _, _ ->
+          :ok
+      end)
+
+      on_exit(&Alambique.Fault.uninstall/0)
+      {:ok, _} = Alambique.execute(c.inst, c.cell, "INSERT INTO t VALUES (2)")
+
+      assert Alambique.hibernate(c.inst, c.cell) == {:error, :orphan_frames}
+      assert_received :injected
+      assert asleep?(c)
+      assert rows(c) == store(c)
+      refute 5 in store(c)
+    end
+  end
+
   test "a write that is in flight keeps frames from counting as orphans", env do
     c = boot(env, :stop)
     parent = self()
