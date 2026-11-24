@@ -10,16 +10,19 @@ defmodule Alambique.SameNodeIdPropertiesTest do
     * every acknowledged write is in the durable state of its cell exactly
       once, and nothing that nobody attempted is;
     * no `(cell, txid)` is acknowledged by two cell processes, so there is one
-      writer per TXID.
+      writer per TXID;
+    * a write is acknowledged only once its segment is in the store, also when
+      the later of two batches in flight lands first;
+    * a write to a cell nobody else holds, that was never killed, is
+      acknowledged; any other instance is refused while the holder lives.
   """
   use ExUnit.Case, async: false
   use ExUnitProperties
 
   import Alambique.CellHelpers
 
-  alias Alambique.Cell
-  alias Alambique.Config
-  alias AlambiqueTestkit.MemoryStore
+  alias Alambique.{AckGuard, Cell, Config, HeldWrites}
+  alias AlambiqueTestkit.{GatedStore, MemoryStore}
 
   @moduletag timeout: 600_000
   @moduletag capture_log: true
@@ -38,7 +41,8 @@ defmodule Alambique.SameNodeIdPropertiesTest do
     cell = member_of(@cells)
 
     frequency([
-      {12, tuple({constant(:write), who, cell})},
+      {10, tuple({constant(:write), who, cell})},
+      {3, tuple({constant(:held_pair), who, cell})},
       {3, tuple({constant(:hibernate), who, cell})},
       {2, tuple({constant(:kill), who, cell})},
       {3, tuple({constant(:pass), member_of([50, 200, 1_100])})}
@@ -62,11 +66,15 @@ defmodule Alambique.SameNodeIdPropertiesTest do
     handler = {__MODULE__, tag}
     :telemetry.attach(handler, [:alambique, :cell, :commit], &__MODULE__.record/4, log)
 
+    {:ok, gate} = GatedStore.start_link()
+    guard = AckGuard.attach(ctx.store, prefix, &(&1 in @cells))
+    gated = %{ctx | store: GatedStore.wrap(gate, ctx.store)}
+
     insts =
       for who <- @who, into: %{} do
         name = :"#{who}#{tag}"
 
-        start_instance(ctx,
+        start_instance(gated,
           name: name,
           prefix: prefix,
           node_id: @id,
@@ -86,6 +94,9 @@ defmodule Alambique.SameNodeIdPropertiesTest do
       holder: %{},
       acked: %{},
       attempted: %{},
+      killed: MapSet.new(),
+      gate: gate,
+      guard: guard,
       store: ctx.store_config
     }
 
@@ -93,6 +104,8 @@ defmodule Alambique.SameNodeIdPropertiesTest do
       run = Enum.reduce(ops, run, &step/2)
       verify(ctx, run, prefix, log)
     after
+      AckGuard.detach(guard)
+      GenServer.stop(gate)
       :telemetry.detach(handler)
       MemoryStore.clear(ctx.store_config)
       for {_, name} <- insts, do: stop_supervised(name)
@@ -111,24 +124,28 @@ defmodule Alambique.SameNodeIdPropertiesTest do
   # cell up, or when its cell died and its lease may have expired.
   defp step({:write, who, cell}, run) do
     n = run.seq + 1
-    run = %{run | seq: n, attempted: Map.update(run.attempted, cell, [n], &[n | &1])}
+    run = %{run | seq: n}
+    answer = Alambique.execute(run.insts[who], cell, "INSERT INTO t VALUES (?)", [n])
+    account(run, who, cell, n, answer)
+  end
 
-    case Alambique.execute(run.insts[who], cell, "INSERT INTO t VALUES (?)", [n]) do
-      {:ok, _} ->
-        case run.holder[cell] do
-          {other, :live} when other != who ->
-            flunk("#{who} acknowledged a write of #{cell} while #{other} holds it")
+  # Two writes of the holder whose puts are held, the later one landing first.
+  defp step({:held_pair, who, cell}, run) do
+    run = step({:write, who, cell}, run)
+    pid = Cell.whereis(Config.fetch!(run.insts[who]), cell)
 
-          _ ->
-            %{
-              run
-              | holder: Map.put(run.holder, cell, {who, :live}),
-                acked: Map.update(run.acked, cell, [n], &[n | &1])
-            }
-        end
+    if pid && run.holder[cell] == {who, :live} do
+      ns = [run.seq + 1, run.seq + 2]
+      run = %{run | seq: run.seq + 2}
 
-      {:error, _} ->
-        run
+      answers =
+        HeldWrites.run(run.gate, cell, pid, 8, ns, fn n ->
+          Alambique.execute(run.insts[who], cell, "INSERT INTO t VALUES (?)", [n])
+        end)
+
+      Enum.reduce(answers, run, fn {n, answer}, run -> account(run, who, cell, n, answer) end)
+    else
+      run
     end
   end
 
@@ -143,7 +160,12 @@ defmodule Alambique.SameNodeIdPropertiesTest do
     case Cell.whereis(Config.fetch!(run.insts[who]), cell) do
       pid when is_pid(pid) ->
         Process.exit(pid, :kill)
-        %{run | holder: Map.replace(run.holder, cell, {who, :killed})}
+
+        %{
+          run
+          | holder: Map.replace(run.holder, cell, {who, :killed}),
+            killed: MapSet.put(run.killed, cell)
+        }
 
       nil ->
         run
@@ -151,6 +173,32 @@ defmodule Alambique.SameNodeIdPropertiesTest do
   end
 
   defp step({:pass, ms}, run), do: tap(run, fn _ -> Process.sleep(ms) end)
+
+  # What the model says of the answer to write `n`: an instance that holds the
+  # cell, or finds it free and was never killed, is acknowledged.
+  defp account(run, who, cell, n, answer) do
+    run = %{run | attempted: Map.update(run.attempted, cell, [n], &[n | &1])}
+    free? = run.holder[cell] in [nil, {who, :live}] and cell not in run.killed
+
+    case answer do
+      {:ok, _} ->
+        case run.holder[cell] do
+          {other, :live} when other != who ->
+            flunk("#{who} acknowledged a write of #{cell} while #{other} holds it")
+
+          _ ->
+            %{
+              run
+              | holder: Map.put(run.holder, cell, {who, :live}),
+                acked: Map.update(run.acked, cell, [n], &[n | &1])
+            }
+        end
+
+      {:error, _} = error ->
+        refute free?, "#{who} was refused a free cell #{cell}: #{inspect(error)}"
+        run
+    end
+  end
 
   defp release(run, who, cell) do
     case run.holder[cell] do
@@ -160,6 +208,9 @@ defmodule Alambique.SameNodeIdPropertiesTest do
   end
 
   defp verify(ctx, run, prefix, log) do
+    assert AckGuard.violations(run.guard) == [],
+           "acknowledged before the put landed: #{inspect(AckGuard.violations(run.guard))}"
+
     for cell <- @cells, acked = Map.get(run.acked, cell, []), acked != [] do
       hibernate_everywhere(run, cell)
       rows = durable_rows(ctx, cell, "SELECT n FROM t ORDER BY n", prefix) |> List.flatten()
