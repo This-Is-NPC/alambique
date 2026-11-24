@@ -132,7 +132,7 @@ defmodule Alambique.Feed.Sender do
   # reader. A TXID after the last batch read has no rows: a marker in the
   # queue reports it once the batches before it are published, so the cell's
   # backlog reaches zero. The cell closes the reader, also under a read: an
-  # interrupted or closed one ends the sender, which the cell no longer needs.
+  # interrupted or closed one ends the sender, which the cell does not need after that.
   defp read(w, from, upto, reader) do
     arrived = System.monotonic_time(:millisecond)
     w = read_pages(w, reader, {from, -1}, nil, upto, arrived)

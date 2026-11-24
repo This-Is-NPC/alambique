@@ -180,10 +180,8 @@ each must be a non-empty string. The option affects only the feed:
 `Alambique.query/5`, migrations and the deploy check treat these tables like
 any other.
 
-The rows that `CREATE TABLE ... AS SELECT` writes are not captured: the
-triggers of the new table exist only once the statement has ended. The rows
-are in the cell and in its store, but not in the feed. Create the table first
-and fill it with `INSERT ... SELECT` in a write to have them in the feed.
+The rows that `CREATE TABLE ... AS SELECT` writes are not in the feed; see
+[known-limitations.md](known-limitations.md).
 
 A feed copies every column of a captured row into the cell's file and into the
 feed object. A column that your consumer never reads, such as a large body,
@@ -334,8 +332,8 @@ The module documentation of `Alambique.Feed.Record` describes the body.
 When a batch is acknowledged, the cell reads the captured rows of the batches
 that were acknowledged and hands them to its publisher. For a batch of
 thousands of rows this read runs in the cell's process, and a call that arrives
-right after a large transaction waits for it. In a measurement of one batch of
-4 500 rows the read took 2.7 to 3.4 ms, 91 to 92 % of the hand-over.
+right after a large transaction waits for it. The read is one query per piece
+plus a copy of each row, so its time grows with the rows of the batch.
 
 `feed: [hand_over_rows: n]` (default `nil`, no bound) hands the rows over in
 pieces of at most `n`. Between two pieces the cell serves the calls in its
@@ -347,8 +345,8 @@ from its start. A cell that stops hands over everything without serving calls,
 for at most `stop_publish_ms`; if that time passes, it gives up and the rows
 stay in the file for the next owner, as for any batch that was not published.
 
-The bound has a cost: each piece is a query on the cell's file. How small to
-set it for a given workload is not measured yet.
+The bound has a cost: each piece is a query on the cell's file, so a smaller
+bound means more queries for the same rows.
 
 ## 14. Let the publisher read the rows
 
@@ -356,10 +354,10 @@ set it for a given workload is not measured yet.
 rows out of the cell. The cell hands over only the range of TXIDs of the
 acknowledged batches. The sender reads the rows with a second connection to the
 cell's file, opened read-only, and builds the batches itself, with the same
-record ids and objects as `:cell`. The cell no longer spends a turn of its
-mailbox on the read and the copy of the rows.
+record ids and objects as `:cell`. The cell spends no turn of its mailbox on
+the read and the copy of the rows.
 
-What changes:
+With `:sender`:
 
 - The cell owns the reader. It closes it when the sender has read everything
   handed over, and always before it closes its own connection, so the stop,
@@ -379,7 +377,9 @@ What changes:
 - A cell that stops hands over the TXIDs and waits for the sender within
   `stop_publish_ms`, as with `:cell`.
 
-How much cell time `:sender` saves for a given batch size is not measured yet.
+`:sender` takes the read and the copy of the rows off the cell. It costs one
+read-only open per burst of handed-over ranges, a page cache of
+`reader_cache_kib`, and two open files while the reader is open.
 
 ## Troubleshooting
 
@@ -394,8 +394,8 @@ How much cell time `:sender` saves for a given batch size is not measured yet.
 - **A record appears twice.** This is expected after an owner change or a lost
   acknowledgement. Deduplicate by `record.id`.
 - **A cell shows gaps in its TXIDs.** Fences, migrations, cleanups of the feed
-  and transactions that change no row use TXIDs without producing an object. Nothing is missing. See
-  [design.md](design.md), section 13.
+  and transactions that change no row use TXIDs without producing an object.
+  Nothing is missing. See [design.md](design.md), section 13.
 - **A table of your application appears on the feed.** List its prefix in
   `feed: [internal_prefixes: ...]` (step 7). The change applies at the cell's
   next wake.
