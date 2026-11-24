@@ -1274,16 +1274,12 @@ mod tests {
     #[cfg_attr(miri, ignore = "calls SQLite")]
     fn only_blank_text_may_follow_a_statement() {
         let db = mem();
-        let next = |sql: &str| {
-            next_statement(db, sql.as_bytes())
-                .ok()
-                .map(|(s, end)| (s, end))
-        };
+        let next = |sql: &str| next_statement(db, sql.as_bytes()).ok().expect(sql);
         let kinds = |sql: &str| {
-            let (stmt, end) = next(sql).expect(sql);
+            let (stmt, end) = next(sql);
             let tail = &sql.as_bytes()[end..];
-            let stmt_found = stmt.map(|StmtPtr(s)| finalize(s)).is_some();
-            (stmt_found, refuse_tail(db, tail).is_ok())
+            let found = stmt.map(|StmtPtr(s)| finalize(s)).is_some();
+            (found, refuse_tail(db, tail).is_ok())
         };
         for (sql, statement, tail_ok) in [
             ("SELECT 1", true, true),
@@ -1302,7 +1298,7 @@ mod tests {
             assert_eq!(kinds(sql), (statement, tail_ok), "{sql:?}");
         }
         let long = format!("SELECT 1; SELECT '{}'", "x".repeat(500));
-        let end = next(&long).unwrap().1;
+        let end = next(&long).1;
         match refuse_tail(db, &long.as_bytes()[end..]) {
             Err(Failure::Multiple(tail)) => {
                 assert!(tail.len() <= TAIL_SHOWN + 3 && tail.ends_with("..."))
