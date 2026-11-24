@@ -95,13 +95,15 @@ defmodule Alambique.Feed.Capture do
   end
 
   @doc "Drops the triggers and forgets the fingerprint. Run it in a transaction."
-  @spec uninstall(term) :: :ok
-  def uninstall(conn), do: Db.script(conn, drops(conn))
+  @spec uninstall(term) :: :ok | {:error, term}
+  def uninstall(conn) do
+    with {:ok, sql} <- drops(conn), do: Db.script(conn, sql)
+  end
 
   # DROP statements for the triggers, and the reset of the fingerprint when
   # the state table exists.
   defp drops(conn) do
-    {:ok, %{rows: rows}} =
+    result =
       Db.run(
         conn,
         """
@@ -111,10 +113,13 @@ defmodule Alambique.Feed.Capture do
         [String.replace(@trigger_prefix, "_", "\\_") <> "%", @state]
       )
 
-    Enum.map_join(rows, "\n", fn
-      ["trigger", name] -> "DROP TRIGGER main.#{ident(name)};"
-      ["table", _] -> "UPDATE #{@state} SET schema = '';"
-    end)
+    with {:ok, %{rows: rows}} <- result do
+      {:ok,
+       Enum.map_join(rows, "\n", fn
+         ["trigger", name] -> "DROP TRIGGER main.#{ident(name)};"
+         ["table", _] -> "UPDATE #{@state} SET schema = '';"
+       end)}
+    end
   end
 
   @doc """
@@ -126,6 +131,7 @@ defmodule Alambique.Feed.Capture do
     started = System.monotonic_time()
     tables = user_tables(conn, select)
     keys = keys(conn)
+    {:ok, drops} = drops(conn)
 
     triggers =
       for {table, _sql, spec} <- tables, do: triggers(table, Map.fetch!(keys, table), spec)
@@ -133,7 +139,7 @@ defmodule Alambique.Feed.Capture do
     :ok =
       Db.script(conn, [
         tables_sql(),
-        drops(conn),
+        drops,
         triggers,
         """
         INSERT INTO #{@state} (id, published_txid, last_time, schema) VALUES (1, 0, 0, '#{fingerprint(tables)}')
@@ -173,20 +179,22 @@ defmodule Alambique.Feed.Capture do
   @doc """
   Runs `fun`, a statement that may change the schema, with the triggers
   dropped (SQLite refuses to drop a column that a trigger names), then
-  generates them again for the new schema. Run it in a transaction.
+  generates them again for the new schema. Run it in a transaction; when the
+  triggers cannot be dropped (the transaction ended), `fun` does not run and
+  the error is returned.
   """
-  @spec around_ddl(term, select, (-> result)) :: result when result: var
+  @spec around_ddl(term, select, (-> result)) :: result | {:error, term} when result: var
   def around_ddl(conn, select, fun) do
-    :ok = uninstall(conn)
-
-    try do
-      fun.()
-    after
-      # A statement stopped at its deadline rolled the transaction back:
-      # there is no schema to match and no statement may run.
-      if Alambique.Sqlite.transaction_status(conn) == {:ok, :transaction} and
-           not current?(conn, select),
-         do: :ok = install(conn, select)
+    with :ok <- uninstall(conn) do
+      try do
+        fun.()
+      after
+        # A statement stopped at its deadline rolled the transaction back:
+        # there is no schema to match and no statement may run.
+        if Alambique.Sqlite.transaction_status(conn) == {:ok, :transaction} and
+             not current?(conn, select),
+           do: :ok = install(conn, select)
+      end
     end
   end
 

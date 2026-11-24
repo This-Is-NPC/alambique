@@ -235,6 +235,24 @@ defmodule Alambique.TxControlSecondReviewTest do
     assert {:error, _} = result
   end
 
+  test "a schema statement after SQLite ended the transaction is an error, not a raise", env do
+    c = boot(env, :stop)
+    test = self()
+
+    result =
+      Alambique.transaction(c.inst, c.cell, fn tx ->
+        {:error, _} = Tx.execute(tx, "INSERT OR ROLLBACK INTO t VALUES (0)")
+        send(test, {:inner, Tx.script(tx, "CREATE TABLE u (n)"), Tx.execute(tx, "DROP TABLE t")})
+        :done
+      end)
+
+    assert_received {:inner, script, execute}
+    assert script == {:error, :transaction_ended}
+    assert execute == {:error, :transaction_ended}
+    assert result == {:error, :transaction_ended}
+    assert rows(c) == [0, 1]
+  end
+
   # The cell must not go on serving with a connection that may write or a
   # transaction that stayed open: it stops at once. What a caller gets from a
   # cell that did not stop is reported.
