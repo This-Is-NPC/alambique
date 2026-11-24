@@ -672,6 +672,9 @@ defmodule Alambique.Cell do
   defp info({:feed_published, pid, txid, time, count}, %State{mode: :serving} = state),
     do: {:noreply, state |> Publisher.published(pid, txid, time, count) |> arm_cleanup()}
 
+  defp info({:feed_part, ref}, %State{mode: :serving} = state),
+    do: {:noreply, Publisher.continue(state, ref)}
+
   defp info({:timeout, ref, :feed_cleanup}, %State{mode: :serving, feed_cleanup: ref} = state) do
     state = %{state | feed_cleanup: nil}
 

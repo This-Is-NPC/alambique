@@ -500,6 +500,15 @@ defmodule Alambique do
     * `:cleanup_rows` - rows one cleanup removes at most (default `nil`, all).
       A batch is never cut: one with more rows goes whole. What is left is
       removed by the next cleanup, which follows at once.
+    * `:hand_over_rows` - rows the cell reads and hands to its publisher at a
+      time (default `nil`, all the rows of the acknowledged batches at once).
+      With a bound the cell hands over a large batch in pieces of at most this
+      many rows, one piece per turn of its mailbox, so a call that arrives
+      meanwhile waits for one piece and not for the whole batch. The
+      publisher joins the pieces: ids and objects are those of an unbounded
+      hand-over. A smaller bound shortens the wait of a call and adds queries
+      on the cell's file. A cell that stops hands over everything without
+      serving calls, within `:stop_publish_ms`. The option is of the instance.
     * `:shards` - prefixes the feed of each location is spread over (default
       16, at most 1 000). It is fixed for as long as the feed exists: consumers
       must use the same value, and a cell changes shard when it changes.

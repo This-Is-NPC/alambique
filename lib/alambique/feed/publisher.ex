@@ -112,8 +112,11 @@ defmodule Alambique.Feed.Publisher do
   Hands the rows of every acknowledged batch not yet handed over to the
   sender, in TXID order, and returns at once. Rows of batches still in the
   pipeline wait: they are not durable. At most `feed.max_backlog_batches`
-  batches are with the sender; the rest follows as it reports progress. The
-  sender retries failures by itself; they never reach the callers.
+  batches are with the sender; the rest follows as it reports progress. With
+  `feed.hand_over_rows` the rows go in pieces of that many, the next one in a
+  message of the cell to itself, so the calls in the mailbox are served
+  between pieces. The sender retries failures by itself; they never reach the
+  callers.
   """
   @spec after_ack(State.t()) :: State.t()
   def after_ack(%State{config: %{feed_capture: false}} = state), do: state
@@ -126,37 +129,60 @@ defmodule Alambique.Feed.Publisher do
       when hydrator != nil,
       do: state
 
-  def after_ack(%State{feed_backlog: backlog} = state) do
+  # The next piece is on its way.
+  def after_ack(%State{feed_tick: tick} = state) when tick != nil, do: state
+
+  # A batch that is partly with the sender takes no room: it must be finished.
+  def after_ack(%State{feed_backlog: backlog, feed_part: part} = state) do
     limit = state.config.feed.max_backlog_batches
 
     cond do
-      backlog >= limit -> %{state | feed_capped: true}
-      State.lease_valid?(state) -> hand_over(state, limit - backlog)
+      backlog >= limit and part == nil -> %{state | feed_capped: true}
+      State.lease_valid?(state) -> state |> hand_over(max(limit - backlog, 0)) |> next_piece()
       true -> state
     end
   end
 
+  @doc "Hands over the next piece, when `ref` is the message the cell sent itself for it."
+  @spec continue(State.t(), reference) :: State.t()
+  def continue(%State{feed_tick: ref} = state, ref), do: after_ack(%{state | feed_tick: nil})
+  def continue(state, _stale), do: state
+
+  defp next_piece({state, true}) do
+    ref = make_ref()
+    send(self(), {:feed_part, ref})
+    %{state | feed_tick: ref}
+  end
+
+  defp next_piece({state, false}), do: state
+
   @doc """
   Publishes what the cell holds before it stops with its lease (design §13):
-  hands over every acknowledged batch, whatever the backlog cap, asks the
-  sender to put its queue without lingering and waits for it, at most
-  `feed.stop_publish_ms` and while the lease is valid. On a timeout, a lost
-  lease or an ended sender it gives up and kills the sender; the rows stay in
-  the file for the next owner. Nothing happens without a connection or a lease.
+  hands over every acknowledged batch, whatever the backlog cap and without
+  serving a call between the pieces, asks the sender to put its queue without
+  lingering and waits for it, at most `feed.stop_publish_ms` and while the
+  lease is valid. On a timeout, a lost lease or an ended sender it gives up
+  and kills the sender; the rows stay in the file for the next owner. Nothing
+  happens without a connection or a lease.
   """
   @spec flush(State.t()) :: State.t()
   def flush(%State{conn: conn, lease: lease, config: %{feed: %{stop_publish_ms: wait}}} = state)
       when conn != nil and lease != nil and wait > 0 do
     if State.lease_valid?(state) do
-      state = hand_over(state, :all)
+      deadline = System.monotonic_time(:millisecond) + wait
 
-      if state.feed_backlog > 0 do
-        Fault.point(:feed_before_stop_flush, %{cell: state.id, txid: state.pipe.acked.txid})
-        ref = make_ref()
-        send(state.feed_pid, {:flush, ref})
-        await_flush(state, ref, System.monotonic_time(:millisecond) + wait)
-      else
-        state
+      case hand_over_all(%{state | feed_tick: nil}, deadline) do
+        {:ok, %{feed_backlog: backlog} = state} when backlog > 0 ->
+          Fault.point(:feed_before_stop_flush, %{cell: state.id, txid: state.pipe.acked.txid})
+          ref = make_ref()
+          send(state.feed_pid, {:flush, ref})
+          await_flush(state, ref, deadline)
+
+        {:ok, state} ->
+          state
+
+        {:late, state} ->
+          give_up(state)
       end
     else
       state
@@ -164,6 +190,18 @@ defmodule Alambique.Feed.Publisher do
   end
 
   def flush(state), do: state
+
+  defp hand_over_all(state, deadline) do
+    case hand_over(state, :all) do
+      {state, false} ->
+        {:ok, state}
+
+      {state, true} ->
+        if System.monotonic_time(:millisecond) >= deadline,
+          do: {:late, state},
+          else: hand_over_all(state, deadline)
+    end
+  end
 
   defp await_flush(state, ref, deadline) do
     lease_left = state.lease.expires_at_ms - state.config.skew_margin_ms - State.now_ms(state)
@@ -212,43 +250,105 @@ defmodule Alambique.Feed.Publisher do
   def sender_down(state, _pid), do: state
 
   defp reset(state),
-    do: %{state | feed_pid: nil, feed_sent: state.feed_published, feed_backlog: 0}
+    do: %{
+      state
+      | feed_pid: nil,
+        feed_sent: state.feed_published,
+        feed_backlog: 0,
+        feed_part: nil,
+        feed_tick: nil
+    }
 
+  # One piece: at most `feed.hand_over_rows` rows from the position of the
+  # hand-over: whole batches as far as they fit, and the start or the middle
+  # of the one the bound cuts. Returns the state and whether more rows follow
+  # at once. At most `room` batches are started; the others wait for the
+  # sender (`feed_capped`).
   defp hand_over(state, room) do
     state = if alive?(state.feed_pid), do: state, else: reset(state)
+    bound = state.config.feed.hand_over_rows
+    position = state.feed_part || {state.feed_sent + 1, -1}
+    rows = Capture.rows_from(state.conn, position, state.pipe.acked.txid, bound && bound + 1)
+    {rows, beyond} = if bound, do: Enum.split(rows, bound), else: {rows, []}
+    {pieces, cut?} = rows |> pieces(beyond, state.feed_part) |> take_room(room)
 
-    case batches(state) do
+    case pieces do
       [] ->
-        %{state | feed_capped: false}
+        {%{state | feed_part: nil, feed_capped: false}, false}
 
-      batches ->
-        {now, later} = if room == :all, do: {batches, []}, else: Enum.split(batches, room)
-        Fault.point(:feed_before_publish, %{cell: state.id, txid: hd(now).txid})
+      _ ->
+        Fault.point(:feed_before_publish, %{
+          cell: state.id,
+          txid: hd(pieces).txid,
+          sender: state.feed_pid
+        })
+
         state = if state.feed_pid, do: state, else: %{state | feed_pid: Sender.start(state)}
-        send(state.feed_pid, {:batches, now})
 
-        %{
-          state
-          | feed_sent: List.last(now).txid,
-            feed_backlog: state.feed_backlog + length(now),
-            feed_capped: later != []
-        }
+        send(
+          state.feed_pid,
+          {:batches, Enum.map(pieces, &Map.take(&1, [:txid, :ts, :changes, :partial]))}
+        )
+
+        {sent(state, pieces, cut?), beyond != [] and not cut?}
     end
+  end
+
+  defp sent(state, pieces, cut?) do
+    last = List.last(pieces)
+
+    %{
+      state
+      | feed_part: if(last.partial, do: {last.txid, last.seq}),
+        feed_sent: if(last.partial, do: state.feed_sent, else: last.txid),
+        feed_backlog: state.feed_backlog + Enum.count(pieces, & &1.first),
+        feed_capped: cut?
+    }
   end
 
   defp alive?(nil), do: false
   defp alive?(pid), do: Process.alive?(pid)
 
-  defp batches(state) do
-    state.conn
-    |> Capture.rows_after(state.feed_sent, state.pipe.acked.txid)
-    |> Enum.chunk_by(&hd/1)
-    |> Enum.map(fn [[txid, ts | _] | _] = rows ->
-      %{
-        txid: txid,
-        ts: ts,
-        changes: Enum.map(rows, fn [_, _ | change] -> List.to_tuple(change) end)
-      }
-    end)
+  # The batches of `rows`, in order, as pieces: `partial` when rows of the
+  # batch follow the piece (the first of `beyond` is one), `first` when the
+  # piece starts it (`resumed` is the position of a batch started before),
+  # `seq` the position of its last row.
+  defp pieces(rows, beyond, resumed) do
+    pieces =
+      for group <- Enum.chunk_by(rows, &hd/1) do
+        [txid, ts | _] = hd(group)
+
+        %{
+          txid: txid,
+          ts: ts,
+          changes:
+            Enum.map(group, fn [_, _, tbl, op, key, vals, _seq] -> {tbl, op, key, vals} end),
+          partial: false,
+          first: not match?({^txid, _}, resumed),
+          seq: group |> List.last() |> List.last()
+        }
+      end
+
+    case {List.last(pieces), beyond} do
+      {%{txid: txid} = last, [[txid | _] | _]} ->
+        List.replace_at(pieces, -1, %{last | partial: true})
+
+      _ ->
+        pieces
+    end
+  end
+
+  # The pieces of at most `room` batches: one that goes on a batch begun before
+  # takes none. Whether others were left.
+  defp take_room(pieces, :all), do: {pieces, false}
+
+  defp take_room(pieces, room) do
+    {resumed, fresh} = Enum.split_while(pieces, &(not &1.first))
+    {kept, left} = Enum.split(fresh, room)
+
+    case left do
+      [] -> {pieces, false}
+      _ -> {resumed ++ kept, true}
+    end
   end
 end

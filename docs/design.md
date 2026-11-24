@@ -347,6 +347,19 @@ cells without waking them.
   not hydrating and, for the idle modes, with nothing pending or in flight.
   `feed_cleaned` advances when it commits; a failure retries with a backoff.
   `cleanup_rows` bounds it at batch boundaries.
+- **Hand-over.** The cell reads the rows of acknowledged batches and sends
+  them to the sender. With `hand_over_rows` it reads at most that many rows
+  at a time, `ORDER BY txid, seq` from the position after the last row sent
+  (`seq` grows in capture order inside a batch), and sends the next piece in a
+  message to itself with a ref, so calls are served between pieces. A batch cut
+  by the bound is sent as pieces that the sender joins; it is queued when the
+  last piece arrived, so ids and objects do not depend on the bound. The cell
+  keeps `feed_part` (the position inside the batch) and `feed_tick` (the ref of
+  the pending message); `feed_sent` moves only when a batch was sent whole, so
+  a batch that is partly sent is never at or below `feed_published` and a
+  cleanup cannot remove it. A reset (sender ended, `feed_pid` replaced) clears
+  both and starts again from `feed_published`; a message with another ref is
+  ignored. The stop hands over everything in a loop, within `stop_publish_ms`.
 - **Reading.** `Alambique.Feed.read/3` merges the shards by key. It skips
   objects newer than `now - settle_ms`, so a late put never lands behind
   a position.

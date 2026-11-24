@@ -160,6 +160,7 @@ defmodule Alambique.Config do
     cleanup: :idle_or_write,
     cleanup_after_ms: 1_000,
     cleanup_rows: nil,
+    hand_over_rows: nil,
     shards: Alambique.Feed.Keys.default_shards(),
     internal_prefixes: [],
     tables: %{},
@@ -262,6 +263,7 @@ defmodule Alambique.Config do
             cleanup: :in_write | :idle | :after_publish | :idle_or_write,
             cleanup_after_ms: pos_integer,
             cleanup_rows: pos_integer | nil,
+            hand_over_rows: pos_integer | nil,
             shards: pos_integer,
             internal_prefixes: [String.t()],
             tables: %{String.t() => Alambique.Feed.Capture.spec()},
@@ -700,6 +702,11 @@ defmodule Alambique.Config do
     unless rows == nil or (is_integer(rows) and rows > 0),
       do: bad!(":feed cleanup_rows must be nil or a positive integer")
 
+    hand_over = feed[:hand_over_rows]
+
+    unless hand_over == nil or (is_integer(hand_over) and hand_over > 0),
+      do: bad!(":feed hand_over_rows must be nil or a positive integer")
+
     %{
       window_ms: pos_int!(feed, :window_ms),
       retention_ms: retention,
@@ -713,6 +720,7 @@ defmodule Alambique.Config do
       cleanup: cleanup,
       cleanup_after_ms: cleanup_after!(feed, given, idle_timeout),
       cleanup_rows: rows,
+      hand_over_rows: hand_over,
       shards: shards!(feed),
       internal_prefixes: internal_prefixes!(feed[:internal_prefixes]),
       tables: tables!(feed[:tables]),

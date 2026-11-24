@@ -364,15 +364,21 @@ defmodule Alambique.Feed.Capture do
   end
 
   @doc """
-  Captured rows of stamped batches after `txid` up to `upto`, in commit order:
-  `[txid, ts, table, op, key, values]`.
+  Captured rows of stamped batches in commit order, from the position
+  `{txid, seq}` (the rows of `txid` with a `seq` above it, then those of the
+  later batches) up to the batch `upto`, at most `limit` of them (`nil`: all):
+  `[txid, ts, table, op, key, values, seq]`. `seq` grows with the order of
+  the changes, so it pages through a batch (`{txid, -1}` is its start).
   """
-  @spec rows_after(term, non_neg_integer, non_neg_integer) :: [list]
-  def rows_after(conn, txid, upto) do
+  @spec rows_from(term, {pos_integer, integer}, non_neg_integer, pos_integer | nil) :: [list]
+  def rows_from(conn, {txid, seq}, upto, limit) do
     rows(
       conn,
-      "SELECT txid, ts, tbl, op, key, vals FROM #{@feed} WHERE txid > ? AND txid <= ? ORDER BY txid, seq",
-      [txid, upto]
+      """
+      SELECT txid, ts, tbl, op, key, vals, seq FROM #{@feed}
+      WHERE txid >= ?1 AND txid <= ?3 AND (txid > ?1 OR seq > ?2) ORDER BY txid, seq LIMIT ?4
+      """,
+      [txid, seq, upto, limit || -1]
     )
   end
 

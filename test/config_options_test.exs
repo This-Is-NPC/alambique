@@ -148,6 +148,19 @@ defmodule Alambique.ConfigOptionsTest do
     end
   end
 
+  describe "feed hand-over" do
+    test "hand_over_rows is nil by default, or a positive integer", ctx do
+      assert feed(ctx, []).hand_over_rows == nil
+      assert feed(ctx, hand_over_rows: 500).hand_over_rows == 500
+
+      for bad <- [0, -1, 1.5, :all] do
+        assert_raise ArgumentError, ~r/hand_over_rows must be nil or a positive integer/, fn ->
+          feed(ctx, hand_over_rows: bad)
+        end
+      end
+    end
+  end
+
   test "awake.idle_gc is a boolean, true by default", ctx do
     assert Alambique.Config.build(base(ctx, [])).awake.idle_gc == true
     assert Alambique.Config.build(base(ctx, awake: [idle_gc: false])).awake.idle_gc == false

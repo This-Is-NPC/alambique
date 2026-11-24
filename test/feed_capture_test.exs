@@ -25,7 +25,7 @@ defmodule Alambique.FeedCaptureTest do
   end
 
   defp rows(conn, txid, upto) do
-    for [t, ts, tbl, op, _key, _vals] <- Capture.rows_after(conn, txid, upto),
+    for [t, ts, tbl, op, _key, _vals, _seq] <- Capture.rows_from(conn, {txid + 1, -1}, upto, nil),
         do: {t, ts, tbl, op}
   end
 
