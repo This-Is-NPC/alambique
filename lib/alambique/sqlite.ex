@@ -157,6 +157,9 @@ defmodule Alambique.Sqlite do
   A wrong `token` is `{:error, :not_authorized}`. `:commit` of a transaction
   that SQLite already ended is `{:error, :transaction_ended}`; `:rollback` of
   one is `:ok`. After a failed statement the connection stays armed.
+  `:commit` then runs `PRAGMA query_only = ON` in the same call; when it
+  fails the write is committed, the connection is disarmed and the result is
+  `{:error, {:query_only, reason}}`.
   """
   @spec finish_transaction(conn, non_neg_integer, :commit | :rollback) :: :ok | {:error, term}
   def finish_transaction(conn, token, how) when how in [:commit, :rollback],
