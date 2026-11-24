@@ -15,7 +15,7 @@ defmodule Alambique.LazyRestorePropertiesTest do
   alias Alambique.Replication
   alias Alambique.Replication.{Hydrator, Lazy, Native, Replicator}
   alias Alambique.Sqlite
-  alias AlambiqueTestkit.MemoryStore
+  alias AlambiqueTestkit.{HostileStore, MemoryStore}
 
   @io_error "disk I/O error"
 
@@ -56,6 +56,9 @@ defmodule Alambique.LazyRestorePropertiesTest do
     ])
   end
 
+  defp damage_gen,
+    do: one_of([map(integer(0..99), &{:flip, &1}), member_of([:short, :shifted])])
+
   defp command_gen do
     frequency([
       {6, map(read_gen(), &{:read, &1})},
@@ -63,8 +66,24 @@ defmodule Alambique.LazyRestorePropertiesTest do
       {3, constant(:sync)},
       {2, constant(:checkpoint)},
       {2,
-       gen all(kind <- member_of([:error, :timeout]), times <- member_of([3, 40, :infinity])) do
-         {:fault, kind, times}
+       gen all(
+             ops <-
+               member_of([
+                 [:get_range],
+                 [:get_range],
+                 [:get_range, :put],
+                 [:get],
+                 [:head],
+                 [:list],
+                 [:put]
+               ]),
+             times <- member_of([3, 40, :infinity])
+           ) do
+         {:fault, ops, times}
+       end},
+      {2,
+       gen all(kind <- damage_gen(), times <- member_of([1, 2, 5, 50])) do
+         {:damage, kind, times}
        end},
       {1, constant(:heal)},
       {1, constant(:crash)}
@@ -141,15 +160,18 @@ defmodule Alambique.LazyRestorePropertiesTest do
 
   # Run
 
-  defp run(seed, compact?, latency, commands) do
+  defp run(seed, compact?, latency, lie?, damage, commands) do
     Process.flag(:trap_exit, true)
-    {_pid, {_, cfg} = store} = start_store()
+    {_pid, {_, inner}} = start_store()
+    hostile = HostileStore.config(inner)
+    store = {HostileStore, hostile}
+    cfg = inner
     dir = tmp_dir()
     ctx = ctx(store, new_world(), timeout_ms: 150)
 
     try do
       cell = seed_store(ctx, dir, seed, compact?)
-      model = open(ctx, cfg, dir, cell, latency)
+      model = open(ctx, cfg, hostile, dir, cell, latency, lie?, damage)
 
       try do
         model = Enum.reduce_while(commands, model, &step/2)
@@ -185,7 +207,7 @@ defmodule Alambique.LazyRestorePropertiesTest do
     "cell"
   end
 
-  defp open(ctx, cfg, dir, cell, latency) do
+  defp open(ctx, cfg, hostile, dir, cell, latency, lie?, damage) do
     # The reference: the same state, fully restored.
     ref_path = Path.join(dir, "reference.db")
     {:ok, _} = Replication.restore(ctx, cell, ref_path, :latest)
@@ -203,10 +225,15 @@ defmodule Alambique.LazyRestorePropertiesTest do
     {:ok, hydrator} = Hydrator.start_link(lazy, concurrency: 2, fetch_ms: 60)
     {:ok, conn} = retry_io(fn -> Db.open(path) end)
     repl = Replicator.from_restore(result, 2, lazy: lazy)
+    with {kind, times} <- damage, do: HostileStore.damage(hostile, kind, times)
 
     %{
       ctx: ctx,
       cfg: cfg,
+      hostile: hostile,
+      lie?: lie?,
+      over: false,
+      seen: 0,
       dir: dir,
       cell: cell,
       path: path,
@@ -215,7 +242,6 @@ defmodule Alambique.LazyRestorePropertiesTest do
       hydrator: hydrator,
       hydrated?: false,
       repl: repl,
-      faulted?: false,
       dirty?: false,
       latency: latency,
       wait_ms: lazy_opts.wait_ms
@@ -229,27 +255,68 @@ defmodule Alambique.LazyRestorePropertiesTest do
   end
 
   # A hydrator that finished tells us once.
+  defp poll(%{over: true} = model), do: model
   defp poll(%{hydrated?: true} = model), do: model
 
   defp poll(model) do
     hydrator = model.hydrator
 
     receive do
-      {:hydrated, ^hydrator} ->
-        assert {:ok, repl} = Replicator.hydrated(model.repl)
-        %{model | repl: repl, hydrated?: true}
-
-      {:hydration_failed, ^hydrator, reason} ->
-        flunk("hydration failed: #{inspect(reason)}")
+      {:hydrated, ^hydrator} -> hydrated(model)
+      {:hydration_failed, ^hydrator, reason} -> hydration_failed(model, reason)
     after
       0 -> model
     end
   end
 
+  # The pages are complete and match the restored state. A replicator whose
+  # own checksum disagrees with the pages refuses to leave the lazy phase.
+  defp hydrated(%{lie?: true} = model) do
+    wrong = %{model.repl | checksum: Bitwise.bxor(model.repl.checksum, 1)}
+    assert Replicator.hydrated(wrong) == {:error, :checksum_mismatch}
+    %{model | hydrated?: true, over: true}
+  end
+
+  defp hydrated(model) do
+    assert {:ok, repl} = Replicator.hydrated(model.repl)
+    %{model | repl: repl, hydrated?: true}
+  end
+
+  # Only a damaged read may have corrupted the file: the pages fail their
+  # checksum, a page does not decode, or a read comes back short.
+  defp hydration_failed(model, reason) do
+    assert HostileStore.damaged(model.hostile) > 0,
+           "hydration failed without a damaged read: #{inspect(reason)}"
+
+    case reason do
+      {:checksum, expected, got} -> assert expected != got
+      {:invalid, message} when is_binary(message) -> :ok
+      {:short_read, key} when is_binary(key) -> :ok
+    end
+
+    %{model | over: true}
+  end
+
+  # A read or a write that fails on the store is excused by a ranged read the
+  # store failed, or by a damaged one, since the last operation.
+  defp excused?(model),
+    do:
+      HostileStore.range_delivered(model.hostile) > model.seen or
+        HostileStore.damaged(model.hostile) > 0
+
+  defp seen(model), do: %{model | seen: HostileStore.range_delivered(model.hostile)}
+
   # Without a fault a read that waits can still run out of time on a loaded
   # machine; it leaves nothing behind, so it is asked again.
-  defp retry_unfaulted(%{faulted?: true}, fun), do: fun.()
-  defp retry_unfaulted(_model, fun), do: retry_io(fun)
+  defp retried(model, fun, tries \\ 20) do
+    case fun.() do
+      {:error, @io_error} = error ->
+        if excused?(model) or tries == 1, do: error, else: retried(model, fun, tries - 1)
+
+      result ->
+        result
+    end
+  end
 
   defp retry_io(fun, tries \\ 20) do
     case fun.() do
@@ -258,64 +325,74 @@ defmodule Alambique.LazyRestorePropertiesTest do
     end
   end
 
-  defp step(command, model), do: do_step(command, poll(model))
+  defp step(command, model) do
+    case poll(model) do
+      %{over: true} = model -> {:halt, model}
+      model -> do_step(command, model)
+    end
+  end
 
   defp do_step({:read, r}, model) do
     expected = read(model.reference, r)
 
-    case retry_unfaulted(model, fn -> read_lazy(model.conn, r) end) do
-      {:error, @io_error} ->
-        assert model.faulted?, "a read failed without a fault: #{inspect(r)}"
+    model =
+      case retried(model, fn -> read_lazy(model.conn, r) end) do
+        {:error, @io_error} ->
+          assert excused?(model), "a read failed without a fault: #{inspect(r)}"
+          model
 
-      # integrity_check reports a page it cannot read as a row, not as an error.
-      actual when r == :integrity and model.faulted? ->
-        assert match?({:ok, _}, actual)
+        # integrity_check reports a page it cannot read as a row, not as an error.
+        actual when r == :integrity ->
+          if HostileStore.damaged(model.hostile) > 0 do
+            model
+          else
+            assert match?({:ok, _}, actual)
+            if excused?(model), do: model, else: assert_equal(model, actual, expected, r)
+          end
 
-      actual ->
-        assert actual == expected, "read #{inspect(r)} differs from the full restore"
-    end
+        actual ->
+          # Pages of a damaged read are served as they came, until the end of
+          # hydration checks them.
+          if HostileStore.damaged(model.hostile) > 0,
+            do: model,
+            else: assert_equal(model, actual, expected, r)
+      end
 
-    {:cont, model}
+    {:cont, seen(model)}
   end
 
   defp do_step({:write, ops}, model) do
     model =
       Enum.reduce(ops, model, fn op, model ->
-        case retry_unfaulted(model, fn -> apply_op(model.conn, op) end) do
-          :ok ->
-            assert apply_op(model.reference, op) == :ok
-            %{model | dirty?: true}
-
-          {:error, @io_error} ->
-            assert model.faulted?, "a write failed without a fault: #{inspect(op)}"
-            model
-
-          {:error, message} ->
-            assert apply_op(model.reference, op) == {:error, message}
-            model
-        end
+        # The write gate holds writes while a damaged page may be in the file.
+        if damaged?(model), do: model, else: write(model, op)
       end)
 
-    {:cont, model}
+    {:cont, seen(model)}
   end
 
   defp do_step(:sync, model), do: {:cont, sync(model)}
 
   defp do_step(:checkpoint, model) do
-    case Replicator.checkpoint(model.repl, model.conn) do
+    case checkpoint(model) do
       {:ok, repl} -> {:cont, %{model | repl: repl}}
       {:error, _} -> {:cont, model}
     end
   end
 
-  defp do_step({:fault, kind, times}, model) do
-    MemoryStore.inject(model.cfg, kind: kind, ops: [:get_range], times: times, ms: 5)
-    {:cont, %{model | faulted?: true}}
+  defp do_step({:fault, ops, times}, model) do
+    HostileStore.fail(model.hostile, ops, times)
+    {:cont, model}
+  end
+
+  defp do_step({:damage, kind, times}, model) do
+    HostileStore.damage(model.hostile, kind, times)
+    {:cont, model}
   end
 
   defp do_step(:heal, model) do
-    MemoryStore.clear(model.cfg)
-    {:cont, %{model | faulted?: false}}
+    HostileStore.heal(model.hostile)
+    {:cont, model}
   end
 
   defp do_step(:crash, model) do
@@ -325,26 +402,71 @@ defmodule Alambique.LazyRestorePropertiesTest do
     Process.exit(model.hydrator, :kill)
     Sqlite.close(model.conn)
 
+    # Requests that fail while it restores fail the restore, not the state.
+    HostileStore.fail(model.hostile, [:get, :head, :list], 2)
+    before = HostileStore.delivered(model.hostile)
     path = Path.join(model.dir, "after-crash.db")
+
+    case Replication.restore(model.ctx, model.cell, path, :latest) do
+      {:ok, _} -> :ok
+      {:error, _} -> assert HostileStore.delivered(model.hostile) > before
+    end
+
+    HostileStore.heal(model.hostile)
     assert {:ok, result} = Replication.restore(model.ctx, model.cell, path, :latest)
     assert result.checksum == model.repl.checksum
-    assert dump_file(path) == dump(model.reference)
+    if !damaged?(model), do: assert(dump_file(path) == dump(model.reference))
     {:halt, %{model | conn: model.reference}}
   end
 
-  # A failed sync is retried: the committed transactions stay in the WAL.
-  defp sync(model) do
-    case Replicator.sync(model.repl, model.ctx) do
-      {:ok, repl} -> %{model | repl: repl}
-      {:error, _} -> model
+  defp write(model, op) do
+    case retried(model, fn -> apply_op(model.conn, op) end) do
+      :ok ->
+        applied = apply_op(model.reference, op)
+        if HostileStore.damaged(model.hostile) == 0, do: assert(applied == :ok)
+        %{model | dirty?: true}
+
+      {:error, @io_error} ->
+        assert excused?(model), "a write failed without a fault: #{inspect(op)}"
+        model
+
+      # The pages of a damaged read are served as they came.
+      {:error, message} ->
+        if HostileStore.damaged(model.hostile) == 0,
+          do: assert(apply_op(model.reference, op) == {:error, message})
+
+        model
     end
   end
 
+  defp assert_equal(model, actual, expected, r) do
+    assert actual == expected, "read #{inspect(r)} differs from the full restore"
+    model
+  end
+
+  # A failed sync is retried: the committed transactions stay in the WAL.
+  # Nothing is acknowledged while a damaged page may be in the file: the write
+  # gate holds the writes until hydration has checked the pages.
+  defp sync(model) do
+    with false <- damaged?(model),
+         {:ok, repl} <- Replicator.sync(model.repl, model.ctx) do
+      %{model | repl: repl}
+    else
+      _ -> model
+    end
+  end
+
+  defp checkpoint(model) do
+    if damaged?(model),
+      do: {:error, :damaged},
+      else: Replicator.checkpoint(model.repl, model.conn)
+  end
+
+  defp damaged?(model), do: not model.hydrated? and HostileStore.damaged(model.hostile) > 0
+
   # No faults, everything replicated.
   defp quiesce(model) do
-    MemoryStore.clear(model.cfg)
-
-    model = %{model | faulted?: false}
+    HostileStore.heal(model.hostile)
 
     Enum.reduce_while(1..20, model, fn _, model ->
       model = sync(model)
@@ -362,25 +484,45 @@ defmodule Alambique.LazyRestorePropertiesTest do
     hydrator = model.hydrator
 
     receive do
-      {:hydrated, ^hydrator} ->
-        assert {:ok, repl} = Replicator.hydrated(model.repl)
-        %{model | repl: repl, hydrated?: true}
-
-      {:hydration_failed, ^hydrator, reason} ->
-        flunk("hydration failed: #{inspect(reason)}")
+      {:hydrated, ^hydrator} -> hydrated(model)
+      {:hydration_failed, ^hydrator, reason} -> hydration_failed(model, reason)
     after
       20_000 -> flunk("hydration did not finish")
     end
   end
 
   defp finish(%{conn: conn, reference: conn}), do: :ok
+  defp finish(%{over: true}), do: :ok
 
   defp finish(model) do
-    model = model |> quiesce() |> await_hydrated()
+    HostileStore.heal(model.hostile)
+    model = model |> await_hydrated() |> quiesce()
+    if model.over, do: :ok, else: complete(model)
+  end
 
+  # The open connection answers like the reference. A mismatch tells whether a
+  # fresh connection on the same file agrees with the reference: if it does,
+  # the open connection holds a page the file no longer has.
+  defp assert_same_read(model, r) do
+    expected = read(model.reference, r)
+
+    if read(model.conn, r) != expected do
+      {:ok, fresh} = Db.open(model.path)
+      agrees? = read(fresh, r) == expected
+      Sqlite.close(fresh)
+
+      flunk(
+        "read #{inspect(r)} differs from the full restore on the open connection; " <>
+          "a fresh connection on the file " <>
+          if(agrees?, do: "agrees with it", else: "differs too")
+      )
+    end
+  end
+
+  defp complete(model) do
     # Same reads, now on a complete file.
     for r <- [:aggregate, :everything, :schema, {:table, 1}, :integrity],
-        do: assert(read(model.conn, r) == read(model.reference, r))
+        do: assert_same_read(model, r)
 
     assert {:ok, repl} = Replicator.checkpoint(model.repl, model.conn)
     Sqlite.close(model.conn)
@@ -396,8 +538,7 @@ defmodule Alambique.LazyRestorePropertiesTest do
     assert dump_file(full) == dump_file(model.path)
     assert dump_file(full) == dump(model.reference)
     {:ok, conn} = Db.open(model.path)
-    %{model | conn: conn}
-    :ok
+    Sqlite.close(conn)
   end
 
   @tag timeout: 900_000
@@ -406,10 +547,16 @@ defmodule Alambique.LazyRestorePropertiesTest do
             seed <- list_of(op_gen(), min_length: 4, max_length: 14),
             compact? <- boolean(),
             latency <- member_of([0, 3, 10]),
+            lie? <- boolean(),
+            damage <-
+              frequency([
+                {1, constant(nil)},
+                {2, tuple({damage_gen(), member_of([1, 3, 50])})}
+              ]),
             commands <- list_of(command_gen(), min_length: 3, max_length: 25),
-            max_runs: String.to_integer(System.get_env("H1_RUNS", "40"))
+            max_runs: String.to_integer(System.get_env("H1_RUNS", "120"))
           ) do
-      run(seed, compact?, latency, commands)
+      run(seed, compact?, latency, lie?, damage, commands)
     end
   end
 end

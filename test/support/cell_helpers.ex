@@ -3,7 +3,7 @@ defmodule Alambique.CellHelpers do
 
   import ExUnit.Callbacks, only: [start_supervised!: 1, on_exit: 1]
 
-  alias AlambiqueTestkit.MemoryStore
+  alias AlambiqueTestkit.{CrashPoints, MemoryStore}
 
   @doc "A fresh memory store and a data directory removed when the test ends."
   def setup_store do
@@ -149,6 +149,31 @@ defmodule Alambique.CellHelpers do
   end
 
   def unique_cell, do: "cell-#{System.unique_integer([:positive])}"
+
+  @doc """
+  Holds the background reads of every hydrator of `cell` until the returned
+  function is called, so that only the pages statements miss get filled.
+  A held read gives up when its hydrator ends.
+  """
+  def hold_hydration(cell) do
+    gate = :atomics.new(1, [])
+
+    CrashPoints.arm(
+      :hydrate_before_fetch,
+      fn _, %{hydrator: hydrator} -> await_gate(gate, hydrator) end,
+      times: :infinity,
+      when: &match?(%{cell: ^cell}, &1)
+    )
+
+    fn -> :atomics.put(gate, 1, 1) end
+  end
+
+  defp await_gate(gate, hydrator) do
+    if :atomics.get(gate, 1) == 0 and Process.alive?(hydrator) do
+      Process.sleep(5)
+      await_gate(gate, hydrator)
+    end
+  end
 
   @doc "Sends the given telemetry events to the calling process as `{:telemetry, event, measurements, meta}`."
   def capture(events) do
