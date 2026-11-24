@@ -403,13 +403,43 @@ defmodule Alambique.FeedEncodingPropertiesTest do
       assert reason in [:bad_compression, :invalid_json]
     end
 
+    # The 13 bytes of a time and the 16 of a TXID, with the spellings that
+    # `Integer.parse/2` takes but the format does not write.
+    defp key_rest do
+      times =
+        ["1700000000000", "0000000000001", "+000000000001", "-000000000001"] ++
+          [" 000000000001", "00000000000a1", "1_00000000000"]
+
+      txids =
+        ["0000000000000001", "00000000000000ff", "000000000000000F", "+000000000000001"] ++
+          ["-000000000000001", "0x00000000000001", "0000000000000000", "ffffffffffffffff"] ++
+          ["00000000000000g1"]
+
+      gen all(
+            time <- member_of(times),
+            txid <- member_of(txids),
+            cell <- member_of(["cell", "", "a-b"])
+          ) do
+        time <> "-" <> txid <> "-" <> cell
+      end
+    end
+
+    # What the format writes: 13 digits, 16 lowercase hex digits from 1, a cell.
+    defp written?(<<time::binary-size(13), ?-, txid::binary-size(16), ?-, cell::binary>>) do
+      Regex.match?(~r/\A[0-9]{13}\z/, time) and Regex.match?(~r/\A[0-9a-f]{16}\z/, txid) and
+        String.to_integer(txid, 16) >= 1 and cell != ""
+    end
+
+    defp written?(_rest), do: false
+
     property "parse never raises and accepts only keys the format writes" do
       check all(
               prefix <- prefix(),
               shard <- integer(0..999),
-              rest <- string(:printable, max_length: 40)
+              rest <- one_of([string(:printable, max_length: 40), key_rest()])
             ) do
         key = Keys.prefix(prefix, shard) <> rest
+        assert Keys.parse(prefix, shard, key) != nil == written?(rest)
 
         case Keys.parse(prefix, shard, key) do
           nil ->
