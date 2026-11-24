@@ -26,7 +26,7 @@ defmodule Alambique.TxControlReviewTest do
     env = setup_store()
     {:ok, gate} = GatedStore.start_link()
     on_exit(fn -> if Process.alive?(gate), do: GenServer.stop(gate) end)
-    on_exit(&Alambique.Fault.uninstall/0)
+    install_commit_behind_back()
     Map.merge(env, %{gate: gate, tag: ctx.test |> Atom.to_string() |> :erlang.phash2()})
   end
 
@@ -66,14 +66,11 @@ defmodule Alambique.TxControlReviewTest do
   end
 
   # A write function that ends the transaction behind the library's back, as
-  # the original defect did. The connection refuses it while the library's
-  # transaction is open, so the function lifts that itself, as a defect of
-  # the library would.
+  # the original defect did, when it returns.
   defp ending(n) do
     fn tx ->
       {:ok, _} = ins(tx, n)
-      :ok = Sqlite.expect_transaction(tx.conn, false)
-      :ok = Sqlite.execute(tx.conn, "COMMIT")
+      commit_behind_back()
     end
   end
 
@@ -519,19 +516,72 @@ defmodule Alambique.TxControlReviewTest do
     end
   end
 
+  describe "what a write function can reach with the connection of its handle" do
+    # Nothing public ends the library's transaction: it needs the token that
+    # only `Db.transaction` holds.
+    test "every public way to end or restart the transaction is refused", env do
+      c = boot(env)
+
+      result =
+        Alambique.transaction(c.inst, c.cell, fn tx ->
+          conn = tx.conn
+          {:ok, _} = ins(tx, 1)
+          {:ok, _} = ins(tx, 2)
+
+          attempts =
+            for guess <- [0, 1, 0xFFFFFFFFFFFFFFFF, :rand.uniform(0xFFFFFFFFFFFFFFFF)],
+                how <- [:commit, :rollback] do
+              Sqlite.finish_transaction(conn, guess, how)
+            end ++
+              [
+                Native.sqlite_finish_transaction(conn, 1, true),
+                Sqlite.begin_transaction(conn),
+                Sqlite.execute(conn, "COMMIT"),
+                Sqlite.execute(conn, "END"),
+                Sqlite.execute(conn, "ROLLBACK"),
+                Sqlite.execute(conn, "BEGIN"),
+                Sqlite.script(conn, "COMMIT"),
+                Db.writable_script(conn, "COMMIT"),
+                Db.transaction(conn, 1, fn _ -> :ok end)
+              ]
+
+          Sqlite.interrupt(conn)
+          {attempts, Sqlite.checkpoint(conn)}
+        end)
+
+      assert {:ok, {attempts, checkpoint}} = result
+      assert Enum.all?(attempts, &(&1 == {:error, :not_authorized})), inspect(attempts)
+      # A checkpoint with the transaction open copies nothing.
+      assert {:error, _} = checkpoint
+      assert local_ids(c) == [0, 1, 2]
+      assert store_ids(c) == [0, 1, 2]
+      refute unreplicated?(c)
+    end
+
+    test "closing the connection rolls the write back and stops the cell", env do
+      c = boot(env)
+
+      result =
+        Alambique.transaction(c.inst, c.cell, fn tx ->
+          {:ok, _} = ins(tx, 1)
+          Sqlite.close(tx.conn)
+        end)
+
+      assert {:error, {:rollback_failed, :connection_closed}} = result
+      assert asleep?(c)
+      assert local_ids(c) == [0]
+      assert store_ids(c) == [0]
+    end
+  end
+
   describe "a rollback that fails" do
     test "stops the cell, and the next wake serves what the store holds", env do
       c = boot(env)
 
-      # The handler turns the library's mark back on, so the connection
-      # refuses the library's own ROLLBACK.
+      # The handler makes the library's own ROLLBACK fail.
       Alambique.Fault.install(fn
-        :db_before_rollback, conn ->
-          Sqlite.expect_transaction(conn, true)
-          :ok
-
-        _, _ ->
-          :ok
+        :db_before_rollback, _ -> {:error, :not_authorized}
+        _, _ -> :ok
       end)
 
       result =

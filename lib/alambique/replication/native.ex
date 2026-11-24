@@ -192,7 +192,9 @@ defmodule Alambique.Replication.Native do
   @doc false
   def sqlite_transaction_status(_conn), do: nif_error()
   @doc false
-  def sqlite_expect_transaction(_conn, _on), do: nif_error()
+  def sqlite_begin_transaction(_conn), do: nif_error()
+  @doc false
+  def sqlite_finish_transaction(_conn, _token, _commit), do: nif_error()
   @doc false
   def sqlite_wal_advanced(_conn), do: nif_error()
   @doc false

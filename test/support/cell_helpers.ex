@@ -15,6 +15,35 @@ defmodule Alambique.CellHelpers do
     %{store: {MemoryStore, config}, store_config: config, dir: dir}
   end
 
+  @commit_behind_back :alambique_commit_behind_back
+
+  @doc """
+  Installs the fault handler of `commit_behind_back/0`, removed when the test
+  ends. The only way a test ends the library's transaction behind its back:
+  nothing public does.
+  """
+  def install_commit_behind_back do
+    Alambique.Fault.install(fn
+      :db_before_commit, %{conn: conn, token: token} ->
+        if Process.delete(@commit_behind_back),
+          do: :ok = Alambique.Sqlite.finish_transaction(conn, token, :commit)
+
+        :ok
+
+      _, _ ->
+        :ok
+    end)
+
+    on_exit(&Alambique.Fault.uninstall/0)
+  end
+
+  @doc """
+  Called by a write function: when it returns, the transaction is committed
+  behind the library's back, as the defect that made orphan frames did.
+  Needs `install_commit_behind_back/0`.
+  """
+  def commit_behind_back, do: Process.put(@commit_behind_back, true)
+
   @doc "Starts an instance with short timings; `opts` override the defaults. Returns its name."
   def start_instance(%{store: store, dir: dir}, opts \\ []) do
     name =

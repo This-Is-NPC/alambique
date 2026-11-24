@@ -136,22 +136,36 @@ defmodule Alambique.Sqlite do
   def transaction_status(conn), do: Native.sqlite_transaction_status(conn)
 
   @doc """
-  Says that a transaction of the caller is open on `conn` (`true`) or is not
-  (`false`). While it is, `run/4` and `execute/3` return
+  Runs `PRAGMA query_only = OFF; BEGIN IMMEDIATE` and returns `{:ok, token}`.
+  The connection is then armed until `finish_transaction/3` ends the
+  transaction with that token: `run/4` and `execute/3` return
   `{:error, :transaction_ended}` without running a statement once SQLite has
   ended the transaction (a conflict or a trigger that rolls back, an
   interrupted statement, an I/O error), and no statement on the connection
   may begin, commit or roll back a transaction (`{:error, :not_authorized}`).
-  Turn it off before the final `COMMIT` or `ROLLBACK`. Turning it on notes the
-  size of the WAL for `wal_advanced?/1`.
+  Beginning again while armed is `{:error, :not_authorized}` too. Arming notes
+  the size of the WAL for `wal_advanced?/1`. Only the holder of the token can
+  end the transaction, so the function of a transaction, which gets the
+  connection but not the token, cannot.
   """
-  @spec expect_transaction(conn, boolean) :: :ok | {:error, term}
-  def expect_transaction(conn, on), do: Native.sqlite_expect_transaction(conn, on)
+  @spec begin_transaction(conn) :: {:ok, non_neg_integer} | {:error, term}
+  def begin_transaction(conn), do: Native.sqlite_begin_transaction(conn)
 
   @doc """
-  Whether a commit reached the WAL of `conn` since `expect_transaction(conn,
-  true)`. After a transaction that failed it says that frames were committed
-  that no write accounts for.
+  Ends the transaction of `begin_transaction/1` with `COMMIT` or `ROLLBACK`,
+  the only statement that may, and disarms the connection once it succeeded.
+  A wrong `token` is `{:error, :not_authorized}`. `:commit` of a transaction
+  that SQLite already ended is `{:error, :transaction_ended}`; `:rollback` of
+  one is `:ok`. After a failed statement the connection stays armed.
+  """
+  @spec finish_transaction(conn, non_neg_integer, :commit | :rollback) :: :ok | {:error, term}
+  def finish_transaction(conn, token, how) when how in [:commit, :rollback],
+    do: Native.sqlite_finish_transaction(conn, token, how == :commit)
+
+  @doc """
+  Whether a commit reached the WAL of `conn` since `begin_transaction/1`.
+  After a transaction that failed it says that frames were committed that no
+  write accounts for.
   """
   @spec wal_advanced?(conn) :: boolean
   def wal_advanced?(conn), do: Native.sqlite_wal_advanced(conn)

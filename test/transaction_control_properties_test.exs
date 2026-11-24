@@ -138,11 +138,10 @@ defmodule Alambique.TransactionControlPropertiesTest do
   defp run(tx, {:direct, text}, _n), do: Sqlite.execute(tx.conn, text)
 
   # The transaction ends behind the library's back, as a defect of the library
-  # would: the connection refuses it until the flag of the library is lifted.
+  # would, when the function returns.
   defp run(tx, :lifted, n) do
     _ = Tx.execute(tx, "INSERT INTO t VALUES (#{n})")
-    :ok = Sqlite.expect_transaction(tx.conn, false)
-    Sqlite.execute(tx.conn, "COMMIT")
+    commit_behind_back()
   end
 
   defp run(tx, {:smuggle, {ident, text}}, n) do
@@ -155,6 +154,7 @@ defmodule Alambique.TransactionControlPropertiesTest do
   end
 
   setup do
+    install_commit_behind_back()
     env = setup_store()
     # Started first, so it stops after the instance: the cells release their
     # leases through it.

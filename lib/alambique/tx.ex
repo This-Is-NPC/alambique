@@ -14,7 +14,9 @@ defmodule Alambique.Tx do
   A function cannot end its transaction. `query/3`, `execute/3` and `script/2`
   refuse `BEGIN`, `COMMIT`, `END` and `ROLLBACK` with
   `{:error, :not_authorized}`, and so does a statement run directly on the
-  connection of the handle with `Alambique.Sqlite`; the transaction goes on. `SAVEPOINT`,
+  connection of the handle with `Alambique.Sqlite`; the transaction goes on.
+  Nothing that takes the connection can end or restart it: only the library
+  holds the token that does. `SAVEPOINT`,
   `ROLLBACK TO` and `RELEASE` are allowed, and `rollback/2` aborts the whole
   transaction. `query/3` and `execute/3` take one statement: text after it that
   holds another statement gives `{:error, {:multiple_statements, tail}}` and

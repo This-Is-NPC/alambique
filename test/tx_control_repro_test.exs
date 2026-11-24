@@ -10,7 +10,7 @@ defmodule Alambique.TxControlReproTest do
 
   import Alambique.CellHelpers
 
-  alias Alambique.{Cell, Config, Feed, Sqlite, Tx}
+  alias Alambique.{Cell, Config, Feed, Tx}
   alias Alambique.Replication.{Native, Replicator}
   alias AlambiqueTestkit.GatedStore
 
@@ -28,6 +28,7 @@ defmodule Alambique.TxControlReproTest do
     env = setup_store()
     {:ok, gate} = GatedStore.start_link()
     on_exit(fn -> if Process.alive?(gate), do: GenServer.stop(gate) end)
+    install_commit_behind_back()
     Map.merge(env, %{gate: gate, tag: ctx.test |> Atom.to_string() |> :erlang.phash2()})
   end
 
@@ -52,12 +53,8 @@ defmodule Alambique.TxControlReproTest do
   defp ins(tx, n), do: Tx.execute(tx, "INSERT INTO t VALUES (#{n})")
 
   # What a defect of the library would do: end the transaction behind its
-  # back. The connection refuses it while the library's transaction is open,
-  # so the flag of the library is lifted first.
-  defp lifted_commit(tx) do
-    :ok = Sqlite.expect_transaction(tx.conn, false)
-    Sqlite.execute(tx.conn, "COMMIT")
-  end
+  # back, when the function returns.
+  defp lifted_commit(_tx), do: commit_behind_back()
 
   defp ids(rows), do: rows |> List.flatten() |> Enum.reject(&(&1 == 0))
 
@@ -296,8 +293,8 @@ defmodule Alambique.TxControlReproTest do
   end
 
   describe "a transaction ended behind the library's back" do
-    # The connection refuses a COMMIT while the library's transaction is
-    # open; these lift the flag, as a defect of the library would.
+    # The function returns and the transaction is committed behind the
+    # library's back, as a defect of the library would.
     defp lifted(tx) do
       {:ok, _} = ins(tx, 1)
       lifted_commit(tx)
