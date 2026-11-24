@@ -16,7 +16,7 @@ defmodule Alambique.FeedCleanupPropertiesTest do
 
   import Alambique.CellHelpers
 
-  alias Alambique.{Feed, Sqlite, Tx}
+  alias Alambique.{Feed, FeedProbe, Sqlite, Tx}
   alias Alambique.Cell.Db
   alias Alambique.Feed.Capture
   alias AlambiqueTestkit.{CrashPoints, GatedStore, MemoryStore}
@@ -288,17 +288,7 @@ defmodule Alambique.FeedCleanupPropertiesTest do
   # rows of the held batch stay, whatever happens to the cell next.
   defp step({:race, after_race}, run) do
     run = settle(run)
-    GatedStore.hold(run.gate, ~r{/feed/})
-    run = run |> write(1) |> write(1)
-
-    [first | _] =
-      eventually(fn -> GatedStore.held(run.gate) != [] and GatedStore.held(run.gate) end)
-
-    before = published(run) || 0
-    GatedStore.release(run.gate, first)
-    # A crash armed in the cleanup may have stopped the cell meanwhile.
-    eventually(fn -> (now = published(run)) == nil or now > before end)
-    run = write(run, 1)
+    run = FeedProbe.race(run.gate, run.inst, @cell, run, &write(&1, 1))
 
     case after_race do
       :kill ->
@@ -323,22 +313,10 @@ defmodule Alambique.FeedCleanupPropertiesTest do
     run
   end
 
-  defp kill(run) do
-    case Alambique.Cell.whereis(Alambique.Config.fetch!(run.inst), @cell) do
-      nil -> :ok
-      pid -> Process.exit(pid, :kill)
-    end
-  end
+  defp kill(run), do: FeedProbe.kill(run.inst, @cell)
 
   # `nil` when the cell is not running.
-  defp published(run) do
-    case Alambique.Cell.whereis(Alambique.Config.fetch!(run.inst), @cell) do
-      nil -> nil
-      pid -> :sys.get_state(pid).feed_published
-    end
-  catch
-    :exit, _ -> nil
-  end
+  defp published(run), do: FeedProbe.published(run.inst, @cell)
 
   # Faults cleared, puts released, every acknowledged row on the feed and the
   # cell told of its publication.
