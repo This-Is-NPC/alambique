@@ -477,7 +477,8 @@ is that frames committed and not yet replicated imply a write in flight
   feed rows, the `ATTACH` of a rewind. Not defended: code that reads or
   replaces the state of the cell process (`:sys.get_state/1`,
   `:sys.replace_state/2`, a debugger), writes of the database file by other
-  means, and other native code in the VM.
+  means, and other native code in the VM (the cell finds what such code
+  commits, below).
 - A transaction function cannot end its transaction. The authorizer of the
   native library (`SQLITE_TRANSACTION`) refuses `BEGIN`, `COMMIT`, `END` and
   `ROLLBACK` in a call that carries user text (`Alambique.Tx.query/3`,
@@ -521,6 +522,70 @@ is that frames committed and not yet replicated imply a write in flight
   frames are uploaded first, the caller gets `{:error, {:committed,
   {:query_only, reason}}}` and the cell stops after the batch. A failed
   `ROLLBACK` stops the cell too.
+- A second read-write connection on the file of a cell is refused when the
+  library can see it. The native library keeps a process-wide table of the
+  (device, inode) of the main database file of every read-write connection
+  that `Db.open` opened, until it closes (also when its opener dies). A
+  read-write open of a file in the table gives `{:error, :held_by_cell}`:
+  `Alambique.Sqlite.open/2` checks it after SQLite opened the file, which
+  covers the default VFS and a `vfs=` URI, the `x_open` of the Alambique VFS
+  checks it for every main database it opens read-write, `ATTACH` from a
+  connection of that VFS included, and the authorizer of a connection
+  opened with `attach: true` refuses the `ATTACH` of a held name. Keying by
+  inode makes a hard link the same file. Read-only opens are allowed: the
+  feed reader, replicas, the scrub. Rewind and relocate work on files of
+  their own (a restored target, a work directory), never on the file of an
+  awake cell. What the table cannot see is not prevented: another OS
+  process, a raw write of the file, other native code, a connection opened
+  before the cell woke (the cell opens after it and holds the file from
+  then on), a connection of another VFS in another process.
+- A foreign writer that got through is found by the header of the wal-index.
+  The frame count is not a witness: it returns to 0 after a restart of the
+  WAL, and a foreign commit, a checkpoint and as many frames as the cell last counted leave
+  the same count. The first 96 bytes of the shared memory hold two copies of
+  the header SQLite updates at every commit and every restart of the WAL:
+  `iChange` (one more per commit), `mxFrame`, `nPage`, the checksums and the
+  two salts (the first one more per restart, the second random). The native
+  library reads it through the connection, in the one native call that needs
+  it: `xShmMap` of the connection's own file for region 0 without extending
+  it, under the connection's mutex, read as `walIndexTryHdr` reads it (two
+  copies, the second written after the first, equal; a few retries, then
+  unreadable). While the connection holds the write lock nothing writes the
+  header, so the read after `BEGIN IMMEDIATE` is exact; outside it a writer
+  may be mid-update, which the two copies and the retries absorb, and the
+  header that cannot be read is treated as a foreign write. The shared memory
+  is the one every process maps, so a writer of another process shows in it as
+  one of the same process does.
+  The connection records the identity (`iChange`, `mxFrame`, `nPage`, the
+  salts) at open (`Alambique.Sqlite.baseline_wal/1`, called by `Db.open`; frames
+  that a file already holds are counted by the WAL position of the
+  replicator, not by the record) and after every commit and checkpoint of its own. The
+  record after a commit checks itself: `iChange` must be the recorded one
+  plus the commits the WAL hook counted and `mxFrame` the frames it reported,
+  so a writer that slipped in between the release of the write lock and the
+  read leaves the record as it was and the next check finds it. Inside
+  `sqlite_begin_transaction`, after `BEGIN IMMEDIATE` holds the write lock,
+  the header is compared with the record: when it differs the native call
+  rolls back, does not run the write and returns `{:error, :foreign_write}`.
+  That adds no native call to a write. The same comparison runs in
+  `sqlite_checkpoint` before the checkpoint (a difference refuses it) and
+  after it (a writer that took the lock first leaves a file that the WAL does
+  not explain: `{:error, :foreign_write}`), and as `Alambique.Sqlite.foreign_write/1`
+  where the cell asks for frames no write carries: at every cut, before a
+  hibernation, before every feed cleanup. The answer is `:none`, `:advanced`
+  (another writer committed; the WAL generation is the same, so its frames
+  follow the replicated position) or `:restarted` (the salts changed, or the
+  header cannot be read: the WAL restarted, so frames may be in the file and
+  not in the WAL).
+  `:advanced` follows `sql: [orphan_frames:]`: `:stop` stops the cell, and
+  `:replicate` takes the header as accounted for
+  (`Alambique.Sqlite.accept_foreign_write/1`), stamps the feed rows and
+  uploads the frames as a batch; a write that found them before it began runs
+  after the batch. `:restarted` stops the cell under both values: no batch
+  can carry what the WAL does not hold, and a capture of the whole file
+  would take the writer's rows into the store without the library ever having
+  seen them as a write. The next wake restores the state of the store, which
+  is every row the library acknowledged.
 - The cell checks the rest. The native library keeps the size of the WAL
   (the WAL hook) and notes it when the connection is armed; a write that failed is an
   orphan when the WAL moved during its transaction, whether or not a batch is

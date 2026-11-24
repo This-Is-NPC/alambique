@@ -117,11 +117,20 @@ and the `Alambique.Tx` functions is one statement.
   error). Every later statement of the function, `Tx.script/2` included,
   returns it without running, and so does the write when the function returns.
   Nothing was committed.
-- `{:error, :orphan_frames}`: committed frames that no write carries were found
-  (they cannot come from a transaction function). With the default
-  `sql: [orphan_frames: :stop]` the cell stops and the next wake restores what
-  the store holds. `position/3` and `hibernate/3` answer it; a write answers
-  its own error.
+- `{:error, :orphan_frames}`: another writer changed the database file, so
+  frames were committed that no write of the cell carries (they cannot come
+  from a transaction function). With the default `sql: [orphan_frames: :stop]`
+  the cell stops and the next wake restores what the store holds.
+  `position/3` and `hibernate/3` answer it, and so does a write that found the
+  other writer before it began: that write did not run. A write that failed
+  answers its own error. With `:replicate` the cell uploads the frames and the
+  write runs after them, unless a checkpoint or a restart of the WAL took the
+  frames out of it: then no batch can carry them and the cell stops under
+  both values.
+- `{:error, :held_by_cell}`: `Alambique.Sqlite.open/2` was asked for a
+  read-write connection on the file of an awake cell, by its name, by a hard
+  link, with another VFS or by `ATTACH`. Open it read-only, or when the cell
+  is asleep.
 - `{:error, {:committed, reason}}`: only with `sql: [orphan_frames: :replicate]`.
   The write failed with `reason` but left committed frames; they were uploaded
   as a batch of their own, so its rows are durable.
@@ -152,7 +161,8 @@ transaction of the library is open on that connection.
 cell does with committed frames no write accounts for. `:stop` stops the cell;
 `:replicate` uploads them as a batch of their own, with their feed rows
 stamped, and goes on. A cell checks for them at every cut, before a
-hibernation and before every feed cleanup.
+hibernation, before every feed cleanup and before each write, by the header
+of the shared-memory wal-index of its connection.
 
 **`Alambique.Sqlite.begin_transaction/1` and `finish_transaction/3`.** The
 first opens the transaction and arms the connection; the second ends it with

@@ -25,6 +25,17 @@ about it, and where the evidence is.
   the cell process (`:sys.get_state/1`, `:sys.replace_state/2`, a debugger)
   or writes the database file by other means. A kept handle can read and
   nothing else ([design.md](design.md), section 15).
+- A second read-write connection on the file of an awake cell is refused only
+  when the library opens it. Another OS process, a raw write of the file,
+  other native code in the VM, a connection that was opened before the cell
+  woke and a connection through another VFS in another process are not
+  prevented. The cell finds their commits and checkpoints by the header of
+  the wal-index at its next write, cut, hibernation or feed cleanup. It never
+  acknowledges those rows: with `sql: [orphan_frames: :stop]` it stops and the
+  next wake restores the store's state, so the rows are gone; with `:replicate`
+  it uploads them when they are still in the WAL, and stops when a checkpoint
+  or a restart of the WAL took them out of it. Until the next of those events
+  the rows are visible to the cell's reads.
 - The rows that `CREATE TABLE ... AS SELECT` writes are in the cell and in its
   store but not in the change feed: the triggers of the new table exist only
   once the statement has ended. Create the table, then fill it with
