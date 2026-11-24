@@ -104,10 +104,13 @@ defmodule Alambique.OrphanFramesTest do
       end
 
       test "a write that failed after it committed is not lost or reported durable", %{c: c} do
-        # The function ends the transaction behind the library's back.
+        # The function ends the transaction behind the library's back. The
+        # connection refuses that while the transaction is open, so the
+        # function lifts the library's flag first, as a defect would.
         result =
           Alambique.transaction(c.inst, c.cell, fn tx ->
             {:ok, _} = Tx.execute(tx, "INSERT INTO t VALUES (6)")
+            :ok = Sqlite.expect_transaction(tx.conn, false)
             :ok = Sqlite.execute(tx.conn, "COMMIT")
           end)
 

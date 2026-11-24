@@ -210,7 +210,8 @@ defmodule Alambique.Cell.Db do
   `isolated: true` says that the transaction owns its batch (`Alambique.Tx.before/1`).
   `limits:` are the options of `Alambique.Sqlite.run/4` for the statements
   the function runs through its handle. Those statements cannot run `BEGIN`,
-  `COMMIT`, `END` or `ROLLBACK` (`{:error, :not_authorized}`).
+  `COMMIT`, `END` or `ROLLBACK` (`{:error, :not_authorized}`), nor can any
+  other statement on the connection while `fun` runs.
   """
   @spec transaction(Sqlite.conn(), pos_integer, (Tx.t() -> term), keyword) ::
           {:ok, term} | {:error, term}

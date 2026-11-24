@@ -63,7 +63,9 @@ pub(crate) struct Control {
     no_txn_control: AtomicBool,
     /// A transaction of the library is open on the connection
     /// (`sqlite_expect_transaction`): a statement that finds it gone does not
-    /// run (`check_transaction`).
+    /// run (`check_transaction`), and no statement of any call may begin,
+    /// commit or roll it back (`authorize`). Only the library's own final
+    /// `COMMIT` or `ROLLBACK`, after it turned this off, may.
     expect_txn: AtomicBool,
     /// Frames in the WAL after the latest commit on the connection (the WAL
     /// hook), and the value when the transaction of the library began.
@@ -225,9 +227,11 @@ const INTROSPECTION: [&[u8]; 16] = [
 ///   file is another cell's data or a file the SQL creates.
 /// - In a read-only call: transaction and savepoint statements, and every
 ///   pragma with an argument except the introspection ones.
-/// - In a call that runs a user's text (`no_txn_control`): `BEGIN`, `COMMIT`,
-///   `END` and `ROLLBACK` (`SQLITE_TRANSACTION`). Savepoints stay: `ROLLBACK
-///   TO` and `RELEASE` are `SQLITE_SAVEPOINT` and never end the transaction.
+/// - In a call that runs a user's text (`no_txn_control`), and in every call
+///   while a transaction of the library is open (`expect_txn`): `BEGIN`,
+///   `COMMIT`, `END` and `ROLLBACK` (`SQLITE_TRANSACTION`). Savepoints stay:
+///   `ROLLBACK TO` and `RELEASE` are `SQLITE_SAVEPOINT` and never end the
+///   transaction.
 pub(crate) unsafe extern "C" fn authorize(
     ctx: *mut std::ffi::c_void,
     action: c_int,
@@ -242,7 +246,9 @@ pub(crate) unsafe extern "C" fn authorize(
         let read_only = ctl.read_only.load(Relaxed);
         let allowed = match action {
             ffi::SQLITE_ATTACH | ffi::SQLITE_DETACH => ctl.allow_attach && !read_only,
-            ffi::SQLITE_TRANSACTION => !read_only && !ctl.no_txn_control.load(Relaxed),
+            ffi::SQLITE_TRANSACTION => {
+                !read_only && !ctl.no_txn_control.load(Relaxed) && !ctl.expect_txn.load(Relaxed)
+            }
             ffi::SQLITE_SAVEPOINT => !read_only,
             ffi::SQLITE_PRAGMA if !name.is_null() => {
                 // SAFETY: for a pragma SQLite passes NUL-terminated names,
@@ -1297,6 +1303,17 @@ mod tests {
         ctl.no_txn_control.store(false, Relaxed);
         assert!(run(db, "BEGIN").is_ok());
         assert!(run(db, "ROLLBACK").is_ok());
+
+        // While a transaction of the library is open, no call may control it.
+        assert!(run(db, "BEGIN").is_ok());
+        ctl.expect_txn.store(true, Relaxed);
+        for sql in ["BEGIN", "COMMIT", "END", "ROLLBACK"] {
+            assert!(run(db, sql).is_err(), "{sql}");
+        }
+        assert!(run(db, "SAVEPOINT s").is_ok());
+        assert!(run(db, "RELEASE s").is_ok());
+        ctl.expect_txn.store(false, Relaxed);
+        assert!(run(db, "COMMIT").is_ok());
 
         // SAFETY: `db` is live and not used afterwards.
         unsafe { close_v2(db) };

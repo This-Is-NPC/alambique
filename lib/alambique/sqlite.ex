@@ -140,8 +140,10 @@ defmodule Alambique.Sqlite do
   (`false`). While it is, `run/4` and `execute/3` return
   `{:error, :transaction_ended}` without running a statement once SQLite has
   ended the transaction (a conflict or a trigger that rolls back, an
-  interrupted statement, an I/O error). Turn it off before the final `COMMIT`
-  or `ROLLBACK`. Turning it on notes the size of the WAL for `wal_advanced?/1`.
+  interrupted statement, an I/O error), and no statement on the connection
+  may begin, commit or roll back a transaction (`{:error, :not_authorized}`).
+  Turn it off before the final `COMMIT` or `ROLLBACK`. Turning it on notes the
+  size of the WAL for `wal_advanced?/1`.
   """
   @spec expect_transaction(conn, boolean) :: :ok | {:error, term}
   def expect_transaction(conn, on), do: Native.sqlite_expect_transaction(conn, on)
