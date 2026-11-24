@@ -351,4 +351,52 @@ defmodule Alambique.ForeignWriterTest do
       end
     end
   end
+
+  # A wake reuses the local file only when its marker names the head of the
+  # store, and that file is closed and checkpointed; a restore removes any
+  # `-wal`. So a wake reaches `Db.open` with frames only when a WAL was left
+  # beside a file that equals the store: a crash that recovered a WAL, which
+  # the test makes by keeping the files of a live connection.
+  describe "a wake whose local file has frames in its WAL" do
+    for mode <- [:stop, :replicate] do
+      test "is not judged a foreign write (#{mode})", env do
+        c = boot(env, unquote(mode))
+        file = path(c)
+        assert Alambique.hibernate(c.inst, c.cell) == :ok
+        assert asleep?(c)
+        leave_frames(file, 60)
+        assert wal_frames(file) > 0
+
+        # The wake reuses the file and recovers its WAL.
+        assert {:ok, _} = Alambique.touch(c.inst, c.cell)
+        awake = pid(c)
+        assert File.exists?(file <> "-wal")
+
+        assert {:ok, _} = Alambique.execute(c.inst, c.cell, "INSERT INTO t VALUES (2)")
+        assert {:ok, _} = Alambique.execute(c.inst, c.cell, "INSERT INTO t VALUES (3)")
+        assert pid(c) == awake
+        assert {:ok, _} = Alambique.position(c.inst, c.cell)
+        assert pid(c) == awake
+
+        assert rows(c) == [0, 1, 2, 3, 60]
+        assert store(c) == rows(c)
+        assert Enum.sort(feed_now(c)) == rows(c)
+      end
+    end
+
+    # A committed row in a WAL beside the database file as it was before: the
+    # state a crash leaves, made from the files of a live connection.
+    defp leave_frames(file, n) do
+      {:ok, other} = Foreign.open(file)
+      :ok = Sqlite.execute(other, "INSERT INTO t VALUES (#{n})")
+      for part <- ["", "-wal"], do: File.cp!(file <> part, file <> part <> ".copy")
+      Sqlite.close(other)
+
+      for part <- ["", "-wal"] do
+        File.rename!(file <> part <> ".copy", file <> part)
+      end
+
+      File.rm(file <> "-shm")
+    end
+  end
 end
