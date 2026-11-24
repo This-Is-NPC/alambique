@@ -4,7 +4,9 @@ defmodule Alambique.ForwardOutcomePropertiesTest do
 
   Random scenarios send writes with unique client ids from random nodes while
   served writes drop the links of their target (so the sender sees
-  `noconnection` for a call that ran) and peers are partitioned and healed.
+  `noconnection` for a call that ran), some writes are sent with every peer
+  but the sender armed to lose its reply, and peers are partitioned and
+  healed.
   After the cluster is healed:
 
     * every acknowledged write is in its cell exactly once;
@@ -41,6 +43,7 @@ defmodule Alambique.ForwardOutcomePropertiesTest do
 
     frequency([
       {12, tuple({constant(:write), node, member_of(@cells), boolean()})},
+      {5, tuple({constant(:lost_reply), node, member_of(@cells)})},
       {4, tuple({constant(:drop), node, member_of([:execute, :transaction])})},
       {1, tuple({constant(:partition_nodes), member_of(@pairs)})},
       {2, tuple({constant(:heal_nodes), member_of(@pairs)})},
@@ -108,6 +111,20 @@ defmodule Alambique.ForwardOutcomePropertiesTest do
 
     write = %{cell: cell, idempotent?: idempotent?, reply: classify(reply)}
     %{run | seq: n, writes: Map.put(run.writes, n, write)}
+  end
+
+  # A write that is not idempotent whose reply is lost: the first peer that
+  # serves it for `cell` drops its links once it ran, so the sender sees
+  # `noconnection` for a call that was applied and must not send it again.
+  defp step(cluster, {:lost_reply, node, cell}, run) do
+    for peer <- @names -- [node] do
+      arm(cluster, peer, :router_after_serve, ClusterFuns.drop_links([node()]),
+        times: 1,
+        when: ClusterFuns.serving([:execute], cell)
+      )
+    end
+
+    step(cluster, {:write, node, cell, false}, run)
   end
 
   # The next served write on `target` ends by dropping the target's links.
