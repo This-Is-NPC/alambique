@@ -11,6 +11,7 @@ defmodule Alambique.QueryRefreshTest do
 
   @schema [{1, "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)"}]
   @count "SELECT count(*) FROM notes"
+  @all "SELECT id, body FROM notes ORDER BY id"
 
   setup do
     setup_store()
@@ -116,9 +117,11 @@ defmodule Alambique.QueryRefreshTest do
     end
   end
 
-  # Random chains of writes between refreshes: every cached file equals a full
-  # restore at its TXID, and its recorded checksum is the checksum of its pages.
-  property "a refreshed replica equals a full restore at the same TXID", base do
+  # Random chains of writes between refreshes: the replica answers with the
+  # owner's rows at the owner's last acknowledged TXID, every cached file equals
+  # a full restore at its TXID, and its recorded checksum is the checksum of
+  # its pages.
+  property "a refreshed replica is current and equals a full restore at its TXID", base do
     check all(
             steps <- list_of(list_of(integer(0..3), max_length: 4), min_length: 2, max_length: 6),
             max_runs: 25
@@ -135,7 +138,8 @@ defmodule Alambique.QueryRefreshTest do
 
         for writes <- steps do
           for w <- writes, do: write(owner, w)
-          assert %{errors: []} = Query.all(reader, ["p"], @count)
+          assert %{errors: []} = answer = Query.all(reader, ["p"], @all)
+          assert_replica_is_current(run, owner, answer)
           assert_replica_matches_restore(run, reader)
         end
       after
@@ -159,6 +163,22 @@ defmodule Alambique.QueryRefreshTest do
     do:
       {:ok, _} =
         Alambique.execute(owner, "p", "INSERT INTO notes (body) VALUES (hex(randomblob(6000)))")
+
+  defp assert_replica_is_current(run, owner, answer) do
+    repl =
+      Alambique.Replication.ctx(
+        store: run.store,
+        prefix: "cells-test",
+        node: "verifier",
+        timeout_ms: 5_000
+      )
+
+    {:ok, %{txid: head}} = Alambique.Replication.head(repl, "p")
+    {:ok, %{rows: expected}} = Alambique.query(owner, "p", @all)
+
+    assert Enum.map(answer.rows, & &1.values) == expected
+    assert Enum.uniq(Enum.map(answer.rows, & &1.txid)) == [head]
+  end
 
   defp assert_replica_matches_restore(run, reader) do
     dir = Cache.dir(Alambique.Config.fetch!(reader))
