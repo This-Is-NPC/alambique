@@ -135,6 +135,17 @@ defmodule Alambique.Sqlite do
   def transaction_status(conn), do: Native.sqlite_transaction_status(conn)
 
   @doc """
+  Says that a transaction of the caller is open on `conn` (`true`) or is not
+  (`false`). While it is, `run/4` and `execute/3` return
+  `{:error, :transaction_ended}` without running a statement once SQLite has
+  ended the transaction (a conflict or a trigger that rolls back, an
+  interrupted statement, an I/O error). Turn it off before the final `COMMIT`
+  or `ROLLBACK`.
+  """
+  @spec expect_transaction(conn, boolean) :: :ok | {:error, term}
+  def expect_transaction(conn, on), do: Native.sqlite_expect_transaction(conn, on)
+
+  @doc """
   Bytes the connection holds, by purpose: `:cache_used` (page cache),
   `:schema_used`, `:stmt_used` (prepared statements) and `:lookaside_used`.
   """
