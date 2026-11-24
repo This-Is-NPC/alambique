@@ -200,8 +200,7 @@ defmodule Alambique.Cell.Db do
   a rollback (a raise, a `Tx.rollback/2`, or a failed commit). The `COMMIT`
   and the `PRAGMA query_only = ON` after it are two steps of one native call;
   when the pragma failed after a commit the write is committed and the reason is `{:query_only, reason}`; when the
-  rollback failed it is `{:rollback_failed, reason}`: the cell stops in both
-  cases. Only this function holds the token that ends the transaction
+  rollback failed it is `{:rollback_failed, reason}`: both are `fatal?/1`. Only this function holds the token that ends the transaction
   (`Alambique.Sqlite.begin_transaction/1`); the handle of `fun` has none.
   While `fun` runs, a statement on the connection returns `{:error, :transaction_ended}`
   without running once SQLite has ended the transaction itself (a conflict or
@@ -234,6 +233,17 @@ defmodule Alambique.Cell.Db do
   end
 
   defp read_only(conn), do: Sqlite.execute(conn, "PRAGMA query_only = ON")
+
+  @doc """
+  Whether the `{:error, reason}` of `transaction/4` leaves a connection that
+  cannot be served: `{:query_only, _}` (the commit ran and the connection may
+  still write) or `{:rollback_failed, _}` (a transaction may still be open).
+  Every caller of `transaction/4` stops the cell on it.
+  """
+  @spec fatal?(term) :: boolean
+  def fatal?({:query_only, _}), do: true
+  def fatal?({:rollback_failed, _}), do: true
+  def fatal?(_reason), do: false
 
   defp transact(conn, token, txid, fun, opts) do
     tx = %Tx{

@@ -85,7 +85,7 @@ defmodule Alambique.Feed.Publisher do
   `feed_cleaned` advances only once the transaction committed. The cell must
   send a batch afterwards: the deletion is a change of the file.
   """
-  @spec cleanup(State.t()) :: {:ok, State.t()} | {:error, State.t()}
+  @spec cleanup(State.t()) :: {:ok, State.t()} | {:error, State.t()} | {:stop, term, State.t()}
   def cleanup(state) do
     {from, published, floor} = {state.feed_cleaned, state.feed_published, state.feed_floor}
     rows = state.config.feed.cleanup_rows
@@ -101,7 +101,7 @@ defmodule Alambique.Feed.Publisher do
            select: state.config.feed
          ) do
       {:ok, cut} -> {:ok, %{state | feed_cleaned: cut}}
-      {:error, _} -> {:error, state}
+      {:error, reason} -> if Db.fatal?(reason), do: {:stop, reason, state}, else: {:error, state}
     end
   end
 

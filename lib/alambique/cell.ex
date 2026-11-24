@@ -624,8 +624,10 @@ defmodule Alambique.Cell do
       {:error, reason, state} when elem(reason, 0) in [:bad_migrations, :schema_too_new] ->
         {:reply, {:error, reason}, state}
 
-      {:error, {:migration, version, _} = reason, state} when is_integer(version) ->
-        migrated(state, before, DiskFull.classify(reason))
+      {:error, {:migration, version, inner} = reason, state} when is_integer(version) ->
+        if Db.fatal?(inner),
+          do: stop_serving(state, stop_reason(reason), {:error, stop_reason(reason)}),
+          else: migrated(state, before, DiskFull.classify(reason))
 
       {:error, reason, state} ->
         stop_reason = stop_reason(reason)
@@ -853,6 +855,9 @@ defmodule Alambique.Cell do
           {:ok, state} -> {:ok, arm_cleanup(state, 0)}
           {:stop, _reason, _state} = stop -> stop
         end
+
+      {:stop, reason, state} ->
+        {:stop, reason, state}
 
       {:error, state} ->
         %{retry_backoff_max_ms: max} = state.config.upload
@@ -1335,7 +1340,7 @@ defmodule Alambique.Cell do
         :atomics.add(state.load, 1, 1)
         state = %{state | pending: [item | state.pending]}
 
-        if match?({:query_only, _}, reason),
+        if Db.fatal?(reason),
           do: replicate_and_stop(state, reason),
           else: {:noreply, queue_flush(state)}
     end
