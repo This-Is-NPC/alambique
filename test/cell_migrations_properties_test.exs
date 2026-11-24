@@ -19,6 +19,11 @@ defmodule Alambique.CellMigrationsPropertiesTest do
       the later of two batches in flight lands first, and until the first
       fault every write is acknowledged.
 
+  A second property stores cells ahead of the code: one further ahead than
+  the migration window is refused with `schema_too_new` and the version it
+  has, one within the window, at its edge too, is served and keeps its
+  version.
+
   At the end, once the breaker of the store lets requests through again, the
   sweeper brings every listed cell to the version of its
   namespace and lists it only there. After a restart that takes until the
@@ -55,8 +60,10 @@ defmodule Alambique.CellMigrationsPropertiesTest do
     def clear, do: :persistent_term.erase(@key)
     def version(cell), do: Map.fetch!(:persistent_term.get(@key), namespace(cell))
 
-    def migrations(cell) do
-      for k <- 1..version(cell)//1 do
+    def migrations(cell), do: list(version(cell))
+
+    def list(version) do
+      for k <- 1..version//1 do
         {k,
          if(k == 1,
            do: "CREATE TABLE t (n INTEGER PRIMARY KEY)",
@@ -209,6 +216,121 @@ defmodule Alambique.CellMigrationsPropertiesTest do
       stop_supervised(name)
       MemoryStore.clear(ctx.store_config)
     end
+  end
+
+  # Cells stored ahead of the code
+
+  defp ahead_op(count) do
+    index = integer(0..(count - 1))
+
+    frequency([
+      {4, map(index, &{:read, &1})},
+      {4, map(index, &{:write, &1})},
+      {3, map(tuple({index, boolean()}), fn {i, wake} -> {:migrate, i, wake} end)},
+      {2, map(index, &{:hibernate, &1})}
+    ])
+  end
+
+  # A cell stored `edge` versions past the window is refused with the version
+  # it has, and a cell within the window, at its edge included, is served
+  # without changing its version.
+  property "a cell ahead of the code is refused beyond the window and served within it", ctx do
+    check all(
+            n <- integer(1..4),
+            edges <- list_of(member_of([-1, 0, 1, 2]), min_length: 2, max_length: 4),
+            ops <- list_of(ahead_op(length(edges)), min_length: 4, max_length: 14),
+            max_runs: 15,
+            max_shrinking_steps: 0
+          ) do
+      run_ahead(ctx, n, edges, ops)
+    end
+  end
+
+  defp run_ahead(ctx, n, edges, ops) do
+    main = start_instance(ctx, migrations: Lists.list(n))
+    limit = n + Config.fetch!(main).migration_window
+
+    cells =
+      edges
+      |> Enum.map(&ahead_cell(ctx, limit + &1, limit))
+      |> Enum.with_index()
+      |> Map.new(fn {cell, i} -> {i, cell} end)
+
+    cells = Enum.reduce(ops, cells, &ahead_step(&1, &2, main))
+
+    for {_, cell} <- cells do
+      _ = Alambique.hibernate(main, cell.id)
+      assert durable_rows(ctx, cell.id, "PRAGMA user_version") == [[cell.version]]
+      assert durable_rows(ctx, cell.id, "SELECT n FROM t ORDER BY n") == sorted(cell)
+    end
+
+    stop_supervised(main)
+  end
+
+  # A cell that newer code woke and wrote three rows into.
+  defp ahead_cell(ctx, version, limit) do
+    cell = unique_cell()
+    newer = start_instance(ctx, migrations: Lists.list(version))
+
+    for k <- 1..3,
+        do: {:ok, _} = Alambique.execute(newer, cell, "INSERT INTO t (n) VALUES (?)", [k])
+
+    :ok = Alambique.hibernate(newer, cell)
+    stop_supervised(newer)
+    assert durable_rows(ctx, cell, "PRAGMA user_version") == [[version]]
+
+    %{id: cell, version: version, refused?: version > limit, rows: [1, 2, 3]}
+  end
+
+  defp sorted(cell), do: cell.rows |> Enum.sort() |> Enum.map(&[&1])
+  defp refusal(cell), do: {:error, {:schema_too_new, cell.version}}
+
+  defp ahead_step({:read, i}, cells, main) do
+    cell = cells[i]
+    answer = Alambique.query(main, cell.id, "SELECT n FROM t ORDER BY n")
+
+    if cell.refused? do
+      assert answer == refusal(cell)
+    else
+      assert {:ok, %{rows: rows}} = answer
+      assert rows == sorted(cell)
+    end
+
+    cells
+  end
+
+  defp ahead_step({:write, i}, cells, main) do
+    cell = cells[i]
+    value = 100 + System.unique_integer([:positive])
+    answer = Alambique.execute(main, cell.id, "INSERT INTO t (n) VALUES (?)", [value])
+
+    if cell.refused? do
+      assert answer == refusal(cell)
+      cells
+    else
+      assert {:ok, _} = answer
+      Map.put(cells, i, %{cell | rows: [value | cell.rows]})
+    end
+  end
+
+  # A cell nobody owns migrates at its next wake, unless `wake` is set.
+  defp ahead_step({:migrate, i, wake}, cells, main) do
+    cell = cells[i]
+    asleep? = Alambique.owner(main, cell.id) == :none
+    answer = Alambique.migrate(main, cell.id, wake: wake)
+
+    cond do
+      cell.refused? and wake -> assert answer == refusal(cell)
+      asleep? and not wake -> assert answer == {:ok, :asleep}
+      true -> assert answer == {:ok, cell.version}
+    end
+
+    cells
+  end
+
+  defp ahead_step({:hibernate, i}, cells, main) do
+    _ = Alambique.hibernate(main, cells[i].id)
+    cells
   end
 
   defp assert_acks_landed(%{guard: guard}) do
