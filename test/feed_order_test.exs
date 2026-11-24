@@ -20,7 +20,7 @@ defmodule Alambique.FeedOrderTest do
   alias AlambiqueTestkit.{GatedStore, ManualClock}
 
   @schema [{1, "CREATE TABLE log (id INTEGER PRIMARY KEY)"}]
-  @start 1_800_000_000_000
+  @start 1_700_000_000_000
 
   setup do
     base = setup_store()
