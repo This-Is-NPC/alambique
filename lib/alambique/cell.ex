@@ -1272,7 +1272,7 @@ defmodule Alambique.Cell do
   # of their own, with the feed rows stamped, and goes on once it is durable.
   defp backstop(state) do
     if orphan?(state) do
-      Logger.error("Alambique cell #{state.id} had committed frames no write carries")
+      log_orphans(state)
 
       case state.config.sql.orphan_frames do
         :stop -> {:stop, :orphan_frames, state}
@@ -1283,24 +1283,33 @@ defmodule Alambique.Cell do
     end
   end
 
+  defp log_orphans(state),
+    do: Logger.error("Alambique cell #{state.id} had committed frames no write carries")
+
   defp replicated(state),
     do: if(orphan?(state), do: {:stop, :orphan_frames, state}, else: {:ok, state})
 
   defp replicate_orphans(state) do
-    state = Publisher.stamp(state)
-
-    with {:ok, state} <- flush_now(%{state | unsent: true}),
+    with {:ok, state} <- orphan_batch(state),
          {:ok, state} <- settle(state) do
       replicated(state)
     end
   end
 
-  # A write failed and left committed frames. `:stop` answers the caller with
-  # its error and stops. `:replicate` parks the caller as a write: the stamp,
-  # the reads' wait and the batch apply, and it is answered after the batch
-  # with `{:error, {:committed, reason}}`, because its rows are durable then.
+  # The frames as a batch of their own, with the feed rows stamped.
+  defp orphan_batch(state) do
+    state = Publisher.stamp(state)
+    flush_now(%{state | unsent: true})
+  end
+
+  # A write failed and left committed frames (the WAL moved during its
+  # transaction). `:stop` answers the caller with its error and stops: writes
+  # not sent get the stop reason and those in flight `:outcome_unknown`.
+  # `:replicate` parks the caller as a write: the stamp, the reads' wait and
+  # the batch apply, and it is answered after the batch with
+  # `{:error, {:committed, reason}}`, because its rows are durable then.
   defp orphaned_write(state, from, reason) do
-    Logger.error("Alambique cell #{state.id} had committed frames no write carries")
+    log_orphans(state)
 
     case state.config.sql.orphan_frames do
       :stop ->
@@ -1320,11 +1329,26 @@ defmodule Alambique.Cell do
     with {:ok, state} <- flush_now(state), do: settle_within(state, limit)
   end
 
-  defp settle_within(%State{pipe: %{queue: []}} = state, _limit), do: backstop(state)
+  # The orphan batch of `:replicate` is awaited within the deadline too.
+  defp settle_within(state, limit, replicated? \\ false)
 
-  defp settle_within(state, limit) do
+  defp settle_within(%State{pipe: %{queue: []}} = state, limit, replicated?) do
+    cond do
+      not orphan?(state) ->
+        {:ok, state}
+
+      replicated? or state.config.sql.orphan_frames == :stop ->
+        {:stop, :orphan_frames, state}
+
+      true ->
+        log_orphans(state)
+        with {:ok, state} <- orphan_batch(state), do: settle_within(state, limit, true)
+    end
+  end
+
+  defp settle_within(state, limit, replicated?) do
     case await(state, max(limit - System.monotonic_time(:millisecond), 0)) do
-      {:ok, state} -> settle_within(state, limit)
+      {:ok, state} -> settle_within(state, limit, replicated?)
       {:timeout, state} -> {:busy, state}
       {:stop, _, _} = stop -> stop
     end
