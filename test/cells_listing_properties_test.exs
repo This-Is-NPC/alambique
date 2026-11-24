@@ -17,7 +17,8 @@ defmodule Alambique.CellsListingPropertiesTest do
     one_of([
       tuple({constant(:wake), member_of(@ids)}),
       tuple({constant(:hibernate), member_of(@ids)}),
-      tuple({constant(:kill), member_of(@ids)})
+      tuple({constant(:kill), member_of(@ids)}),
+      tuple({constant(:kill_unseen), member_of(@ids)})
     ])
   end
 
@@ -43,6 +44,33 @@ defmodule Alambique.CellsListingPropertiesTest do
         Process.exit(pid, :kill)
         assert_receive {:DOWN, ^ref, :process, ^pid, _}
         MapSet.delete(model, id)
+    end
+  end
+
+  # The process dies while the registry of live cells is stopped, so the
+  # listing, which reads the table in the caller, meets an entry of a dead
+  # process and leaves it out.
+  defp apply_op({:kill_unseen, id}, inst, model) do
+    config = Alambique.Config.fetch!(inst)
+    assert eventually(fn -> Alambique.cells(inst, limit: 1_000).cells == Enum.sort(model) end)
+
+    case Alambique.Cell.whereis(config, id) do
+      nil ->
+        model
+
+      pid ->
+        :ok = :sys.suspend(config.live)
+
+        try do
+          ref = Process.monitor(pid)
+          Process.exit(pid, :kill)
+          assert_receive {:DOWN, ^ref, :process, ^pid, _}
+          model = MapSet.delete(model, id)
+          assert Alambique.cells(inst, limit: 1_000).cells == Enum.sort(model)
+          model
+        after
+          :ok = :sys.resume(config.live)
+        end
     end
   end
 
