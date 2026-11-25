@@ -2,9 +2,10 @@ defmodule Alambique.Replication.Lazy do
   @moduledoc false
   # A lazily restored database (design §16): the page map built by
   # `Restore` (a NIF resource the VFS reads) and where its frames live in the
-  # store. `fetch_run/3` is the one way a page gets from the store into the file.
+  # store. `fetch_run/3` is the one way a page gets from the store into the file;
+  # `check_objects/3` compares the pages it installed with the whole objects.
 
-  alias Alambique.Replication.{Budget, Native, Objects}
+  alias Alambique.Replication.{Budget, Native, Objects, Retry}
 
   @enforce_keys [:handle, :files, :pins, :ctx, :budget]
   defstruct [
@@ -92,6 +93,63 @@ defmodule Alambique.Replication.Lazy do
   # A store that raises or exits is a failed read, not a crash of the caller.
   defp fetch_range(ctx, key, offset, len, etag, deadline) do
     Objects.fetch_range(ctx, key, offset, len, deadline, etag)
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  @doc """
+  Reads every object of the chain whole, once every page is local, and
+  compares each with the pages the ranged reads installed: the object must
+  pass its file checksum, and each page it provides to the file must be the
+  one that was read. This is what the database checksum cannot say, because
+  errors can cancel in it. Up to `concurrency` objects are read at once, each
+  within `fetch_ms`. Returns the objects and bytes read.
+  """
+  @spec check_objects(t, pos_integer, pos_integer) ::
+          {:ok, %{objects: non_neg_integer, bytes: non_neg_integer}} | {:error, term}
+  def check_objects(%__MODULE__{} = lazy, concurrency, fetch_ms) do
+    0..(tuple_size(lazy.files) - 1)//1
+    |> Task.async_stream(&check_object(lazy, &1, fetch_ms),
+      max_concurrency: concurrency,
+      timeout: :infinity
+    )
+    |> Enum.reduce_while({:ok, %{objects: 0, bytes: 0}}, fn
+      {:ok, {:ok, bytes}}, {:ok, sum} ->
+        {:cont, {:ok, %{objects: sum.objects + 1, bytes: sum.bytes + bytes}}}
+
+      {:ok, {:error, _} = error}, _ ->
+        {:halt, error}
+
+      {:exit, reason}, _ ->
+        {:halt, {:error, {:exit, reason}}}
+    end)
+  end
+
+  defp check_object(lazy, file, fetch_ms) do
+    key = elem(lazy.files, file)
+    {_etag, _epoch, size} = elem(lazy.pins, file)
+    deadline = Retry.deadline_in(fetch_ms)
+    weight = Budget.weigh(lazy.budget, size)
+
+    with :ok <- Budget.acquire(lazy.budget, weight, deadline) do
+      try do
+        with {:ok, body} <- fetch_whole(lazy.ctx, key, deadline),
+             :ok <- if(byte_size(body) == size, do: :ok, else: {:error, {:changed, key}}),
+             {:ok, _pages} <- Native.lazy_check_object(lazy.handle, file, body) do
+          {:ok, byte_size(body)}
+        end
+      after
+        Budget.release(lazy.budget, weight)
+      end
+    end
+  end
+
+  defp fetch_whole(ctx, key, deadline) do
+    case Objects.fetch_optional(ctx, key, deadline) do
+      {:ok, body, _meta} -> {:ok, body}
+      :none -> {:error, {:not_found, key}}
+      {:error, _} = error -> error
+    end
   catch
     kind, reason -> {:error, {kind, reason}}
   end

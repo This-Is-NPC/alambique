@@ -235,6 +235,23 @@ fn lazy_verify<'a>(env: Env<'a>, lazy: ResourceArc<LazyRes>, expected: u64) -> T
     }
 }
 
+/// Compares the whole object `data` of `file` with the pages the database was
+/// given, once every page is local: `{:ok, pages compared}` or
+/// `{:error, reason}` (design §16).
+#[rustler::nif(schedule = "DirtyCpu")]
+fn lazy_check_object<'a>(
+    env: Env<'a>,
+    lazy: ResourceArc<LazyRes>,
+    file: u32,
+    data: Binary,
+) -> Term<'a> {
+    let _t = crate::stats::LAZY_CALLS.time();
+    match lazy.0.check_object(file, data.as_slice()) {
+        Ok(pages) => (atoms::ok(), pages).encode(env),
+        Err(e) => error_term(env, e),
+    }
+}
+
 /// Fills the page sums of `pages` from fetched pages, in a copy of `sums`
 /// (which stays as it was). `{:ok, sums}` when all are known,
 /// `{:missing, pages, sums}` otherwise.

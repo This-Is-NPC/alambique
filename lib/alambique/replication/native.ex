@@ -164,6 +164,8 @@ defmodule Alambique.Replication.Native do
   @doc false
   def lazy_verify(_lazy, _expected), do: nif_error()
   @doc false
+  def lazy_check_object(_lazy, _file, _data), do: nif_error()
+  @doc false
   def lazy_prepare_sums(_lazy, _sums, _pages), do: nif_error()
   @doc false
   def lazy_mark_sums(_lazy, _pages), do: nif_error()
