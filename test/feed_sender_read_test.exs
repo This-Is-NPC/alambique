@@ -228,6 +228,30 @@ defmodule Alambique.FeedSenderReadTest do
     end
   end
 
+  describe "the facts" do
+    test "say when the reader is open and include its memory", ctx do
+      inst = start(ctx, "facts", sender(reader_cache_kib: 64), name: :facts)
+      insert(inst, @cell, 1..5)
+      eventually(fn -> state(inst).feed_reader == nil end)
+      {:ok, _} = Alambique.query(inst, @cell, "SELECT 1")
+      assert {:ok, %{feed_reader_open: false} = closed} = Alambique.facts(inst, @cell)
+
+      gate = hold(:feed_after_read, self())
+      insert(inst, @cell, [6])
+      assert_receive {:held, :feed_after_read, _, _}, 5_000
+      {:ok, _} = Alambique.query(inst, @cell, "SELECT 1")
+      assert {:ok, %{feed_reader_open: true} = open} = Alambique.facts(inst, @cell)
+
+      {:ok, reader} = in_cell(pid(inst), fn st -> Sqlite.memory(st.feed_reader) end)
+      assert open.schema_used >= closed.schema_used + reader.schema_used
+
+      open(gate)
+      eventually(fn -> state(inst).feed_reader == nil end)
+      {:ok, _} = Alambique.query(inst, @cell, "SELECT 1")
+      assert {:ok, %{feed_reader_open: false}} = Alambique.facts(inst, @cell)
+    end
+  end
+
   describe "the stop" do
     test "closes the reader of a sender in the middle of a read, when no flush runs", ctx do
       inst = start(ctx, "stop", sender(stop_publish_ms: 0), name: :stop)
