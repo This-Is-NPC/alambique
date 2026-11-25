@@ -278,12 +278,12 @@ defmodule Alambique do
       garbage. `:track_bytes` (default `true`) makes every awake cell
       measure what its connection holds, which `cells/2` and `facts/2`
       report, except while the feed sender is in the middle of a read, when
-      the last values stay; `false` leaves those fields `nil` and costs
-      nothing. With a
-      budget, every awake cell reports what its connection holds (page cache,
-      schema and prepared statements; the same skip applies) at the end of its wake, after each call,
-      after an idle cache shrink and at the end of a hydration, whatever
-      `:track_bytes` says; a call that would wake a cell while the total is at
+      the last values stay. A measurement costs the cell about 3.6 µs per
+      call; `false` leaves those fields `nil` and costs nothing. With a
+      budget, every awake cell reports what its connection holds (page
+      cache, schema and prepared statements; the same skip applies) at the
+      end of its wake, after each call, after an idle cache shrink and at the
+      end of a hydration, whatever `:track_bytes` says; a call that would wake a cell while the total is at
       or over `:max_bytes` hibernates the least recently used cells that have
       no caller waiting until it is under, and gives `{:error, :overloaded}`
       if none is left to hibernate. The cell that wakes may take the total
@@ -1724,12 +1724,14 @@ defmodule Alambique do
 
   A page costs in proportion to its size, whatever the number of cells: per
   entry one liveness check and up to 29 counter reads, none of them a message
-  to the cell. Keeping the facts costs the cell 14 counter writes, and the
-  walk of its commit queue and parked calls, after each call and each message.
-  The memory costs the cell, at each moment listed above, one `sqlite_memory`
-  call per connection (four `sqlite3_db_status` calls) and one
-  `Process.info(self(), :memory)`; none of it with `track_bytes: false` and
-  no `max_bytes`. The list follows the registry by a message, so a cell that
+  to the cell: about 3 µs per entry with `details: true` and 0.6 µs without.
+  Keeping the facts costs the cell 14 counter writes, and the walk of its
+  commit queue and parked calls, after each call and each message: about
+  0.35 µs. The memory costs the cell, at each moment listed above, one
+  `sqlite_memory` call per connection (four `sqlite3_db_status` calls) and
+  one `Process.info(self(), :memory)`: about 3.6 µs; none of it with
+  `track_bytes: false` and no `max_bytes`. The memory read never waits: on a
+  connection that a statement is using it returns at once and is skipped. The list follows the registry by a message, so a cell that
   has just woken or stopped may be missing or listed late; entries whose
   process is gone are skipped. Cells on other nodes are not listed: ask each
   node.

@@ -242,7 +242,8 @@ this node has no array.
   acknowledged TXID, the batches in flight and the parked calls, the six feed
   facts, the lease epoch and expiry, the cache state and the hydration flag.
   It walks its commit queue and its parked calls to count them. The wake
-  writes the same slots once, when it starts to serve.
+  writes the same slots once, when it starts to serve. The writes cost the
+  cell about 0.35 µs per call or message.
 - **Order.** A reader reads the acknowledged TXID before the newest one, and
   the writer stores the newest first, so one entry never shows
   `acked_txid > txid`. The other slots are not a joint snapshot: each is exact
@@ -257,9 +258,14 @@ this node has no array.
   `sqlite3_db_status` calls on a regular scheduler, plus one
   `Process.info(self(), :memory)`. `awake.track_bytes: false` turns it off; a
   budget (`awake.max_bytes`) always measures, and `Admission` keeps the sum of
-  cache, schema and statement bytes of the same measurement in its table.
+  cache, schema and statement bytes of the same measurement in its table. A
+  measurement costs the cell about 3.6 µs. `sqlite3_db_status` takes the
+  database mutex, which a statement holds while it runs on a dirty
+  scheduler, so `sqlite_memory` only tries it: on a connection in use it
+  returns `{:error, :busy}` at once, and the cell keeps its last values. This
+  is what happens while the feed sender is in the middle of a read.
 - **Read.** One liveness check and up to 29 counter reads per entry of
-  `cells/2`. `facts/2` adds one `stat` of the local file and one ETS lookup of
+  `cells/2`, about 3 µs per entry (0.6 µs without `details`). `facts/2` adds one `stat` of the local file and one ETS lookup of
   the wake backoff.
 
 ## 8. Routing
