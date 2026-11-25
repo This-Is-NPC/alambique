@@ -276,18 +276,19 @@ defmodule Alambique do
       with no measurable cost on the next call. It does nothing while
       `:idle_cache_after_ms` is `nil`; `false` shrinks the cache but keeps the
       garbage. `:track_bytes` (default `true`) makes every awake cell
-      measure what its connection holds, which `cells/2` and `facts/2`
-      report, except while the feed sender is in the middle of a read, when
-      the last values stay. A measurement costs the cell about 3.6 µs per
-      call; `false` leaves those fields `nil` and costs nothing. With a
-      budget, every awake cell reports what its connection holds (page
-      cache, schema and prepared statements; the same skip applies) at the
-      end of its wake, after each call, after an idle cache shrink and at the
-      end of a hydration, whatever `:track_bytes` says; a call that would wake a cell while the total is at
-      or over `:max_bytes` hibernates the least recently used cells that have
-      no caller waiting until it is under, and gives `{:error, :overloaded}`
-      if none is left to hibernate. The cell that wakes may take the total
-      past the budget as its cache fills; the next wake makes room.
+      measure the bytes SQLite and its process hold, which `cells/2` and
+      `facts/2` report, except while the feed sender is in the middle of a
+      read, when the last values stay. A measurement costs the cell about
+      3.6 µs per call; `false` saves that and leaves those fields `nil`.
+      With a budget, every awake cell reports what its connection holds
+      (page cache, schema and prepared statements; the same skip applies)
+      at the end of its wake, after each call, after an idle cache shrink
+      and at the end of a hydration, whatever `:track_bytes` says; a call
+      that would wake a cell while the total is at or over `:max_bytes`
+      hibernates the least recently used cells that have no caller waiting
+      until it is under, and gives `{:error, :overloaded}` if none is left
+      to hibernate. The cell that wakes may take the total past the budget
+      as its cache fills; the next wake makes room.
     * `:relocate` - `:fence_attempts` (default 5), `:timeout_ms` (default
       60 000; the `:timeout` of `relocate/4` overrides it) and `:poll_ms` (wait
       between tries for a hibernating owner, default 100).
@@ -1731,10 +1732,10 @@ defmodule Alambique do
   `sqlite_memory` call per connection (four `sqlite3_db_status` calls) and
   one `Process.info(self(), :memory)`: about 3.6 µs; none of it with
   `track_bytes: false` and no `max_bytes`. The memory read never waits: on a
-  connection that a statement is using it returns at once and is skipped. The list follows the registry by a message, so a cell that
-  has just woken or stopped may be missing or listed late; entries whose
-  process is gone are skipped. Cells on other nodes are not listed: ask each
-  node.
+  connection that a statement is using it returns at once and is skipped.
+  The list follows the registry by a message, so a cell that has just woken
+  or stopped may be missing or listed late; entries whose process is gone are
+  skipped. Cells on other nodes are not listed: ask each node.
   """
   @spec cells(instance, keyword) :: %{
           cells: [cell] | [map],

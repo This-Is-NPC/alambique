@@ -265,8 +265,8 @@ this node has no array.
   returns `{:error, :busy}` at once, and the cell keeps its last values. This
   is what happens while the feed sender is in the middle of a read.
 - **Read.** One liveness check and up to 29 counter reads per entry of
-  `cells/2`, about 3 µs per entry (0.6 µs without `details`). `facts/2` adds one `stat` of the local file and one ETS lookup of
-  the wake backoff.
+  `cells/2`, about 3 µs per entry (0.6 µs without `details`). `facts/2` adds
+  one `stat` of the local file and one ETS lookup of the wake backoff.
 
 ## 8. Routing
 
