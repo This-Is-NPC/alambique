@@ -12,8 +12,8 @@ defmodule AlambiqueTestkit.HostileStore do
       follow it
     * `:codeword` xors the last nine bytes with the CRC-64 polynomial as a
       message: the last page of a body changes and its CRC does not
-    * `:swap` swaps the payloads of the first two frames of the body when
-      they have the same length: two pages take each other's content (only
+    * `:swap` swaps the payloads of the first two adjacent frames of the body
+      that have the same length: two pages take each other's content (only
       reads that change are counted by `damaged/1`)
     * `:flags` clears the flags of the first frame
     * `:epoch` and `:total` answer another epoch in the metadata and another
@@ -187,12 +187,9 @@ defmodule AlambiqueTestkit.HostileStore do
   end
 
   defp harm(5, {part, size, meta}, _c, _read) do
-    with {:ok, {head1, pay1}, rest} <- frame(part),
-         {:ok, {head2, pay2}, rest} <- frame(rest),
-         true <- byte_size(pay1) == byte_size(pay2) do
-      {head1 <> pay2 <> head2 <> pay1 <> rest, size, meta}
-    else
-      _ -> {part, size, meta}
+    case swap_equal(part, <<>>) do
+      {:ok, swapped} -> {swapped, size, meta}
+      :none -> {part, size, meta}
     end
   end
 
@@ -210,4 +207,16 @@ defmodule AlambiqueTestkit.HostileStore do
     do: {:ok, {<<head::binary, n::32>>, payload}, rest}
 
   defp frame(_part), do: :error
+
+  # The first two adjacent frames of the same length trade payloads.
+  defp swap_equal(part, done) do
+    with {:ok, {head1, pay1}, rest} <- frame(part),
+         {:ok, {head2, pay2}, tail} <- frame(rest) do
+      if byte_size(pay1) == byte_size(pay2),
+        do: {:ok, done <> head1 <> pay2 <> head2 <> pay1 <> tail},
+        else: swap_equal(rest, done <> head1 <> pay1)
+    else
+      _ -> :none
+    end
+  end
 end
