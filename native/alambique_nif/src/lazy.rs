@@ -21,7 +21,7 @@ use crate::dbsum::fold;
 use crate::error::{invalid, Result};
 use crate::ltx::{
     get_uvarint, lock_pgno, page_crc, pages_added, trailer_post, valid_page_size, verify, Header,
-    HEADER_SIZE, PAGE_HEADER_SIZE, TRAILER_SIZE,
+    HEADER_SIZE, PAGE_FLAG_SIZE, PAGE_HEADER_SIZE, TRAILER_SIZE,
 };
 use crate::sums::Sums;
 
@@ -141,7 +141,9 @@ pub fn stage_file(
     }))
 }
 
-/// Decompresses one page frame (page header, size prefix, LZ4 block).
+/// Decompresses one page frame (page header, size prefix, LZ4 block). The
+/// frame must be exactly what the page index says: the size flag, and a block
+/// that ends where the frame does.
 pub fn decode_frame(frame: &[u8], pgno: u32, page_size: u32) -> Result<Vec<u8>> {
     let head = PAGE_HEADER_SIZE + 4;
     if frame.len() < head {
@@ -150,12 +152,15 @@ pub fn decode_frame(frame: &[u8], pgno: u32, page_size: u32) -> Result<Vec<u8>> 
     if u32::from_be_bytes(frame[0..4].try_into().unwrap()) != pgno {
         return invalid(format!("frame is not page {pgno}"));
     }
+    if u16::from_be_bytes(frame[4..PAGE_HEADER_SIZE].try_into().unwrap()) != PAGE_FLAG_SIZE {
+        return invalid(format!("page {pgno} frame has unexpected flags"));
+    }
     let n = u32::from_be_bytes(frame[PAGE_HEADER_SIZE..head].try_into().unwrap()) as usize;
-    let payload = frame
-        .get(head..head + n)
-        .ok_or_else(|| crate::error::Error::Invalid("truncated page frame".into()))?;
+    if frame.len() - head != n {
+        return invalid(format!("page {pgno} frame length differs from its size"));
+    }
     let mut page = vec![0u8; page_size as usize];
-    let got = lz4_flex::block::decompress_into(payload, &mut page)
+    let got = lz4_flex::block::decompress_into(&frame[head..], &mut page)
         .map_err(|e| crate::error::Error::Invalid(format!("decompress page {pgno}: {e}")))?;
     if got != page.len() {
         return invalid(format!("page {pgno} decompressed to {got} bytes"));
@@ -1037,6 +1042,25 @@ mod tests {
         assert!(lazy.verify_whole(0, &bad[..40]).is_ok());
         lazy.set_whole_max(0);
         assert!(lazy.miss_run(7, 1).unwrap().len < b.len() as u64);
+    }
+
+    #[test]
+    fn a_frame_with_other_flags_or_another_length_is_rejected() {
+        let file = ltx(1, 1, &[(1, 1)]);
+        let (_, start, len) = verify(&file).unwrap().2[0];
+        let frame = &file[start..start + len];
+        assert!(decode_frame(frame, 1, PS).is_ok());
+        let mut flags = frame.to_vec();
+        flags[5] = 0;
+        assert!(decode_frame(&flags, 1, PS).is_err());
+        flags[5] = 1;
+        flags[4] = 1;
+        assert!(decode_frame(&flags, 1, PS).is_err());
+        // Bytes past the block, and a block cut short.
+        let mut longer = frame.to_vec();
+        longer.push(0);
+        assert!(decode_frame(&longer, 1, PS).is_err());
+        assert!(decode_frame(&frame[..frame.len() - 1], 1, PS).is_err());
     }
 
     #[test]

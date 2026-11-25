@@ -24,7 +24,7 @@ pub const HEADER_FLAG_NO_CHECKSUM: u32 = 1 << 1;
 /// Offsets of the checksums in the reserved header bytes of `NoChecksum` files.
 const RESERVED_PRE: usize = 80;
 const RESERVED_POST: usize = 88;
-const PAGE_FLAG_SIZE: u16 = 1;
+pub(crate) const PAGE_FLAG_SIZE: u16 = 1;
 const PENDING_BYTE: u64 = 0x4000_0000;
 
 pub fn lock_pgno(page_size: u32) -> u32 {
