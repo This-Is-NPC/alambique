@@ -295,10 +295,14 @@ defmodule Alambique.TakeoverPropertiesTest do
     run = step({:write, who, cell}, run)
     pid = Cell.whereis(Config.fetch!(inst(run, who)), cell)
 
-    if (run.calm? and pid) && run.owner[cell] == who do
+    # A refused write leaves its pid registered while the cell stops (`:fenced`),
+    # and a plain read of a stale owner also marks it the owner: the step then
+    # has no live cell to hold, and is skipped.
+    head = run.calm? and pid != nil and run.owner[cell] == who and head_of(pid)
+
+    if head do
       n = run.seq + 1
       run = %{run | seq: n, attempted: Map.update(run.attempted, cell, [n], &[n | &1])}
-      head = :sys.get_state(pid).repl.txid
       key = Keys.segment(run.prefix, cell, 0, head + 1, head + 1)
       GatedStore.hold(run.gate, Regex.compile!("^" <> Regex.escape(key) <> "$"))
       write = Task.async(fn -> execute(run, who, cell, n) end)
@@ -448,6 +452,13 @@ defmodule Alambique.TakeoverPropertiesTest do
     )
   catch
     :exit, reason -> {:exit, reason}
+  end
+
+  # The TXID the cell has reached, or nil when it already stopped.
+  defp head_of(pid) do
+    :sys.get_state(pid).repl.txid
+  catch
+    :exit, _ -> nil
   end
 
   # A checked read waits in the newest batch of the cell.
