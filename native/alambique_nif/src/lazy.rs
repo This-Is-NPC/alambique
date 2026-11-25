@@ -1231,14 +1231,13 @@ mod tests {
 
     #[test]
     fn a_page_installed_after_the_plan_is_complete_keeps_the_comparison() {
-        let (_dir, lazy, a, _b) = fetched(|p, d| {
-            if p == 3 {
-                *d.last_mut().unwrap() ^= 0x55;
-            }
-        });
-        // A read that was under way delivers a page again after the last one.
-        lazy.install(3, &page(3, 1)).unwrap();
-        assert!(lazy.check_object(0, &a).is_err());
+        let (_dir, lazy, a, b) = fetched(|_, _| {});
+        // A read that was under way delivers a page after the last one: no
+        // page is missing, so `install` calls `finish` again.
+        assert!(lazy.install(3, &page(3, 2)).unwrap());
+        // `finish` must not empty `owner`, nor the recorded CRC change.
+        assert_eq!(lazy.check_object(0, &a).unwrap(), 5);
+        assert_eq!(lazy.check_object(1, &b).unwrap(), 2);
     }
 
     #[test]
