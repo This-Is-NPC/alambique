@@ -169,8 +169,10 @@ defmodule Alambique.Cell.Facts do
   def track_bytes?(%{awake: awake}), do: awake.track_bytes or awake.max_bytes != nil
 
   # The bytes of the connection and, while the feed sender reads, of its
-  # reader; a failed read leaves the last values. The sum the budget keeps is
-  # the one admission has always used (no lookaside).
+  # reader; a failed read leaves the last values, as does a busy one: the
+  # feed sender holds its connection while it reads, and the cell must not wait
+  # for it. The sum the budget keeps is the one admission has always used (no
+  # lookaside).
   defp measure(state) do
     memories = Enum.map([state.conn | List.wrap(state.feed_reader)], &Sqlite.memory/1)
 

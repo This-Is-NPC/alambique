@@ -299,9 +299,10 @@ defmodule Alambique.Sqlite do
   @doc """
   Bytes the connection holds, by purpose: `:cache_used` (page cache),
   `:schema_used`, `:stmt_used` (prepared statements) and `:lookaside_used`.
-  The opener only.
+  The opener only. It never waits: while a statement of the connection runs
+  it gives `{:error, :busy}`.
   """
-  @spec memory(conn) :: {:ok, %{atom => non_neg_integer}} | {:error, term}
+  @spec memory(conn) :: {:ok, %{atom => non_neg_integer}} | {:error, :busy | term}
   def memory(conn), do: Native.sqlite_memory(ref(conn))
 
   defp raise_argument_error({:error, {:argument_error, message}}),

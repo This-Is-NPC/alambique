@@ -277,9 +277,11 @@ defmodule Alambique do
       `:idle_cache_after_ms` is `nil`; `false` shrinks the cache but keeps the
       garbage. `:track_bytes` (default `true`) makes every awake cell
       measure what its connection holds, which `cells/2` and `facts/2`
-      report; `false` leaves those fields `nil` and costs nothing. With a
+      report, except while the feed sender is in the middle of a read, when
+      the last values stay; `false` leaves those fields `nil` and costs
+      nothing. With a
       budget, every awake cell reports what its connection holds (page cache,
-      schema and prepared statements) at the end of its wake, after each call,
+      schema and prepared statements; the same skip applies) at the end of its wake, after each call,
       after an idle cache shrink and at the end of a hydration, whatever
       `:track_bytes` says; a call that would wake a cell while the total is at
       or over `:max_bytes` hibernates the least recently used cells that have
@@ -1712,7 +1714,9 @@ defmodule Alambique do
       (`sqlite3_db_status`). Measured at the end of the wake, after each call,
       after an idle cache shrink and at the end of a hydration, so a reader
       that is open or closed, or a change made by another message, shows at
-      the next of those. `nil` with `awake: [track_bytes: false]` unless
+      the next of those. A measurement is skipped while the feed sender is in
+      the middle of a read on the reader, and the fields keep their last
+      values. `nil` with `awake: [track_bytes: false]` unless
       `awake: [max_bytes:]` is set, which always measures.
     * `:process_bytes` - `Process.info(pid, :memory)` of the cell, measured by
       the cell at the same moments as the fields above and `nil` with them.
