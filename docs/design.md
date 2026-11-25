@@ -224,6 +224,44 @@ wake and no eviction work in one directory.
 The router's lease read is reused, and the frozen and state reads run beside it.
 The fence is a put with `if_none_match`.
 
+### 7.3 Facts of a cell
+
+An awake cell publishes facts about itself in the `:atomics` array that is its
+registry value. `Alambique.Cell.Facts` holds the table of slots: their order,
+their encoding and the code that writes and reads them. `cells/2` with
+`details: true` and `facts/2` read the array from the calling process. They
+send nothing to the cell, never wake it and never change its `last_used`, so a
+cell inside a long transaction answers them at once. A cell with no process on
+this node has no array.
+
+- **Encoding.** Every slot is a signed 64-bit integer. A boolean is 0 or 1, an
+  enum is the position of its atom, and `nil` is the smallest integer, because
+  a monotonic time can be negative and a TXID of 0 is real.
+- **Writer.** Only the cell writes. After each call and each message it writes
+  14 slots from its state, in a fixed order: the newest encoded TXID, the
+  acknowledged TXID, the batches in flight and the parked calls, the six feed
+  facts, the lease epoch and expiry, the cache state and the hydration flag.
+  It walks its commit queue and its parked calls to count them. The wake
+  writes the same slots once, when it starts to serve.
+- **Order.** A reader reads the acknowledged TXID before the newest one, and
+  the writer stores the newest first, so one entry never shows
+  `acked_txid > txid`. The other slots are not a joint snapshot: each is exact
+  as of the last call or message.
+- **Waking.** The wake writes `last_used` last. While it is 0 every fact
+  written by the wake or by a publish reads `nil`; the process, `serving`,
+  `pending`, the wake start and the wake source are known.
+- **Memory.** The cell measures its connections (and the feed reader while it
+  is open) at the end of the wake, after each call, after an idle cache
+  shrink and at the end of a hydration, not after other messages. A
+  measurement is one `sqlite_memory` call per connection, which makes four
+  `sqlite3_db_status` calls on a regular scheduler, plus one
+  `Process.info(self(), :memory)`. `awake.track_bytes: false` turns it off; a
+  budget (`awake.max_bytes`) always measures, and `Admission` keeps the sum of
+  cache, schema and statement bytes of the same measurement in its table.
+- **Read.** One liveness check and up to 29 counter reads per entry of
+  `cells/2`. `facts/2` adds one `stat` of the local file and one ETS lookup of
+  the wake backoff.
+
 ## 8. Routing
 
 Each cell has one owner node at a time. Routing finds that node.

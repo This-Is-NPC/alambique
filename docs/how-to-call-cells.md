@@ -225,6 +225,20 @@ while the cell is waking: skip those entries when you compare them.
 `wal_bytes` is the size of the cell's WAL after its last acknowledged batch.
 Hibernating the cell checkpoints it and removes the WAL.
 
+Each entry also has the cell's pid, whether it still serves, the calls waiting
+on it, its TXIDs, commit queue, lease, change feed, page cache state, the
+bytes SQLite and the process hold, and when and how it woke. The fields and
+their cost are in the documentation of `Alambique.cells/2`. Every one of them
+is read without calling the cell, so it never wakes or touches a busy one.
+`Alambique.facts/2` gives the same fields for one cell, and says whether it has
+a process on this node, how big its local file is and whether its wake is in
+backoff, without waking it:
+
+```elixir
+{:ok, %{local_process: false, local_file_bytes: bytes, wake_backoff: nil}} =
+  Alambique.facts(MyApp.Cells, "org-1")
+```
+
 `Alambique.list_cells/2` lists every cell stored in a location, asleep or awake,
 from the schema index. Pass `next` as `after:` to get the next page.
 
