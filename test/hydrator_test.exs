@@ -5,10 +5,9 @@ defmodule Alambique.HydratorTest do
   import Alambique.CellHelpers, only: [eventually: 1]
   import Alambique.CompactionHelpers
 
-  alias Alambique.LtxTamper
   alias Alambique.Replication
   alias Alambique.Replication.{Hydrator, Lazy, Native, Retry}
-  alias AlambiqueTestkit.MemoryStore
+  alias AlambiqueTestkit.{HostileStore, MemoryStore}
 
   setup do
     env = setup_world()
@@ -23,6 +22,13 @@ defmodule Alambique.HydratorTest do
     lazy_opts = %{min_bytes: 0, wait_ms: 1_000}
     {:ok, result} = Replication.restore(env.ctx, cell(), path, :latest, lazy: lazy_opts)
     Lazy.new(result, env.ctx, miss_pages: 2, batch_bytes: 256, verify_bytes: verify_bytes)
+  end
+
+  # The same world, read through a store that damages the ranged reads on
+  # command: the object stays the one that was staged, ETag included.
+  defp hostile(env) do
+    hostile = HostileStore.config(env.cfg)
+    {%{env | ctx: %{env.ctx | store: {HostileStore, hostile}}}, hostile}
   end
 
   defp start(lazy, fetch_ms \\ 1_000) do
@@ -103,10 +109,10 @@ defmodule Alambique.HydratorTest do
     end
 
     test "an object shorter than the run asked for is a short read", %{env: env} do
+      {env, hostile} = hostile(env)
       lazy = lazy(env)
       key = elem(lazy.files, 0)
-      {:ok, body, _etag, _meta} = env.mod.get(env.cfg, key)
-      {:ok, _} = env.mod.put(env.cfg, key, binary_part(body, 0, 150), :none, %{})
+      HostileStore.damage(hostile, :short, 1)
 
       assert {:error, {:short_read, ^key}} = Lazy.fetch_page(lazy, 1, deadline(1_000))
     end
@@ -132,13 +138,9 @@ defmodule Alambique.HydratorTest do
     end
 
     test "a page of a file that fails its checksum is not served", %{env: env} do
+      {env, hostile} = hostile(env)
       lazy = lazy(env)
-
-      for idx <- 0..(tuple_size(lazy.files) - 1) do
-        key = elem(lazy.files, idx)
-        {:ok, body, _etag, _meta} = env.mod.get(env.cfg, key)
-        {:ok, _} = env.mod.put(env.cfg, key, LtxTamper.alter_frames(body), :none, %{})
-      end
+      HostileStore.damage(hostile, {:flip, 50}, 50)
 
       {pages, left} = Native.lazy_progress(lazy.handle)
       assert {:error, {:invalid, _}} = Lazy.fetch_page(lazy, 1, deadline(1_000))
@@ -147,12 +149,9 @@ defmodule Alambique.HydratorTest do
     end
 
     test "a file whose checksum fails ends the hydration", %{env: env} do
+      {env, hostile} = hostile(env)
       lazy = lazy(env)
-      key = elem(lazy.files, 0)
-      {:ok, body, _etag, _meta} = env.mod.get(env.cfg, key)
-      cut = byte_size(body) - 1
-      <<head::binary-size(^cut), last>> = body
-      {:ok, _} = env.mod.put(env.cfg, key, <<head::binary, Bitwise.bxor(last, 1)>>, :none, %{})
+      HostileStore.damage(hostile, {:flip, 99}, 50)
       hydrator = start(lazy)
 
       assert_receive {:hydration_failed, ^hydrator, {:invalid, _}}, 5_000
