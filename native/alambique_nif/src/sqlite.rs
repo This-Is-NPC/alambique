@@ -1802,6 +1802,7 @@ fn sqlite_memory<'a>(env: Env<'a>, conn: ResourceArc<Conn>) -> Term<'a> {
     // SAFETY: `db` is live while the guard is held. The mutex is recursive,
     // so the calls below enter it again; it is left before the guard.
     let mutex = unsafe { ffi::sqlite3_db_mutex(db) };
+    // SAFETY: `mutex` is the non-null mutex of the live `db`.
     if !mutex.is_null() && unsafe { ffi::sqlite3_mutex_try(mutex) } != ffi::SQLITE_OK {
         return Failure::Busy.term(env);
     }
