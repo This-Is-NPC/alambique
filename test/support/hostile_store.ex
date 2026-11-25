@@ -3,9 +3,24 @@ defmodule AlambiqueTestkit.HostileStore do
   A memory store whose requests fail, or whose ranged reads come back damaged,
   on command. The counters tell which requests were hit.
 
-  `damage/3` damages the next `times` ranged reads: `{:flip, pct}` flips one
-  byte at `pct` percent of the body, `:short` cuts it in half and `:shifted`
-  returns the bytes that follow it.
+  `damage/3` damages the next `times` ranged reads:
+
+    * `{:flip, pct}` flips every bit of one byte at `pct` percent of the body;
+      `{:flip, pct, masks}` xors that byte with the next mask of the list, one
+      mask per damaged read, in turn
+    * `:short` cuts the body in half and `:shifted` returns the bytes that
+      follow it
+    * `:codeword` xors the last nine bytes with the CRC-64 polynomial as a
+      message: the last page of a body changes and its CRC does not
+    * `:swap` swaps the payloads of the first two frames of the body when
+      they have the same length: two pages take each other's content (only
+      reads that change are counted by `damaged/1`)
+    * `:flags` clears the flags of the first frame
+    * `:epoch` and `:total` answer another epoch in the metadata and another
+      size of the object
+
+  `get_range/5` is honoured as the memory store does, and damaged like the
+  other reads.
   """
 
   @behaviour Alambique.Store
@@ -21,8 +36,12 @@ defmodule AlambiqueTestkit.HostileStore do
   @damaged 6
   @range_delivered 7
   @damage_at 8
+  @mask_count 9
+  @picked 10
+  @masks 11
+  @mask_slots 8
 
-  def config(inner), do: %{inner: inner, ctl: :atomics.new(8, [])}
+  def config(inner), do: %{inner: inner, ctl: :atomics.new(@masks + @mask_slots - 1, [])}
 
   def fail(%{ctl: ctl}, ops, times) do
     :atomics.put(ctl, @mask, Enum.reduce(ops, 0, &(Bitwise.bsl(1, index(&1)) + &2)))
@@ -35,10 +54,20 @@ defmodule AlambiqueTestkit.HostileStore do
   end
 
   def damage(%{ctl: ctl}, kind, times) do
+    {at, masks} = flip(kind)
+
+    for {mask, i} <- Enum.with_index(masks), do: :atomics.put(ctl, @masks + i, mask)
+
+    :atomics.put(ctl, @mask_count, length(masks))
+    :atomics.put(ctl, @picked, 0)
     :atomics.put(ctl, @damage_kind, index(kind))
-    :atomics.put(ctl, @damage_at, with({:flip, at} <- kind, do: at, else: (_ -> 0)))
+    :atomics.put(ctl, @damage_at, at)
     :atomics.put(ctl, @damage_left, times)
   end
+
+  defp flip({:flip, at}), do: {at, [0xFF]}
+  defp flip({:flip, at, masks}) when length(masks) in 1..@mask_slots, do: {at, masks}
+  defp flip(_kind), do: {0, [0xFF]}
 
   def delivered(%{ctl: ctl}), do: :atomics.get(ctl, @delivered)
   def range_delivered(%{ctl: ctl}), do: :atomics.get(ctl, @range_delivered)
@@ -46,8 +75,14 @@ defmodule AlambiqueTestkit.HostileStore do
 
   defp index(op) when op in @ops, do: Enum.find_index(@ops, &(&1 == op))
   defp index({:flip, _}), do: 1
+  defp index({:flip, _, _}), do: 1
   defp index(:short), do: 2
   defp index(:shifted), do: 3
+  defp index(:codeword), do: 4
+  defp index(:swap), do: 5
+  defp index(:flags), do: 6
+  defp index(:epoch), do: 7
+  defp index(:total), do: 8
 
   defp hit?(%{ctl: ctl}, op) do
     if Bitwise.band(:atomics.get(ctl, @mask), Bitwise.bsl(1, index(op))) != 0 and
@@ -96,22 +131,26 @@ defmodule AlambiqueTestkit.HostileStore do
   def delete(%{inner: inner}, key), do: MemoryStore.delete(inner, key)
 
   @impl true
-  def get_range(%{inner: inner, ctl: ctl} = c, key, offset, length) do
-    faulty(c, :get_range, fn ->
-      with {:ok, part, size, meta} <- MemoryStore.get_range(inner, key, offset, length) do
-        if part != "" and take?(ctl, @damage_left) do
-          :atomics.add(ctl, @damaged, 1)
+  def get_range(%{inner: inner} = c, key, offset, length) do
+    ranged(c, key, offset, length, fn -> MemoryStore.get_range(inner, key, offset, length) end)
+  end
 
-          {:ok,
-           harm(
-             :atomics.get(ctl, @damage_kind),
-             part,
-             inner,
-             key,
-             offset,
-             length,
-             :atomics.get(ctl, @damage_at)
-           ), size, meta}
+  @impl true
+  def get_range(%{inner: inner} = c, key, offset, length, etag) do
+    ranged(c, key, offset, length, fn ->
+      MemoryStore.get_range(inner, key, offset, length, etag)
+    end)
+  end
+
+  defp ranged(%{ctl: ctl} = c, key, offset, length, read) do
+    faulty(c, :get_range, fn ->
+      with {:ok, part, size, meta} <- read.() do
+        if part != "" and take?(ctl, @damage_left) do
+          kind = :atomics.get(ctl, @damage_kind)
+          whole = {part, size, meta}
+          {body, total, found} = harmed = harm(kind, whole, c, {key, offset, length})
+          if harmed != whole, do: :atomics.add(ctl, @damaged, 1)
+          {:ok, body, total, found}
         else
           {:ok, part, size, meta}
         end
@@ -119,20 +158,56 @@ defmodule AlambiqueTestkit.HostileStore do
     end)
   end
 
-  defp harm(1, part, _inner, _key, _offset, _length, pct) do
-    at = div((byte_size(part) - 1) * pct, 99)
+  defp harm(1, {part, size, meta}, %{ctl: ctl}, _read) do
+    at = div((byte_size(part) - 1) * :atomics.get(ctl, @damage_at), 99)
+    n = :atomics.add_get(ctl, @picked, 1) - 1
+    mask = :atomics.get(ctl, @masks + rem(n, :atomics.get(ctl, @mask_count)))
     <<head::binary-size(^at), byte, tail::binary>> = part
-    <<head::binary, Bitwise.bxor(byte, 0xFF), tail::binary>>
+    {<<head::binary, Bitwise.bxor(byte, mask), tail::binary>>, size, meta}
   end
 
-  defp harm(2, part, _inner, _key, _offset, _length, _pct),
-    do: binary_part(part, 0, div(byte_size(part), 2))
+  defp harm(2, {part, size, meta}, _c, _read),
+    do: {binary_part(part, 0, div(byte_size(part), 2)), size, meta}
 
   # The bytes that follow: another page's frame in place of the requested one.
-  defp harm(3, part, inner, key, offset, length, _pct) do
+  defp harm(3, {part, size, meta}, %{inner: inner}, {key, offset, length}) do
     case MemoryStore.get_range(inner, key, offset + length, byte_size(part)) do
-      {:ok, other, _, _} when byte_size(other) == byte_size(part) -> other
-      _ -> part
+      {:ok, other, _, _} when byte_size(other) == byte_size(part) -> {other, size, meta}
+      _ -> {part, size, meta}
     end
   end
+
+  # x^64 + x^4 + x^3 + x + 1 as the last 65 bits of the body.
+  defp harm(4, {part, size, meta}, _c, _read) when byte_size(part) >= 9 do
+    at = byte_size(part) - 9
+    <<head::binary-size(^at), first, middle::binary-size(7), last>> = part
+    first = Bitwise.bxor(first, 0x80)
+    last = Bitwise.bxor(last, 0xD8)
+    {<<head::binary, first, middle::binary, last>>, size, meta}
+  end
+
+  defp harm(5, {part, size, meta}, _c, _read) do
+    with {:ok, {head1, pay1}, rest} <- frame(part),
+         {:ok, {head2, pay2}, rest} <- frame(rest),
+         true <- byte_size(pay1) == byte_size(pay2) do
+      {head1 <> pay2 <> head2 <> pay1 <> rest, size, meta}
+    else
+      _ -> {part, size, meta}
+    end
+  end
+
+  defp harm(6, {<<pgno::32, _flags::16, rest::binary>>, size, meta}, _c, _read),
+    do: {<<pgno::32, 0::16, rest::binary>>, size, meta}
+
+  defp harm(7, {part, size, meta}, _c, _read), do: {part, size, Map.put(meta, "epoch", "9999")}
+
+  defp harm(8, {part, size, meta}, _c, _read), do: {part, size + 1, meta}
+
+  defp harm(_kind, read, _c, _read), do: read
+
+  # A frame: its page number, flags and size, and its payload.
+  defp frame(<<head::binary-size(6), n::32, payload::binary-size(n), rest::binary>>),
+    do: {:ok, {<<head::binary, n::32>>, payload}, rest}
+
+  defp frame(_part), do: :error
 end
