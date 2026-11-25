@@ -2,8 +2,10 @@ defmodule Alambique.Replication.Hydrator do
   @moduledoc false
   # The process of a cell that restores lazily (design §16). It answers the
   # `{:page_miss, ...}` messages of the VFS with ranged reads, fetches the
-  # remaining pages in the background and, when every page is local and the
-  # database checksum equals the restored one, tells its owner and ends.
+  # remaining pages in the background and, when every page is local, reads each
+  # object of the chain whole and compares it with the pages that were
+  # installed, checks that the database checksum equals the restored one, tells
+  # its owner and ends.
   #
   # Messages to the owner: `{:hydrated, pid}` and `{:hydration_failed, pid, reason}`.
 
@@ -49,7 +51,10 @@ defmodule Alambique.Replication.Hydrator do
       fill_timer: nil,
       started: System.monotonic_time(),
       pages: total,
-      misses: 0
+      misses: 0,
+      # What the comparison with the whole objects read, for the telemetry.
+      check: %{},
+      check_started: nil
     }
 
     {:ok, state, {:continue, :fill}}
@@ -88,6 +93,8 @@ defmodule Alambique.Replication.Hydrator do
       {:miss, _} -> maybe_finish(state)
       {{:bg, _pages}, {:ok, _done}} -> fill(%{state | failures: 0})
       {{:bg, pages}, {:error, reason}} -> background_failed(state, pages, reason)
+      {:check, {:ok, stats}} -> verify(%{state | check: checked(state, stats)})
+      {:check, {:error, reason}} -> check_failed(state, reason)
     end
   end
 
@@ -142,14 +149,15 @@ defmodule Alambique.Replication.Hydrator do
   defp background_failed(state, pages, reason) do
     :ok = Native.lazy_requeue(state.lazy.handle, pages)
 
-    if permanent?(reason) do
-      fail(state, reason)
-    else
-      failures = state.failures + 1
-      delay = min(state.lazy.ctx.backoff_ms * Integer.pow(2, min(failures, 6)), 5_000)
-      timer = Process.send_after(self(), :fill, delay)
-      {:noreply, %{state | failures: failures, fill_timer: timer}}
-    end
+    if permanent?(reason), do: fail(state, reason), else: retry_later(state)
+  end
+
+  # Looks again after a backoff, with the same `:fill` that polls for pages.
+  defp retry_later(state) do
+    failures = state.failures + 1
+    delay = min(state.lazy.ctx.backoff_ms * Integer.pow(2, min(failures, 6)), 5_000)
+    timer = Process.send_after(self(), :fill, delay)
+    {:noreply, %{state | failures: failures, fill_timer: timer}}
   end
 
   # What no retry can fix: an object that is gone or that changed, a range the
@@ -159,15 +167,17 @@ defmodule Alambique.Replication.Hydrator do
   defp permanent?({:changed, _key}), do: true
   defp permanent?({:bad_range, _offset}), do: true
   defp permanent?({:invalid, _}), do: true
+  defp permanent?({:too_large, _, _}), do: true
   defp permanent?(_), do: false
 
   # Done when no page is missing; otherwise look again soon, because pages
   # that the cell fetched for its own sums arrive without a message.
   defp maybe_finish(state) do
     running = map_size(state.tasks)
+    waiting = state.fill_timer != nil
 
     case Native.lazy_progress(state.lazy.handle) do
-      {_pages, 0} when running == 0 -> verify(state)
+      {_pages, 0} when running == 0 and not waiting -> check_objects(state)
       {_pages, 0} -> {:noreply, state}
       _ when running == 0 -> {:noreply, schedule(state)}
       _ -> {:noreply, state}
@@ -184,6 +194,32 @@ defmodule Alambique.Replication.Hydrator do
       %{hydrator: %{poll_ms: ms}} -> ms
       _ -> Keyword.get(opts, :poll_ms, 100)
     end
+  end
+
+  # Every page is local: the whole objects say whether they are the right ones.
+  defp check_objects(state) do
+    lazy = state.lazy
+    concurrency = state.concurrency
+    fetch_ms = state.fetch_ms
+    task = Task.async(fn -> Lazy.check_objects(lazy, concurrency, fetch_ms) end)
+
+    state = %{state | tasks: Map.put(state.tasks, task.ref, :check)}
+    {:noreply, %{state | check_started: state.check_started || System.monotonic_time()}}
+  end
+
+  # A store that fails is tried again; an object that disagrees ends it.
+  defp check_failed(state, reason) do
+    if permanent?(reason),
+      do: fail(%{state | check: checked(state, %{})}, reason),
+      else: retry_later(state)
+  end
+
+  defp checked(state, stats) do
+    %{
+      check_objects: Map.get(stats, :objects, 0),
+      check_bytes: Map.get(stats, :bytes, 0),
+      check_duration: System.monotonic_time() - state.check_started
+    }
   end
 
   defp verify(state) do
@@ -204,7 +240,7 @@ defmodule Alambique.Replication.Hydrator do
     Telemetry.span_stop(
       [:replication, :hydrate],
       state.started,
-      %{pages: state.pages, misses: state.misses},
+      Map.merge(%{pages: state.pages, misses: state.misses}, state.check),
       Map.put(meta, :cell, state.lazy.cell)
     )
   end

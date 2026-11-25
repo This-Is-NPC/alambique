@@ -182,6 +182,8 @@ struct Inner {
     crc: Vec<u64>,
     /// Pages without a base CRC: still to fetch.
     unknown: u32,
+    /// The file each page came from once the plan is complete.
+    owner: Vec<u32>,
     /// Page numbers by (file, offset), and each page's position in it.
     order: Vec<u32>,
     rank: Vec<u32>,
@@ -255,6 +257,7 @@ impl Lazy {
                 flags: Vec::new(),
                 crc: Vec::new(),
                 unknown: 0,
+                owner: Vec::new(),
                 order: Vec::new(),
                 rank: Vec::new(),
                 cursor: 0,
@@ -533,6 +536,7 @@ impl Lazy {
     }
 
     fn finish(&self, g: &mut Inner) {
+        g.owner = g.map.iter().map(|e| e.file).collect();
         g.map = Vec::new();
         g.sizes = HashMap::new();
         g.order = Vec::new();
@@ -692,6 +696,43 @@ impl Lazy {
     }
 
     // Checksums
+
+    /// Compares a whole object of the plan with the pages the database was
+    /// given. The object must pass its file checksum, and each page it
+    /// provides to the file (the newest version) must have the CRC that
+    /// `install` recorded from the ranged read, and none may be missing. The
+    /// database checksum cannot do this: a CRC is linear, so errors can
+    /// cancel in the fold. Only once every page is local. Returns the pages
+    /// compared.
+    pub fn check_object(&self, file: u32, data: &[u8]) -> Result<usize> {
+        if !self.is_complete() {
+            return invalid("pages are still missing");
+        }
+        let (_, _, frames) = verify(data)?;
+        let g = self.inner();
+        let mut compared = 0usize;
+        for (pgno, start, len) in frames {
+            let i = pgno as usize - 1;
+            if g.owner.get(i) != Some(&file) {
+                continue;
+            }
+            let page = decode_frame(&data[start..start + len], pgno, self.page_size)?;
+            if page_crc(pgno, &page) != g.crc[i] {
+                return invalid(format!(
+                    "page {pgno} of file {file} differs from the one read"
+                ));
+            }
+            compared += 1;
+        }
+        let owned = g.owner.iter().filter(|&&f| f == file).count();
+        if compared != owned {
+            return invalid(format!(
+                "file {file} lacks {} of its pages",
+                owned - compared
+            ));
+        }
+        Ok(compared)
+    }
 
     /// Fills `sums` (per-page CRCs, as the replicator keeps them) for `pages`
     /// from the CRCs of fetched pages. Returns the pages that were not fetched
@@ -1061,6 +1102,120 @@ mod tests {
         longer.push(0);
         assert!(decode_frame(&longer, 1, PS).is_err());
         assert!(decode_frame(&frame[..frame.len() - 1], 1, PS).is_err());
+    }
+
+    /// The plan of `files()` with every page installed, `damage` applied to
+    /// the page as it is installed.
+    fn fetched(damage: impl Fn(u32, &mut Vec<u8>)) -> (tempfile::TempDir, Lazy, Vec<u8>, Vec<u8>) {
+        let dir = tempfile::tempdir().unwrap();
+        let lazy = Lazy::create(&dir.path().join("db"), PS, Duration::from_secs(1)).unwrap();
+        let (a, b) = files();
+        stage_all(&lazy, 0, &a);
+        stage_all(&lazy, 1, &b);
+        lazy.ready().unwrap();
+        while let Some(run) = lazy.next_batch(u64::MAX) {
+            let file = if run.file == 0 { &a } else { &b };
+            for (i, (p, _, _)) in run.pages.iter().enumerate() {
+                let mut data = decode_frame(frame(file, &run, i), *p, PS).unwrap();
+                damage(*p, &mut data);
+                lazy.install(*p, &data).unwrap();
+            }
+        }
+        (dir, lazy, a, b)
+    }
+
+    /// The database checksum of the pages of `files()`.
+    fn database_checksum() -> u64 {
+        fold(
+            &(1..=7)
+                .map(|p| page_crc(p, &page(p, if p == 2 || p == 7 { 9 } else { 1 })))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn whole_objects_match_the_pages_that_were_read() {
+        let (_dir, lazy, a, b) = fetched(|_, _| {});
+        assert_eq!(lazy.verify(database_checksum()), Ok(true));
+        // The newest version of each page: five from the first file, two from
+        // the second.
+        assert_eq!(lazy.check_object(0, &a).unwrap(), 5);
+        assert_eq!(lazy.check_object(1, &b).unwrap(), 2);
+        // An object that is another file of the plan lacks the pages.
+        assert!(lazy.check_object(0, &b).is_err());
+        // A damaged object, and a valid one with other pages.
+        let mut bad = a.clone();
+        bad[HEADER_SIZE + 12] ^= 1;
+        assert!(lazy.check_object(0, &bad).is_err());
+        let other = ltx(1, 6, &(1..=6).map(|p| (p, 2)).collect::<Vec<_>>());
+        assert!(lazy.check_object(0, &other).is_err());
+    }
+
+    #[test]
+    fn whole_objects_are_compared_only_when_every_page_is_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let lazy = Lazy::create(&dir.path().join("db"), PS, Duration::from_secs(1)).unwrap();
+        let (a, b) = files();
+        stage_all(&lazy, 0, &a);
+        stage_all(&lazy, 1, &b);
+        lazy.ready().unwrap();
+        assert!(lazy.check_object(0, &a).is_err());
+    }
+
+    /// Each damage below leaves the database checksum as it was: a CRC is
+    /// linear, so errors whose CRCs add up to nothing cancel in the fold. The
+    /// comparison with the whole object still refuses them.
+    fn assert_blind_fold_but_refused(damage: impl Fn(u32, &mut Vec<u8>)) {
+        let (_dir, lazy, a, b) = fetched(damage);
+        assert_eq!(
+            lazy.verify(database_checksum()),
+            Ok(true),
+            "the damage must cancel in the fold"
+        );
+        assert!(lazy.check_object(0, &a).is_err() || lazy.check_object(1, &b).is_err());
+    }
+
+    #[test]
+    fn the_same_error_on_two_pages_is_refused() {
+        assert_blind_fold_but_refused(|p, d| {
+            if p == 1 || p == 3 {
+                *d.last_mut().unwrap() ^= 0x55;
+            }
+        });
+    }
+
+    #[test]
+    fn errors_a_b_and_a_xor_b_on_three_pages_are_refused() {
+        assert_blind_fold_but_refused(|p, d| {
+            let error = match p {
+                1 => 0x01,
+                3 => 0x02,
+                4 => 0x03,
+                _ => 0,
+            };
+            *d.last_mut().unwrap() ^= error;
+        });
+    }
+
+    #[test]
+    fn two_pages_that_swap_contents_are_refused() {
+        assert_blind_fold_but_refused(|p, d| match p {
+            3 => *d = page(4, 1),
+            4 => *d = page(3, 1),
+            _ => {}
+        });
+    }
+
+    #[test]
+    fn an_error_that_is_a_multiple_of_the_crc_polynomial_is_refused() {
+        // The polynomial as a message: the CRC of the page does not change.
+        assert_blind_fold_but_refused(|p, d| {
+            if p == 5 {
+                let n = d.len();
+                d[n - 9] ^= 0x80;
+                d[n - 1] ^= 0xD8;
+            }
+        });
     }
 
     #[test]
