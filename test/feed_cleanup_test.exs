@@ -196,6 +196,31 @@ defmodule Alambique.FeedCleanupTest do
     end
   end
 
+  describe "the facts" do
+    test "follow the publication and the batch of the cleanup", ctx do
+      inst = start(ctx, cleanup: :after_publish)
+      cell = unique_cell()
+      insert(inst, cell, 1)
+      cleaned(inst, cell)
+
+      facts =
+        eventually(fn ->
+          {:ok, f} = Alambique.facts(inst, cell)
+          s = state(inst, cell)
+
+          f.txid == s.repl.txid and f.acked_txid == s.pipe.acked.txid and
+            f.feed_published == s.feed_published and f.feed_sent == s.feed_sent and
+            f.feed_cleaned == s.feed_cleaned and f.feed_backlog == s.feed_backlog and f
+        end)
+
+      assert facts.feed_published > 0
+      assert facts.feed_cleaned == facts.feed_published
+      assert facts.feed_backlog == 0 and facts.feed_capped == false
+      # The cleanup is a batch of its own, after the one it published.
+      assert facts.txid > facts.feed_published
+    end
+  end
+
   describe ":idle_or_write" do
     test "cleans an idle cell", ctx do
       inst = start(ctx, cleanup: :idle_or_write)

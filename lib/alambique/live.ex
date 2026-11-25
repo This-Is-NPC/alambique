@@ -11,6 +11,8 @@ defmodule Alambique.Live do
 
   use GenServer
 
+  alias Alambique.Cell.Facts
+
   def start_link(config), do: GenServer.start_link(__MODULE__, config.live, name: config.live)
 
   @impl true
@@ -66,15 +68,8 @@ defmodule Alambique.Live do
     }
   end
 
-  defp entry({id, _load}, false), do: id
-
-  defp entry({id, load}, true) do
-    %{
-      id: id,
-      last_used: Alambique.Cell.last_used(load),
-      wal_bytes: Alambique.Cell.wal_bytes(load)
-    }
-  end
+  defp entry({id, _pid, _load}, false), do: id
+  defp entry({id, pid, load}, true), do: Map.put(Facts.read(load, pid), :id, id)
 
   defp walk(_table, :"$end_of_table", _), do: []
   defp walk(_table, _key, 0), do: []
@@ -85,7 +80,7 @@ defmodule Alambique.Live do
     case :ets.lookup(table, key) do
       [{id, pid, load}] ->
         if Process.alive?(pid),
-          do: [{id, load} | walk(table, next, left - 1)],
+          do: [{id, pid, load} | walk(table, next, left - 1)],
           else: walk(table, next, left)
 
       [] ->

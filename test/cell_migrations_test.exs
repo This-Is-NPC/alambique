@@ -337,6 +337,27 @@ defmodule Alambique.CellMigrationsTest do
       assert index(ctx) == [{3, "a.1"}]
     end
 
+    test "a migration moves the txid fact", ctx do
+      inst = start(ctx, %{"a" => [@v1]})
+      assert {:ok, _} = put(inst, "a.1", 1)
+
+      before =
+        eventually(fn ->
+          {:ok, f} = Alambique.facts(inst, "a.1")
+          f.acked_txid == f.txid and f
+        end)
+
+      Lists.set(%{"a" => [@v1, @v2, @v3]})
+      assert {:ok, 3} = Alambique.migrate(inst, "a.1")
+
+      eventually(fn ->
+        {:ok, f} = Alambique.facts(inst, "a.1")
+
+        f.txid > before.txid and f.txid == :sys.get_state(pid_of(inst, "a.1")).repl.txid and
+          f.acked_txid == f.txid
+      end)
+    end
+
     test "answers after the writes before it are durable and serves the ones behind it", ctx do
       test = self()
       inst = start(ctx, %{"a" => [@v1]})

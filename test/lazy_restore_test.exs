@@ -142,6 +142,35 @@ defmodule Alambique.LazyRestoreTest do
       assert :sys.get_state(pid).parked == []
     end
 
+    test "the facts show the hydration and the parked reads", ctx do
+      cell = seed(ctx, 300)
+      release = hold_hydration(cell)
+      inst = lazy_instance(ctx, lazy_restore: @lazy ++ [verify_reads: true])
+      wake_and_flush(inst, cell)
+
+      assert {:ok, %{hydrating: true, parked: 0, wake_source: :restore}} =
+               Alambique.facts(inst, cell)
+
+      reads =
+        for n <- 5..6 do
+          Task.async(fn -> Alambique.query(inst, cell, "SELECT n FROM t WHERE n = #{n}") end)
+        end
+
+      eventually(fn ->
+        match?({:ok, %{parked: 2, hydrating: true}}, Alambique.facts(inst, cell))
+      end)
+
+      release.()
+      for read <- reads, do: assert({:ok, %{rows: [[_]]}} = Task.await(read, 30_000))
+
+      eventually(fn ->
+        match?(
+          {:ok, %{parked: 0, hydrating: false, cache_used: used}} when used > 0,
+          Alambique.facts(inst, cell)
+        )
+      end)
+    end
+
     test "without verify_reads a read runs at once and misses the page", ctx do
       cell = seed(ctx, 300)
       release = hold_hydration(cell)

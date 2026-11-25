@@ -260,4 +260,20 @@ defmodule Alambique.OrphanFramesTest do
     assert {:ok, _} = Alambique.position(c.inst, c.cell)
     assert rows(c) == [0, 1, 9]
   end
+
+  describe "the facts" do
+    test "an orphan batch moves the txid", env do
+      c = boot(env, :replicate)
+      assert {:ok, %{txid: before}} = Alambique.facts(c.inst, c.cell)
+      orphan(c, 5)
+      assert {:ok, _} = Alambique.position(c.inst, c.cell)
+
+      eventually(fn ->
+        {:ok, f} = Alambique.facts(c.inst, c.cell)
+
+        f.txid > before and f.txid == :sys.get_state(pid(c)).repl.txid and
+          f.acked_txid == f.txid
+      end)
+    end
+  end
 end

@@ -31,4 +31,29 @@ defmodule Alambique.CellNifCallsTest do
     # the stamp of the feed rows and the read of the captured rows.
     assert calls <= 6, "#{calls} SQLite calls for one write"
   end
+
+  # The memory of the connection runs on a regular scheduler, so the counter of
+  # dirty calls above does not see it.
+  for {track, calls} <- [{true, 1}, {false, 0}] do
+    test "one write makes #{calls} sqlite_memory call with track_bytes: #{track}", env do
+      inst =
+        start_instance(env,
+          migrations: [{1, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)"}],
+          compaction: false,
+          awake: [track_bytes: unquote(track)]
+        )
+
+      cell = unique_cell()
+      {:ok, _} = Alambique.execute(inst, cell, "INSERT INTO t (v) VALUES ('warm')")
+      pid = Alambique.Cell.whereis(Alambique.Config.fetch!(inst), cell)
+      # Every message of the first batch is handled before this returns.
+      _ = :sys.get_state(pid)
+
+      before = NativeStats.read().sqlite_memory_calls
+      {:ok, _} = Alambique.execute(inst, cell, "INSERT INTO t (v) VALUES ('x')")
+      _ = :sys.get_state(pid)
+
+      assert NativeStats.read().sqlite_memory_calls - before == unquote(calls)
+    end
+  end
 end

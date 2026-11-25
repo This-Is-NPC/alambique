@@ -275,13 +275,17 @@ defmodule Alambique do
       0.45 MiB with `true`. The cost is one collection of the cell process,
       with no measurable cost on the next call. It does nothing while
       `:idle_cache_after_ms` is `nil`; `false` shrinks the cache but keeps the
-      garbage. With a budget, every awake cell reports what its connection
-      holds (page cache, schema and prepared statements) after each call and
-      message; a call that would wake a cell while the total is at or over
-      `:max_bytes` hibernates the least recently used cells that have no
-      caller waiting until it is under, and gives `{:error, :overloaded}` if
-      none is left to hibernate. The cell that wakes may take the total past
-      the budget as its cache fills; the next wake makes room.
+      garbage. `:track_bytes` (default `true`) makes every awake cell
+      measure what its connection holds, which `cells/2` and `facts/2`
+      report; `false` leaves those fields `nil` and costs nothing. With a
+      budget, every awake cell reports what its connection holds (page cache,
+      schema and prepared statements) at the end of its wake, after each call,
+      after an idle cache shrink and at the end of a hydration, whatever
+      `:track_bytes` says; a call that would wake a cell while the total is at
+      or over `:max_bytes` hibernates the least recently used cells that have
+      no caller waiting until it is under, and gives `{:error, :overloaded}`
+      if none is left to hibernate. The cell that wakes may take the total
+      past the budget as its cache fills; the next wake makes room.
     * `:relocate` - `:fence_attempts` (default 5), `:timeout_ms` (default
       60 000; the `:timeout` of `relocate/4` overrides it) and `:poll_ms` (wait
       between tries for a hibernating owner, default 100).
@@ -1638,9 +1642,20 @@ defmodule Alambique do
   `:limit` (a positive integer, default 100) and `:details` (default `false`).
   Anything else raises `ArgumentError`.
 
-  With `details: true` each entry of `cells` is a map instead of an id:
+  With `details: true` each entry of `cells` is a map instead of an id. Every
+  value comes from numbers the cell process publishes as it works. The read
+  never calls the cell, never wakes it and never changes its `last_used`, so a
+  cell stuck in a long transaction answers at once. A fact is as old as the last
+  call or message the cell handled; the facts of one entry are not a joint
+  snapshot, except that `acked_txid <= txid` always holds. The fields:
 
     * `:id` - the cell id.
+    * `:pid` - the cell process.
+    * `:serving` - `false` once the cell stopped serving and only has to
+      close its database and release its lease (a hibernation, a failure, a
+      lost lease); `true` before that, waking included. It is set before the
+      cell's stop event.
+    * `:pending` - the calls waiting on the cell, as `load/2` counts them.
     * `:last_used` - the time of the last call the cell served, in
       `System.monotonic_time(:millisecond)` of this node, so `now - last_used`
       is the idle time and the smallest value is the least recently used cell.
@@ -1653,14 +1668,70 @@ defmodule Alambique do
       from disk by this call, so a write still being uploaded is not in it,
       and it drops to 0 when the cell checkpoints (see `:wal`,
       `:checkpoint_bytes`).
+    * `:wake_started_at` and `:wake_started_at_mono` - when the cell process
+      started, before it waited for a wake slot: `System.system_time(:millisecond)`
+      and `System.monotonic_time(:millisecond)`, the base of `:last_used`.
+      Written once.
+    * `:wake_source` - where the wake took the database from: `:local` (the
+      file on disk was current), `:restore` (rebuilt from the store) or
+      `:empty` (a new cell). `nil` until the wake has chosen. Written once per
+      attempt.
 
-  A page costs in proportion to its size, whatever the number of cells. The
-  list follows the registry by a message, so a cell that has just woken or
-  stopped may be missing or listed late; entries whose process is gone are
-  skipped. Cells on other nodes are not listed: ask each node.
+  The facts below are `nil` while the cell is waking, that is while
+  `:last_used` is `nil`, and are exact as of the last call or message after
+  that, unless a field says otherwise.
+
+    * `:awake_since` and `:awake_since_mono` - when the cell started to serve,
+      in the two clocks above. Written once.
+    * `:txid` - the newest TXID the cell has encoded into a batch, or the one
+      its wake restored. A batch in flight may not be durable yet.
+    * `:acked_txid` - the newest TXID whose batch landed in the store and was
+      acknowledged. Never above `:txid` in one entry.
+    * `:batches_in_flight` - the batches encoded and not yet acknowledged
+      (the commit pipeline, design §6).
+    * `:parked` - the calls held until the file is complete (design §16).
+    * `:lease_epoch` and `:lease_expires_at` - the epoch of the cell's lease
+      and its expiry in milliseconds of the instance clock, as of its last
+      renewal.
+    * `:cache` - `:shrunk` while the idle cache shrink holds the page cache at
+      `:idle_cache_kib`, else `:full`. The first call after a shrink restores
+      it.
+    * `:hydrating` - `true` while the hydrator still fills the file of a
+      lazy restore (design §16).
+    * `:feed_published`, `:feed_sent`, `:feed_cleaned`, `:feed_backlog`,
+      `:feed_capped` and `:feed_reader_open` - the change feed of the cell
+      (design §13): the newest TXID published, the newest handed to the
+      sender, and the newest whose rows the database no longer holds; the
+      batches the sender holds; whether more wait in the file for room; and
+      whether the sender reads with a connection of its own. `0`, `false` and
+      `false` without a feed.
+    * `:cache_used`, `:schema_used`, `:stmt_used` and `:lookaside_used` - the
+      bytes SQLite holds for the page cache, the schema, the prepared
+      statements and the lookaside slots in use, summed over the cell's
+      connection and the feed sender's reader while it is open
+      (`sqlite3_db_status`). Measured at the end of the wake, after each call,
+      after an idle cache shrink and at the end of a hydration, so a reader
+      that is open or closed, or a change made by another message, shows at
+      the next of those. `nil` with `awake: [track_bytes: false]` unless
+      `awake: [max_bytes:]` is set, which always measures.
+    * `:process_bytes` - `Process.info(pid, :memory)` of the cell, measured by
+      the cell at the same moments as the fields above and `nil` with them.
+      Reference-counted binaries are not in it.
+
+  A page costs in proportion to its size, whatever the number of cells: per
+  entry one liveness check and up to 29 counter reads, none of them a message
+  to the cell. Keeping the facts costs the cell 14 counter writes, and the
+  walk of its commit queue and parked calls, after each call and each message.
+  The memory costs the cell, at each moment listed above, one `sqlite_memory`
+  call per connection (four `sqlite3_db_status` calls) and one
+  `Process.info(self(), :memory)`; none of it with `track_bytes: false` and
+  no `max_bytes`. The list follows the registry by a message, so a cell that
+  has just woken or stopped may be missing or listed late; entries whose
+  process is gone are skipped. Cells on other nodes are not listed: ask each
+  node.
   """
   @spec cells(instance, keyword) :: %{
-          cells: [cell] | [%{id: cell, last_used: integer | nil, wal_bytes: non_neg_integer}],
+          cells: [cell] | [map],
           next: cell | nil,
           count: non_neg_integer
         }
@@ -1678,6 +1749,56 @@ defmodule Alambique do
       do: raise(ArgumentError, ":details must be a boolean, got: #{inspect(details?)}")
 
     Alambique.Live.page(Config.fetch!(instance), after_id, limit, details?)
+  end
+
+  @doc """
+  The facts of one cell, read without calling it or waking it, and without
+  changing its `last_used`.
+
+  Returns `{:ok, map}`, or `{:error, :invalid_cell_id}` (or the error of the
+  placement) for an id the instance does not accept. The map holds:
+
+    * `:id` and `:local_process` - `true` when the cell has a process on this
+      node, `false` otherwise. The cell may be awake on another node: ask the
+      owner (`owner/3`, `lease/3`).
+    * With `local_process: true`, every field of an entry of
+      `cells(instance, details: true)` (see `cells/2`: when each is written,
+      how old it can be and what it costs), read the same way.
+    * `:local_file_bytes` - the size in bytes of the local copy of the
+      database, `nil` when there is none. It is the file on this node's disk,
+      which a cell elsewhere may have outdated, and a file still being filled
+      by a lazy restore (`:hydrating`) is sparse, so its size is a lower bound
+      of the database. It costs one `stat` of the file. It works for a cell
+      with no process.
+    * `:wake_backoff` - `nil`, or `%{until: ms, attempts: n, reason: term}`
+      while this node refuses to wake the cell after failed wakes: `until` is
+      in `System.monotonic_time(:millisecond)` of this node, `attempts` the
+      failures in a row and `reason` the last. It costs one ETS lookup.
+  """
+  @spec facts(instance, cell) :: {:ok, map} | {:error, term}
+  def facts(instance, cell) do
+    config = Config.fetch!(instance)
+
+    with :ok <- Placement.validate_id(config, cell) do
+      local =
+        case Alambique.Cell.find(config, cell) do
+          {pid, load} -> Map.put(Alambique.Cell.Facts.read(load, pid), :local_process, true)
+          nil -> %{local_process: false}
+        end
+
+      file =
+        case File.stat(Alambique.Cell.Local.db_path(config, cell)) do
+          {:ok, %{size: size}} -> size
+          {:error, _} -> nil
+        end
+
+      {:ok,
+       Map.merge(local, %{
+         id: cell,
+         local_file_bytes: file,
+         wake_backoff: Alambique.Admission.backoff(config, cell)
+       })}
+    end
   end
 
   @doc """
