@@ -8,9 +8,13 @@
 //! store also leaves its CRC in `crc`, so that the database checksum of a
 //! full restore can be recomputed (`verify`) and the replicator can get the
 //! CRCs of pages it replaces without reading them (`prepare_sums`).
+//! It also leaves a keyed hash in `keyed` (8 more bytes per page), which only
+//! `check_object` reads.
 
+use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
+use std::hash::{BuildHasher, Hasher};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -180,6 +184,8 @@ struct Inner {
     local: Vec<u64>,
     flags: Vec<u8>,
     crc: Vec<u64>,
+    /// Keyed hash of each page (see `Lazy::keyed`), recorded with `crc`.
+    keyed: Vec<u64>,
     /// Pages without a base CRC: still to fetch.
     unknown: u32,
     /// The file each page came from once the plan is complete.
@@ -223,6 +229,8 @@ pub struct Lazy {
     /// their file checksum before any of their pages is served (0: never).
     whole_max: AtomicU64,
     complete: AtomicBool,
+    /// Random keys of this restore, unknown to the store: `keyed` is not linear.
+    key: RandomState,
     inner: Mutex<Inner>,
     cond: Condvar,
     notify: Mutex<Option<Notify>>,
@@ -247,6 +255,7 @@ impl Lazy {
             wait,
             whole_max: AtomicU64::new(0),
             complete: AtomicBool::new(false),
+            key: RandomState::new(),
             inner: Mutex::new(Inner {
                 map: Vec::new(),
                 sizes: HashMap::new(),
@@ -256,6 +265,7 @@ impl Lazy {
                 local: Vec::new(),
                 flags: Vec::new(),
                 crc: Vec::new(),
+                keyed: Vec::new(),
                 unknown: 0,
                 owner: Vec::new(),
                 order: Vec::new(),
@@ -360,6 +370,7 @@ impl Lazy {
         g.local = vec![0; (n as usize).div_ceil(64)];
         g.flags = vec![0; n as usize];
         g.crc = vec![0; n as usize];
+        g.keyed = vec![0; n as usize];
         g.unknown = n;
         if (1..=n).contains(&lock) {
             g.flags[lock as usize - 1] = F_CRC | F_SUM;
@@ -503,6 +514,7 @@ impl Lazy {
     /// wrote is not replaced. True when this was the last missing page.
     pub fn install(&self, pgno: u32, page: &[u8]) -> crate::error::Result<bool> {
         let crc = page_crc(pgno, page);
+        let keyed = self.keyed(pgno, page);
         let mut g = self.inner();
         if pgno == 0 || pgno > g.orig || page.len() != self.page_size as usize {
             return crate::error::invalid(format!("page {pgno} is not part of the plan"));
@@ -523,6 +535,7 @@ impl Lazy {
         if *f & F_CRC == 0 {
             *f |= F_CRC;
             g.crc[pgno as usize - 1] = crc;
+            g.keyed[pgno as usize - 1] = keyed;
             g.unknown -= 1;
         }
         g.requested.remove(&pgno);
@@ -533,6 +546,14 @@ impl Lazy {
         }
         self.cond.notify_all();
         Ok(done)
+    }
+
+    /// SipHash of the page number and bytes under this restore's random keys.
+    fn keyed(&self, pgno: u32, page: &[u8]) -> u64 {
+        let mut h = self.key.build_hasher();
+        h.write_u32(pgno);
+        h.write(page);
+        h.finish()
     }
 
     fn finish(&self, g: &mut Inner) {
@@ -704,9 +725,9 @@ impl Lazy {
     /// Compares a whole object of the plan with the pages the database was
     /// given. The object must pass its file checksum, and each page it
     /// provides to the file (the newest version) must have the CRC that
-    /// `install` recorded from the ranged read, and none may be missing. The
-    /// database checksum cannot do this: a CRC is linear, so errors can
-    /// cancel in the fold. Only once every page is local. Returns the pages
+    /// `install` recorded from the ranged read (CRC and keyed hash), and none
+    /// may be missing. The database checksum cannot do this: a CRC is linear,
+    /// so errors can cancel in the fold, or be a multiple of its polynomial. Only once every page is local. Returns the pages
     /// compared.
     pub fn check_object(&self, file: u32, data: &[u8]) -> Result<usize> {
         if !self.is_complete() {
@@ -725,7 +746,7 @@ impl Lazy {
                 continue;
             }
             let page = decode_frame(&data[start..start + len], pgno, self.page_size)?;
-            if page_crc(pgno, &page) != g.crc[i] {
+            if page_crc(pgno, &page) != g.crc[i] || self.keyed(pgno, &page) != g.keyed[i] {
                 return invalid(format!(
                     "page {pgno} of file {file} differs from the one read"
                 ));
