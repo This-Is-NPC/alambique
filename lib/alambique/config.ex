@@ -345,6 +345,7 @@ defmodule Alambique.Config do
             idle_cache_after_ms: pos_integer | nil,
             idle_cache_kib: non_neg_integer,
             idle_gc: boolean,
+            track_bytes: boolean,
             wake_queue_ms: pos_integer,
             max_wake_queue: pos_integer,
             max_bytes: pos_integer | nil
@@ -1219,7 +1220,9 @@ defmodule Alambique.Config do
   end
 
   # `max_bytes: nil` (the default) leaves the memory of the awake cells
-  # unbounded; `max_wake_queue: nil` is four times `max_wakes`.
+  # unbounded; `max_wake_queue: nil` is four times `max_wakes`. `track_bytes`
+  # measures the memory of each cell for `Alambique.cells/2`; a budget measures
+  # it whatever its value.
   defp awake!(opts, idle_timeout_ms) do
     opts =
       checked_keyword!(:awake, opts, [
@@ -1227,7 +1230,8 @@ defmodule Alambique.Config do
         :max_wake_queue,
         :idle_cache_after_ms,
         :idle_cache_kib,
-        :idle_gc | Keyword.keys(@awake_defaults)
+        :idle_gc,
+        :track_bytes | Keyword.keys(@awake_defaults)
       ])
 
     {max_bytes, rest} = Keyword.pop(opts, :max_bytes)
@@ -1236,11 +1240,13 @@ defmodule Alambique.Config do
     {idle_kib, rest} = Keyword.pop(rest, :idle_cache_kib, @idle_cache_kib)
 
     {idle_gc, rest} = Keyword.pop(rest, :idle_gc, true)
+    {track_bytes, rest} = Keyword.pop(rest, :track_bytes, true)
 
     unless is_integer(idle_kib) and idle_kib >= 0,
       do: bad!(":awake :idle_cache_kib must be a non-negative integer")
 
     unless is_boolean(idle_gc), do: bad!(":awake :idle_gc must be true or false")
+    unless is_boolean(track_bytes), do: bad!(":awake :track_bytes must be true or false")
 
     for {key, value} <- [max_bytes: max_bytes, max_wake_queue: queue],
         not (is_nil(value) or (is_integer(value) and value > 0)),
@@ -1252,6 +1258,7 @@ defmodule Alambique.Config do
     awake
     |> Map.put(:idle_cache_kib, idle_kib)
     |> Map.put(:idle_gc, idle_gc)
+    |> Map.put(:track_bytes, track_bytes)
     |> Map.put(:idle_cache_after_ms, idle_after)
     |> Map.put(:max_bytes, max_bytes)
     |> Map.put(:max_wake_queue, queue || 4 * awake.max_wakes)
