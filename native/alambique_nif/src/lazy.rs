@@ -1133,6 +1133,22 @@ mod tests {
         assert!(decode_frame(&frame[..frame.len() - 1], 1, PS).is_err());
     }
 
+    #[test]
+    fn a_frame_whose_declared_length_is_not_the_rest_is_rejected() {
+        // The block itself is intact: only the length prefix is wrong, so the
+        // decompressor alone would accept it.
+        let file = ltx(1, 1, &[(1, 1)]);
+        let (_, start, len) = verify(&file).unwrap().2[0];
+        let frame = &file[start..start + len];
+        let at = PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + 4;
+        let declared = u32::from_be_bytes(frame[at.clone()].try_into().unwrap());
+        for other in [declared - 1, declared + 1] {
+            let mut bad = frame.to_vec();
+            bad[at.clone()].copy_from_slice(&other.to_be_bytes());
+            assert!(decode_frame(&bad, 1, PS).is_err());
+        }
+    }
+
     /// The plan of `files()` with every page installed, `damage` applied to
     /// the page as it is installed.
     fn fetched(damage: impl Fn(u32, &mut Vec<u8>)) -> (tempfile::TempDir, Lazy, Vec<u8>, Vec<u8>) {
