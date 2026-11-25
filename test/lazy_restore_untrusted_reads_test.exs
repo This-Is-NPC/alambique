@@ -120,7 +120,8 @@ defmodule Alambique.LazyRestoreUntrustedReadsTest do
   end
 
   # A write waits for the end of the hydration (the write gate); the damaged
-  # pages must not let it through.
+  # pages must not let it through. The comparison with the whole objects must
+  # be what refuses them, not the database checksum.
   defp refused_write(inst, cell, release) do
     config = Alambique.Config.fetch!(inst)
     write = Task.async(fn -> Alambique.execute(inst, cell, @append) end)
@@ -131,6 +132,8 @@ defmodule Alambique.LazyRestoreUntrustedReadsTest do
     {_, meta} = await_event([:alambique, :replication, :hydrate], cell, 30_000)
 
     assert meta.result == :error
+    assert {:invalid, "page " <> _ = reason} = meta.reason
+    assert reason =~ "differs from the one read"
     assert {:error, {:hydration_failed, _}} = Task.await(write, 30_000)
     meta
   end
