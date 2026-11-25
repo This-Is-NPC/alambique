@@ -42,6 +42,17 @@ about it, and where the evidence is.
   `INSERT ... SELECT` in a write; those rows are in the feed
   ([how-to-consume-the-change-feed.md](how-to-consume-the-change-feed.md)).
 
+- A lazy restore serves pages of files above `lazy_restore: [verify_bytes:]`
+  before their content is checked. On arrival a ranged read is checked for
+  the object (ETag, size, epoch, and with S3 the `Content-Range`) and the
+  frame (page number, flags, length); the content of the page is checked at
+  the end of the hydration, by the comparison with the whole objects and the
+  database checksum. Reads before the end can see wrong content; with
+  `lazy_restore: [verify_reads: true]` they wait for the end, and writes
+  always do ([design.md](design.md), section 16). The end of the hydration
+  reads every object of the chain whole. A store whose ranged reads give no
+  ETag is not pinned to the object that was staged.
+
 ## Load measurements
 
 The cost of one cell, as measured under load, is in

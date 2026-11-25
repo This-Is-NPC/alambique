@@ -189,20 +189,30 @@ defmodule Alambique.Store.S3 do
   end
 
   @impl true
-  def get_range(config, key, offset, length) do
+  def get_range(config, key, offset, length), do: ranged(config, key, offset, length, [])
+
+  # `If-Match` makes the server refuse (412) a read of an object that is not
+  # the one with this ETag.
+  @impl true
+  def get_range(config, key, offset, length, etag),
+    do: ranged(config, key, offset, length, [{"if-match", ~s("#{etag}")}])
+
+  defp ranged(config, key, offset, length, conditions) do
     range = "bytes=#{offset}-#{offset + length - 1}"
 
-    case request(config, :get, key, headers: [{"range", range}]) do
+    case request(config, :get, key, headers: [{"range", range} | conditions]) do
       {:ok, %{status: 206, body: body} = resp} ->
-        {:ok, body, total_size(resp), meta(resp)}
+        with {:ok, total} <- content_range(resp, offset, byte_size(body)) do
+          {:ok, body, total, range_meta(resp)}
+        end
 
       # The whole object was returned: the server ignored the range.
       {:ok, %{status: 200, body: body} = resp} ->
-        {:ok, binary_part_at(body, offset, length), byte_size(body), meta(resp)}
+        {:ok, binary_part_at(body, offset, length), byte_size(body), range_meta(resp)}
 
       # The offset is at or past the end.
       {:ok, %{status: 416} = resp} ->
-        {:ok, "", total_size(resp), meta(resp)}
+        {:ok, "", total_size(resp), range_meta(resp)}
 
       other ->
         error(other)
@@ -484,6 +494,27 @@ defmodule Alambique.Store.S3 do
       String.to_integer(total)
     else
       _ -> 0
+    end
+  end
+
+  # The part the server says it sent, `Content-Range: bytes 10-19/12345`, must
+  # be the one asked for: it starts at `offset` and is as long as the body.
+  defp content_range(resp, offset, size) do
+    with [value | _] <- Req.Response.get_header(resp, "content-range"),
+         [_, first, last, total] <- Regex.run(~r{\Abytes (\d+)-(\d+)/(\d+)\z}, value),
+         true <- String.to_integer(first) == offset,
+         true <- String.to_integer(last) - offset + 1 == size do
+      {:ok, String.to_integer(total)}
+    else
+      _ -> {:error, {:bad_range, offset}}
+    end
+  end
+
+  # The metadata of a ranged read carry the ETag of the object that served it.
+  defp range_meta(resp) do
+    case etag(resp) do
+      "" -> meta(resp)
+      etag -> Map.put(meta(resp), "etag", etag)
     end
   end
 

@@ -26,6 +26,11 @@ defmodule Alambique.Store.Guard do
     do: guard(fn -> store.get_range(config, key, offset, length) end)
 
   @impl true
+  def get_range({store, config}, key, offset, length, etag) do
+    guard(fn -> Alambique.Store.call_get_range({store, config}, key, offset, length, etag) end)
+  end
+
+  @impl true
   def list({store, config}, prefix, start_after, limit),
     do: guard(fn -> store.list(config, prefix, start_after, limit) end)
 

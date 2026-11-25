@@ -253,6 +253,37 @@ defmodule Alambique.Store.S3StubTest do
       assert header(sent(), "range") == "bytes=10-19"
     end
 
+    test "refuses a part that is not the one asked for" do
+      wrong = [
+        # Another start, a body longer than the range it names, and no range.
+        [{"content-range", "bytes 20-29/1234"}],
+        [{"content-range", "bytes 10-14/1234"}],
+        []
+      ]
+
+      for headers <- wrong do
+        c = config(reply(206, headers, "0123456789"))
+        assert {:error, {:bad_range, 10}} = S3.get_range(c, "k", 10, 10)
+      end
+    end
+
+    test "gives the ETag of the object that served the read in the metadata" do
+      headers = [{"content-range", "bytes 0-9/1234"}, {"etag", ~s("abc")}]
+      c = config(reply(206, headers, "0123456789"))
+      assert {:ok, _, 1234, %{"etag" => "abc"}} = S3.get_range(c, "k", 0, 10)
+    end
+
+    test "with an ETag asks for that version only (If-Match) and maps a refusal" do
+      headers = [{"content-range", "bytes 0-9/1234"}]
+      c = config(reply(206, headers, "0123456789"))
+      assert {:ok, "0123456789", 1234, _} = S3.get_range(c, "k", 0, 10, "abc")
+      request = sent()
+      assert header(request, "if-match") == ~s("abc")
+      assert header(request, "range") == "bytes=0-9"
+
+      assert {:error, :precondition_failed} = S3.get_range(config(reply(412)), "k", 0, 10, "abc")
+    end
+
     test "slices the body when the server ignored the range" do
       c = config(reply(200, [], "0123456789"))
       assert {:ok, "345", 10, _} = S3.get_range(c, "k", 3, 3)

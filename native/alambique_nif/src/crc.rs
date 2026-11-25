@@ -72,4 +72,16 @@ mod tests {
         h.update(b"56789");
         assert_eq!(h.sum(), crc64(b"123456789"));
     }
+
+    #[test]
+    fn the_polynomial_as_a_message_error_leaves_the_checksum_unchanged() {
+        // x^64 + x^4 + x^3 + x + 1 with the last bit of the data as x^0: the
+        // reflected algorithm reads the low bit of each byte first.
+        let mut data: Vec<u8> = (0..64u32).map(|i| (i * 7 + 3) as u8).collect();
+        let before = crc64(&data);
+        let n = data.len();
+        data[n - 9] ^= 0x80;
+        data[n - 1] ^= 0xD8;
+        assert_eq!(crc64(&data), before);
+    }
 }

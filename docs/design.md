@@ -59,6 +59,15 @@ the shared object contains one of their names.
   uses no breaker. A state is told apart in events by `class` (`:default` or
   `:feed`) and in `Alambique.breaker_status/1` by the `feed` entry.
 
+- **Ranged reads.** The metadata of a `get_range` carry the ETag of the object
+  that served it, under `"etag"`. A store may implement `get_range/5`, which
+  reads only the object with the given ETag and answers
+  `:precondition_failed` for another. `Alambique.Store.S3` sends `If-Match`
+  and checks that `Content-Range` starts at the offset and is as long as the
+  body; the memory store of the testkit compares the ETag. The library calls
+  `get_range/4` of a store without `get_range/5` and compares the ETag in the
+  metadata; a store with neither gives no ETag to compare (§16).
+
 ### 3.1 Trust model
 
 The library trusts the store. Its checks (CRC-64 of pages, checksums, epochs,
@@ -643,15 +652,55 @@ the dirty I/O scheduler of its statement. The VFS asks the hydrator for the
 page and waits. The statement fails with `SQLITE_IOERR` if the fetch gives
 up, or if no answer comes within `op_timeout_ms` + 1 s.
 
-**Hydrator.** One process per lazy cell fetches the missing pages, then
-checks the database checksum. A match sends
-`{:hydrated, pid}`. A mismatch stops the cell with
+**Hydrator.** One process per lazy cell fetches the missing pages. When every
+page is local it reads each object of the chain whole and compares it with
+the pages it installed, then checks the database checksum. If both match it
+sends `{:hydrated, pid}`. Otherwise it stops the cell with
 `{:hydration_failed, reason}`, and parked callers get
 `{:error, {:hydration_failed, reason}}`.
 
-**Limit: unchecked pages.** Pages of a file above `verify_bytes` are checked
-only at the end of hydration. The write gate keeps them out of acknowledged
-writes. `verify_reads: true` covers reads too.
+**What is checked, and when.** The frames of an LTX file carry no checksum of
+their own, so the checks split by what they can see.
+
+- *On arrival of a ranged read*, before any of its pages is installed. The
+  restore records, for each object of the chain, the ETag, the size and the
+  epoch from its first read. A ranged read is of that ETag (`get_range/5`, or
+  the ETag in the metadata of the answer, §3), and its answer must carry the
+  recorded size and epoch, or the read is `{:changed, key}`. With the S3 store
+  the `Content-Range` must also start at the offset and be as long as the
+  body, or the read is `{:bad_range, offset}`. In each frame the page number
+  is the one asked for, the flags are the size flag, the declared length of
+  the block is the rest of the frame, and the block decompresses to one page,
+  or the read is `{:invalid, reason}`. A store that gives no ETag is not
+  pinned by ETag; the size and the epoch are still checked.
+- *At the end of the hydration*, the content of every page. `install` keeps
+  the CRC-64 of each page as it arrived, and a 64-bit SipHash of the page
+  number and bytes under keys drawn at random for each restore (8 bytes more
+  per page). Each object of the chain is read
+  whole (`lazy_restore: [concurrency:]` at a time, within `restore:
+  [max_inflight_bytes:]`), checked against its file checksum, and the
+  pages it provides to the final file (the last file that wrote each page)
+  are decoded and both values compared with the ones kept. A difference is
+  `{:invalid, reason}` and the hydration fails. Then the XOR of all the CRCs
+  is compared with the database checksum of the restored state.
+
+The database checksum alone cannot see errors whose CRC changes add up to
+nothing: the same error on an even number of pages, errors A, B and A xor B
+on three, two pages that swap contents. The comparison with the whole objects
+does. A CRC-64 is linear, so an error that is a multiple of its polynomial
+leaves the CRC of a page unchanged; the keyed hash changes, and a store does
+not know its keys. A file at or below
+`verify_bytes` is read whole and checked against its file checksum before any
+of its pages is served.
+
+**Cost.** Each lazy hydration reads every object of the chain whole, after
+the ranged reads. The `[:alambique, :replication, :hydrate]` event
+reports `check_objects`, `check_bytes` and `check_duration`.
+
+**Limit: unchecked pages.** Until the end of the hydration a page of a file
+above `verify_bytes` is served with the arrival checks only: its content can
+be wrong, and statements can read it. The write gate keeps such pages out of
+acknowledged writes. `verify_reads: true` covers reads too.
 
 ## 17. Versioned migrations
 

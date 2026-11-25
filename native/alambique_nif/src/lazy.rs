@@ -8,9 +8,13 @@
 //! store also leaves its CRC in `crc`, so that the database checksum of a
 //! full restore can be recomputed (`verify`) and the replicator can get the
 //! CRCs of pages it replaces without reading them (`prepare_sums`).
+//! It also leaves a keyed hash in `keyed` (8 more bytes per page), which only
+//! `check_object` reads.
 
+use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
+use std::hash::{BuildHasher, Hasher};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -21,7 +25,7 @@ use crate::dbsum::fold;
 use crate::error::{invalid, Result};
 use crate::ltx::{
     get_uvarint, lock_pgno, page_crc, pages_added, trailer_post, valid_page_size, verify, Header,
-    HEADER_SIZE, PAGE_HEADER_SIZE, TRAILER_SIZE,
+    HEADER_SIZE, PAGE_FLAG_SIZE, PAGE_HEADER_SIZE, TRAILER_SIZE,
 };
 use crate::sums::Sums;
 
@@ -141,7 +145,9 @@ pub fn stage_file(
     }))
 }
 
-/// Decompresses one page frame (page header, size prefix, LZ4 block).
+/// Decompresses one page frame (page header, size prefix, LZ4 block). The
+/// frame must be exactly what the page index says: the size flag, and a block
+/// that ends where the frame does.
 pub fn decode_frame(frame: &[u8], pgno: u32, page_size: u32) -> Result<Vec<u8>> {
     let head = PAGE_HEADER_SIZE + 4;
     if frame.len() < head {
@@ -150,12 +156,15 @@ pub fn decode_frame(frame: &[u8], pgno: u32, page_size: u32) -> Result<Vec<u8>> 
     if u32::from_be_bytes(frame[0..4].try_into().unwrap()) != pgno {
         return invalid(format!("frame is not page {pgno}"));
     }
+    if u16::from_be_bytes(frame[4..PAGE_HEADER_SIZE].try_into().unwrap()) != PAGE_FLAG_SIZE {
+        return invalid(format!("page {pgno} frame has unexpected flags"));
+    }
     let n = u32::from_be_bytes(frame[PAGE_HEADER_SIZE..head].try_into().unwrap()) as usize;
-    let payload = frame
-        .get(head..head + n)
-        .ok_or_else(|| crate::error::Error::Invalid("truncated page frame".into()))?;
+    if frame.len() - head != n {
+        return invalid(format!("page {pgno} frame length differs from its size"));
+    }
     let mut page = vec![0u8; page_size as usize];
-    let got = lz4_flex::block::decompress_into(payload, &mut page)
+    let got = lz4_flex::block::decompress_into(&frame[head..], &mut page)
         .map_err(|e| crate::error::Error::Invalid(format!("decompress page {pgno}: {e}")))?;
     if got != page.len() {
         return invalid(format!("page {pgno} decompressed to {got} bytes"));
@@ -175,8 +184,12 @@ struct Inner {
     local: Vec<u64>,
     flags: Vec<u8>,
     crc: Vec<u64>,
+    /// Keyed hash of each page (see `Lazy::keyed`), recorded with `crc`.
+    keyed: Vec<u64>,
     /// Pages without a base CRC: still to fetch.
     unknown: u32,
+    /// The file each page came from once the plan is complete.
+    owner: Vec<u32>,
     /// Page numbers by (file, offset), and each page's position in it.
     order: Vec<u32>,
     rank: Vec<u32>,
@@ -216,6 +229,8 @@ pub struct Lazy {
     /// their file checksum before any of their pages is served (0: never).
     whole_max: AtomicU64,
     complete: AtomicBool,
+    /// Random keys of this restore, unknown to the store: `keyed` is not linear.
+    key: RandomState,
     inner: Mutex<Inner>,
     cond: Condvar,
     notify: Mutex<Option<Notify>>,
@@ -240,6 +255,7 @@ impl Lazy {
             wait,
             whole_max: AtomicU64::new(0),
             complete: AtomicBool::new(false),
+            key: RandomState::new(),
             inner: Mutex::new(Inner {
                 map: Vec::new(),
                 sizes: HashMap::new(),
@@ -249,7 +265,9 @@ impl Lazy {
                 local: Vec::new(),
                 flags: Vec::new(),
                 crc: Vec::new(),
+                keyed: Vec::new(),
                 unknown: 0,
+                owner: Vec::new(),
                 order: Vec::new(),
                 rank: Vec::new(),
                 cursor: 0,
@@ -352,6 +370,7 @@ impl Lazy {
         g.local = vec![0; (n as usize).div_ceil(64)];
         g.flags = vec![0; n as usize];
         g.crc = vec![0; n as usize];
+        g.keyed = vec![0; n as usize];
         g.unknown = n;
         if (1..=n).contains(&lock) {
             g.flags[lock as usize - 1] = F_CRC | F_SUM;
@@ -495,6 +514,7 @@ impl Lazy {
     /// wrote is not replaced. True when this was the last missing page.
     pub fn install(&self, pgno: u32, page: &[u8]) -> crate::error::Result<bool> {
         let crc = page_crc(pgno, page);
+        let keyed = self.keyed(pgno, page);
         let mut g = self.inner();
         if pgno == 0 || pgno > g.orig || page.len() != self.page_size as usize {
             return crate::error::invalid(format!("page {pgno} is not part of the plan"));
@@ -515,6 +535,7 @@ impl Lazy {
         if *f & F_CRC == 0 {
             *f |= F_CRC;
             g.crc[pgno as usize - 1] = crc;
+            g.keyed[pgno as usize - 1] = keyed;
             g.unknown -= 1;
         }
         g.requested.remove(&pgno);
@@ -527,7 +548,20 @@ impl Lazy {
         Ok(done)
     }
 
+    /// SipHash of the page number and bytes under this restore's random keys.
+    fn keyed(&self, pgno: u32, page: &[u8]) -> u64 {
+        let mut h = self.key.build_hasher();
+        h.write_u32(pgno);
+        h.write(page);
+        h.finish()
+    }
+
     fn finish(&self, g: &mut Inner) {
+        // A page installed after the plan was complete must not empty `owner`.
+        if self.complete.load(Ordering::Acquire) {
+            return;
+        }
+        g.owner = g.map.iter().map(|e| e.file).collect();
         g.map = Vec::new();
         g.sizes = HashMap::new();
         g.order = Vec::new();
@@ -687,6 +721,47 @@ impl Lazy {
     }
 
     // Checksums
+
+    /// Compares a whole object of the plan with the pages the database was
+    /// given. The object must pass its file checksum, and each page it
+    /// provides to the file (the newest version) must have the CRC that
+    /// `install` recorded from the ranged read (CRC and keyed hash), and none
+    /// may be missing. The database checksum cannot do this: a CRC is linear,
+    /// so errors can cancel in the fold, or be a multiple of its polynomial. Only once every page is local. Returns the pages
+    /// compared.
+    pub fn check_object(&self, file: u32, data: &[u8]) -> Result<usize> {
+        if !self.is_complete() {
+            return invalid("pages are still missing");
+        }
+        let (_, _, frames) = verify(data)?;
+        let g = self.inner();
+        // Without one owner per page there is nothing to compare against.
+        if g.owner.len() != g.orig as usize {
+            return invalid("the pages have no recorded source");
+        }
+        let mut compared = 0usize;
+        for (pgno, start, len) in frames {
+            let i = pgno as usize - 1;
+            if g.owner.get(i) != Some(&file) {
+                continue;
+            }
+            let page = decode_frame(&data[start..start + len], pgno, self.page_size)?;
+            if page_crc(pgno, &page) != g.crc[i] || self.keyed(pgno, &page) != g.keyed[i] {
+                return invalid(format!(
+                    "page {pgno} of file {file} differs from the one read"
+                ));
+            }
+            compared += 1;
+        }
+        let owned = g.owner.iter().filter(|&&f| f == file).count();
+        if compared != owned {
+            return invalid(format!(
+                "file {file} lacks {} of its pages",
+                owned - compared
+            ));
+        }
+        Ok(compared)
+    }
 
     /// Fills `sums` (per-page CRCs, as the replicator keeps them) for `pages`
     /// from the CRCs of fetched pages. Returns the pages that were not fetched
@@ -1037,6 +1112,166 @@ mod tests {
         assert!(lazy.verify_whole(0, &bad[..40]).is_ok());
         lazy.set_whole_max(0);
         assert!(lazy.miss_run(7, 1).unwrap().len < b.len() as u64);
+    }
+
+    #[test]
+    fn a_frame_with_other_flags_or_another_length_is_rejected() {
+        let file = ltx(1, 1, &[(1, 1)]);
+        let (_, start, len) = verify(&file).unwrap().2[0];
+        let frame = &file[start..start + len];
+        assert!(decode_frame(frame, 1, PS).is_ok());
+        let mut flags = frame.to_vec();
+        flags[5] = 0;
+        assert!(decode_frame(&flags, 1, PS).is_err());
+        flags[5] = 1;
+        flags[4] = 1;
+        assert!(decode_frame(&flags, 1, PS).is_err());
+        // Bytes past the block, and a block cut short.
+        let mut longer = frame.to_vec();
+        longer.push(0);
+        assert!(decode_frame(&longer, 1, PS).is_err());
+        assert!(decode_frame(&frame[..frame.len() - 1], 1, PS).is_err());
+    }
+
+    #[test]
+    fn a_frame_whose_declared_length_is_not_the_rest_is_rejected() {
+        // The block itself is intact: only the length prefix is wrong, so the
+        // decompressor alone would accept it.
+        let file = ltx(1, 1, &[(1, 1)]);
+        let (_, start, len) = verify(&file).unwrap().2[0];
+        let frame = &file[start..start + len];
+        let at = PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + 4;
+        let declared = u32::from_be_bytes(frame[at.clone()].try_into().unwrap());
+        for other in [declared - 1, declared + 1] {
+            let mut bad = frame.to_vec();
+            bad[at.clone()].copy_from_slice(&other.to_be_bytes());
+            assert!(decode_frame(&bad, 1, PS).is_err());
+        }
+    }
+
+    /// The plan of `files()` with every page installed, `damage` applied to
+    /// the page as it is installed.
+    fn fetched(damage: impl Fn(u32, &mut Vec<u8>)) -> (tempfile::TempDir, Lazy, Vec<u8>, Vec<u8>) {
+        let dir = tempfile::tempdir().unwrap();
+        let lazy = Lazy::create(&dir.path().join("db"), PS, Duration::from_secs(1)).unwrap();
+        let (a, b) = files();
+        stage_all(&lazy, 0, &a);
+        stage_all(&lazy, 1, &b);
+        lazy.ready().unwrap();
+        while let Some(run) = lazy.next_batch(u64::MAX) {
+            let file = if run.file == 0 { &a } else { &b };
+            for (i, (p, _, _)) in run.pages.iter().enumerate() {
+                let mut data = decode_frame(frame(file, &run, i), *p, PS).unwrap();
+                damage(*p, &mut data);
+                lazy.install(*p, &data).unwrap();
+            }
+        }
+        (dir, lazy, a, b)
+    }
+
+    /// The database checksum of the pages of `files()`.
+    fn database_checksum() -> u64 {
+        fold(
+            &(1..=7)
+                .map(|p| page_crc(p, &page(p, if p == 2 || p == 7 { 9 } else { 1 })))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn whole_objects_match_the_pages_that_were_read() {
+        let (_dir, lazy, a, b) = fetched(|_, _| {});
+        assert_eq!(lazy.verify(database_checksum()), Ok(true));
+        // The newest version of each page: five from the first file, two from
+        // the second.
+        assert_eq!(lazy.check_object(0, &a).unwrap(), 5);
+        assert_eq!(lazy.check_object(1, &b).unwrap(), 2);
+        // An object that is another file of the plan lacks the pages.
+        assert!(lazy.check_object(0, &b).is_err());
+        // A damaged object, and a valid one with other pages.
+        let mut bad = a.clone();
+        bad[HEADER_SIZE + 12] ^= 1;
+        assert!(lazy.check_object(0, &bad).is_err());
+        let other = ltx(1, 6, &(1..=6).map(|p| (p, 2)).collect::<Vec<_>>());
+        assert!(lazy.check_object(0, &other).is_err());
+    }
+
+    #[test]
+    fn whole_objects_are_compared_only_when_every_page_is_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let lazy = Lazy::create(&dir.path().join("db"), PS, Duration::from_secs(1)).unwrap();
+        let (a, b) = files();
+        stage_all(&lazy, 0, &a);
+        stage_all(&lazy, 1, &b);
+        lazy.ready().unwrap();
+        assert!(lazy.check_object(0, &a).is_err());
+    }
+
+    /// Each damage below leaves the database checksum as it was: a CRC is
+    /// linear, so errors whose CRCs add up to nothing cancel in the fold. The
+    /// comparison with the whole object still refuses them.
+    fn assert_blind_fold_but_refused(damage: impl Fn(u32, &mut Vec<u8>)) {
+        let (_dir, lazy, a, b) = fetched(damage);
+        assert_eq!(
+            lazy.verify(database_checksum()),
+            Ok(true),
+            "the damage must cancel in the fold"
+        );
+        assert!(lazy.check_object(0, &a).is_err() || lazy.check_object(1, &b).is_err());
+    }
+
+    #[test]
+    fn the_same_error_on_two_pages_is_refused() {
+        assert_blind_fold_but_refused(|p, d| {
+            if p == 1 || p == 3 {
+                *d.last_mut().unwrap() ^= 0x55;
+            }
+        });
+    }
+
+    #[test]
+    fn a_page_installed_after_the_plan_is_complete_keeps_the_comparison() {
+        let (_dir, lazy, a, b) = fetched(|_, _| {});
+        // A read that was under way delivers a page after the last one: no
+        // page is missing, so `install` calls `finish` again.
+        assert!(lazy.install(3, &page(3, 2)).unwrap());
+        // `finish` must not empty `owner`, nor the recorded CRC change.
+        assert_eq!(lazy.check_object(0, &a).unwrap(), 5);
+        assert_eq!(lazy.check_object(1, &b).unwrap(), 2);
+    }
+
+    #[test]
+    fn errors_a_b_and_a_xor_b_on_three_pages_are_refused() {
+        assert_blind_fold_but_refused(|p, d| {
+            let error = match p {
+                1 => 0x01,
+                3 => 0x02,
+                4 => 0x03,
+                _ => 0,
+            };
+            *d.last_mut().unwrap() ^= error;
+        });
+    }
+
+    #[test]
+    fn two_pages_that_swap_contents_are_refused() {
+        assert_blind_fold_but_refused(|p, d| match p {
+            3 => *d = page(4, 1),
+            4 => *d = page(3, 1),
+            _ => {}
+        });
+    }
+
+    #[test]
+    fn an_error_that_is_a_multiple_of_the_crc_polynomial_is_refused() {
+        // The polynomial as a message: the CRC of the page does not change.
+        assert_blind_fold_but_refused(|p, d| {
+            if p == 5 {
+                let n = d.len();
+                d[n - 9] ^= 0x80;
+                d[n - 1] ^= 0xD8;
+            }
+        });
     }
 
     #[test]

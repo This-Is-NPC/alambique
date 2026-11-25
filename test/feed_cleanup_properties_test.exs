@@ -343,18 +343,19 @@ defmodule Alambique.FeedCleanupPropertiesTest do
   # A crash armed earlier may stop the cell again: a call wakes it. A cell
   # that woke after its rows were cleaned has published nothing itself.
   defp caught_up?(run) do
-    {:ok, _} = Alambique.touch(run.inst, @cell)
-    published = published(run) || 0
-
-    {:ok, %{rows: [[waiting]]}} =
-      Alambique.query(
-        run.inst,
-        @cell,
-        "SELECT count(*) FROM _alambique_feed WHERE op != 'floor' AND txid > ?",
-        [published]
-      )
-
-    run.acked -- ids(feed_records(run)) == [] and waiting == 0
+    with {:ok, _} <- Alambique.touch(run.inst, @cell),
+         {:ok, %{rows: [[waiting]]}} <-
+           Alambique.query(
+             run.inst,
+             @cell,
+             "SELECT count(*) FROM _alambique_feed WHERE op != 'floor' AND txid > ?",
+             [published(run) || 0]
+           ) do
+      run.acked -- ids(feed_records(run)) == [] and waiting == 0
+    else
+      # Down right after a kill: not caught up yet.
+      {:error, {:cell_down, _}} -> false
+    end
   end
 
   defp feed_records(run) do
