@@ -109,6 +109,10 @@ defmodule AlambiqueTestkit.MemoryStore do
     do: run(config, :get_range, key, {:get_range, key, offset, length})
 
   @impl Alambique.Store
+  def get_range(config, key, offset, length, etag),
+    do: run(config, :get_range, key, {:get_range, key, offset, length, etag})
+
+  @impl Alambique.Store
   def head(config, key), do: run(config, :head, key, {:head, key})
 
   @impl Alambique.Store
@@ -248,16 +252,15 @@ defmodule AlambiqueTestkit.MemoryStore do
 
   defp apply_request({:get_range, key, offset, length}, state) do
     case lookup(state, key) do
-      {body, _etag, meta} ->
-        size = byte_size(body)
+      {body, etag, meta} -> {range(body, etag, meta, offset, length), state}
+      nil -> {{:error, :not_found}, state}
+    end
+  end
 
-        part =
-          if offset >= size, do: "", else: binary_part(body, offset, min(length, size - offset))
-
-        {{:ok, part, size, meta}, state}
-
-      nil ->
-        {{:error, :not_found}, state}
+  defp apply_request({:get_range, key, offset, length, wanted}, state) do
+    case lookup(state, key) do
+      {_body, etag, _meta} when etag != wanted -> {{:error, :precondition_failed}, state}
+      _ -> apply_request({:get_range, key, offset, length}, state)
     end
   end
 
@@ -286,6 +289,16 @@ defmodule AlambiqueTestkit.MemoryStore do
   defp apply_request({:delete, key}, state) do
     :ets.delete(state.objects, key)
     {:ok, state}
+  end
+
+  # The ETag of the object travels in the metadata of a ranged read.
+  defp range(body, etag, meta, offset, length) do
+    size = byte_size(body)
+
+    part =
+      if offset >= size, do: "", else: binary_part(body, offset, min(length, size - offset))
+
+    {:ok, part, size, Map.put(meta, "etag", etag)}
   end
 
   defp lookup(state, key) do

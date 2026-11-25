@@ -152,10 +152,12 @@ defmodule Alambique.Replication.Hydrator do
     end
   end
 
-  # What no retry can fix: an object that is gone or a frame that does not
-  # decode.
+  # What no retry can fix: an object that is gone or that changed, a range the
+  # store did not honour or a frame that does not decode.
   defp permanent?({:not_found, _key}), do: true
   defp permanent?({:short_read, _key}), do: true
+  defp permanent?({:changed, _key}), do: true
+  defp permanent?({:bad_range, _offset}), do: true
   defp permanent?({:invalid, _}), do: true
   defp permanent?(_), do: false
 

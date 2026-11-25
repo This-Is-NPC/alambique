@@ -9,8 +9,9 @@ defmodule Alambique.Replication.Restore do
   @flag Bitwise.bsl(1, 63)
 
   # A lazy restore (option `:lazy`) leaves the database file sparse and gives
-  # `:lazy` (the page map, see `Alambique.Replication.Hydrator`) and `:files`
-  # (the keys the map refers to, by index) in the result.
+  # `:lazy` (the page map, see `Alambique.Replication.Hydrator`), `:files`
+  # (the keys the map refers to, by index) and `:pins` (what each of them was
+  # when it was read: ETag, epoch and size) in the result.
   @type result :: %{
           required(:cell) => String.t(),
           required(:path) => Path.t(),
@@ -23,7 +24,8 @@ defmodule Alambique.Replication.Restore do
           required(:timestamp) => integer | nil,
           required(:segments) => non_neg_integer,
           optional(:lazy) => reference,
-          optional(:files) => [String.t()]
+          optional(:files) => [String.t()],
+          optional(:pins) => [{String.t() | nil, non_neg_integer, non_neg_integer}]
         }
 
   def run(ctx, cell, dest, target, opts) do
@@ -155,10 +157,11 @@ defmodule Alambique.Replication.Restore do
       commit: 0,
       timestamp: nil,
       segments: 0,
-      # Lazy restore: the page map, the keys it refers to (newest first) and
-      # the size of those files.
+      # Lazy restore: the page map, the keys it refers to (newest first), what
+      # each was when it was read and the size of those files.
       lazy: nil,
       files: [],
+      pins: [],
       bytes: 0
     }
   end
@@ -331,6 +334,7 @@ defmodule Alambique.Replication.Restore do
           {:ok,
            state
            |> Map.update!(:files, &Enum.reverse/1)
+           |> Map.update!(:pins, &Enum.reverse/1)
            |> Map.drop([:bytes])
            |> Map.merge(%{cell: env.cell, path: env.dest})}
 
@@ -341,7 +345,7 @@ defmodule Alambique.Replication.Restore do
   end
 
   defp finish(env, state) do
-    state = Map.drop(state, [:lazy, :files, :bytes])
+    state = Map.drop(state, [:lazy, :files, :pins, :bytes])
 
     # A write the disk refuses (`:enospc`) fails the restore: the caller sees
     # `:disk_full` (design §6.2).
@@ -372,7 +376,8 @@ defmodule Alambique.Replication.Restore do
 
   defp load(env, state, key) do
     with {:ok, {head, tail, total}, meta} <- edges(env, key) do
-      {:ok, state, {:edges, head, tail, total}, meta}
+      pin = {Map.get(meta, "etag"), Objects.epoch_of(meta)}
+      {:ok, state, {:edges, head, tail, total, pin}, meta}
     end
   end
 
@@ -381,13 +386,13 @@ defmodule Alambique.Replication.Restore do
          do: {:ok, state, file, header, post}
   end
 
-  defp inspect_file(env, state, {:edges, head, tail, total}, kind, key) do
+  defp inspect_file(env, state, {:edges, head, tail, total, pin}, kind, key) do
     with {:ok, state} <- ensure_lazy(env, state, head) do
       idx = length(state.files)
 
       case Native.lazy_stage(state.lazy, idx, head, tail, total) do
         {:ok, header, post} ->
-          {:ok, state, {:staged, header, post, total}, header, post}
+          {:ok, state, {:staged, header, post, total, pin}, header, post}
 
         {:need_tail, n} ->
           # A page index larger than the edge is read whole, past the memory
@@ -399,7 +404,7 @@ defmodule Alambique.Replication.Restore do
             grow(env, n)
 
             with {:ok, tail, _total, _meta} <- range(env, key, max(total - n, 0), n),
-                 do: inspect_file(env, state, {:edges, head, tail, total}, kind, key)
+                 do: inspect_file(env, state, {:edges, head, tail, total, pin}, kind, key)
           end
 
         {:error, reason} ->
@@ -417,7 +422,7 @@ defmodule Alambique.Replication.Restore do
     end
   end
 
-  defp apply_file(_env, state, {:staged, header, post, total}, key, current, page_size) do
+  defp apply_file(_env, state, {:staged, header, post, total, pin}, key, current, page_size) do
     {min, _max, _ts, _commit, pre, ps} = header
 
     cond do
@@ -430,7 +435,16 @@ defmodule Alambique.Replication.Restore do
       true ->
         case Native.lazy_apply(state.lazy, length(state.files)) do
           :ok ->
-            {:ok, %{state | files: [key | state.files], bytes: state.bytes + total}, header, post}
+            {etag, epoch} = pin
+
+            state = %{
+              state
+              | files: [key | state.files],
+                pins: [{etag, epoch, total} | state.pins],
+                bytes: state.bytes + total
+            }
+
+            {:ok, state, header, post}
 
           {:error, reason} ->
             {:error, reason}
