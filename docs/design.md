@@ -674,18 +674,22 @@ their own, so the checks split by what they can see.
   or the read is `{:invalid, reason}`. A store that gives no ETag is not
   pinned by ETag; the size and the epoch are still checked.
 - *At the end of the hydration*, the content of every page. `install` keeps
-  the CRC-64 of each page as it arrived. Each object of the chain is read
+  the CRC-64 of each page as it arrived, and a 64-bit SipHash of the page
+  number and bytes under keys drawn at random for each restore (8 bytes more
+  per page). Each object of the chain is read
   whole (`lazy_restore: [concurrency:]` at a time, within `restore:
   [max_inflight_bytes:]`), checked against its file checksum, and the
   pages it provides to the final file (the last file that wrote each page)
-  are decoded and their CRC compared with the one kept. A difference is
+  are decoded and both values compared with the ones kept. A difference is
   `{:invalid, reason}` and the hydration fails. Then the XOR of all the CRCs
   is compared with the database checksum of the restored state.
 
 The database checksum alone cannot see errors whose CRC changes add up to
 nothing: the same error on an even number of pages, errors A, B and A xor B
-on three, an error that is a multiple of the CRC polynomial, two pages that
-swap contents. The comparison with the whole objects does. A file at or below
+on three, two pages that swap contents. The comparison with the whole objects
+does. A CRC-64 is linear, so an error that is a multiple of its polynomial
+leaves the CRC of a page unchanged; the keyed hash changes, and a store does
+not know its keys. A file at or below
 `verify_bytes` is read whole and checked against its file checksum before any
 of its pages is served.
 
