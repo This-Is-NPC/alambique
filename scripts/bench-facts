@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Runs the benchmark of the cell facts. Arguments: cell counts of the page case
+# (default 1000 10000). Operations, loop sizes and the cache come from the
+# ALAMBIQUE_BENCH_* variables of bench/facts.exs.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+MIX_ENV=test exec mix run bench/facts.exs "$@"
