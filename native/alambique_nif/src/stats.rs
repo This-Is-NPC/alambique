@@ -56,6 +56,7 @@ counters!(
     WAL_FRAMES_READ,
     LTX_BYTES_ENCODED,
     LTX_BYTES_DECODED,
+    SQLITE_MEMORY_CALLS,
 );
 
 pub static CONNECTIONS_OPEN: AtomicI64 = AtomicI64::new(0);
@@ -140,6 +141,7 @@ fn stats(env: Env) -> Term {
         ("wal_frames_read".into(), get(&WAL_FRAMES_READ)),
         ("ltx_bytes_encoded".into(), get(&LTX_BYTES_ENCODED)),
         ("ltx_bytes_decoded".into(), get(&LTX_BYTES_DECODED)),
+        ("sqlite_memory_calls".into(), get(&SQLITE_MEMORY_CALLS)),
     ];
     pairs.extend(calls("sqlite", &SQLITE_CALLS));
     pairs.extend(calls("replication", &REPLICATION_CALLS));

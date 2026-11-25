@@ -1783,8 +1783,10 @@ fn sqlite_transaction_status<'a>(env: Env<'a>, conn: ResourceArc<Conn>) -> Term<
 
 /// Bytes the connection holds, by purpose (`sqlite3_db_status`): the page
 /// cache, the schema, the prepared statements and the lookaside slots in use.
+/// It runs on a regular scheduler, so it is counted apart from the dirty calls.
 #[rustler::nif]
 fn sqlite_memory<'a>(env: Env<'a>, conn: ResourceArc<Conn>) -> Term<'a> {
+    crate::stats::add(&crate::stats::SQLITE_MEMORY_CALLS, 1);
     if let Err(f) = check_opener(env, &conn) {
         return f.term(env);
     }

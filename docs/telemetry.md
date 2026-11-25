@@ -540,6 +540,7 @@ samples. Gauges go up and down. Sizes are bytes and times are nanoseconds.
 | `wal_frames_read` | counter | Valid WAL frames read by replication scans. |
 | `ltx_bytes_encoded` | counter | Size of the LTX files encoded. |
 | `ltx_bytes_decoded` | counter | Size of the LTX files opened for decoding (reading only a header decodes nothing). |
+| `sqlite_memory_calls` | counter | Calls of `Alambique.Sqlite.memory/1`, which run on a regular scheduler and are not in `sqlite_calls`. |
 | `sqlite_calls`, `replication_calls`, `lazy_calls` | counters | Calls of the dirty NIFs of SQLite, of replication (capture, apply, merge, inspect) and of lazy restore. |
 | `sqlite_call_ns_total`, `replication_call_ns_total`, `lazy_call_ns_total` | counters | Wall time of those calls. Divide the difference by the difference in calls for the mean. |
 | `sqlite_call_ns_max`, `replication_call_ns_max`, `lazy_call_ns_max` | gauges | The longest call since the node started. |
