@@ -62,16 +62,17 @@ defmodule Alambique.LazyRestoreUntrustedReadsTest do
     setup_store()
   end
 
-  # 300 rows of random 1 KB values, hibernated, so that the state is in the
+  # 300 rows of 1 KB values (random, or all zeros: the pages of a table of
+  # zeros compress to one length), hibernated, so that the state is in the
   # store only. Returns the cell and its rows.
-  defp seed(ctx) do
+  defp seed(ctx, value \\ "randomblob(1024)") do
     seeder = start_instance(ctx, migrations: @schema, lazy_restore: false)
     cell = unique_cell()
 
     {:ok, :ok} =
       Alambique.transaction(seeder, cell, fn tx ->
         for n <- 1..300 do
-          {:ok, _} = Tx.execute(tx, "INSERT INTO t VALUES (?, randomblob(1024))", [n])
+          {:ok, _} = Tx.execute(tx, "INSERT INTO t VALUES (?, #{value})", [n])
         end
 
         :ok
@@ -172,11 +173,11 @@ defmodule Alambique.LazyRestoreUntrustedReadsTest do
     end
 
     test "two pages that swap contents fail the hydration", ctx do
-      {cell, rows} = seed(ctx)
-      {inst, hostile, release} = hostile_wake(ctx, cell, Keyword.put(@lazy, :miss_pages, 2))
+      {cell, rows} = seed(ctx, "zeroblob(1024)")
+      {inst, hostile, release} = hostile_wake(ctx, cell, Keyword.put(@lazy, :miss_pages, 8))
 
-      # The first two frames of a read, when they have the same length (pages
-      # of rows of the same size do).
+      # Two adjacent frames of a read that have the same length (pages of rows
+      # of the same size do).
       HostileStore.damage(hostile, :swap, 1_000)
       read_until_damaged(inst, cell, hostile, 1)
       HostileStore.heal(hostile)
