@@ -151,6 +151,14 @@ with no measurable cost on the next call. It does nothing while
 `idle_cache_after_ms` is `nil`; with `idle_gc: false` the cell shrinks its cache
 and keeps the garbage.
 
+**`awake: [track_bytes: ...]`.** On by default. Every awake cell measures the
+bytes SQLite holds for its connections and the memory of its process, which
+`Alambique.cells/2` and `Alambique.facts/2` report. A measurement is about
+3.6 µs of the cell, at the end of its wake, after each call, after an idle
+cache shrink and at the end of a hydration. `track_bytes: false` saves that
+and leaves those fields `nil`. A budget (`awake: [max_bytes:]`) measures
+whatever the option says.
+
 **Dirty IO schedulers and `sql: [max_concurrent_statements:]`.** The statements
 of callers run on the dirty IO schedulers, which the node's commits share. The
 number of these schedulers is the VM's `:dirty_io_schedulers`, set with `+SDio`.
