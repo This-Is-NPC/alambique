@@ -536,6 +536,10 @@ impl Lazy {
     }
 
     fn finish(&self, g: &mut Inner) {
+        // A page installed after the plan was complete must not empty `owner`.
+        if self.complete.load(Ordering::Acquire) {
+            return;
+        }
         g.owner = g.map.iter().map(|e| e.file).collect();
         g.map = Vec::new();
         g.sizes = HashMap::new();
@@ -710,6 +714,10 @@ impl Lazy {
         }
         let (_, _, frames) = verify(data)?;
         let g = self.inner();
+        // Without one owner per page there is nothing to compare against.
+        if g.owner.len() != g.orig as usize {
+            return invalid("the pages have no recorded source");
+        }
         let mut compared = 0usize;
         for (pgno, start, len) in frames {
             let i = pgno as usize - 1;
@@ -1182,6 +1190,18 @@ mod tests {
                 *d.last_mut().unwrap() ^= 0x55;
             }
         });
+    }
+
+    #[test]
+    fn a_page_installed_after_the_plan_is_complete_keeps_the_comparison() {
+        let (_dir, lazy, a, _b) = fetched(|p, d| {
+            if p == 3 {
+                *d.last_mut().unwrap() ^= 0x55;
+            }
+        });
+        // A read that was under way delivers a page again after the last one.
+        lazy.install(3, &page(3, 1)).unwrap();
+        assert!(lazy.check_object(0, &a).is_err());
     }
 
     #[test]
