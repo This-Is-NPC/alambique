@@ -62,6 +62,8 @@ Install Erlang/OTP, Elixir and Rust with your usual tools; `rustup` installs Rus
 
 **[Cost of a cell](docs/cost-of-a-cell.md)** — what one cell costs in CPU, memory and storage.
 
+**[Known limitations](docs/known-limitations.md)** — what to know before you run a release in production.
+
 **[Telemetry](docs/telemetry.md)** — the telemetry events Alambique emits, and their data.
 
 **[Segment format](docs/segment-format.md)** — the bytes of a replicated segment.
