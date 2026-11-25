@@ -8,7 +8,15 @@ defmodule Alambique.StoreBreakerTest do
   use ExUnit.Case, async: true
 
   import Alambique.CellHelpers,
-    only: [capture: 1, eventually: 1, setup_store: 0, start_instance: 2, unique_cell: 0]
+    only: [
+      await_event: 4,
+      capture: 1,
+      drain: 2,
+      eventually: 1,
+      setup_store: 0,
+      start_instance: 2,
+      unique_cell: 0
+    ]
 
   alias Alambique.Replication
   alias Alambique.Replication.{Objects, Retry}
@@ -417,15 +425,21 @@ defmodule Alambique.StoreBreakerTest do
     end
 
     test "no cell loses its lease to an outage that opens the breaker and ends in time", ctx do
-      capture([[:alambique, :cell, :stop], [:alambique, :store, :breaker, :open]])
+      capture([
+        [:alambique, :cell, :stop],
+        [:alambique, :lease, :renew],
+        [:alambique, :store, :breaker, :open]
+      ])
+
       schema = [{1, "CREATE TABLE t (n INTEGER)"}]
 
-      # TTL 3 s, renewals about every second, margin 0.5 s.
+      # TTL 3 s, renewals about every second, margin 0.5 s. The cool-down keeps
+      # the breaker open for the whole test.
       inst =
         start_instance(ctx,
           migrations: schema,
           compaction: false,
-          breaker: [failures: 2, cooldown_ms: 8_000]
+          breaker: [failures: 2, cooldown_ms: 60_000]
         )
 
       config = Alambique.Config.fetch!(inst)
@@ -443,19 +457,23 @@ defmodule Alambique.StoreBreakerTest do
           times: :infinity
         )
 
-      # Wakes that fail open the breaker.
+      # Wakes that fail open the breaker; the outage ends there, within the
+      # lease of every cell.
       for _ <- 1..3, do: Alambique.execute(inst, unique_cell(), "INSERT INTO t VALUES (1)", [])
       assert_receive {:telemetry, [:alambique, :store, :breaker, :open], _, %{instance: ^inst}}
-
-      Process.sleep(1_500)
       MemoryStore.remove(ctx.store_config, fault)
+      for cell <- cells, do: drain([:alambique, :lease, :renew], cell)
 
-      # The breaker is still open; two more TTLs' worth of renewals must get through.
-      Process.sleep(4_000)
+      # Two renewals of each cell get through the open breaker.
+      for cell <- cells, _ <- 1..2 do
+        await_event([:alambique, :lease, :renew], cell, 5_000, &(&1.result == :ok))
+      end
 
+      assert Enum.all?(Map.values(Alambique.breaker_status(inst)), &(&1.state == :open))
+      # The reason of a stop names the cause of a failure.
+      refute_received {:telemetry, [:alambique, :cell, :stop], _, _}
       assert pids == for(cell <- cells, do: Alambique.Cell.whereis(config, cell))
       assert Enum.all?(pids, &Process.alive?/1)
-      refute_received {:telemetry, [:alambique, :cell, :stop], _, _}
     end
   end
 end
