@@ -41,7 +41,6 @@ about it, and where the evidence is.
   once the statement has ended. Create the table, then fill it with
   `INSERT ... SELECT` in a write; those rows are in the feed
   ([how-to-consume-the-change-feed.md](how-to-consume-the-change-feed.md)).
-
 - A lazy restore serves pages of files above `lazy_restore: [verify_bytes:]`
   before their content is checked. On arrival a ranged read is checked for
   the object (ETag, size, epoch, and with S3 the `Content-Range`) and the
