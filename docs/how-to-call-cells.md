@@ -95,7 +95,11 @@ and the `Alambique.Tx` functions is one statement.
   write, a pragma that sets something, `ATTACH`, `ANALYZE`, `REINDEX`,
   `VACUUM` and `PRAGMA optimize` give `{:error, :not_authorized}`, and `close/1`
   and `checkpoint/1` do too. Any call on it from another process gives
-  `{:error, :not_owner}`. Keep rows, not the handle.
+  `{:error, :not_owner}`. A connection you open with `Alambique.Sqlite.open/2`
+  has the same rule: the process that opened it uses it, closes it,
+  interrupts it and reads its memory, and `Alambique.Sqlite.assign/2` names
+  the one other process that may run statements on it. Keep rows, not the
+  handle.
 - Text after the first statement that holds another statement gives
   `{:error, {:multiple_statements, tail}}` (the start of the tail) and nothing
   runs. Spaces, comments and `;` may follow.
@@ -142,8 +146,9 @@ and the `Alambique.Tx` functions is one statement.
   is not durable; with `:replicate` the answer is `{:error, {:committed,
   {:query_only, reason}}}` and the rows are.
 - `{:error, {:rollback_failed, reason}}`: the rollback failed and the
-  transaction may still be open. The cell stops. The same two results stop the cell in a feed cleanup and in a migration of a
-  serving cell, whose caller gets `{:error, {:migrate_failed, {:migration,
+  transaction may still be open. The cell stops. The same two results stop
+  the cell in a feed cleanup and in a migration of a serving cell, whose
+  caller gets `{:error, {:migrate_failed, {:migration,
   version, reason}}}`.
 - `{:error, {:stamp_failed, reason}}`: the feed rows of a batch could not be
   stamped, and the cell stops. The call that woke the cell gets it when the
