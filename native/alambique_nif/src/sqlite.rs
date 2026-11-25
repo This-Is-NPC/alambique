@@ -1784,34 +1784,49 @@ fn sqlite_transaction_status<'a>(env: Env<'a>, conn: ResourceArc<Conn>) -> Term<
 /// Bytes the connection holds, by purpose (`sqlite3_db_status`): the page
 /// cache, the schema, the prepared statements and the lookaside slots in use.
 /// It runs on a regular scheduler, so it is counted apart from the dirty calls.
+///
+/// It never waits for the connection: `sqlite3_db_status` takes the database
+/// mutex, which a statement running on a dirty scheduler holds, and a regular
+/// scheduler must not block behind it. A held mutex gives `{:error, :busy}`.
 #[rustler::nif]
 fn sqlite_memory<'a>(env: Env<'a>, conn: ResourceArc<Conn>) -> Term<'a> {
     crate::stats::add(&crate::stats::SQLITE_MEMORY_CALLS, 1);
     if let Err(f) = check_opener(env, &conn) {
         return f.term(env);
     }
-    reply(
-        env,
-        with_db(&conn, |db| {
-            let used = |op| {
-                let (mut cur, mut high) = (0, 0);
-                // SAFETY: `db` is live (`with_db`).
-                unsafe { ffi::sqlite3_db_status(db, op, &mut cur, &mut high, 0) };
-                cur as i64
-            };
-            let map = [
-                (atoms::cache_used(), ffi::SQLITE_DBSTATUS_CACHE_USED),
-                (atoms::schema_used(), ffi::SQLITE_DBSTATUS_SCHEMA_USED),
-                (atoms::stmt_used(), ffi::SQLITE_DBSTATUS_STMT_USED),
-                (atoms::lookaside_used(), ffi::SQLITE_DBSTATUS_LOOKASIDE_USED),
-            ]
-            .into_iter()
-            .fold(Term::map_new(env), |map, (key, op)| {
-                map.map_put(key.encode(env), used(op).encode(env)).unwrap()
-            });
-            Ok((atoms::ok(), map).encode(env))
-        }),
-    )
+    let guard = conn.db.read().unwrap_or_else(|e| e.into_inner());
+    let Some(DbPtr(db)) = guard.as_ref() else {
+        return Failure::Closed.term(env);
+    };
+    let db = *db;
+    // SAFETY: `db` is live while the guard is held. The mutex is recursive,
+    // so the calls below enter it again; it is left before the guard.
+    let mutex = unsafe { ffi::sqlite3_db_mutex(db) };
+    if !mutex.is_null() && unsafe { ffi::sqlite3_mutex_try(mutex) } != ffi::SQLITE_OK {
+        return Failure::Busy.term(env);
+    }
+    let used = |op| {
+        let (mut cur, mut high) = (0, 0);
+        // SAFETY: `db` is live and its mutex is held.
+        unsafe { ffi::sqlite3_db_status(db, op, &mut cur, &mut high, 0) };
+        cur as i64
+    };
+    let map = [
+        (atoms::cache_used(), ffi::SQLITE_DBSTATUS_CACHE_USED),
+        (atoms::schema_used(), ffi::SQLITE_DBSTATUS_SCHEMA_USED),
+        (atoms::stmt_used(), ffi::SQLITE_DBSTATUS_STMT_USED),
+        (atoms::lookaside_used(), ffi::SQLITE_DBSTATUS_LOOKASIDE_USED),
+    ]
+    .into_iter()
+    .fold(Term::map_new(env), |map, (key, op)| {
+        map.map_put(key.encode(env), used(op).encode(env)).unwrap()
+    });
+    count_cache(db);
+    if !mutex.is_null() {
+        // SAFETY: entered by the `try` above.
+        unsafe { ffi::sqlite3_mutex_leave(mutex) };
+    }
+    (atoms::ok(), map).encode(env)
 }
 
 #[cfg(test)]

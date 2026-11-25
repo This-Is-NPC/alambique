@@ -10,6 +10,8 @@ defmodule Alambique.SqliteMemoryTest do
   """
   use ExUnit.Case, async: false
 
+  import Alambique.CellHelpers, only: [eventually: 1]
+
   alias Alambique.Sqlite
 
   @moduletag :tmp_dir
@@ -48,5 +50,34 @@ defmodule Alambique.SqliteMemoryTest do
     :ok = Sqlite.close(default)
 
     assert used * 4 < default_used
+  end
+
+  test "memory/1 does not wait for a statement that is running", %{tmp_dir: dir} do
+    {:ok, conn} = Sqlite.open(Path.join(dir, "busy.db"))
+    on_exit(fn -> Sqlite.close(conn) end)
+
+    runner =
+      Task.async(fn ->
+        receive do
+          :go ->
+            Sqlite.run(
+              conn,
+              "WITH RECURSIVE c(n) AS " <>
+                "(SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 2000000000) " <>
+                "SELECT count(*) FROM c",
+              []
+            )
+        end
+      end)
+
+    :ok = Sqlite.assign(conn, runner.pid)
+    send(runner.pid, :go)
+
+    # Each call returns at once; one lands while the statement holds the connection.
+    eventually(fn -> Sqlite.memory(conn) == {:error, :busy} end)
+
+    :ok = Sqlite.interrupt(conn)
+    assert {:error, _} = Task.await(runner, 30_000)
+    assert {:ok, %{cache_used: _}} = Sqlite.memory(conn)
   end
 end
