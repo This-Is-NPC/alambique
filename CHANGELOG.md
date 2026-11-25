@@ -1,5 +1,67 @@
 # Changelog
 
+## [0.17.0](https://github.com/This-Is-NPC/alambique/compare/v0.16.1...v0.17.0) (2026-11-25)
+
+
+### ⚠ BREAKING CHANGES
+
+* **sqlite:** Alambique.Sqlite.open/2 returns {:error, :held_by_cell} for a read-write connection on a file that a cell holds open read-write.
+* **sqlite:** a connection from Alambique.Sqlite.open/2 answers {:error, :not_owner} to every process but its opener and the user the opener names with Sqlite.assign/2, interrupt/1 and memory/1 are the opener's, close/1 and checkpoint/1 are refused while a transaction of the library is open, and open/2 takes gated: true.
+* **tx:** Tx.execute, Tx.query, Alambique.execute and Alambique.query return {:error, {:multiple_statements, tail}}, with the start of the tail, for text that holds more than one statement. They used to run the first statement and drop the rest.
+* **tx:** a transaction function that runs BEGIN, COMMIT, END or ROLLBACK through Tx.execute, Tx.query or Tx.script now gets {:error, :not_authorized} from that call and its transaction goes on, where it used to end the transaction and the write returned {:error, :transaction_ended}. SAVEPOINT, ROLLBACK TO and RELEASE are unchanged.
+
+### Features
+
+* **cell:** collect garbage when a cell goes idle ([c878e44](https://github.com/This-Is-NPC/alambique/commit/c878e4451b56244fb7ef98f0d485e273b98883dc))
+* **cell:** shrink the page cache of idle cells ([bc459a2](https://github.com/This-Is-NPC/alambique/commit/bc459a2064ba66011e6295dd01d4feb2ba5fc14a))
+* **feed:** choose when published rows are cleaned ([f4340bd](https://github.com/This-Is-NPC/alambique/commit/f4340bd251902f2d348521ae7ff070c406e87aaf))
+* **feed:** filter captured operations per table ([b4da5fb](https://github.com/This-Is-NPC/alambique/commit/b4da5fb983650e86e06368d95646610e13754a08))
+* **feed:** hand rows to the sender in pieces ([a3dd909](https://github.com/This-Is-NPC/alambique/commit/a3dd90964d4e71758ae2224a1f673416cb9383be))
+* **feed:** let the sender read the rows itself ([321d4b6](https://github.com/This-Is-NPC/alambique/commit/321d4b6b406d6fbaa1fc9b1ed4032e52611c37e1))
+* **sqlite:** guard the file of an awake cell ([9b4a0bf](https://github.com/This-Is-NPC/alambique/commit/9b4a0bf4ad44368169829b46ed5e44d2127a0611))
+* **sqlite:** own and gate the connection of a cell ([59e0e2e](https://github.com/This-Is-NPC/alambique/commit/59e0e2ee6f1e63464564119f53efa8d94385502c))
+
+
+### Bug Fixes
+
+* **cell:** answer no-op writes during a cleanup ([6c05d90](https://github.com/This-Is-NPC/alambique/commit/6c05d90a63625f83908a9cd70115e033a6406383))
+* **cell:** answer reads during a feed cleanup batch ([6606bc0](https://github.com/This-Is-NPC/alambique/commit/6606bc0ad7db6888a102568308065537413bb57f))
+* **cell:** honour the checkpoint deadline with orphans ([f643650](https://github.com/This-Is-NPC/alambique/commit/f64365063e5961073960034178e36e041e553d62))
+* **cell:** judge a failed write by the WAL position ([d90ba9d](https://github.com/This-Is-NPC/alambique/commit/d90ba9d5812cb771fec7131106c5806aa77beb82))
+* **cell:** judge orphan frames before any cleanup ([19c9ecf](https://github.com/This-Is-NPC/alambique/commit/19c9ecfe60582fc84f310a76248838e47921b2e5))
+* **cell:** stop on a failed query_only without frames ([e7fe0b0](https://github.com/This-Is-NPC/alambique/commit/e7fe0b0e5765690e24174b43f62006cb35a650df))
+* **cell:** stop on a fatal transaction result everywhere ([ae5ee5f](https://github.com/This-Is-NPC/alambique/commit/ae5ee5f7f83c5445e7be2973bcc713273f637421))
+* **cell:** stop on frames that no write carries ([424f419](https://github.com/This-Is-NPC/alambique/commit/424f419ed35f82d0e13be0142e077fb9e26186e7))
+* **db:** close the connection when the open fails ([176e05f](https://github.com/This-Is-NPC/alambique/commit/176e05f2629e72ac0680a8dd380f4512b2858f06))
+* **db:** finish the transaction in one native call ([580f66f](https://github.com/This-Is-NPC/alambique/commit/580f66f198e75f5d1dce27c1434163d1855cc745))
+* **db:** run COMMIT alone, then the query_only pragma ([1617c1e](https://github.com/This-Is-NPC/alambique/commit/1617c1edd5d977783ed65c077f9821b3323976b9))
+* **db:** stop the cell when a commit or rollback fails halfway ([2ffb11f](https://github.com/This-Is-NPC/alambique/commit/2ffb11f73cd6433650b0743d3b3bd8791a96c399))
+* **fault:** do not hand the transaction token to handlers ([24cd8b8](https://github.com/This-Is-NPC/alambique/commit/24cd8b8813c5af786a0150035ae557208d0bc688))
+* **feed:** account for orphan frames before a cleanup ([decb147](https://github.com/This-Is-NPC/alambique/commit/decb147f4f4a5d9f295f53e90511e89f6854c9bc))
+* **feed:** decode only well-formed rewind markers ([f84978c](https://github.com/This-Is-NPC/alambique/commit/f84978c91c406c86a9ae9f3c2d853937f6b3d69c))
+* **feed:** return an error for schema after a rollback ([92f5caa](https://github.com/This-Is-NPC/alambique/commit/92f5caae5a7b97042441d76e12fdec7ba439d875))
+* **feed:** skip the trigger check after a timed-out DDL ([41a26da](https://github.com/This-Is-NPC/alambique/commit/41a26da4a28852740d8dbdfbae3e2e7349e64646))
+* **ltx:** check frame flags and length ([87491e7](https://github.com/This-Is-NPC/alambique/commit/87491e7def316c89171af8a81fa919004b238187))
+* **nif:** compare lazy pages with a keyed hash ([658ef60](https://github.com/This-Is-NPC/alambique/commit/658ef60469427e76bb37faf7c74ff2847dccb47f))
+* **nif:** keep the comparison after a late page ([70994ce](https://github.com/This-Is-NPC/alambique/commit/70994ceec756f7e9edc0d3520ffbf4302312ba01))
+* **nif:** refuse ATTACH of a held file by inode ([403e123](https://github.com/This-Is-NPC/alambique/commit/403e123873ec19bc852085a1ff50339a5f80a46e))
+* **restore:** compare lazy pages with whole objects ([7800ad0](https://github.com/This-Is-NPC/alambique/commit/7800ad07b5570d431887e7557850c1981b706017))
+* **sqlite:** end the transaction only with its token ([1a83533](https://github.com/This-Is-NPC/alambique/commit/1a8353327b640cf8042f7549e25f1535142b049e))
+* **sqlite:** note the WAL before the begin runs ([7c052cf](https://github.com/This-Is-NPC/alambique/commit/7c052cfe2174bffa27e5f45196631fcd168af161))
+* **sqlite:** refuse a checkpoint inside a transaction ([42698ee](https://github.com/This-Is-NPC/alambique/commit/42698ee5cd8fb3a06121f57a1fd0c3cab4b94491))
+* **sqlite:** refuse NUL bytes in statement text ([012004a](https://github.com/This-Is-NPC/alambique/commit/012004a06be72d1652af7dc7960b3ea0348affb5))
+* **sqlite:** refuse transaction control while one is open ([ce6a2b6](https://github.com/This-Is-NPC/alambique/commit/ce6a2b60db15b7c9b664eab27e277d80d6ab3c05))
+* **sql:** keep keywords inside identifiers whole ([44a3e25](https://github.com/This-Is-NPC/alambique/commit/44a3e2593b08dbfb491377cd29b14d062e2770eb))
+* **sql:** split scripts where SQLite does ([025b47e](https://github.com/This-Is-NPC/alambique/commit/025b47ed70acde7e4ac21a67642b2962611983fe))
+* **store:** give the feed its own breaker state ([fbeb6bb](https://github.com/This-Is-NPC/alambique/commit/fbeb6bb23af074a9180f145200115e11caa62de7))
+* **store:** pin ranged reads to the staged object ([0bdad19](https://github.com/This-Is-NPC/alambique/commit/0bdad194189baba05cdd08c677e15c2f0610461b))
+* **tx:** decide DDL with the native check ([93042c6](https://github.com/This-Is-NPC/alambique/commit/93042c6bcd9e1dce3334536f7a01134021e3fa5f))
+* **tx:** let SQLite delimit the statements of a script ([9c19ad7](https://github.com/This-Is-NPC/alambique/commit/9c19ad77a02c16b5ccf6776196bdc55eb45f322d))
+* **tx:** refuse statements once SQLite ended the transaction ([5f43f05](https://github.com/This-Is-NPC/alambique/commit/5f43f05e3a3f62312bfbeade95bcd26d1c0b409b))
+* **tx:** refuse text after the first statement ([7e1c4c8](https://github.com/This-Is-NPC/alambique/commit/7e1c4c888b71f4ce71f72ece58918af653e6dbd3))
+* **tx:** refuse transaction control in user text ([5d06da9](https://github.com/This-Is-NPC/alambique/commit/5d06da9e222413c4e3e941811c71336a4dfa007a))
+* **wake:** fail the wake when the stamp fails ([4c0136d](https://github.com/This-Is-NPC/alambique/commit/4c0136d34c7f4ce9e49012c2ce62c86e1a976ac2))
+
 ## [0.16.1](https://github.com/This-Is-NPC/alambique/compare/v0.16.0...v0.16.1) (2026-11-22)
 
 

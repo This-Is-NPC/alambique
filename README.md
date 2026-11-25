@@ -8,7 +8,7 @@ is used and sleeps when it is idle, and any node that runs the instance can
 serve any cell. A service scales with compute and object storage, with no
 database server per region.
 
-The current version is 0.16.1. <!-- x-release-please-version -->
+The current version is 0.17.0. <!-- x-release-please-version -->
 
 ## Install
 
@@ -17,7 +17,7 @@ Alambique is not published on Hex. Add it to `mix.exs` by its release tag:
 ```elixir
 def deps do
   [
-    {:alambique, git: "https://github.com/This-Is-NPC/alambique.git", tag: "v0.16.1"} # x-release-please-version
+    {:alambique, git: "https://github.com/This-Is-NPC/alambique.git", tag: "v0.17.0"} # x-release-please-version
   ]
 end
 ```
