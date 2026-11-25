@@ -7,7 +7,7 @@ defmodule Alambique.Cell.Wake do
   # taken so far, so the caller can release them.
 
   alias Alambique.{Config, Fault, Freeze, Lease, Placement, Replication, Schema}
-  alias Alambique.Cell.{Commit, Db, Hydration, Local, Pipe, Sql, State}
+  alias Alambique.Cell.{Commit, Db, Facts, Hydration, Local, Pipe, Sql, State}
   alias Alambique.Feed.{Capture, Publisher}
   alias Alambique.Compaction.{Compactor, Hold}
   alias Alambique.Store.Metered
@@ -317,6 +317,7 @@ defmodule Alambique.Cell.Wake do
     with {:ok, state} <- ensure_lease(state),
          {:ok, conn} <- open(state) do
       state = %{state | conn: conn, repl: repl, source: source}
+      Facts.put(state.load, :wake_source, source)
       indexing = start_index(state)
 
       fenced =

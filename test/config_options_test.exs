@@ -213,6 +213,19 @@ defmodule Alambique.ConfigOptionsTest do
     end
   end
 
+  test "awake.track_bytes is a boolean, true by default", ctx do
+    assert Alambique.Config.build(base(ctx, [])).awake.track_bytes == true
+
+    assert Alambique.Config.build(base(ctx, awake: [track_bytes: false])).awake.track_bytes ==
+             false
+
+    for bad <- [nil, 1, :yes] do
+      assert_raise ArgumentError, ~r/track_bytes must be true or false/, fn ->
+        Alambique.Config.build(base(ctx, awake: [track_bytes: bad]))
+      end
+    end
+  end
+
   test "awake.idle_cache_kib is a non-negative integer below cache_kib when the shrink is on",
        ctx do
     for bad <- [-1, 1.5, :small] do
@@ -267,6 +280,7 @@ defmodule Alambique.ConfigOptionsTest do
              idle_cache_after_ms: nil,
              idle_cache_kib: 64,
              idle_gc: true,
+             track_bytes: true,
              wake_queue_ms: 500,
              max_wake_queue: 1_024,
              max_bytes: nil
@@ -433,6 +447,7 @@ defmodule Alambique.ConfigOptionsTest do
              idle_cache_after_ms: nil,
              idle_cache_kib: 64,
              idle_gc: true,
+             track_bytes: true,
              wake_queue_ms: 40,
              max_wake_queue: 5,
              max_bytes: 5_000_000

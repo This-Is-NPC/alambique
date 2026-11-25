@@ -99,7 +99,7 @@ defmodule Alambique.Cell.LocalCache do
   defp evict(config, dir, acc) do
     task =
       Task.async(fn ->
-        case Registry.register(config.registry, dir.cell, Alambique.Cell.new_load()) do
+        case Registry.register(config.registry, dir.cell, Alambique.Cell.Facts.new()) do
           {:ok, _} ->
             File.rm_rf(dir.dir)
             :evicted

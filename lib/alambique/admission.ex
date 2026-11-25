@@ -15,7 +15,7 @@ defmodule Alambique.Admission do
   # entries `{{:failed, cell}, reason, until_ms, failures_in_a_row}` and, with `awake.max_bytes`,
   # the counter `:bytes` and one entry `{{:cell, pid}, bytes}` per awake cell.
 
-  alias Alambique.{Config, Sqlite, Telemetry}
+  alias Alambique.{Config, Telemetry}
 
   @doc "Creates the table; called by the process that owns it."
   @spec init(Config.t()) :: :ok
@@ -216,36 +216,41 @@ defmodule Alambique.Admission do
   @doc "The remembered failure of `cell`, while its backoff lasts."
   @spec failure(Config.t(), String.t(), integer) :: {:error, term} | nil
   def failure(config, cell, now \\ System.monotonic_time(:millisecond)) do
-    case :ets.lookup(config.admission, {:failed, cell}) do
-      [{_, reason, until, _}] ->
-        if now < until, do: {:error, reason}
+    with %{reason: reason} <- backoff(config, cell, now), do: {:error, reason}
+  end
 
-      [] ->
+  @doc """
+  The wake backoff of `cell` while it lasts: the monotonic ms it ends at, the
+  failures in a row and the reason of the last. `nil` when there is none.
+  """
+  @spec backoff(Config.t(), String.t(), integer) ::
+          %{until: integer, attempts: pos_integer, reason: term} | nil
+  def backoff(config, cell, now \\ System.monotonic_time(:millisecond)) do
+    case :ets.lookup(config.admission, {:failed, cell}) do
+      [{_, reason, until, attempts}] when now < until ->
+        %{until: until, attempts: attempts, reason: reason}
+
+      _ ->
         nil
     end
   end
 
-  # The memory budget (`awake.max_bytes`, design §7). Each awake cell reports
-  # what its connection holds after every call and at the end of its wake;
-  # nothing is measured or kept without a budget.
+  # The memory budget (`awake.max_bytes`, design §7). Each awake cell records
+  # what its connections hold when it measures them (`Cell.Facts`: after each
+  # call, a shrink and the end of the wake or the hydration); nothing is kept
+  # without a budget.
 
   @doc """
-  Records the memory of the connections `conns` for the cell `pid`: its own
-  and, while the feed sender reads, the reader's.
+  Records `bytes`, the memory of the connections of the cell `pid` (its own
+  and, while the feed sender reads, the reader's).
   """
-  @spec track(Config.t(), pid, [Sqlite.conn()]) :: :ok
-  def track(%{awake: %{max_bytes: nil}}, _pid, _conns), do: :ok
+  @spec record(Config.t(), pid, non_neg_integer) :: :ok
+  def record(%{awake: %{max_bytes: nil}}, _pid, _bytes), do: :ok
 
-  def track(config, pid, conns) do
-    memories = Enum.map(conns, &Sqlite.memory/1)
-
-    if Enum.all?(memories, &match?({:ok, _}, &1)) do
-      bytes = Enum.sum(for {:ok, m} <- memories, do: m.cache_used + m.schema_used + m.stmt_used)
-      old = recorded(config, pid)
-      :ets.insert(config.admission, {{:cell, pid}, bytes})
-      if bytes != old, do: :ets.update_counter(config.admission, :bytes, bytes - old)
-    end
-
+  def record(config, pid, bytes) do
+    old = recorded(config, pid)
+    :ets.insert(config.admission, {{:cell, pid}, bytes})
+    if bytes != old, do: :ets.update_counter(config.admission, :bytes, bytes - old)
     :ok
   end
 
