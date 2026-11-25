@@ -150,7 +150,7 @@ Emitted by `Alambique.Replication.Replicator` and `Alambique.Replication`.
 | --- | --- | --- |
 | `[:alambique, :replication, :sync]` | `duration`, `bytes` (size of the segment) | `cell`, `txid`, `epoch`, `kind` (`:batch`, `:fence` or `:replace`, the segment of a rewind), `result` (`:ok`, `:fenced` or `:error`), and `reason` for `:error` |
 | `[:alambique, :replication, :fenced]` | none | `cell`, `txid`, `epoch`, `kind` |
-| `[:alambique, :replication, :hydrate]` | `duration` (from the lazy wake to the last page), `pages` (in the restored database), `misses` (pages a query waited for) | `cell`, `result` (`:ok` or `:error`), and `reason` for `:error` |
+| `[:alambique, :replication, :hydrate]` | `duration` (from the lazy wake to the end of the checks), `pages` (in the restored database), `misses` (pages a query waited for), `check_objects`, `check_bytes` and `check_duration` (the objects read whole to compare them with the pages, once every page is local; absent when the hydration ended before that) | `cell`, `result` (`:ok` or `:error`), and `reason` for `:error` |
 | `[:alambique, :replication, :restore]` | `duration` | `cell`, `target`, `result` (`:ok` or `:error`), and `txid`, `epoch`, `segments` (files applied) for `:ok`, or `reason` for `:error` |
 
 `:sync` is emitted for every upload attempt that ends, including fences. A

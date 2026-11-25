@@ -121,8 +121,8 @@ Fewer requests, or requests that run together, make the wake faster. Design
    - `lazy_restore: [verify_bytes:]` (default 1 MiB) is the size under which a
      file is read whole and checked against its file checksum before any page of
      it is used. A miss on such a file reads the whole file, not 16 pages. Set it
-     to 0 to read frames only and rely on the database checksum at the end of the
-     download, or raise it to check larger files.
+     to 0 to read frames only and rely on the comparison with the whole objects
+     at the end of the download, or raise it to check larger files.
    - `lazy_restore: [verify_writes:]` (default `true`) makes the first write
      after a lazy wake wait until the whole file is downloaded and its checksum
      matched. Set it to `false` only if first-write latency matters more than
@@ -142,7 +142,8 @@ Fewer requests, or requests that run together, make the wake faster. Design
    the first writes (and, with `verify_reads`, the first reads) after a lazy
    wake time out. Measure the download time of a cell of your size with the
    `duration` of `[:alambique, :replication, :hydrate]`, which runs from the lazy
-   wake to the last page. Use a cell of that size (for example, one filled with
+   wake to the end of the checks, which read every object of the chain whole
+   (`check_bytes`, `check_duration`). Use a cell of that size (for example, one filled with
    `Alambique.execute/4`), hibernate it, call it, and read the event. Convert the
    duration with `System.convert_time_unit/3`, and check that it fits in the
    timeout. The throughput of a store with latency is much lower than that of
