@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.18.0](https://github.com/This-Is-NPC/alambique/compare/v0.17.0...v0.18.0) (2026-11-25)
+
+
+### Features
+
+* **cell:** publish facts in the load array ([ab4edff](https://github.com/This-Is-NPC/alambique/commit/ab4edff64b586efe511ffdfd2ea0a0db49e40ede))
+* **cells:** expose facts in cells/2 and facts/2 ([3d5756c](https://github.com/This-Is-NPC/alambique/commit/3d5756c1c6e230467f1836150c3f9fd7d758ef87))
+* **native:** count sqlite_memory calls ([1167727](https://github.com/This-Is-NPC/alambique/commit/1167727b1b68b6ff37fd192608d16782ef939e5e))
+
+
+### Bug Fixes
+
+* **cell:** count the first renewal from the put ([9026853](https://github.com/This-Is-NPC/alambique/commit/902685384fcdd97de5680d028357ed48337ebc54))
+* **native:** do not wait for a busy connection memory ([a736864](https://github.com/This-Is-NPC/alambique/commit/a7368647f9e916a03d85a0f4c42ec2e57fad456d))
+* **native:** give the mutex try a safety comment ([5d9d2b1](https://github.com/This-Is-NPC/alambique/commit/5d9d2b1acc3ffa916b8b4535ede0cdb2d6baaeeb))
+
 ## [0.17.0](https://github.com/This-Is-NPC/alambique/compare/v0.16.1...v0.17.0) (2026-11-25)
 
 
