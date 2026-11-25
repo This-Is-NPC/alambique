@@ -121,6 +121,12 @@ defmodule Alambique.Store.Metered do
   end
 
   @impl true
+  def get_range(%{store: store} = s, key, offset, length, etag) do
+    bump(s, :get, key)
+    timed(s, fn -> Alambique.Store.call_get_range(store, key, offset, length, etag) end)
+  end
+
+  @impl true
   def head(%{store: {m, c}} = s, key) do
     bump(s, :head, key)
     timed(s, fn -> m.head(c, key) end)

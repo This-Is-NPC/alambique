@@ -6,10 +6,11 @@ defmodule Alambique.Replication.Lazy do
 
   alias Alambique.Replication.{Budget, Native, Objects}
 
-  @enforce_keys [:handle, :files, :ctx, :budget]
+  @enforce_keys [:handle, :files, :pins, :ctx, :budget]
   defstruct [
     :handle,
     :files,
+    :pins,
     :ctx,
     :budget,
     :checksum,
@@ -22,6 +23,7 @@ defmodule Alambique.Replication.Lazy do
   @type t :: %__MODULE__{
           handle: reference,
           files: tuple,
+          pins: tuple,
           ctx: map,
           budget: Budget.t(),
           checksum: integer | nil,
@@ -33,17 +35,18 @@ defmodule Alambique.Replication.Lazy do
 
   @doc "The lazy part of a `Restore` result."
   @spec new(map, map, keyword) :: t
-  def new(%{lazy: handle, files: files, checksum: checksum, cell: cell}, ctx, opts \\ []) do
+  def new(%{lazy: handle, files: files, pins: pins} = result, ctx, opts \\ []) do
     lazy =
       struct!(
         __MODULE__,
         [
           handle: handle,
           files: List.to_tuple(files),
+          pins: List.to_tuple(pins),
           ctx: ctx,
           budget: Budget.new(ctx.max_inflight_bytes),
-          checksum: checksum,
-          cell: cell
+          checksum: result.checksum,
+          cell: result.cell
         ] ++ opts
       )
 
@@ -56,21 +59,26 @@ defmodule Alambique.Replication.Lazy do
   Returns `{:ok, done}`, where `done` says that this was the last missing page.
   The run waits for room in the budget of the cell, so the runs under way hold
   at most `ctx.max_inflight_bytes` (a longer run is read alone).
+
+  The read is pinned to the object as the restore staged it: its ETag, its
+  size and its epoch. A different one is `{:error, {:changed, key}}`.
   """
   @spec fetch_run(t, {non_neg_integer, non_neg_integer, pos_integer, list}, integer) ::
           {:ok, boolean} | {:error, term}
   def fetch_run(%__MODULE__{} = lazy, {file, offset, len, pages}, deadline) do
     key = elem(lazy.files, file)
+    {etag, epoch, size} = elem(lazy.pins, file)
     weight = Budget.weigh(lazy.budget, len)
 
     with :ok <- Budget.acquire(lazy.budget, weight, deadline) do
       try do
-        case fetch_range(lazy.ctx, key, offset, len, deadline) do
-          {:ok, body, _total, _meta} when byte_size(body) == len ->
-            Native.lazy_deliver(lazy.handle, file, body, pages)
-
-          {:ok, _short, _total, _meta} ->
-            {:error, {:short_read, key}}
+        case fetch_range(lazy.ctx, key, offset, len, etag, deadline) do
+          {:ok, body, total, meta} ->
+            cond do
+              total != size or Objects.epoch_of(meta) != epoch -> {:error, {:changed, key}}
+              byte_size(body) != len -> {:error, {:short_read, key}}
+              true -> Native.lazy_deliver(lazy.handle, file, body, pages)
+            end
 
           {:error, reason} ->
             {:error, if(reason == :not_found, do: {:not_found, key}, else: reason)}
@@ -82,8 +90,8 @@ defmodule Alambique.Replication.Lazy do
   end
 
   # A store that raises or exits is a failed read, not a crash of the caller.
-  defp fetch_range(ctx, key, offset, len, deadline) do
-    Objects.fetch_range(ctx, key, offset, len, deadline)
+  defp fetch_range(ctx, key, offset, len, etag, deadline) do
+    Objects.fetch_range(ctx, key, offset, len, deadline, etag)
   catch
     kind, reason -> {:error, {kind, reason}}
   end

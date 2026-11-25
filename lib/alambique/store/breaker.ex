@@ -265,6 +265,13 @@ defmodule Alambique.Store.Breaker do
     do: through(s, :get_range, fn m, c -> m.get_range(c, key, offset, length) end)
 
   @impl true
+  def get_range(s, key, offset, length, etag) do
+    through(s, :get_range, fn m, c ->
+      Alambique.Store.call_get_range({m, c}, key, offset, length, etag)
+    end)
+  end
+
+  @impl true
   def list(s, prefix, start_after, limit),
     do: through(s, :list, fn m, c -> m.list(c, prefix, start_after, limit) end)
 

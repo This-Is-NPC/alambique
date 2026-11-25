@@ -85,16 +85,28 @@ defmodule Alambique.Replication.Objects do
     end)
   end
 
-  @doc "Part of an object, its size and its metadata, retried."
-  @spec fetch_range(map, String.t(), non_neg_integer, pos_integer, integer) ::
+  @doc """
+  Part of an object, its size and its metadata, retried. With `etag` the read
+  is of that version of the object only: another one, whether the store
+  refuses the read or says so in the metadata, is `{:error, {:changed, key}}`
+  at once.
+  """
+  @spec fetch_range(map, String.t(), non_neg_integer, pos_integer, integer, String.t() | nil) ::
           {:ok, binary, non_neg_integer, map} | {:error, term}
-  def fetch_range(ctx, key, offset, length, deadline) do
-    {store, config} = ctx.store
-
+  def fetch_range(ctx, key, offset, length, deadline, etag \\ nil) do
     Retry.run(ctx, deadline, fn ->
-      case store.get_range(config, key, offset, length) do
-        {:ok, body, total, meta} -> {:ok, body, total, meta}
-        {:error, reason} -> retry_or_final(ctx, reason)
+      case Store.call_get_range(ctx.store, key, offset, length, etag) do
+        {:ok, _body, _total, %{"etag" => found}} when etag != nil and found != etag ->
+          {:error, {:changed, key}}
+
+        {:ok, body, total, meta} ->
+          {:ok, body, total, meta}
+
+        {:error, :precondition_failed} when etag != nil ->
+          {:error, {:changed, key}}
+
+        {:error, reason} ->
+          retry_or_final(ctx, reason)
       end
     end)
   end

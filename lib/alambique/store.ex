@@ -4,7 +4,15 @@ defmodule Alambique.Store do
 
   `get_range/4` returns up to `length` bytes starting at `offset`, the size
   of the whole object and its metadata. The body is shorter at the end of the object and empty
-  when `offset` is at or past it.
+  when `offset` is at or past it. A store puts the ETag of the object that
+  served the read in the metadata, under the key `"etag"`: a lazy restore
+  pins the ranged reads of an object to the ETag it staged (design §16).
+  A store without it gives no such pin.
+
+  A store can implement `c:get_range/5`, a `get_range` that is applied only
+  when the ETag of the object is the one given, as `If-Match` does for a
+  `put`; any other ETag is `{:error, :precondition_failed}`. Without it the
+  library reads with `c:get_range/4` and compares the ETag in the metadata.
 
   A store can implement `c:get/3`, a `get` that gives up on an object larger
   than `max_bytes` with `{:error, {:too_large, size, max_bytes}}` before it
@@ -47,6 +55,11 @@ defmodule Alambique.Store do
               {:ok, body :: binary, total_size :: non_neg_integer, meta}
               | {:error, :not_found}
               | {:error, term}
+  @callback get_range(config, key, offset :: non_neg_integer, length :: pos_integer, etag) ::
+              {:ok, body :: binary, total_size :: non_neg_integer, meta}
+              | {:error, :not_found}
+              | {:error, :precondition_failed}
+              | {:error, term}
   @callback get(config, key, max_bytes :: pos_integer) ::
               {:ok, body :: binary, etag, meta}
               | {:error, :not_found}
@@ -58,7 +71,7 @@ defmodule Alambique.Store do
   @callback location(config) :: term
   @callback conceal(config) :: config
 
-  @optional_callbacks get: 3, location: 1, conceal: 1
+  @optional_callbacks get: 3, get_range: 5, location: 1, conceal: 1
 
   @doc "Where `store` keeps its data: its `c:location/1`, or its config without one."
   @spec location({module, config}) :: term
@@ -110,6 +123,22 @@ defmodule Alambique.Store do
         other ->
           other
       end
+    end
+  end
+
+  @doc """
+  `get_range` of the object with ETag `etag` (any object when `nil`): the
+  store's `c:get_range/5`, or its `c:get_range/4` for a store without it, whose
+  answer the caller checks against the ETag in its metadata.
+  """
+  @spec call_get_range({module, config}, key, non_neg_integer, pos_integer, etag | nil) ::
+          {:ok, binary, non_neg_integer, meta} | {:error, term}
+  def call_get_range({module, config}, key, offset, length, etag) do
+    if etag != nil and Code.ensure_loaded?(module) and
+         function_exported?(module, :get_range, 5) do
+      module.get_range(config, key, offset, length, etag)
+    else
+      module.get_range(config, key, offset, length)
     end
   end
 
