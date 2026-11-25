@@ -348,6 +348,11 @@ stay in the file for the next owner, as for any batch that was not published.
 The bound has a cost: each piece is a query on the cell's file, so a smaller
 bound means more queries for the same rows.
 
+`feed: [max_backlog_batches: n]` (default 256) is the number of acknowledged
+batches the cell hands to its publisher at a time. The rest stays in the cell's
+file until the publisher reports progress. `object_batches` must not be above
+it.
+
 ## 14. Let the publisher read the rows
 
 `feed: [hand_over: :sender]` (default `:cell`) moves the read of the captured
@@ -366,8 +371,8 @@ With `:sender`:
   the close waits for the read to end, at most `op_timeout_ms`.
 - Each read is one statement, with no transaction held between statements, so
   it does not keep a checkpoint from finishing.
-- `max_backlog_batches` counts TXIDs, not batches: the cell cannot count what it
-  did not read. A TXID without rows, such as the batch of a cleanup, counts
+- `max_backlog_batches` (step 13) counts TXIDs, not batches: the cell cannot
+  count what it did not read. A TXID without rows, such as the batch of a cleanup, counts
   until the batches before it are published.
 - `hand_over_rows` (step 13) bounds the rows of each read of the sender, with
   the same meaning: it cuts between batches and, inside a larger batch, between

@@ -99,16 +99,25 @@ defmodule Alambique.TransactionControlPropertiesTest do
     ])
   end
 
-  # The function of the write: each op is a call whose result is ignored.
+  # The function of the write: each op is a call whose result is ignored. It
+  # ends by reading what the transaction holds, `:ok` when the read fails.
   defp function(ops) do
     fn tx ->
       ops
       |> Enum.with_index(10)
       |> Enum.each(fn {op, n} -> run(tx, op, n) end)
 
-      :ok
+      case Tx.query(tx, @all) do
+        {:ok, %{rows: rows}} -> {:seen, ids(rows)}
+        _ -> :ok
+      end
     end
   end
+
+  # The caller was told the transaction is committed.
+  defp committed?({:ok, {:ok, :ok}}), do: true
+  defp committed?({:ok, {:ok, {:seen, _}}}), do: true
+  defp committed?(_), do: false
 
   defp run(tx, {:sql, text}, _n), do: Tx.execute(tx, text)
   defp run(tx, :insert, n), do: Tx.execute(tx, "INSERT INTO t VALUES (#{n})")
@@ -298,6 +307,10 @@ defmodule Alambique.TransactionControlPropertiesTest do
   defp scripts?(ops),
     do: Enum.any?(ops, &(is_tuple(&1) and elem(&1, 0) in [:smuggle, :variable, :bom]))
 
+  # Whether any op may roll back to a savepoint: the rows read are then not
+  # the inserts. Only the ROLLBACK TO controls hold the word `to`.
+  defp rolls_back_to?(ops), do: Enum.any?(ops, &(inspect(&1) =~ ~r/\bto\b/i))
+
   # Whether the function leaves something to commit when it ends.
   defp commits?(ops), do: Enum.any?(ops, &(&1 in [:insert, :end_column, :trailing_bom]))
 
@@ -316,7 +329,7 @@ defmodule Alambique.TransactionControlPropertiesTest do
         # Nothing was left to commit: answered at once, behind the batch in
         # flight, or after the batch of a script whose triggers were rewritten
         # although its statements were undone.
-        assert early == {:ok, {:ok, :ok}} or ((inflight? or scripts?(ops)) and early == nil),
+        assert committed?(early) or ((inflight? or scripts?(ops)) and early == nil),
                "A: a write that changed nothing was answered #{inspect(early)}: #{inspect(ops)}"
     end
   end
@@ -326,7 +339,7 @@ defmodule Alambique.TransactionControlPropertiesTest do
   defp assert_final(final, ops, killed?) do
     cond do
       ends?(ops) -> assert final == {:ok, {:error, :transaction_ended}}, "A: #{inspect(final)}"
-      final == {:ok, {:ok, :ok}} -> :ok
+      committed?(final) -> :ok
       killed? -> assert down?(final), "A: #{inspect(final)} after the kill: #{inspect(ops)}"
       true -> flunk("A: #{inspect(final)} for #{inspect(ops)}")
     end
@@ -467,12 +480,28 @@ defmodule Alambique.TransactionControlPropertiesTest do
       assert after_wake == durable, "I3: #{inspect(ops)}"
       refute 5000 in durable
 
-      # I5: a caller told its inserts are committed finds them in the store.
-      if final == {:ok, {:ok, :ok}} do
+      # I5: a caller told its transaction is committed finds in the store the
+      # rows the function read at its end, and without a ROLLBACK TO every
+      # insert is among them.
+      if committed?(final) do
+        seen =
+          case final do
+            {:ok, {:ok, {:seen, seen}}} -> seen
+            _ -> []
+          end
+
         inserted = for {:insert, n} <- Enum.with_index(ops, 10), do: n
 
-        assert inserted -- durable == [],
-               "I5: acknowledged inserts #{inspect(inserted -- durable)} are not in the store: #{inspect(ops)}"
+        assert seen -- durable == [],
+               "I5: acknowledged rows #{inspect(seen -- durable)} are not in the store: #{inspect(ops)}"
+
+        unless rolls_back_to?(ops) do
+          assert final == {:ok, {:ok, :ok}} or inserted -- seen == [],
+                 "I5: inserts #{inspect(inserted -- seen)} are not among the rows read: #{inspect(ops)}"
+
+          assert inserted -- durable == [],
+                 "I5: acknowledged inserts #{inspect(inserted -- durable)} are not in the store: #{inspect(ops)}"
+        end
       end
 
       if inflight, do: Task.shutdown(inflight, 2_000)

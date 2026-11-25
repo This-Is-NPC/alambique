@@ -137,7 +137,7 @@ whole process, so the shrunk cell lowers what the awake cells may hold in total
 by `cache_kib - idle_cache_kib`; the pages freed are the least recently used
 ones of the node, not necessarily the cell's own. The cost is cold pages: the
 first call after a shrink reads its pages again. `idle_cache_after_ms` must be
-below `idle_timeout_ms`.
+below `idle_timeout_ms`, and `idle_cache_kib` (0 or more) below `cache_kib`.
 
 `idle_gc` (default `true`) makes the cell also collect its own garbage when the
 shrink happens. It returns the garbage of the last calls. With `cache_kib: 512`,

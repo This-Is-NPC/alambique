@@ -67,8 +67,12 @@ defmodule Alambique.LazyRestoreTailFlipTest do
   defp reread(ctx, cell) do
     fresh = start_instance(ctx, migrations: @schema, lazy_restore: false)
 
+    # The failed owner holds its lease until it lapses: `{:unavailable, _, _}`.
     eventually(fn ->
-      with {:ok, %{rows: rows}} <- Alambique.query(fresh, cell, @all), do: rows
+      case Alambique.query(fresh, cell, @all) do
+        {:ok, %{rows: rows}} -> rows
+        {:error, {:unavailable, _, _}} -> nil
+      end
     end)
   end
 
