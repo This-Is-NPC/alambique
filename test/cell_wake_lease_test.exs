@@ -25,4 +25,32 @@ defmodule Alambique.CellWakeLeaseTest do
 
     assert {:ok, _} = Alambique.touch(inst, "slow")
   end
+
+  test "the first renewal comes a third of the TTL after the lease was put, however slow the wake",
+       %{inst: inst} do
+    test = self()
+
+    # Short of the half window that makes the wake renew: the cell serves on
+    # the lease it acquired, 0.9 s old.
+    Alambique.Fault.install(fn
+      :schema_before_put, _ ->
+        Process.sleep(900)
+
+      :lease_after_put, %{op: op, cell: "slow"} ->
+        send(test, {op, System.monotonic_time(:millisecond)})
+
+      _, _ ->
+        :ok
+    end)
+
+    on_exit(&Alambique.Fault.uninstall/0)
+
+    assert {:ok, _} = Alambique.touch(inst, "slow")
+    assert_receive {:acquire, acquired}
+    assert_receive {:renew, renewed}, 5_000
+
+    # Counted from the end of the wake, the renewal would come at least
+    # 0.9 + 0.9 s after the put, with less than one interval of the lease left.
+    assert renewed - acquired < 1_800
+  end
 end

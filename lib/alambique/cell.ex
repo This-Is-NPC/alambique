@@ -291,7 +291,7 @@ defmodule Alambique.Cell do
 
   defp serve(state) do
     config = state.config
-    Process.send_after(self(), :renew, renew_interval(config))
+    Process.send_after(self(), :renew, first_renewal_in(state))
     Process.send_after(self(), :idle, config.idle_timeout_ms)
     state = %{state | mode: :serving, last_active: System.monotonic_time(:millisecond)}
     wal_size(state)
@@ -332,6 +332,14 @@ defmodule Alambique.Cell do
     base = div(config.ttl_ms, 3)
     spread = trunc(base * config.renew_jitter)
     base + :rand.uniform(2 * spread + 1) - spread - 1
+  end
+
+  # The first renewal counts from the put of the lease, not from the end of
+  # the wake: a slow wake would otherwise leave room for only one renewal
+  # before the lease runs out.
+  defp first_renewal_in(%State{config: config, lease: lease} = state) do
+    age = config.ttl_ms - (lease.expires_at_ms - State.now_ms(state))
+    max(renew_interval(config) - age, 0)
   end
 
   # Calls
