@@ -206,7 +206,9 @@ defmodule Alambique.FeedSenderReadTest do
       GatedStore.hold(gate, ~r{/feed/})
       for id <- 1..5, do: insert(inst, @cell, [id])
 
-      assert %{feed_backlog: 2, feed_capped: true} = state(inst)
+      # With one range at a time (`reader_close: :after_read`) the cap is reached
+      # as the sender reports each read.
+      eventually(fn -> match?(%{feed_backlog: 2, feed_capped: true}, state(inst)) end)
       GatedStore.open(gate)
 
       eventually(fn ->
