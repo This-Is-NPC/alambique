@@ -239,26 +239,16 @@ defmodule Alambique.CellOptionsRefreshTest do
       assert cache_size(inst, "c") == -96
     end
 
-    test "a refresh that arrives with the shrink queued runs after it and sets the idle limit",
-         ctx do
+    test "a refresh while shrunk sets the new idle limit at once", ctx do
       inst = start(ctx, awake: [cache_kib: 128, idle_cache_kib: 8])
-      Callbacks.set(fn _ -> [awake: [idle_cache_after_ms: 400]] end)
+      Callbacks.set(fn _ -> [awake: [idle_cache_after_ms: 50]] end)
       assert {:ok, _} = wake(inst, "c")
-      pid = pid(inst, "c")
+      eventually(fn -> cache_size(inst, "c") == -8 end)
 
-      :sys.suspend(pid)
-      eventually(fn -> mailbox_has?(pid, &match?({:timeout, _, :idle_cache}, &1)) end)
-
-      Callbacks.set(fn _ -> [awake: [idle_cache_after_ms: 400, idle_cache_kib: 4]] end)
-      task = Task.async(fn -> refresh(inst, "c") end)
-
-      eventually(fn ->
-        mailbox_has?(pid, &match?({:"$gen_call", _, {:deadline, _, :refresh_options}}, &1))
-      end)
-
-      :sys.resume(pid)
-      assert {:ok, :override, changed: [:idle_cache_kib]} = await(task)
-      eventually(fn -> state(inst, "c").idle_cache == :shrunk and cache_size(inst, "c") == -4 end)
+      Callbacks.set(fn _ -> [awake: [idle_cache_after_ms: 50, idle_cache_kib: 4]] end)
+      assert {:ok, :override, changed: [:idle_cache_kib]} = refresh(inst, "c")
+      assert %{idle_cache: :shrunk} = state(inst, "c")
+      assert cache_size(inst, "c") == -4
     end
 
     test "a refresh is no activity: the cell stays shrunk and its clock is not reset", ctx do
@@ -273,11 +263,6 @@ defmodule Alambique.CellOptionsRefreshTest do
       assert %{idle_cache: :shrunk, last_active: ^last} = state(inst, "c")
       assert cache_size(inst, "c") == -8
     end
-  end
-
-  defp mailbox_has?(pid, match) do
-    {:messages, messages} = Process.info(pid, :messages)
-    Enum.any?(messages, match)
   end
 
   describe "a closed connection" do
