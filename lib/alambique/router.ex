@@ -59,27 +59,28 @@ defmodule Alambique.Router do
       args = {config, cell, :touch, timeout, 0, config.routing.attempts}
 
       case Cell.whereis(config, cell) do
-        pid when is_pid(pid) ->
-          {:ok, node()}
-
-        nil ->
-          Logger.info("Alambique takes over cell #{cell}: #{inspect(reason)}")
-          takeover = %{reason: reason, epoch: opts[:epoch]}
-
-          # An explicit takeover is the retry: it does not wait for the
-          # backoff that shields the callers.
-          Admission.recovered(config, cell)
-
-          case start_cell(args, {config, cell, takeover: takeover}) do
-            {_, :ok} ->
-              # Whatever node the hint named, the cell is here now.
-              Membership.delete_hint(config, cell)
-              {:ok, node()}
-
-            {_, {:error, _} = error} ->
-              error
-          end
+        pid when is_pid(pid) -> {:ok, node()}
+        nil -> start_takeover(args, reason, opts[:epoch])
       end
+    end
+  end
+
+  defp start_takeover({config, cell, _, _, _, _} = args, reason, epoch) do
+    Logger.info("Alambique takes over cell #{cell}: #{inspect(reason)}")
+    takeover = %{reason: reason, epoch: epoch}
+
+    # An explicit takeover is the retry: it does not wait for the backoff that
+    # shields the callers.
+    Admission.recovered(config, cell)
+
+    case start_cell(args, {config, cell, takeover: takeover}) do
+      {_, :ok} ->
+        # Whatever node the hint named, the cell is here now.
+        Membership.delete_hint(config, cell)
+        {:ok, node()}
+
+      {_, {:error, _} = error} ->
+        error
     end
   end
 
@@ -181,12 +182,14 @@ defmodule Alambique.Router do
         :none
 
       %{answer: {:ok, lease}} ->
-        with true <- held_elsewhere?(config, lease) || :none do
-          case Membership.node_of(config, lease.owner, lease.incarnation) do
-            {:ok, node} -> {:ok, node}
-            :error -> {:error, {:unavailable, lease.owner, lease.expires_at_ms}}
-          end
-        end
+        with true <- held_elsewhere?(config, lease) || :none, do: owner_node(config, lease)
+    end
+  end
+
+  defp owner_node(config, lease) do
+    case Membership.node_of(config, lease.owner, lease.incarnation) do
+      {:ok, node} -> {:ok, node}
+      :error -> {:error, {:unavailable, lease.owner, lease.expires_at_ms}}
     end
   end
 
@@ -229,6 +232,7 @@ defmodule Alambique.Router do
   @doc false
   # An instance that stopped while the VM is up refuses like a draining node:
   # the call did not run.
+  @spec remote(atom, String.t(), term, timeout, non_neg_integer) :: {node | nil, term}
   def remote(name, cell, request, timeout, hops) do
     case Config.fetch(name) do
       {:ok, config} -> serve_peer(config, cell, request, timeout, hops)
@@ -411,20 +415,24 @@ defmodule Alambique.Router do
          :ok <- Admission.begin_wake(config, timeout) do
       Fault.point(:wake_slot_taken, %{cell: cell})
 
-      case DynamicSupervisor.start_child(config.supervisor, {Cell, with_holder(child_arg)}) do
-        {:ok, pid} ->
-          deliver(pid, config |> Cell.find(cell) |> load_of(), args)
-
-        {:error, {:already_started, pid}} ->
-          Admission.release(config)
-          deliver(pid, config |> Cell.find(cell) |> load_of(), args)
-
-        {:error, reason} ->
-          Admission.release(config)
-          {nil, {:error, start_failed(reason)}}
-      end
+      launch(args, child_arg)
     else
       {:error, _} = error -> {nil, error}
+    end
+  end
+
+  defp launch({config, cell, _, _, _, _} = args, child_arg) do
+    case DynamicSupervisor.start_child(config.supervisor, {Cell, with_holder(child_arg)}) do
+      {:ok, pid} ->
+        deliver(pid, config |> Cell.find(cell) |> load_of(), args)
+
+      {:error, {:already_started, pid}} ->
+        Admission.release(config)
+        deliver(pid, config |> Cell.find(cell) |> load_of(), args)
+
+      {:error, reason} ->
+        Admission.release(config)
+        {nil, {:error, start_failed(reason)}}
     end
   end
 
@@ -490,17 +498,19 @@ defmodule Alambique.Router do
       :busy -> {node(), {:error, :busy}}
     end
   catch
-    :exit, {reason, {GenServer, :call, _}} ->
-      case reason do
-        :noproc -> again(args, {:error, :unavailable})
-        :normal -> after_exit(pid, args, {:error, :unavailable})
-        {:shutdown, {:wake_failed, {:owned, _, _} = why}} -> after_exit(pid, args, {:error, why})
-        {:shutdown, {:wake_failed, why}} -> wake_failed(args, why)
-        {:shutdown, why} -> after_exit(pid, args, {:error, why})
-        :timeout -> {nil, {:error, :timeout}}
-        other -> {nil, {:error, {:cell_down, other}}}
-      end
+    :exit, {reason, {GenServer, :call, _}} -> exited(reason, pid, args)
   end
+
+  defp exited(:noproc, _pid, args), do: again(args, {:error, :unavailable})
+  defp exited(:normal, pid, args), do: after_exit(pid, args, {:error, :unavailable})
+
+  defp exited({:shutdown, {:wake_failed, {:owned, _, _} = why}}, pid, args),
+    do: after_exit(pid, args, {:error, why})
+
+  defp exited({:shutdown, {:wake_failed, why}}, _pid, args), do: wake_failed(args, why)
+  defp exited({:shutdown, why}, pid, args), do: after_exit(pid, args, {:error, why})
+  defp exited(:timeout, _pid, _args), do: {nil, {:error, :timeout}}
+  defp exited(other, _pid, _args), do: {nil, {:error, {:cell_down, other}}}
 
   # A cell with `awake.max_pending` callers waiting refuses more, so its
   # mailbox does not grow past the limit while the callers time out. The
@@ -557,9 +567,8 @@ defmodule Alambique.Router do
         {:ok, :asleep}
 
       {pid, load} ->
-        with :ok <- admit(config, load, :refresh_options) do
-          call_cell(pid, :refresh_options, timeout)
-        else
+        case admit(config, load, :refresh_options) do
+          :ok -> call_cell(pid, :refresh_options, timeout)
           :busy -> {:error, :busy}
         end
     end
@@ -622,13 +631,11 @@ defmodule Alambique.Router do
   # write was sent and the connection failed before the answer, so it may have
   # run (design §8).
   defp forward(target, {config, cell, _, _, _, _} = args) do
-    cond do
-      target in Membership.foreign_nodes(config) ->
-        Membership.delete_hint(config, cell)
-        {:error, {:foreign_store, target}}
-
-      true ->
-        send_forward(target, args)
+    if target in Membership.foreign_nodes(config) do
+      Membership.delete_hint(config, cell)
+      {:error, {:foreign_store, target}}
+    else
+      send_forward(target, args)
     end
   end
 
@@ -642,8 +649,7 @@ defmodule Alambique.Router do
         do: lost(target, cell, request),
         else: outcome
 
-    with {:error, reason} when reason in [:noconnection, :outcome_unknown] <- outcome,
-         do: Membership.delete_hint(config, cell)
+    :ok = forget_lost_hint(config, cell, outcome)
 
     result =
       case outcome do
@@ -661,6 +667,14 @@ defmodule Alambique.Router do
 
     outcome
   end
+
+  defp forget_lost_hint(config, cell, {:error, reason})
+       when reason in [:noconnection, :outcome_unknown] do
+    Membership.delete_hint(config, cell)
+    :ok
+  end
+
+  defp forget_lost_hint(_config, _cell, _outcome), do: :ok
 
   defp lost(target, cell, request) do
     Fault.point(:router_forward_lost, %{cell: cell, target: target, request: kind(request)})
