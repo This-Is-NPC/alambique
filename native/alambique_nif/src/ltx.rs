@@ -12,6 +12,7 @@
 //! Files without the flag carry them in the header and trailer, as upstream
 //! does for checksummed files.
 
+use crate::bytes::Reader;
 use crate::crc::Crc64;
 use crate::error::{invalid, Error, Result};
 
@@ -97,31 +98,32 @@ impl Header {
         if b.len() < HEADER_SIZE {
             return invalid("short header");
         }
-        if &b[0..4] != MAGIC {
+        let short = || Error::Invalid("short header".into());
+        let u32_at = |o: usize| crate::bytes::u32_at(b, o).ok_or_else(short);
+        let u64_at = |o: usize| crate::bytes::u64_at(b, o).ok_or_else(short);
+        if b.first_chunk::<4>() != Some(MAGIC) {
             return invalid("bad magic");
         }
-        let u32_at = |o: usize| u32::from_be_bytes(b[o..o + 4].try_into().unwrap());
-        let u64_at = |o: usize| u64::from_be_bytes(b[o..o + 8].try_into().unwrap());
-        let flags = u32_at(4);
+        let flags = u32_at(4)?;
         let (pre_apply, post_apply) = if flags & HEADER_FLAG_NO_CHECKSUM != 0 {
-            (u64_at(RESERVED_PRE), u64_at(RESERVED_POST))
+            (u64_at(RESERVED_PRE)?, u64_at(RESERVED_POST)?)
         } else {
-            (u64_at(40), 0)
+            (u64_at(40)?, 0)
         };
         Ok(Header {
             flags,
-            page_size: u32_at(8),
-            commit: u32_at(12),
-            min_txid: u64_at(16),
-            max_txid: u64_at(24),
-            timestamp: u64_at(32) as i64,
+            page_size: u32_at(8)?,
+            commit: u32_at(12)?,
+            min_txid: u64_at(16)?,
+            max_txid: u64_at(24)?,
+            timestamp: u64_at(32)? as i64,
             pre_apply,
             post_apply,
-            wal_offset: u64_at(48) as i64,
-            wal_size: u64_at(56) as i64,
-            wal_salt1: u32_at(64),
-            wal_salt2: u32_at(68),
-            node_id: u64_at(72),
+            wal_offset: u64_at(48)? as i64,
+            wal_size: u64_at(56)? as i64,
+            wal_salt1: u32_at(64)?,
+            wal_salt2: u32_at(68)?,
+            node_id: u64_at(72)?,
         })
     }
 
@@ -386,13 +388,17 @@ impl<'a> Decoder<'a> {
             return Ok(None);
         }
         let start = self.pos;
+        let truncated = |what: &str| Error::Invalid(format!("truncated {what}"));
         let head = self
             .data
-            .get(start..start + PAGE_HEADER_SIZE)
-            .ok_or_else(|| Error::Invalid("truncated page header".into()))?;
+            .get(start..)
+            .and_then(|d| d.first_chunk::<PAGE_HEADER_SIZE>())
+            .ok_or_else(|| truncated("page header"))?;
         self.hash.update(head);
-        let pgno = u32::from_be_bytes(head[0..4].try_into().unwrap());
-        let flags = u16::from_be_bytes(head[4..6].try_into().unwrap());
+        let mut r = Reader::new(head);
+        let (Some(pgno), Some(flags)) = (r.u32(), r.u16()) else {
+            return Err(truncated("page header"));
+        };
         self.pos += PAGE_HEADER_SIZE;
         if pgno == 0 && flags == 0 {
             self.at_end_of_pages = true;
@@ -421,15 +427,17 @@ impl<'a> Decoder<'a> {
         self.prev_pgno = pgno;
         let size_bytes = self
             .data
-            .get(self.pos..self.pos + 4)
-            .ok_or_else(|| Error::Invalid("truncated page size".into()))?;
+            .get(self.pos..)
+            .and_then(|d| d.first_chunk::<4>())
+            .ok_or_else(|| truncated("page size"))?;
         self.hash.update(size_bytes);
-        let n = u32::from_be_bytes(size_bytes.try_into().unwrap()) as usize;
+        let n = u32::from_be_bytes(*size_bytes) as usize;
         self.pos += 4;
         let payload = self
             .data
-            .get(self.pos..self.pos + n)
-            .ok_or_else(|| Error::Invalid("truncated page data".into()))?;
+            .get(self.pos..)
+            .and_then(|d| d.get(..n))
+            .ok_or_else(|| truncated("page data"))?;
         let got = lz4_flex::block::decompress_into(payload, buf)
             .map_err(|e| Error::Invalid(format!("decompress page {pgno}: {e}")))?;
         if got != buf.len() {
@@ -475,24 +483,34 @@ impl<'a> Decoder<'a> {
         let entries_len = (p - index_start) as u64;
         let size_field = self
             .data
-            .get(p..p + 8)
+            .get(p..)
+            .and_then(|d| d.first_chunk::<8>())
             .ok_or_else(|| Error::Invalid("truncated page index size".into()))?;
-        if u64::from_be_bytes(size_field.try_into().unwrap()) != entries_len {
+        if u64::from_be_bytes(*size_field) != entries_len {
             return invalid("page index size mismatch");
         }
         p += 8;
-        self.hash.update(&self.data[index_start..p]);
+        self.hash.update(
+            self.data
+                .get(index_start..p)
+                .ok_or_else(|| Error::Invalid("truncated page index".into()))?,
+        );
 
         let trailer = self
             .data
             .get(p..)
-            .ok_or_else(|| Error::Invalid("truncated trailer".into()))?;
-        if trailer.len() != TRAILER_SIZE {
-            return invalid("unexpected data after trailer or truncated trailer");
-        }
-        self.hash.update(&trailer[..8]);
-        let wire_post = u64::from_be_bytes(trailer[..8].try_into().unwrap());
-        let file_checksum = u64::from_be_bytes(trailer[8..].try_into().unwrap());
+            .and_then(|t| {
+                t.first_chunk::<TRAILER_SIZE>()
+                    .filter(|_| t.len() == TRAILER_SIZE)
+            })
+            .ok_or_else(|| {
+                Error::Invalid("unexpected data after trailer or truncated trailer".into())
+            })?;
+        let mut tr = Reader::new(trailer);
+        let (Some(wire_post), Some(file_checksum)) = (tr.u64(), tr.u64()) else {
+            return invalid("truncated trailer");
+        };
+        self.hash.update(&wire_post.to_be_bytes());
         // The fuzzers cannot guess a CRC, so they skip this one check.
         if !cfg!(fuzzing) && CHECKSUM_FLAG | self.hash.sum() != file_checksum {
             return invalid("file checksum mismatch");
@@ -529,13 +547,19 @@ pub fn peek(data: &[u8]) -> Result<(Header, Trailer)> {
     if data.len() < HEADER_SIZE + TRAILER_SIZE {
         return invalid("short file");
     }
-    let t = &data[data.len() - TRAILER_SIZE..];
-    let post_apply = trailer_post(&header, u64::from_be_bytes(t[..8].try_into().unwrap()))?;
+    let Some((_, trailer)) = data.split_last_chunk::<TRAILER_SIZE>() else {
+        return invalid("short file");
+    };
+    let mut r = Reader::new(trailer);
+    let (Some(wire_post), Some(file_checksum)) = (r.u64(), r.u64()) else {
+        return invalid("short file");
+    };
+    let post_apply = trailer_post(&header, wire_post)?;
     Ok((
         header,
         Trailer {
             post_apply,
-            file_checksum: u64::from_be_bytes(t[8..].try_into().unwrap()),
+            file_checksum,
         },
     ))
 }
@@ -552,7 +576,9 @@ pub fn verify(data: &[u8]) -> Result<(Header, Trailer, Vec<Frame>)> {
     let mut buf = vec![0u8; header.page_size as usize];
     let mut frames = Vec::new();
     while dec.next_page(&mut buf)?.is_some() {
-        let &(pgno, start, len) = dec.frames.last().expect("frame recorded");
+        let Some(&(pgno, start, len)) = dec.frames.last() else {
+            return invalid("page frame not recorded");
+        };
         frames.push((pgno, start as usize, len as usize));
     }
     let trailer = dec.finish()?;
@@ -560,8 +586,12 @@ pub fn verify(data: &[u8]) -> Result<(Header, Trailer, Vec<Frame>)> {
 }
 
 /// The LZ4 block of a frame returned by `verify`.
-pub fn frame_payload<'a>(data: &'a [u8], frame: &Frame) -> &'a [u8] {
-    &data[frame.1 + PAGE_HEADER_SIZE + 4..frame.1 + frame.2]
+pub fn frame_payload<'a>(data: &'a [u8], frame: &Frame) -> Result<&'a [u8]> {
+    frame
+        .1
+        .checked_add(frame.2)
+        .and_then(|end| data.get(frame.1.checked_add(PAGE_HEADER_SIZE + 4)?..end))
+        .ok_or_else(|| Error::Invalid("frame outside the file".into()))
 }
 
 /// Fully decodes and verifies a file, returning its pages.
