@@ -8,7 +8,7 @@ defmodule Alambique.VfsFaultTest do
   import Alambique.CellHelpers
 
   alias Alambique.{Cell, Config}
-  alias Alambique.Replication.Native
+  alias Alambique.Replication.{Native, Replicator}
 
   @moduletag capture_log: true
 
@@ -82,7 +82,9 @@ defmodule Alambique.VfsFaultTest do
 
     assert eventually(fn ->
              state = :sys.get_state(pid)
-             state.feed_published == state.feed_cleaned
+
+             state.feed_published == state.feed_cleaned and
+               not in_cell(pid, &Replicator.unreplicated?(&1.repl, &1.conn))
            end)
 
     vfs_fault(wal(c), :commit_frame, :ioerr_write)
