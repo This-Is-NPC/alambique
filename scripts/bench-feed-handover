@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Runs the benchmark of the hand-over of the feed's rows. Arguments: the cases
+# to run (raw cell latency reader dirty; default all). Sizes and repetitions
+# come from the ALAMBIQUE_BENCH_* variables of bench/feed_handover.exs.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+MIX_ENV=test exec mix run bench/feed_handover.exs "$@"

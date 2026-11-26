@@ -131,6 +131,10 @@ run = "scripts/bench-cells"
 description = "Measure the cost of the cell facts: writes, calls, unit costs, cells/2 pages and a busy connection (arguments: cell counts of the page case, default 1000 10000; ALAMBIQUE_BENCH_N, _LOOP, _CACHE_KIB, _PAGES, _BUSY)"
 run = "scripts/bench-facts"
 
+[tasks."bench:feed-handover"]
+description = "Measure the hand-over of the feed's rows by mode: query, build, copy, cell reductions and heap, first write after a large batch, reader_close, files and dirty IO (arguments: cases raw cell latency reader dirty; ALAMBIQUE_BENCH_ROWS, _REPS, _RUNS, _DELAY_MS, _CELLS, _ROWS_N, _SIZES)"
+run = "scripts/bench-feed-handover"
+
 [tasks."bench:memory"]
 description = "Report the memory of awake cells by purpose and the read and write latency (arguments: cell counts, default 1 100 500; ALAMBIQUE_BENCH_ROWS, _OPS, _OPTS)"
 run = "scripts/bench-memory"
