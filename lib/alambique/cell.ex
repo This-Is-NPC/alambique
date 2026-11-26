@@ -200,7 +200,7 @@ defmodule Alambique.Cell do
         started = System.monotonic_time()
 
         {options, info} =
-          case Options.resolve(state) do
+          case Options.resolve(state.config, state.id) do
             {:ok, opts, info} -> {{:ok, opts}, info}
             {:error, message, info} -> {{:error, message}, info}
           end
@@ -388,7 +388,10 @@ defmodule Alambique.Cell do
   defp refresh_options(%State{refresh: nil, config: %{cell_options: nil}} = state, from) do
     # No callback: the options are the node's and resolving takes no time.
     refresh = %{started: System.monotonic_time(), waiting: [from]}
-    {reply, state} = apply_refresh(state, refresh, Options.resolve(state, :refresh))
+
+    {reply, state} =
+      apply_refresh(state, refresh, Options.resolve(state.config, state.id, :refresh))
+
     tracked({:reply, reply, state}, true)
   end
 
@@ -401,11 +404,11 @@ defmodule Alambique.Cell do
   defp start_refresh(state, waiting, queued) do
     cell = self()
     gen = make_ref()
-    resolver = %{config: state.config, id: state.id}
+    {config, id} = {state.config, state.id}
 
     {pid, mon} =
       spawn_monitor(fn ->
-        send(cell, {:options_resolved, gen, Options.resolve(resolver, :refresh)})
+        send(cell, {:options_resolved, gen, Options.resolve(config, id, :refresh)})
       end)
 
     refresh = %{
@@ -1903,10 +1906,10 @@ defmodule Alambique.Cell do
   # the check saw is accounted for first: the stamp is a commit of the cell's
   # own, and the batch encodes the WAL after the check.
   defp orphan_batch(state) do
-    Sqlite.accept_foreign_write(state.conn)
-
-    case Publisher.try_stamp(state) do
-      {:ok, state} -> flush_now(%{state | unsent: true})
+    with :ok <- Sqlite.accept_foreign_write(state.conn),
+         {:ok, state} <- Publisher.try_stamp(state) do
+      flush_now(%{state | unsent: true})
+    else
       {:error, reason} -> {:stop, {:stamp_failed, reason}, state}
     end
   end
@@ -2172,7 +2175,7 @@ defmodule Alambique.Cell do
 
     # The idle close checkpointed; closing left the emptied WAL and its index.
     Enum.each(["-wal", "-shm"], &File.rm(path <> &1))
-    Local.mark(path, repl.txid, repl.checksum, repl.page_size)
+    mark_local(path, repl)
     Sqlite.release(kept)
     %{state | kept: nil}
   end
@@ -2181,21 +2184,32 @@ defmodule Alambique.Cell do
     # A reader would keep the checkpoint from finishing and the file open.
     state = Publisher.close_reader(state)
     checkpointed = Replicator.checkpoint(state.repl, state.conn)
-    Db.close(state.conn)
+    _ = Db.close(state.conn)
     state = %{state | conn: nil}
 
     # A file that is still being filled is not kept (design §16).
     if Hydration.hydrating?(state) do
       Hydration.discard(state)
     else
-      with {:ok, repl} <- checkpointed do
-        # Closing leaves the emptied WAL and its index behind.
-        Enum.each(["-wal", "-shm"], &File.rm(state.path <> &1))
-        Local.mark(state.path, repl.txid, repl.checksum, repl.page_size)
+      case checkpointed do
+        {:ok, repl} ->
+          # Closing leaves the emptied WAL and its index behind.
+          Enum.each(["-wal", "-shm"], &File.rm(state.path <> &1))
+          mark_local(state.path, repl)
+
+        _ ->
+          :ok
       end
 
       state
     end
+  end
+
+  # The marker only lets the next wake reuse the file: without it the file is
+  # restored again.
+  defp mark_local(path, repl) do
+    _ = Local.mark(path, repl.txid, repl.checksum, repl.page_size)
+    :ok
   end
 
   defp release(%State{lease: lease, lease_ctx: ctx}) do
@@ -2245,7 +2259,8 @@ defmodule Alambique.Cell do
          do: Publisher.flush(state),
          else: state
 
-    if reason not in [:fenced, :lease_lost], do: abandon(state), else: close(state)
+    # The cell stops whatever the release answers, and it logs its failure.
+    _ = if reason in [:fenced, :lease_lost], do: close(state), else: abandon(state)
     state = %{state | mode: :stopped, conn: nil, kept: nil, feed_reader: nil}
 
     if reply,
@@ -2262,7 +2277,7 @@ defmodule Alambique.Cell do
 
   # The reader first: it never outlives the connection it reads next to.
   defp close(%State{conn: conn, kept: kept} = state) do
-    Publisher.close_reader(state)
+    _ = Publisher.close_reader(state)
     if kept, do: Sqlite.release(kept)
     if conn, do: Db.close(conn), else: :ok
   end

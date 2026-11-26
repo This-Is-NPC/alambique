@@ -87,9 +87,10 @@ defmodule Alambique.Cell.Local do
 
     with :ok <- Fault.check(:local_prepare, %{path: db_path}),
          :ok <- private_dir(dir) do
-      for name <- File.ls!(dir),
-          String.starts_with?(name, temp),
-          do: File.rm(Path.join(dir, name))
+      dir
+      |> File.ls!()
+      |> Enum.filter(&String.starts_with?(&1, temp))
+      |> Enum.each(&File.rm(Path.join(dir, &1)))
 
       :ok
     end

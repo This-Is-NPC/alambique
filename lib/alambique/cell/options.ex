@@ -34,12 +34,12 @@ defmodule Alambique.Cell.Options do
           time: integer
         }
 
-  @spec resolve(%{config: Config.t(), id: String.t()}, :wake | :refresh) ::
+  @spec resolve(Config.t(), String.t(), :wake | :refresh) ::
           {:ok, map, info} | {:error, String.t(), info}
-  def resolve(cell, phase \\ :wake)
-  def resolve(%{config: %{cell_options: nil}}, _phase), do: {:ok, %{}, info(:node, [], [], 0)}
+  def resolve(config, id, phase \\ :wake)
+  def resolve(%{cell_options: nil}, _id, _phase), do: {:ok, %{}, info(:node, [], [], 0)}
 
-  def resolve(%{config: config, id: id}, phase) do
+  def resolve(config, id, phase) do
     started = System.monotonic_time()
     called = call(config, id)
     time = System.monotonic_time() - started
