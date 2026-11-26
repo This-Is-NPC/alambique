@@ -42,10 +42,12 @@ defmodule Alambique.Cell do
 
   # Lifecycle
 
-  def start_link({config, id}), do: start_link({config, id, []})
-
   # Options: `:takeover`, `%{reason: term, epoch: pos_integer | nil}`, and
   # `:lease_seen`, the lease the router read (see `State`).
+  @spec start_link({Config.t(), String.t()} | {Config.t(), String.t(), keyword}) ::
+          GenServer.on_start()
+  def start_link({config, id}), do: start_link({config, id, []})
+
   def start_link({config, id, opts}) do
     # The registry value is the cell's published load (see `load/2`).
     load = Facts.new()
@@ -224,53 +226,58 @@ defmodule Alambique.Cell do
       end
 
     case result do
-      {:ok, state} ->
-        Admission.end_wake(state.config, self())
-        Admission.recovered(state.config, state.id)
-        {state, requests, store_time} = Wake.unmeter(state)
-
-        Telemetry.span_stop(
-          [:cell, :wake],
-          started,
-          wake_measurements(requests, store_time, reductions, info),
-          %{
-            cell: state.id,
-            location: state.location.id,
-            result: :ok,
-            options: info.source,
-            clamped: info.clamped,
-            repaired: info.repaired,
-            epoch: state.lease.epoch,
-            txid: state.repl.txid,
-            source: state.source,
-            requests: requests
-          }
-        )
-
-        notify_previous(state)
-        {:noreply, serve(state)}
-
-      {:error, reason, state} ->
-        reason = reason |> DiskFull.classify() |> Breaker.classify()
-        Admission.end_wake(state.config, self())
-        {state, requests, store_time} = Wake.unmeter(state)
-
-        Telemetry.span_stop(
-          [:cell, :wake],
-          started,
-          wake_measurements(requests, store_time, reductions, info),
-          %{
-            cell: state.id,
-            result: :error,
-            options: info.source,
-            reason: reason,
-            requests: requests
-          }
-        )
-
-        abandon(state)
-        {:stop, {:shutdown, {:wake_failed, reason}}, %{state | mode: :stopped}}
+      {:ok, state} -> wake_done(state, info, started, reductions)
+      {:error, reason, state} -> wake_failed(state, reason, info, started, reductions)
     end
+  end
+
+  defp wake_done(state, info, started, reductions) do
+    Admission.end_wake(state.config, self())
+    Admission.recovered(state.config, state.id)
+    {state, requests, store_time} = Wake.unmeter(state)
+
+    Telemetry.span_stop(
+      [:cell, :wake],
+      started,
+      wake_measurements(requests, store_time, reductions, info),
+      %{
+        cell: state.id,
+        location: state.location.id,
+        result: :ok,
+        options: info.source,
+        clamped: info.clamped,
+        repaired: info.repaired,
+        epoch: state.lease.epoch,
+        txid: state.repl.txid,
+        source: state.source,
+        requests: requests
+      }
+    )
+
+    notify_previous(state)
+    {:noreply, serve(state)}
+  end
+
+  defp wake_failed(state, reason, info, started, reductions) do
+    reason = reason |> DiskFull.classify() |> Breaker.classify()
+    Admission.end_wake(state.config, self())
+    {state, requests, store_time} = Wake.unmeter(state)
+
+    Telemetry.span_stop(
+      [:cell, :wake],
+      started,
+      wake_measurements(requests, store_time, reductions, info),
+      %{
+        cell: state.id,
+        result: :error,
+        options: info.source,
+        reason: reason,
+        requests: requests
+      }
+    )
+
+    abandon(state)
+    {:stop, {:shutdown, {:wake_failed, reason}}, %{state | mode: :stopped}}
   end
 
   # The requests of the wake, the time they took summed, the reductions the
@@ -562,50 +569,74 @@ defmodule Alambique.Cell do
     elapsed = System.monotonic_time(:millisecond) - state.last_active
     left = fn key -> max(State.cell_opt(next, key) - elapsed, 0) end
 
-    {next, rearmed} =
-      if :idle_timeout_ms in changed do
-        cancel_timer(state.idle_timer)
-        {arm_idle(next, left.(:idle_timeout_ms)), 1}
-      else
-        {next, 0}
-      end
+    {next, 0}
+    |> rearm_idle(state, changed, left)
+    |> rearm_idle_cache(state, changed, left)
+    |> rearm_idle_close(state, changed, left)
+    |> rearm_cleanup(state, changed, left)
+  end
 
-    {next, rearmed} =
-      cond do
-        :idle_cache_after_ms not in changed or state.conn == nil ->
-          {next, rearmed}
+  defp rearm_idle({next, rearmed}, state, changed, left) do
+    if :idle_timeout_ms in changed do
+      cancel_timer(state.idle_timer)
+      {arm_idle(next, left.(:idle_timeout_ms)), rearmed + 1}
+    else
+      {next, rearmed}
+    end
+  end
 
-        state.idle_cache == :shrunk ->
-          # Stays shrunk; the shrink off means the pragma above gave the cache back.
-          if State.cell_opt(next, :idle_cache_after_ms) == nil,
-            do: {%{next | idle_cache: nil}, rearmed},
-            else: {next, rearmed}
-
-        true ->
-          cancel_timer(state.idle_cache)
-          next = %{next | idle_cache: nil}
-
-          case State.cell_opt(next, :idle_cache_after_ms) do
-            nil -> {next, rearmed + 1}
-            _ -> {arm_idle_cache(next, left.(:idle_cache_after_ms)), rearmed + 1}
-          end
-      end
-
-    {next, rearmed} =
-      if :idle_close_after_ms in changed and state.conn != nil do
-        cancel_timer(state.idle_close)
-        next = %{next | idle_close: nil}
-
-        case State.cell_opt(next, :idle_close_after_ms) do
-          nil -> {next, rearmed + 1}
-          _ -> {arm_idle_close(next, left.(:idle_close_after_ms)), rearmed + 1}
-        end
-      else
+  defp rearm_idle_cache({next, rearmed}, state, changed, left) do
+    cond do
+      :idle_cache_after_ms not in changed or state.conn == nil ->
         {next, rearmed}
-      end
 
-    # The wait before a feed cleanup. A timer that waits out a failure keeps
-    # its backoff, and `:after_publish` waits for nothing.
+      state.idle_cache == :shrunk ->
+        # Stays shrunk; the shrink off means the pragma above gave the cache back.
+        if State.cell_opt(next, :idle_cache_after_ms) == nil,
+          do: {%{next | idle_cache: nil}, rearmed},
+          else: {next, rearmed}
+
+      true ->
+        cancel_timer(state.idle_cache)
+
+        arm_or_off(
+          %{next | idle_cache: nil},
+          rearmed,
+          :idle_cache_after_ms,
+          left,
+          &arm_idle_cache/2
+        )
+    end
+  end
+
+  defp rearm_idle_close({next, rearmed}, state, changed, left) do
+    if :idle_close_after_ms in changed and state.conn != nil do
+      cancel_timer(state.idle_close)
+
+      arm_or_off(
+        %{next | idle_close: nil},
+        rearmed,
+        :idle_close_after_ms,
+        left,
+        &arm_idle_close/2
+      )
+    else
+      {next, rearmed}
+    end
+  end
+
+  # The timer is armed again for what is left of the option, or stays off when
+  # the option is off.
+  defp arm_or_off(next, rearmed, key, left, arm) do
+    case State.cell_opt(next, key) do
+      nil -> {next, rearmed + 1}
+      _ -> {arm.(next, left.(key)), rearmed + 1}
+    end
+  end
+
+  # The wait before a feed cleanup. A timer that waits out a failure keeps
+  # its backoff, and `:after_publish` waits for nothing.
+  defp rearm_cleanup({next, rearmed}, state, changed, left) do
     if :cleanup_after_ms in changed and is_reference(state.feed_cleanup) and
          state.feed_cleanup_failures == 0 and state.config.feed.cleanup != :after_publish do
       cancel_timer(state.feed_cleanup)
@@ -937,31 +968,39 @@ defmodule Alambique.Cell do
            limits: Db.write_limits(state.config, ms)
          ) do
       {:ok, value} ->
-        state = Publisher.committed(state)
-        state = %{state | pending: [{:write, from, {:ok, value}} | state.pending]}
-        :atomics.add(state.load, Facts.slot(:callers), 1)
-        Fault.point(:cell_after_commit, %{cell: state.id, txid: state.repl.txid})
-        if isolated?, do: encode_now(state), else: {:noreply, queue_flush(state)}
-
-      # A function closed the connection: nothing can be read from it, so
-      # nothing is handed to the feed.
-      {:error, {:rollback_failed, :connection_closed} = reason} ->
-        stop_serving(%{state | conn: nil}, reason, {:error, reason})
-
-      {:error, {:rollback_failed, _} = reason} ->
-        stop_serving(state, reason, {:error, reason})
+        committed(state, from, value, isolated?)
 
       # The write did not run: something else wrote to the file.
       {:error, :foreign_write} ->
         foreign_write(state, from, {fun, ms, isolated?}, retried?)
 
-      {:error, reason} = error ->
-        cond do
-          Sqlite.wal_advanced?(state.conn) -> orphaned_write(state, from, reason)
-          # A commit of no frames whose `query_only` failed.
-          Db.fatal?(reason) -> stop_serving(state, reason, error)
-          true -> {:reply, error, state}
-        end
+      {:error, reason} ->
+        write_failed(state, from, reason)
+    end
+  end
+
+  defp committed(state, from, value, isolated?) do
+    state = Publisher.committed(state)
+    state = %{state | pending: [{:write, from, {:ok, value}} | state.pending]}
+    :atomics.add(state.load, Facts.slot(:callers), 1)
+    Fault.point(:cell_after_commit, %{cell: state.id, txid: state.repl.txid})
+    if isolated?, do: encode_now(state), else: {:noreply, queue_flush(state)}
+  end
+
+  # A function closed the connection: nothing can be read from it, so
+  # nothing is handed to the feed.
+  defp write_failed(state, _from, {:rollback_failed, :connection_closed} = reason),
+    do: stop_serving(%{state | conn: nil}, reason, {:error, reason})
+
+  defp write_failed(state, _from, {:rollback_failed, _} = reason),
+    do: stop_serving(state, reason, {:error, reason})
+
+  defp write_failed(state, from, reason) do
+    cond do
+      Sqlite.wal_advanced?(state.conn) -> orphaned_write(state, from, reason)
+      # A commit of no frames whose `query_only` failed.
+      Db.fatal?(reason) -> stop_serving(state, reason, {:error, reason})
+      true -> {:reply, {:error, reason}, state}
     end
   end
 
@@ -984,13 +1023,17 @@ defmodule Alambique.Cell do
 
       {:error, {:migration, version, inner} = reason, state} when is_integer(version) ->
         if Db.fatal?(inner),
-          do: stop_serving(state, stop_reason(reason), {:error, stop_reason(reason)}),
+          do: stop_migrating(state, reason),
           else: migrated(state, before, DiskFull.classify(reason))
 
       {:error, reason, state} ->
-        stop_reason = stop_reason(reason)
-        stop_serving(state, stop_reason, {:error, stop_reason})
+        stop_migrating(state, reason)
     end
+  end
+
+  defp stop_migrating(state, reason) do
+    stop = stop_reason(reason)
+    stop_serving(state, stop, {:error, stop})
   end
 
   defp migrated(state, before, error) do
@@ -1190,10 +1233,7 @@ defmodule Alambique.Cell do
         {:noreply, arm_idle_close(state)}
 
       true ->
-        case cleanup_if_due(state) do
-          {:ok, state} -> if closable?(state), do: close_idle(state), else: rearmed(state)
-          {:stop, reason, state} -> stop_serving(state, reason)
-        end
+        cleanup_then_close(state)
     end
   end
 
@@ -1219,6 +1259,13 @@ defmodule Alambique.Cell do
   end
 
   defp info(_message, state), do: {:noreply, state}
+
+  defp cleanup_then_close(state) do
+    case cleanup_if_due(state) do
+      {:ok, state} -> if closable?(state), do: close_idle(state), else: rearmed(state)
+      {:stop, reason, state} -> stop_serving(state, reason)
+    end
+  end
 
   # Feed cleanup (design §13)
 
@@ -1449,21 +1496,30 @@ defmodule Alambique.Cell do
     if Publisher.cleanup_due?(state) do
       {:noreply, arm_idle_cache(state)}
     else
-      # A pragma that fails leaves the cache as it was: not shrunk, tried again.
-      with :ok <- pragma_fault(state, :cell_before_shrink_pragma),
-           :ok <-
-             Sqlite.execute(
-               state.conn,
-               "PRAGMA cache_size = -#{State.cell_opt(state, :idle_cache_kib)}",
-               write: true
-             ) do
-        # The garbage of the last calls would stay for as long as the cell is idle.
-        if State.cell_opt(state, :idle_gc), do: :erlang.garbage_collect()
-        {:noreply, %{state | idle_cache: :shrunk}}
-      else
-        {:error, _reason} -> {:noreply, arm_idle_cache(state)}
-      end
+      shrink(state)
     end
+  end
+
+  # A pragma that fails leaves the cache as it was: not shrunk, tried again.
+  defp shrink(state) do
+    with :ok <- pragma_fault(state, :cell_before_shrink_pragma),
+         :ok <-
+           Sqlite.execute(
+             state.conn,
+             "PRAGMA cache_size = -#{State.cell_opt(state, :idle_cache_kib)}",
+             write: true
+           ) do
+      collect_idle_garbage(state)
+      {:noreply, %{state | idle_cache: :shrunk}}
+    else
+      {:error, _reason} -> {:noreply, arm_idle_cache(state)}
+    end
+  end
+
+  # The garbage of the last calls would stay for as long as the cell is idle.
+  defp collect_idle_garbage(state) do
+    if State.cell_opt(state, :idle_gc), do: :erlang.garbage_collect()
+    :ok
   end
 
   # One attempt: the cell cannot serve while it waits, and a retry that ran to
@@ -1925,12 +1981,18 @@ defmodule Alambique.Cell do
     found = Sqlite.foreign_write(state.conn)
 
     if found == :advanced and state.config.sql.orphan_frames == :replicate and not retried? do
-      case with({:ok, state} <- orphan_batch(state), do: settle(state)) do
-        {:ok, state} -> write(state, from, fun, ms, isolated?, true)
-        {:stop, reason, state} -> stop_serving(state, reason, {:error, reason})
-      end
+      replicate_and_retry(state, from, {fun, ms, isolated?})
     else
       stop_serving(state, :orphan_frames, {:error, :orphan_frames})
+    end
+  end
+
+  defp replicate_and_retry(state, from, {fun, ms, isolated?}) do
+    with {:ok, state} <- orphan_batch(state),
+         {:ok, state} <- settle(state) do
+      write(state, from, fun, ms, isolated?, true)
+    else
+      {:stop, reason, state} -> stop_serving(state, reason, {:error, reason})
     end
   end
 
