@@ -142,7 +142,7 @@ defmodule Bench do
     dir = tmp()
 
     for layout <- [:interleaved, :sequential], idle_kib <- [64, 0], share <- [50, 75, 90] do
-      conns = for i <- 1..n, do: open_db(dir, "r#{i}.db", kib)
+      conns = for i <- 1..n, do: open_db(dir, "r#{layout}-#{idle_kib}-#{share}-#{i}.db", kib)
       fill(conns, kib, layout)
       settle()
       {mem_a, used_a} = {memory(), stats().sqlite_memory_used}
@@ -182,7 +182,7 @@ defmodule Bench do
     for churn <- [false, true] do
       before = stats()
       stop = System.monotonic_time(:millisecond) + seconds * 1000
-      churner = if churn, do: Task.async(fn -> churn(others, kib, stop) end)
+      churner = if churn, do: start_churner(others, kib, stop)
 
       latencies =
         Stream.repeatedly(fn ->
@@ -196,7 +196,7 @@ defmodule Bench do
         |> Enum.take_while(fn _ -> System.monotonic_time(:millisecond) < stop end)
         |> Enum.sort()
 
-      if churner, do: Task.await(churner, :infinity)
+      if churner, do: finish_churner(churner, others)
       after_stats = stats()
 
       line("hot",
@@ -211,6 +211,26 @@ defmodule Bench do
     end
 
     close_all(conns)
+  end
+
+  # A connection works only in the process that owns it: the churner takes
+  # the others for the window and gives them back.
+  defp start_churner(conns, kib, stop) do
+    task =
+      Task.async(fn ->
+        receive do
+          :go -> churn(conns, kib, stop)
+        end
+      end)
+
+    Enum.each(conns, &(:ok = Sqlite.assign(&1, task.pid)))
+    send(task.pid, :go)
+    task
+  end
+
+  defp finish_churner(task, conns) do
+    Task.await(task, :infinity)
+    Enum.each(conns, &(:ok = Sqlite.assign(&1, self())))
   end
 
   # Shrinks and refills the connections in turn until `stop`.
