@@ -261,8 +261,12 @@ fn sums_zeroed<'a>(env: Env<'a>, pages: u32) -> Term<'a> {
 #[rustler::nif(schedule = "DirtyIo")]
 fn file_state<'a>(env: Env<'a>, path: String, page_size: u32) -> Term<'a> {
     let _t = crate::stats::REPLICATION_CALLS.time();
-    match capture::file_state(Path::new(&path), page_size) {
-        Ok((sums, checksum)) => (
+    let state = capture::file_state(Path::new(&path), page_size).and_then(|(sums, checksum)| {
+        let pages: u32 = error::fit(sums.len(), "page count")?;
+        Ok((sums, checksum, pages))
+    });
+    match state {
+        Ok((sums, checksum, pages)) => (
             atoms::ok(),
             bin(
                 env,
@@ -272,7 +276,7 @@ fn file_state<'a>(env: Env<'a>, path: String, page_size: u32) -> Term<'a> {
                     .collect::<Vec<u8>>(),
             ),
             checksum,
-            sums.len() as u32,
+            pages,
         )
             .encode(env),
         Err(e) => error_term(env, e),

@@ -36,7 +36,9 @@ impl Sums {
             .chunks(CHUNK)
             .map(|c| {
                 let mut a = [0; CHUNK];
-                a[..c.len()].copy_from_slice(c);
+                for (slot, v) in a.iter_mut().zip(c) {
+                    *slot = *v;
+                }
                 Arc::new(a)
             })
             .collect();
@@ -64,16 +66,29 @@ impl Sums {
         self.len
     }
 
-    pub fn get(&self, i: usize) -> u64 {
-        assert!(i < self.len);
-        self.chunks[i / CHUNK][i % CHUNK]
+    /// The sum `i`, `None` past the end.
+    pub fn get(&self, i: usize) -> Option<u64> {
+        if i >= self.len {
+            return None;
+        }
+        self.chunks.get(i / CHUNK)?.get(i % CHUNK).copied()
     }
 
-    pub fn set(&mut self, i: usize, v: u64) {
-        assert!(i < self.len);
-        if self.chunks[i / CHUNK][i % CHUNK] != v {
-            Arc::make_mut(&mut self.chunks[i / CHUNK])[i % CHUNK] = v;
+    /// Sets the sum `i`; false (nothing set) past the end.
+    pub fn set(&mut self, i: usize, v: u64) -> bool {
+        if i >= self.len {
+            return false;
         }
+        let Some(chunk) = self.chunks.get_mut(i / CHUNK) else {
+            return false;
+        };
+        if chunk.get(i % CHUNK) != Some(&v) {
+            match Arc::make_mut(chunk).get_mut(i % CHUNK) {
+                Some(slot) => *slot = v,
+                None => return false,
+            }
+        }
+        true
     }
 
     /// Cuts or extends (with zeros) to `len` sums.
@@ -128,13 +143,13 @@ mod tests {
         let a = Sums::from_slice(&(0..10 * CHUNK as u64).collect::<Vec<_>>());
         let mut b = a.clone();
         assert_eq!(a.shared_chunks(&b), 10);
-        b.set(3 * CHUNK + 5, 99);
+        assert!(b.set(3 * CHUNK + 5, 99));
         assert_eq!(a.shared_chunks(&b), 9);
-        assert_eq!(a.get(3 * CHUNK + 5), (3 * CHUNK + 5) as u64);
-        assert_eq!(b.get(3 * CHUNK + 5), 99);
+        assert_eq!(a.get(3 * CHUNK + 5), Some((3 * CHUNK + 5) as u64));
+        assert_eq!(b.get(3 * CHUNK + 5), Some(99));
         // The same value is no write.
         let mut c = a.clone();
-        c.set(0, 0);
+        assert!(c.set(0, 0));
         assert_eq!(a.shared_chunks(&c), 10);
     }
 
@@ -143,8 +158,9 @@ mod tests {
         let mut s = Sums::from_slice(&[1; CHUNK + 10]);
         s.resize(CHUNK + 3);
         s.resize(CHUNK + 10);
-        assert_eq!(s.get(CHUNK + 2), 1);
-        assert_eq!(s.get(CHUNK + 3), 0);
+        assert_eq!(s.get(CHUNK + 2), Some(1));
+        assert_eq!(s.get(CHUNK + 3), Some(0));
+        assert_eq!(s.get(CHUNK + 10), None);
         s.resize(5);
         s.resize(3 * CHUNK);
         assert_eq!(s.fold(), 1);
@@ -206,7 +222,7 @@ mod props {
                 match op {
                     Op::Set(i, v) if i < model.len() => {
                         model[i] = v;
-                        sums.set(i, v);
+                        prop_assert!(sums.set(i, v));
                     }
                     Op::Set(..) => {}
                     Op::Resize(n) => {
