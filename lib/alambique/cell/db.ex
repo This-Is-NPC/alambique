@@ -83,8 +83,14 @@ defmodule Alambique.Cell.Db do
   """
   @spec open_reader(Path.t(), pos_integer) :: {:ok, Sqlite.conn()} | {:error, term}
   def open_reader(path, cache_kib) do
-    with {:ok, conn} <- Sqlite.open(path, readonly: true, vfs: :alambique, gated: true) do
-      settle(conn, cache_size(conn, cache_kib))
+    case Fault.point(:db_open_reader, %{path: path}) do
+      {:error, _} = injected ->
+        injected
+
+      _ ->
+        with {:ok, conn} <- Sqlite.open(path, readonly: true, vfs: :alambique, gated: true) do
+          settle(conn, cache_size(conn, cache_kib))
+        end
     end
   end
 
