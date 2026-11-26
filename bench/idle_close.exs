@@ -72,6 +72,7 @@ defmodule Bench do
           {"erlang processes", & &1.mem.processes},
           {"sqlite memory_used", & &1.sqlite_used},
           {"driver (rust) alloc", & &1.rust},
+          {"page arena resident", & &1.arena},
           {"allocator blocks in use", & &1.blocks},
           {"allocator carriers", & &1.carriers},
           {"  driver_alloc carriers", &Map.get(&1.types, :driver_alloc, 0)},
@@ -332,6 +333,8 @@ defmodule Bench do
     %{
       sqlite_used: s.sqlite_memory_used,
       rust: s.rust_alloc_bytes - s.rust_free_bytes,
+      # Resident bytes of the page arena (0 when it is off).
+      arena: Map.get(s, :page_arena_resident_bytes, 0),
       mem: Map.new(:erlang.memory()),
       rss_anon: rss_kb("RssAnon") * 1024,
       # Blocks in use against the carriers that hold them: freed blocks stay
