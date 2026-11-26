@@ -272,7 +272,7 @@ or a lazy restore is on, the combinations the build refuses; an
 the keys it changed, in `State.cell_opts`, and reads every one through
 `State.cell_opt/2`: a key that is present with `nil` is off, a key that is
 absent is the node's value. The wake resolves once; the fence's retry after
-`:txid_taken` does not call the function again. Nothing is stored, so a cell
+`:txid_taken` does not call the function again. A refresh resolves again (below). Nothing is stored, so a cell
 that moves gets its options from the function on the node that wakes it.
 
 An override that is invalid as a whole, a function that raises, exits, returns
@@ -283,6 +283,48 @@ is remembered for `wake.failure_backoff_ms` like any failure a retry repeats.
 The node's own values are checked against the limits at build, so the fallback
 is always inside them. These options touch no step of the wake order, the lease
 or the fence, and are outside the TLA+ model (`how-to-check-the-pipeline-model.md`).
+
+**Refresh.** `Alambique.refresh_options/3` resolves the options of an awake
+cell again with the same resolver (merge, clamp, repair). It is a routed
+request like `touch`, with a clause in `Router.free/2` so that a cell nobody
+owns answers `{:ok, :asleep}` and is not woken. It is counted by the admission
+(`admitted`) and the cell gives the place back when it takes the request, as
+for any call. It is not activity: it does not reset `last_active`, does not
+restore a shrunk cache and is not parked behind a hydration.
+
+The function runs in a monitored process, not in the cell, so the cell serves
+and renews its lease meanwhile. One resolve runs per cell: a request that
+arrives meanwhile waits in `State.refresh` and the next resolve answers all
+those that waited, so the newest request is applied last. Each resolve carries
+a ref that the result must match. The cell applies the result in its own
+process, in this order:
+
+1. The page cache pragma, if the connection holds another limit, inside the
+   busy marker (§10), the only part of a refresh that runs native code. When it
+   fails, nothing else changes and the caller gets
+   `{:error, {:cell_options, message}}`.
+2. `State.cell_opts`.
+3. The timers whose time changed (`idle_timeout_ms`, `idle_cache_after_ms`,
+   `idle_close_after_ms`): the old one is cancelled and the new one starts for
+   what is left of the new time since `last_active`, and a message of the old
+   one is ignored by its ref.
+
+A shrunk cache keeps the idle limit until the next call, which restores
+`cache_kib`; a refresh that changes `idle_cache_kib` sets the new idle limit at
+once, and one that turns the shrink off gives `cache_kib` back. A cell whose
+connection is closed (`idle_close_after_ms`) stays closed: nothing is open to
+set, and the next request that runs SQL opens it with the new options and
+arms its timers. Reopening for the refresh would cost an open for a cell that
+nobody calls.
+
+A function that fails or an override that is invalid keeps the options the
+cell has, with either `cell_options_invalid`: stopping a serving cell for a
+bad answer, or dropping a good override for the node's values, would be worse.
+The invalid event carries `phase: :refresh` and `action: :keep`. A function
+that returns `nil` or `[]` is a valid answer: the cell goes back to the node's
+values. `awake.track_bytes` and the feed options are not per cell. The feed
+reader of the sender keeps `feed.reader_cache_kib`: the cell issues no pragma
+on it, and `cache_kib` applies to the cell's own connection only.
 
 Until the page caches are per connection, a per-cell `cache_kib` is a share of
 the node's pool, not an isolated cap.

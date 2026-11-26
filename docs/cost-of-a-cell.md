@@ -264,6 +264,18 @@ cell's own `cache_kib` is a share of the node's pool, not an isolated cap, so
 raising it for one cell does not make the node hold more than the pool
 allows. `awake.cell_cache_kib_max` bounds what a cell may ask for.
 
+**`Alambique.refresh_options/3`.** Per call on an awake cell: one routed call
+(counted in the admission, like any call), one spawned process that runs the
+function, and one message back, bounded by `cell_options_timeout_ms`; the cell
+serves and renews its lease meanwhile. The cell process itself spends a
+`PRAGMA cache_size` when the cache limit changed (inside the busy marker, so
+one marker write before and after), one `start_timer` and one `cancel_timer`
+for each timer whose time changed, and one telemetry event. A refresh with no
+function configured is answered in the cell without a spawn. A cell that is not
+awake costs one lease read and nothing else: it is not woken. Callers that ask
+while a resolve runs wait for it and share the next one, so a burst of `k`
+calls costs two resolves, not `k`.
+
 A per-cell `migrations` function costs the same per wake, bounded by
 `wake.migrations_timeout_ms`. The sweeper calls it once per listed cell, so a
 round costs at most the listed cells times that timeout when the function does
