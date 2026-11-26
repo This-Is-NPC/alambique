@@ -32,6 +32,11 @@ defmodule Alambique.CellOptionsTest do
     start_instance(ctx, Keyword.put_new(opts, :cell_options, {Callbacks, :options}))
   end
 
+  # A valid key beside the invalid value: the override is dropped as a whole.
+  defp with_valid_key(value) do
+    if Keyword.keyword?(value), do: [idle_timeout_ms: 5_000] ++ value, else: value
+  end
+
   defp misbehave(:hang), do: Process.sleep(:infinity)
   defp misbehave(:raise), do: raise("boom")
   defp misbehave(:exit), do: exit(:gone)
@@ -382,7 +387,7 @@ defmodule Alambique.CellOptionsTest do
         value = unquote(Macro.escape(value))
         # A valid key beside the invalid one: the override is dropped as a whole.
         Callbacks.set(fn _ ->
-          if Keyword.keyword?(value), do: [idle_timeout_ms: 5_000] ++ value, else: value
+          with_valid_key(value)
         end)
 
         assert {:ok, _} = wake(inst, "bad")
