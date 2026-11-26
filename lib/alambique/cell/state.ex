@@ -81,6 +81,9 @@ defmodule Alambique.Cell.State do
     # With `reader_close: :after_read`: a range is with the sender, which has
     # not reported it read yet.
     feed_reading: false,
+    # With `hand_over: :native`: a table name that is not UTF-8 was refused and
+    # logged; cleared by the next hand-over that sent rows.
+    feed_refused: false,
     # The `:feed_cleanup` timer (`nil` when none is armed) and the failed
     # cleanups since the last one that committed.
     feed_cleanup: nil,
