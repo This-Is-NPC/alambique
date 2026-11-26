@@ -76,12 +76,15 @@ defmodule Alambique.Retention do
     deadline = Retry.deadline_in(opts[:timeout_ms])
 
     result =
-      with {:ok, {segments, snapshots}} <- Objects.list_cell(ctx, cell, deadline) do
-        env = %{ctx: ctx, cell: cell, opts: opts, deadline: deadline}
+      with {:ok, {segments, snapshots}, sidecars} <-
+             Objects.list_cell_sidecars(ctx, cell, deadline) do
+        env = %{ctx: ctx, cell: cell, opts: opts, deadline: deadline, sidecars: sidecars}
         summary = %{anchor: nil, segments: 0, snapshots: 0, waiting: false}
 
         with {:ok, anchor} <- find_anchor(env, snapshots),
-             do: cover(env, anchor, segments, snapshots, summary)
+             {:ok, summary} <- cover(env, anchor, segments, snapshots, summary),
+             :ok <- sweep(env, Enum.map(segments, & &1.key) ++ Enum.map(snapshots, & &1.key)),
+             do: {:ok, summary}
       end
 
     telemetry(cell, started, result)
@@ -218,8 +221,30 @@ defmodule Alambique.Retention do
   end
 
   defp mark(env, keys, grace) do
-    opts = [grace_ms: grace] ++ Keyword.take(env.opts, [:batch_keys, :concurrency])
+    opts =
+      [grace_ms: grace, sidecars: env.sidecars] ++
+        Keyword.take(env.opts, [:batch_keys, :concurrency])
+
     Trash.mark(env.ctx, env.cell, keys, opts, env.deadline)
+  end
+
+  # Page-hash sidecars whose object is not in the listing (a delete that
+  # stopped between the two, a sidecar of an object another version removed)
+  # wait for the deletion grace like any file, in a manifest of their own.
+  defp sweep(env, listed) do
+    listed = MapSet.new(listed)
+
+    orphans =
+      for object <- env.sidecars, not MapSet.member?(listed, object), do: Keys.sidecar(object)
+
+    case orphans do
+      [] ->
+        :ok
+
+      keys ->
+        grace = env.opts[:deletion_grace_ms] || Trash.default_grace_ms()
+        with {:ok, _} <- mark(env, keys, grace), do: :ok
+    end
   end
 
   defp now(%{clock: {mod, config}}), do: mod.now_ms(config)
