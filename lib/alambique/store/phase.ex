@@ -53,6 +53,7 @@ defmodule Alambique.Store.Phase do
   end
 
   @doc false
+  @spec handle(:telemetry.event_name(), term, term, term) :: :ok
   def handle([:finch, :queue, :start], _, _, _), do: move(:queued)
   def handle([:finch, :queue, :stop], _, _, _), do: move(:checked_out)
   def handle([:finch, :send, :start], _, _, _), do: move(:sent)

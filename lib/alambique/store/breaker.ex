@@ -138,6 +138,7 @@ defmodule Alambique.Store.Breaker do
   def scope(store, :feed), do: store
 
   @doc false
+  @spec monotonic_ms() :: integer
   def monotonic_ms, do: System.monotonic_time(:millisecond)
 
   @doc "`store` without its breaker: a request of it neither waits for the breaker nor counts."

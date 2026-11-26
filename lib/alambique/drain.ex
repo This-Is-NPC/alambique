@@ -12,6 +12,7 @@ defmodule Alambique.Drain do
 
   # Stops after the cells' supervisor and before the registry and the group
   # (the supervisor stops its children in reverse order).
+  @spec child_spec(Alambique.Config.t()) :: Supervisor.child_spec()
   def child_spec(config) do
     %{
       id: __MODULE__,
@@ -20,6 +21,7 @@ defmodule Alambique.Drain do
     }
   end
 
+  @spec start_link(Alambique.Config.t()) :: GenServer.on_start()
   def start_link(config), do: GenServer.start_link(__MODULE__, config)
 
   @impl true

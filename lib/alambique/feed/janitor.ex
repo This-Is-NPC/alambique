@@ -9,6 +9,7 @@ defmodule Alambique.Feed.Janitor do
 
   alias Alambique.Feed
 
+  @spec start_link(Alambique.Config.t()) :: GenServer.on_start()
   def start_link(config), do: GenServer.start_link(__MODULE__, config)
 
   @impl true
