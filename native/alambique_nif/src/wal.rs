@@ -296,30 +296,31 @@ pub fn scan(
 /// frames instead of stopping at the first checksum.
 #[cfg(any(test, feature = "fuzzing"))]
 pub fn repair(b: &mut [u8]) {
-    if b.len() < WAL_HEADER_LEN {
+    let Some((hdr, frames)) = b.split_first_chunk_mut::<WAL_HEADER_LEN>() else {
         return;
-    }
-    let big_endian = b[0] & 1 == 1;
+    };
+    let big_endian = hdr[0] & 1 == 1;
     let magic = if big_endian { MAGIC_BE } else { MAGIC_LE };
-    b[0..4].copy_from_slice(&magic.to_be_bytes());
-    let mut page_size = crate::bytes::u32_at(b, 8).unwrap_or(0);
+    hdr[0..4].copy_from_slice(&magic.to_be_bytes());
+    let mut page_size = u32::from_be_bytes([hdr[8], hdr[9], hdr[10], hdr[11]]);
     if !crate::ltx::valid_page_size(page_size) {
         page_size = 512;
-        b[8..12].copy_from_slice(&page_size.to_be_bytes());
+        hdr[8..12].copy_from_slice(&page_size.to_be_bytes());
     }
-    let (c0, c1) = checksum(big_endian, &b[..24], 0, 0);
-    b[24..28].copy_from_slice(&c0.to_be_bytes());
-    b[28..32].copy_from_slice(&c1.to_be_bytes());
+    let (c0, c1) = checksum(big_endian, &hdr[..24], 0, 0);
+    hdr[24..28].copy_from_slice(&c0.to_be_bytes());
+    hdr[28..32].copy_from_slice(&c1.to_be_bytes());
     let (mut s0, mut s1) = (c0, c1);
     let frame = FRAME_HEADER_SIZE + page_size as usize;
-    let mut at = WAL_HEADER_LEN;
-    while at + frame <= b.len() {
-        b.copy_within(16..24, at + 8);
-        let (x0, x1) = checksum(big_endian, &b[at..at + 8], s0, s1);
-        (s0, s1) = checksum(big_endian, &b[at + FRAME_HEADER_SIZE..at + frame], x0, x1);
-        b[at + 16..at + 20].copy_from_slice(&s0.to_be_bytes());
-        b[at + 20..at + 24].copy_from_slice(&s1.to_be_bytes());
-        at += frame;
+    for chunk in frames.chunks_exact_mut(frame) {
+        let Some((fh, data)) = chunk.split_first_chunk_mut::<FRAME_HEADER_SIZE>() else {
+            return;
+        };
+        fh[8..16].copy_from_slice(&hdr[16..24]);
+        let (x0, x1) = checksum(big_endian, &fh[..8], s0, s1);
+        (s0, s1) = checksum(big_endian, data, x0, x1);
+        fh[16..20].copy_from_slice(&s0.to_be_bytes());
+        fh[20..24].copy_from_slice(&s1.to_be_bytes());
     }
 }
 
