@@ -305,6 +305,18 @@ pub mod testing {
 
     pub const PS: u32 = 512;
 
+    /// What a helper reports when a step it takes fails (not a property it
+    /// checks: those are assertions).
+    pub type Failure = String;
+
+    /// The value of a step of a helper, or the failure naming it.
+    pub fn ok<T, E: std::fmt::Debug>(
+        what: &str,
+        result: std::result::Result<T, E>,
+    ) -> std::result::Result<T, Failure> {
+        result.map_err(|e| format!("{what}: {e:?}"))
+    }
+
     /// A transaction: the database size after it and the pages it rewrites
     /// (see `WalBuilder::transaction`).
     #[derive(Clone, Debug)]
@@ -349,14 +361,19 @@ pub mod testing {
         /// segment per step. `tail` bytes of an uncommitted frame trail the
         /// WAL after every step, like a write in progress. `dir` must exist
         /// and be empty.
-        pub fn build(dir: &Path, initial: &[Tx], steps: &[Step], tail: usize) -> Chain {
+        pub fn build(
+            dir: &Path,
+            initial: &[Tx],
+            steps: &[Step],
+            tail: usize,
+        ) -> std::result::Result<Chain, Failure> {
             let wal_path = dir.join("db-wal");
             let mut wal = WalBuilder::new(PS, (1, 2), false);
             let mut pages = Vec::new();
             for tx in initial {
                 wal.transaction(&mut pages, tx.size, &tx.writes);
             }
-            wal.write(&wal_path);
+            ok("write the wal", wal.write(&wal_path))?;
             let db_path = dir.join("db");
             fn args<'a>(
                 (db_path, wal_path): (&'a Path, &'a Path),
@@ -378,26 +395,29 @@ pub mod testing {
                 }
             }
             let files = (db_path.as_path(), wal_path.as_path());
-            let snap = full(
-                &args(files, WalPos::default(), &Sums::default(), 0, 1),
-                None,
-            )
-            .expect("snapshot");
+            let snap = ok(
+                "snapshot",
+                full(
+                    &args(files, WalPos::default(), &Sums::default(), 0, 1),
+                    None,
+                ),
+            )?;
             let start = dir.join("start");
-            dbsum::apply(&start, &snap.segment, 0, 0).expect("apply snapshot");
+            ok("apply snapshot", dbsum::apply(&start, &snap.segment, 0, 0))?;
 
             let (mut pos, mut sums, mut pre) = (snap.pos, snap.sums, snap.checksum);
             let (mut segments, mut fence) = (Vec::new(), Vec::new());
             for (i, step) in steps.iter().enumerate() {
                 let args = args(files, pos, &sums, pre, i as u64 + 2);
                 let out = match step {
-                    None => empty(&args).expect("fence"),
+                    None => ok("fence", empty(&args))?,
                     Some(txs) => {
                         for tx in txs {
                             wal.transaction(&mut pages, tx.size, &tx.writes);
                         }
-                        wal.write_with_tail(&wal_path, tail);
-                        incremental(&args).expect("capture").expect("commits")
+                        ok("write the wal", wal.write_with_tail(&wal_path, tail))?;
+                        ok("capture", incremental(&args))?
+                            .ok_or_else(|| "a capture found no commits".to_string())?
                     }
                 };
                 assert_eq!(out.checksum, fold(&out.sums.to_vec()));
@@ -405,7 +425,7 @@ pub mod testing {
                 fence.push(step.is_none());
                 (pos, sums, pre) = (out.pos, out.sums, out.checksum);
             }
-            Chain {
+            Ok(Chain {
                 dir: dir.to_path_buf(),
                 start,
                 start_checksum: snap.checksum,
@@ -414,15 +434,23 @@ pub mod testing {
                 pages,
                 checksum: pre,
                 sums,
-            }
+            })
         }
 
         /// A copy of the starting database.
-        fn fresh(&self, name: &str) -> PathBuf {
+        fn fresh(&self, name: &str) -> std::result::Result<PathBuf, Failure> {
             let path = self.dir.join(name);
             // Not `fs::copy`: Miri has no copy_file_range.
-            std::fs::write(&path, std::fs::read(&self.start).expect("read")).expect("copy");
-            path
+            let start = ok("read the start", std::fs::read(&self.start))?;
+            ok("copy the start", std::fs::write(&path, start))?;
+            Ok(path)
+        }
+
+        fn segment(&self, i: usize) -> std::result::Result<&[u8], Failure> {
+            self.segments
+                .get(i)
+                .map(Vec::as_slice)
+                .ok_or_else(|| format!("no segment {i}"))
         }
 
         /// Applies segments in `order` to a copy of the starting database.
@@ -432,36 +460,40 @@ pub mod testing {
             name: &str,
             order: &[usize],
         ) -> std::result::Result<PathBuf, (usize, Error)> {
-            let path = self.fresh(name);
+            let path = self.fresh(name).map_err(|e| (0, Error::Io(e)))?;
             let mut current = self.start_checksum;
             for (at, &i) in order.iter().enumerate() {
-                current = dbsum::apply(&path, &self.segments[i], current, PS)
+                let segment = self.segment(i).map_err(|e| (at, Error::Invalid(e)))?;
+                current = dbsum::apply(&path, segment, current, PS)
                     .map_err(|e| (at, e))?
                     .post_apply;
             }
             Ok(path)
         }
 
-        fn header(&self, i: usize) -> (ltx::Header, ltx::Trailer, bool) {
-            let (h, pages, t) = ltx::decode_all(&self.segments[i]).expect("decode");
-            (h, t, pages.is_empty())
+        fn header(
+            &self,
+            i: usize,
+        ) -> std::result::Result<(ltx::Header, ltx::Trailer, bool), Failure> {
+            let (h, pages, t) = ok("decode", ltx::decode_all(self.segment(i)?))?;
+            Ok((h, t, pages.is_empty()))
         }
 
         /// Whether segment `i` leaves the checksum as it was.
-        fn neutral(&self, i: usize) -> bool {
-            let (h, t, _) = self.header(i);
-            h.pre_apply == t.post_apply
+        fn neutral(&self, i: usize) -> std::result::Result<bool, Failure> {
+            let (h, t, _) = self.header(i)?;
+            Ok(h.pre_apply == t.post_apply)
         }
 
         /// TXIDs follow each other, checksums chain, and applying the
         /// segments in order gives the database after the last transaction.
-        pub fn check_chain(&self) {
+        pub fn check_chain(&self) -> std::result::Result<(), Failure> {
             let mut prev = self.start_checksum;
-            for i in 0..self.segments.len() {
-                let (h, t, no_pages) = self.header(i);
+            for (i, &fence) in self.fence.iter().enumerate() {
+                let (h, t, no_pages) = self.header(i)?;
                 assert_eq!((h.min_txid, h.max_txid), (i as u64 + 2, i as u64 + 2));
                 assert_eq!(h.pre_apply, prev, "segment {i} pre-apply");
-                if self.fence[i] {
+                if fence {
                     assert!(no_pages && h.pre_apply == t.post_apply);
                 }
                 prev = t.post_apply;
@@ -469,10 +501,13 @@ pub mod testing {
             assert_eq!(prev, self.checksum);
 
             let order: Vec<usize> = (0..self.segments.len()).collect();
-            let applied = self.apply_order("applied", &order).expect("chain applies");
-            let bytes = std::fs::read(&applied).unwrap();
+            let applied = ok("chain applies", self.apply_order("applied", &order))?;
+            let bytes = ok("read the applied database", std::fs::read(&applied))?;
             assert_eq!(bytes, self.pages.concat());
-            let sums = dbsum::file_sums(&applied, PS).unwrap();
+            let sums = ok(
+                "sums of the applied database",
+                dbsum::file_sums(&applied, PS),
+            )?;
             assert_eq!(sums, self.sums.to_vec());
             assert_eq!(fold(&sums), self.checksum);
 
@@ -488,17 +523,21 @@ pub mod testing {
                 timestamp: 1,
                 end: None,
             };
-            let whole = full(&args, None).unwrap();
+            let whole = ok("capture the whole wal", full(&args, None))?;
             assert_eq!(whole.checksum, self.checksum);
 
             // The merged chain is the same step.
             if !self.segments.is_empty() {
-                let all: Vec<&[u8]> = self.segments.iter().map(|s| &s[..]).collect();
-                let merged = merge(&all).unwrap();
-                let path = self.fresh("merged");
-                dbsum::apply(&path, &merged, self.start_checksum, PS).unwrap();
-                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                let all: Vec<&[u8]> = self.segments.iter().map(Vec::as_slice).collect();
+                let merged = ok("merge the chain", merge(&all))?;
+                let path = self.fresh("merged")?;
+                ok(
+                    "apply the merged chain",
+                    dbsum::apply(&path, &merged, self.start_checksum, PS),
+                )?;
+                assert_eq!(ok("read", std::fs::read(&path))?, bytes);
             }
+            Ok(())
         }
 
         /// Segments applied out of order, twice or with one missing are
@@ -508,25 +547,31 @@ pub mod testing {
         /// `dbsum::apply` does not look at TXIDs, so only `merge` (and the
         /// restore that checks `min_txid == txid + 1` in Elixir) notices it
         /// missing.
-        pub fn check_misuse(&self) {
+        pub fn check_misuse(&self) -> std::result::Result<(), Failure> {
             let n = self.segments.len();
             let all: Vec<usize> = (0..n).collect();
             let merged = |order: &[usize]| {
-                let inputs: Vec<&[u8]> = order.iter().map(|&i| &self.segments[i][..]).collect();
+                let inputs: Vec<&[u8]> = order
+                    .iter()
+                    .filter_map(|&i| self.segments.get(i))
+                    .map(Vec::as_slice)
+                    .collect();
                 merge(&inputs)
             };
-            for i in 0..n {
+            for (i, &fence) in self.fence.iter().enumerate() {
+                let neutral = self.neutral(i)?;
                 // Segment i missing.
                 let order: Vec<usize> = all.iter().copied().filter(|&j| j != i).collect();
                 match self.apply_order("missing", &order) {
                     Err((at, e)) => {
                         assert!(refused(&e), "missing {i}: {e:?}");
-                        assert!(self.neutral(i) || at == i, "missing {i}: {e:?} at {at}");
+                        assert!(neutral || at == i, "missing {i}: {e:?} at {at}");
                     }
                     Ok(path) => {
-                        assert!(self.neutral(i) || i + 1 == n, "missing {i} went through");
-                        if self.fence[i] {
-                            assert_eq!(std::fs::read(path).unwrap(), self.pages.concat());
+                        assert!(neutral || i + 1 == n, "missing {i} went through");
+                        if fence {
+                            let bytes = ok("read", std::fs::read(path))?;
+                            assert_eq!(bytes, self.pages.concat());
                         }
                     }
                 }
@@ -540,9 +585,9 @@ pub mod testing {
                 match self.apply_order("twice", &order) {
                     Err((at, e)) => {
                         assert!(refused(&e), "twice {i}: {e:?}");
-                        assert!(!self.neutral(i) && at == i + 1, "twice {i}: {e:?} at {at}");
+                        assert!(!neutral && at == i + 1, "twice {i}: {e:?} at {at}");
                     }
-                    Ok(_) => assert!(self.neutral(i)),
+                    Ok(_) => assert!(neutral),
                 }
                 assert!(merged(&order).is_err());
 
@@ -550,16 +595,18 @@ pub mod testing {
                 if i + 1 < n {
                     let mut order = all.clone();
                     order.swap(i, i + 1);
+                    let next = self.neutral(i + 1)?;
                     match self.apply_order("swapped", &order) {
                         Err((at, e)) => {
                             assert!(refused(&e), "swapped {i}: {e:?}");
-                            assert!(self.neutral(i) || at == i, "swapped {i}: {e:?} at {at}");
+                            assert!(neutral || at == i, "swapped {i}: {e:?} at {at}");
                         }
-                        Ok(_) => assert!(self.neutral(i) && self.neutral(i + 1)),
+                        Ok(_) => assert!(neutral && next),
                     }
                     assert!(merged(&order).is_err());
                 }
             }
+            Ok(())
         }
     }
 }
@@ -611,14 +658,14 @@ mod tests {
         let p = Paths::new(dir.path());
         let mut b = WalBuilder::new(PS, (1, 2), false);
         b.frame(1, 0, &pg(1)).frame(2, 2, &pg(2));
-        b.write(&dir.path().join("db-wal"));
+        b.write(&dir.path().join("db-wal")).unwrap();
 
         let snap = full(&p.args(WalPos::default(), &Sums::default(), 1), None).unwrap();
         assert_eq!(snap.commit, 2);
         assert_eq!(snap.checksum, fold(&snap.sums.to_vec()));
 
         b.frame(2, 0, &pg(3)).frame(3, 3, &pg(4));
-        b.write(&dir.path().join("db-wal"));
+        b.write(&dir.path().join("db-wal")).unwrap();
         let inc = incremental(&p.args(snap.pos, &snap.sums, 2))
             .unwrap()
             .unwrap();
@@ -649,7 +696,7 @@ mod tests {
         b.frame(1, 0, &pg(1))
             .frame(2, 0, &pg(2))
             .frame(3, 3, &pg(3));
-        b.write(&dir.path().join("db-wal"));
+        b.write(&dir.path().join("db-wal")).unwrap();
         let old = full(&p.args(WalPos::default(), &Sums::default(), 1), None).unwrap();
 
         // The new state is smaller and shares no page with the old one.
@@ -690,7 +737,7 @@ mod tests {
         let p = Paths::new(dir.path());
         let mut b = WalBuilder::new(PS, (1, 2), false);
         b.frame(1, 1, &pg(1));
-        b.write(&dir.path().join("db-wal"));
+        b.write(&dir.path().join("db-wal")).unwrap();
 
         let none = Sums::default();
         let mut args = p.args(WalPos::default(), &none, 2);
@@ -713,10 +760,10 @@ mod tests {
         b.frame(1, 0, &pg(1))
             .frame(2, 0, &pg(2))
             .frame(3, 3, &pg(3));
-        b.write(&dir.path().join("db-wal"));
+        b.write(&dir.path().join("db-wal")).unwrap();
         let snap = full(&p.args(WalPos::default(), &Sums::default(), 1), None).unwrap();
         b.frame(1, 1, &pg(9));
-        b.write(&dir.path().join("db-wal"));
+        b.write(&dir.path().join("db-wal")).unwrap();
         let inc = incremental(&p.args(snap.pos, &snap.sums, 2))
             .unwrap()
             .unwrap();
@@ -735,14 +782,14 @@ mod tests {
         let p = Paths::new(dir.path());
         let mut b = WalBuilder::new(PS, (1, 2), false);
         b.frame(1, 0, &pg(1)).frame(2, 2, &pg(2));
-        b.write(&dir.path().join("db-wal"));
+        b.write(&dir.path().join("db-wal")).unwrap();
         let snap = full(&p.args(WalPos::default(), &Sums::default(), 1), None).unwrap();
 
         // Checkpoint: pages move to the db file, the WAL restarts with new salts.
         std::fs::write(dir.path().join("db"), [pg(1), pg(2)].concat()).unwrap();
         let mut b2 = WalBuilder::new(PS, (2, 99), false);
         b2.frame(2, 2, &pg(7));
-        b2.write(&dir.path().join("db-wal"));
+        b2.write(&dir.path().join("db-wal")).unwrap();
         let inc = incremental(&p.args(snap.pos, &snap.sums, 2))
             .unwrap()
             .unwrap();
@@ -767,7 +814,7 @@ mod tests {
             ..Default::default()
         };
         b.frame(1, 1, &pg(2));
-        b.write(&dir.path().join("db-wal"));
+        b.write(&dir.path().join("db-wal")).unwrap();
         let s = full(&p.args(WalPos::default(), &Sums::default(), 1), Some(limit)).unwrap();
         assert_eq!(s.checksum, fold(&[page_crc(1, &pg(1))]));
     }
@@ -787,7 +834,7 @@ mod tests {
         // A commit frame whose write failed after it reached the file: valid
         // checksums and a commit mark, past the end the index records.
         b.frame(1, 1, &pg(2));
-        b.write(&dir.path().join("db-wal"));
+        b.write(&dir.path().join("db-wal")).unwrap();
         let snap = full(&p.args(WalPos::default(), &Sums::default(), 1), Some(end)).unwrap();
 
         assert!(pending(&p.wal, PS, snap.pos, None).unwrap());
@@ -807,7 +854,7 @@ mod tests {
         }
 
         fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
-            let at = offset as usize;
+            let at = usize::try_from(offset).unwrap();
             buf.copy_from_slice(&self.0[at..at + buf.len()]);
             Ok(())
         }
@@ -820,7 +867,7 @@ mod tests {
         // `p.db` does not exist: a read by path would fail or be empty.
         let mut b = WalBuilder::new(PS, (1, 2), false);
         b.frame(2, 2, &pg(9));
-        b.write(&dir.path().join("db-wal"));
+        b.write(&dir.path().join("db-wal")).unwrap();
         let file = Mem([pg(4), pg(5)].concat());
         let empty = Sums::default();
         let args = p.args(WalPos::default(), &empty, 1);
@@ -854,7 +901,7 @@ mod tests {
         let old = Sums::from_slice(&(1..=pages as u64).collect::<Vec<_>>());
         let mut b = WalBuilder::new(PS, (1, 2), false);
         b.frame(5, pages, &pg(5));
-        b.write(&dir.path().join("db-wal"));
+        b.write(&dir.path().join("db-wal")).unwrap();
         let inc = incremental(&p.args(WalPos::default(), &old, 2))
             .unwrap()
             .unwrap();
@@ -899,7 +946,7 @@ mod tests {
     }
 
     fn build(dir: &Path, initial: &[Tx], steps: &[Step], tail: usize) -> Chain {
-        Chain::build(dir, initial, steps, tail)
+        Chain::build(dir, initial, steps, tail).unwrap()
     }
 
     fn fixed() -> (Vec<Tx>, Vec<Step>) {
@@ -926,8 +973,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (initial, steps) = fixed();
         let chain = build(dir.path(), &initial, &steps, 100);
-        chain.check_chain();
-        chain.check_misuse();
+        chain.check_chain().unwrap();
+        chain.check_misuse().unwrap();
     }
 
     #[test]
@@ -957,7 +1004,7 @@ mod tests {
             tail in 0usize..600,
         ) {
             let dir = tempfile::tempdir().unwrap();
-            build(dir.path(), &initial, &steps, tail).check_chain();
+            build(dir.path(), &initial, &steps, tail).check_chain().unwrap();
         }
 
         /// A segment that is missing, repeated or out of order is refused.
@@ -968,7 +1015,7 @@ mod tests {
             steps in prop::collection::vec(step(), 2..8),
         ) {
             let dir = tempfile::tempdir().unwrap();
-            build(dir.path(), &initial, &steps, 0).check_misuse();
+            build(dir.path(), &initial, &steps, 0).check_misuse().unwrap();
         }
 
         /// A segment is a function of its inputs: the same bytes come out
@@ -995,7 +1042,7 @@ mod tests {
         let p = Paths::new(dir.path());
         let mut b = WalBuilder::new(PS, (1, 2), false);
         b.frame(1, 3, &pg(1)); // claims 3 pages, writes only page 1
-        b.write(&dir.path().join("db-wal"));
+        b.write(&dir.path().join("db-wal")).unwrap();
         assert!(incremental(&p.args(WalPos::default(), &Sums::default(), 2)).is_err());
     }
 }
