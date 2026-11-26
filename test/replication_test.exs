@@ -509,7 +509,11 @@ defmodule Alambique.ReplicationTest do
       count = MemoryStore.count(cfg)
 
       assert {:error, {:capture, {:page_count, found, 0}}} =
-               Replicator.replace(ctx, "cell", state.db_path, 4096, head, 1, pages: 0)
+               Replicator.replace(ctx, "cell", state.db_path, head,
+                 page_size: 4096,
+                 epoch: 1,
+                 pages: 0
+               )
 
       assert found > 0
       assert MemoryStore.count(cfg) == count
@@ -523,7 +527,11 @@ defmodule Alambique.ReplicationTest do
 
       # `head` is the chain as it was read: TXID 2 was written since.
       assert {:error, :txid_taken} =
-               Replicator.replace(ctx, "cell", state.db_path, 4096, head, 1, pages: now.commit)
+               Replicator.replace(ctx, "cell", state.db_path, head,
+                 page_size: 4096,
+                 epoch: 1,
+                 pages: now.commit
+               )
 
       assert {:ok, ^found, _, _} = mod.get(cfg, Keys.segment(ctx.prefix, "cell", 0, 2, 2))
     end
@@ -533,7 +541,11 @@ defmodule Alambique.ReplicationTest do
       MemoryStore.inject(cfg, kind: :error, ops: [:put], key: ~r/\.ltx$/)
 
       assert {:error, :injected} =
-               Replicator.replace(ctx, "cell", state.db_path, 4096, head, 1, pages: pages(head))
+               Replicator.replace(ctx, "cell", state.db_path, head,
+                 page_size: 4096,
+                 epoch: 1,
+                 pages: pages(head)
+               )
     end
 
     defp pages(head), do: head.commit

@@ -130,7 +130,9 @@ defmodule Alambique.PageSidecarWritersTest do
     {:ok, head} = Replication.head(env.ctx, cell())
 
     assert {:ok, 2} =
-             Replicator.replace(env.ctx, cell(), owner.state.db_path, 4096, head, 1,
+             Replicator.replace(env.ctx, cell(), owner.state.db_path, head,
+               page_size: 4096,
+               epoch: 1,
                pages: head.commit
              )
 

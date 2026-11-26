@@ -156,13 +156,16 @@ defmodule Alambique.Rewind do
 
   defp behind(args, reason) do
     if reason == :history_truncated or (is_tuple(reason) and elem(reason, 0) in @unreachable) do
-      with {:ok, {segments, snapshots}} <- Objects.list_cell(args.repl, args.cell, args.deadline) do
-        scratch = if Enum.any?(segments, &(&1.min == 1)), do: [1], else: []
-        oldest = Enum.min(scratch ++ Enum.map(snapshots, & &1.txid), fn -> 0 end)
-        {:error, {:behind_retention, oldest}}
-      end
+      with {:ok, oldest} <- oldest_kept(args), do: {:error, {:behind_retention, oldest}}
     else
       {:error, reason}
+    end
+  end
+
+  defp oldest_kept(args) do
+    with {:ok, {segments, snapshots}} <- Objects.list_cell(args.repl, args.cell, args.deadline) do
+      scratch = if Enum.any?(segments, &(&1.min == 1)), do: [1], else: []
+      {:ok, Enum.min(scratch ++ Enum.map(snapshots, & &1.txid), fn -> 0 end)}
     end
   end
 
@@ -190,13 +193,20 @@ defmodule Alambique.Rewind do
   # the restore made before the lease; a try after a lost race restores again,
   # because reconciling changes the file.
   defp install(args, lease, target, attempts) do
-    %{cell: cell, repl: repl, dir: dir, deadline: deadline} = args
-    current = Path.join(dir, "current.db")
-
     with {:ok, head} <- head(args),
          :ok <- check_head(args, head),
          {:ok, target} <- if(target, do: {:ok, target}, else: restore_target(args, head)),
-         {:ok, now} <-
+         {:ok, state} <- reconcile_current(args, lease, target) do
+      put(args, lease, target, state, attempts)
+    end
+  end
+
+  # The current state restored and the target made into the state to install.
+  defp reconcile_current(args, lease, target) do
+    %{cell: cell, repl: repl, dir: dir, deadline: deadline} = args
+    current = Path.join(dir, "current.db")
+
+    with {:ok, now} <-
            Replication.restore(repl, cell, current, :latest, timeout_ms: remaining(deadline)),
          :ok <- fits(args, now),
          Fault.point(:rewind_after_head, %{cell: cell, txid: now.txid}),
@@ -206,41 +216,49 @@ defmodule Alambique.Rewind do
          {:ok, %{kept: kept, pages: pages}} <- reconcile(args, current, target, now, info),
          :ok <- renew(args, lease),
          :ok <- index(args, info) do
-      Fault.point(:rewind_before_put, %{cell: cell, txid: now.txid + 1})
-
-      case Replicator.replace(repl, cell, target.path, now.page_size, now, lease.epoch,
-             deadline: deadline,
-             pages: pages
-           ) do
-        {:ok, txid} ->
-          Fault.point(:rewind_after_put, %{cell: cell, txid: txid})
-          drop_old_entry(args, info)
-
-          {:ok,
-           %{
-             txid: txid,
-             from: now.txid,
-             to: target.txid,
-             epoch: lease.epoch,
-             schema_version: info.to_version,
-             kept: kept
-           }}
-
-        {:error, :txid_taken} when attempts > 1 ->
-          install(args, lease, nil, attempts - 1)
-
-        {:error, :txid_taken} ->
-          {:error, {:fence, :txid_taken}}
-
-        # Encoding failed here and nothing was sent: the outcome is known.
-        {:error, {:capture, _}} = error ->
-          error
-
-        {:error, reason} ->
-          Logger.warning("Alambique rewind of #{cell} has an unknown outcome: #{inspect(reason)}")
-          {:error, :outcome_unknown}
-      end
+      {:ok, %{now: now, info: info, kept: kept, pages: pages}}
     end
+  end
+
+  defp put(args, lease, target, %{now: now, pages: pages} = state, attempts) do
+    %{cell: cell, repl: repl, deadline: deadline} = args
+    Fault.point(:rewind_before_put, %{cell: cell, txid: now.txid + 1})
+
+    opts = [page_size: now.page_size, epoch: lease.epoch, deadline: deadline, pages: pages]
+
+    case Replicator.replace(repl, cell, target.path, now, opts) do
+      {:ok, txid} ->
+        installed(args, lease, target, state, txid)
+
+      {:error, :txid_taken} when attempts > 1 ->
+        install(args, lease, nil, attempts - 1)
+
+      {:error, :txid_taken} ->
+        {:error, {:fence, :txid_taken}}
+
+      # Encoding failed here and nothing was sent: the outcome is known.
+      {:error, {:capture, _}} = error ->
+        error
+
+      {:error, reason} ->
+        Logger.warning("Alambique rewind of #{cell} has an unknown outcome: #{inspect(reason)}")
+        {:error, :outcome_unknown}
+    end
+  end
+
+  defp installed(args, lease, target, %{now: now, info: info, kept: kept}, txid) do
+    Fault.point(:rewind_after_put, %{cell: args.cell, txid: txid})
+    drop_old_entry(args, info)
+
+    {:ok,
+     %{
+       txid: txid,
+       from: now.txid,
+       to: target.txid,
+       epoch: lease.epoch,
+       schema_version: info.to_version,
+       kept: kept
+     }}
   end
 
   # The whole database goes through memory several times over (design §20,
@@ -269,8 +287,8 @@ defmodule Alambique.Rewind do
           {:ok, %{from_version: from, to_version: to, floor: Capture.last_time(from_conn)}}
         end
       after
-        Db.close(from_conn)
-        Db.close(to_conn)
+        _ = Db.close(from_conn)
+        _ = Db.close(to_conn)
       end
     end
   end
@@ -322,16 +340,14 @@ defmodule Alambique.Rewind do
       else: Schema.put(config, location, cell, info.to_version, deadline)
   end
 
+  # A failure leaves the entry to the sweeper: the rewind is done.
   defp drop_old_entry(%{config: config, cell: cell, location: location}, info) do
-    if info.to_version != info.from_version,
-      do:
-        Schema.drop(
-          config,
-          location,
-          cell,
-          info.from_version,
-          Retry.deadline_in(config.op_timeout_ms)
-        )
+    if info.to_version != info.from_version do
+      deadline = Retry.deadline_in(config.op_timeout_ms)
+      _ = Schema.drop(config, location, cell, info.from_version, deadline)
+    end
+
+    :ok
   end
 
   defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 1)
