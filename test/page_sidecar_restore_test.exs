@@ -34,7 +34,7 @@ defmodule Alambique.PageSidecarRestoreTest do
   defp key(env, txid), do: Keys.segment(env.ctx.prefix, cell(), 0, txid, txid)
 
   # A lazy restore of the cell, with small reads.
-  defp restore(env, opts \\ []) do
+  defp lazy_restore(env, opts \\ []) do
     path = Path.join(env.dir, "lazy-#{System.unique_integer([:positive])}.db")
     ctx = Keyword.get(opts, :ctx, env.ctx)
     lazy_opts = %{min_bytes: 0, wait_ms: 1_000, verify_bytes: 0}
@@ -79,7 +79,7 @@ defmodule Alambique.PageSidecarRestoreTest do
   end
 
   test "files with a sidecar are not read whole, and the hydration still ends", %{env: env} = t do
-    {_result, lazy} = restore(env)
+    {_result, lazy} = lazy_restore(env)
     assert Native.lazy_covered(lazy.handle) == Enum.to_list(0..(@files - 1))
 
     assert :ok = hydrate(lazy)
@@ -91,7 +91,7 @@ defmodule Alambique.PageSidecarRestoreTest do
 
   test "a file without a sidecar is read whole and the others are not", %{env: env} = t do
     :ok = env.mod.delete(env.cfg, Keys.sidecar(key(env, 2)))
-    {_result, lazy} = restore(env)
+    {_result, lazy} = lazy_restore(env)
     assert Native.lazy_covered(lazy.handle) == [0, 2, 3]
 
     assert :ok = hydrate(lazy)
@@ -100,7 +100,7 @@ defmodule Alambique.PageSidecarRestoreTest do
 
   test "an object that never had a sidecar is checked whole", %{env: env} = t do
     for txid <- 1..@files, do: :ok = env.mod.delete(env.cfg, Keys.sidecar(key(env, txid)))
-    {_result, lazy} = restore(env)
+    {_result, lazy} = lazy_restore(env)
     assert Native.lazy_covered(lazy.handle) == []
 
     assert :ok = hydrate(lazy)
@@ -117,7 +117,7 @@ defmodule Alambique.PageSidecarRestoreTest do
       test name, %{env: env} = t do
         side = sidecar(env, 1)
         put_sidecar(env, 1, damaged(side, unquote(Macro.escape(damage))))
-        {_result, lazy} = restore(env)
+        {_result, lazy} = lazy_restore(env)
 
         assert Native.lazy_covered(lazy.handle) == [1, 2, 3]
         assert [%{result: :rejected, key: key}] = sidecar_events()
@@ -130,7 +130,7 @@ defmodule Alambique.PageSidecarRestoreTest do
 
     test "that describes another file", %{env: env} = t do
       put_sidecar(env, 1, sidecar(env, 2))
-      {_result, lazy} = restore(env)
+      {_result, lazy} = lazy_restore(env)
 
       assert Native.lazy_covered(lazy.handle) == [1, 2, 3]
       assert [%{result: :rejected}] = sidecar_events()
@@ -154,7 +154,7 @@ defmodule Alambique.PageSidecarRestoreTest do
 
   test "a sidecar that is intact and wrong is dropped and the cell hydrates", %{env: env} = t do
     put_sidecar(env, 1, Native.forge_sidecar(sidecar(env, 1)))
-    {_result, lazy} = restore(env)
+    {_result, lazy} = lazy_restore(env)
     assert Native.lazy_covered(lazy.handle) == [0, 1, 2, 3]
 
     assert :ok = hydrate(lazy)
@@ -167,7 +167,7 @@ defmodule Alambique.PageSidecarRestoreTest do
 
   test "hashes that do not fit the budget are not used", %{env: env} do
     ctx = %{env.ctx | max_inflight_bytes: 400}
-    {_result, lazy} = restore(env, ctx: ctx)
+    {_result, lazy} = lazy_restore(env, ctx: ctx)
 
     assert Native.lazy_covered(lazy.handle) == []
     assert Enum.all?(sidecar_events(), &(&1.result == :budget))
@@ -175,7 +175,7 @@ defmodule Alambique.PageSidecarRestoreTest do
   end
 
   test "the hashes of a restore are counted against the budget of its hydration", %{env: env} do
-    {result, lazy} = restore(env)
+    {result, lazy} = lazy_restore(env)
     sizes = for txid <- 1..@files, do: byte_size(sidecar(env, txid))
 
     assert result.hash_bytes == Enum.sum(sizes)
@@ -189,7 +189,7 @@ defmodule Alambique.PageSidecarRestoreTest do
         env: env,
         hostile: hostile
       } do
-        {_result, lazy} = restore(env)
+        {_result, lazy} = lazy_restore(env)
         {_total, unknown} = Native.lazy_progress(lazy.handle)
         run = Native.lazy_next_batch(lazy.handle, 1_000_000)
         assert {_file, _offset, _len, [_, _ | _]} = run
@@ -214,7 +214,7 @@ defmodule Alambique.PageSidecarRestoreTest do
     damaged = Alambique.LtxTamper.alter_frames(object, :all)
     {:ok, _} = env.mod.put(env.cfg, key, damaged, :none, meta)
 
-    {_result, lazy} = restore(env)
+    {_result, lazy} = lazy_restore(env)
     assert {:error, {:invalid, _}} = hydrate(lazy)
   end
 end
