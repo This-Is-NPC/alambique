@@ -168,15 +168,21 @@ pub fn build(level: u8, object: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// A copy of the sidecar `side` whose first page hash is wrong and whose seal
-/// is right: intact, and wrong (for tests of what a restore does with one).
+/// A copy of the sidecar `side` with the byte at `at` changed and the seal
+/// recomputed: intact, and wrong (for tests of what a restore does with one).
 #[cfg(any(test, feature = "test-panic"))]
-pub fn forge(side: &[u8]) -> Vec<u8> {
+pub fn forge_at(side: &[u8], at: usize) -> Vec<u8> {
     let mut body = side[..side.len() - HASH_LEN].to_vec();
-    body[HEAD_LEN + 4] ^= 1;
+    body[at] ^= 1;
     let sealed = seal(&body);
     body.extend_from_slice(&sealed);
     body
+}
+
+/// `forge_at` the first byte of the first page hash.
+#[cfg(any(test, feature = "test-panic"))]
+pub fn forge(side: &[u8]) -> Vec<u8> {
+    forge_at(side, HEAD_LEN + 4)
 }
 
 /// Where the page index starts in a verified object.
