@@ -26,6 +26,7 @@ defmodule Alambique.Replication.Native do
     crate: "alambique_nif",
     path: "native/alambique_nif",
     features: if(@test_build, do: ["test-panic"], else: []),
+    load_data_fun: {Alambique.Replication.NativeOptions, :load_data},
     skip_compilation?: @prebuilt
 
   # Every Mix environment loads the same artifact through the linked
