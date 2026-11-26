@@ -118,3 +118,8 @@ pub unsafe fn unreserve(ptr: *mut u8, len: usize) {
     // SAFETY: the block `reserve` allocated with this layout.
     unsafe { std::alloc::dealloc(ptr, layout) };
 }
+
+/// # Safety
+/// As the real one.
+#[cfg(all(test, not(miri), not(target_os = "linux")))]
+pub unsafe fn unreserve(_ptr: *mut u8, _len: usize) {}

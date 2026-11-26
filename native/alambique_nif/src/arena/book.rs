@@ -119,12 +119,12 @@ impl Book {
     pub fn new(g: Geometry) -> Option<Book> {
         let mut slots = [0; CLASSES];
         let mut used_bytes = [0; CLASSES];
-        for c in 0..CLASSES {
-            if g.strides[c] == 0 || g.strides[c] % 8 != 0 {
+        for (c, &stride) in g.strides.iter().enumerate() {
+            if stride == 0 || !stride.is_multiple_of(8) {
                 return None;
             }
-            slots[c] = (g.extent_bytes / g.strides[c]).max(1);
-            used_bytes[c] = round_up(slots[c] * g.strides[c], g.page);
+            slots[c] = (g.extent_bytes / stride).max(1);
+            used_bytes[c] = round_up(slots[c] * stride, g.page);
         }
         let ext_bytes = used_bytes.iter().copied().max()?.next_power_of_two();
         let max_ext = (g.reserved / ext_bytes).min(NONE as usize - 1);
@@ -365,7 +365,7 @@ impl Book {
             }
         }
         self.in_use += stride as u64;
-        Some((e as usize) << self.shift | from)
+        Some(((e as usize) << self.shift) | from)
     }
 
     /// An extent for `region`, from the hot pool, the cold pool or the range.
@@ -751,14 +751,14 @@ mod tests {
 
     #[test]
     fn a_random_run_keeps_the_books_and_never_overlaps_slots() {
-        let mut b = book(64, 512, 16);
+        let mut b = book(64, if cfg!(miri) { 64 } else { 512 }, 16);
         let mut next = rng(7);
         let regions: Vec<_> = (0..4).map(|_| b.open_region().unwrap()).collect();
         let mut live: HashMap<usize, usize> = HashMap::new();
         let steps = if cfg!(miri) { 600 } else { 20_000 };
         for i in 0..steps {
             let r = next();
-            if r % 3 != 0 || live.is_empty() {
+            if !r.is_multiple_of(3) || live.is_empty() {
                 let class = (r >> 8) as usize % CLASSES;
                 let region = regions[(r >> 16) as usize % regions.len()].0;
                 let off = b.alloc(class, region).expect("room");
@@ -768,7 +768,7 @@ mod tests {
                 b.free(key);
                 live.remove(&key);
             }
-            if r % 11 == 0 {
+            if r.is_multiple_of(11) {
                 let mut claims = Vec::with_capacity(MAX_CLAIMS);
                 b.claim(&mut claims, 64, 8);
                 // A claim never covers a slot in use.
@@ -786,11 +786,11 @@ mod tests {
                     }
                 }
                 for c in claims.iter_mut() {
-                    c.released = r % 2 == 0;
+                    c.released = r.is_multiple_of(2);
                 }
                 b.finish(&claims);
             }
-            if i % 97 == 0 {
+            if i.is_multiple_of(97) {
                 b.check();
             }
         }
