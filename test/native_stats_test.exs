@@ -4,6 +4,7 @@ defmodule Alambique.NativeStatsTest do
   # reads; the module runs after the async ones and alone.
   use ExUnit.Case, async: false
 
+  import Alambique.CellHelpers, only: [native_quiet: 0]
   import Alambique.ReplicationHelpers, only: [open_db: 1]
 
   alias Alambique.NativeStats
@@ -47,8 +48,12 @@ defmodule Alambique.NativeStatsTest do
   end
 
   test "SQLite memory comes from the BEAM and balances after close" do
+    # A close that a test left in flight frees memory in the middle of this one.
+    native_quiet()
     before = stats()
-    total = :erlang.memory(:total)
+    # What SQLite allocates is the system's, not a process heap's, which other
+    # tests' garbage collections shrink meanwhile.
+    system = :erlang.memory(:system)
 
     # An in-memory database lives in SQLite's heap: 16 MB of pages.
     {:ok, conn} = Sqlite.open(":memory:")
@@ -70,7 +75,7 @@ defmodule Alambique.NativeStatsTest do
     if arena?(open) do
       assert open.page_arena_in_use_bytes - before.page_arena_in_use_bytes >= 16_000_000
     else
-      assert :erlang.memory(:total) - total >= 16_000_000
+      assert :erlang.memory(:system) - system >= 16_000_000
     end
 
     # SQLite's accounting and ours agree, and nothing is left after close.
