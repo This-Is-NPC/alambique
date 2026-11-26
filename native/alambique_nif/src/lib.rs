@@ -15,6 +15,7 @@ mod lazy;
 mod lazy_nif;
 mod ltx;
 mod merge;
+mod pages;
 mod reflink;
 mod sqlite;
 mod stats;
@@ -342,6 +343,17 @@ fn ltx_info<'a>(env: Env<'a>, data: Binary, verify: bool) -> Term<'a> {
         Ok((atoms::ok(), header_tuple(&h), t.post_apply).encode(env))
     };
     run().unwrap_or_else(|e| error_term(env, e))
+}
+
+/// The page sidecar (`docs/segment-format.md`) of the LTX file `data` of
+/// `level`. The file is decoded and checked first.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn page_sidecar<'a>(env: Env<'a>, level: u8, data: Binary) -> Term<'a> {
+    let _t = crate::stats::REPLICATION_CALLS.time();
+    match pages::build(level, data.as_slice()) {
+        Ok(side) => (atoms::ok(), bin(env, &side)).encode(env),
+        Err(e) => error_term(env, e),
+    }
 }
 
 /// Merges consecutive LTX files into one.

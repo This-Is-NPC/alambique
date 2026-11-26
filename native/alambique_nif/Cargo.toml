@@ -11,6 +11,7 @@ name = "alambique_nif"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+blake3 = { version = "1.8", default-features = false, features = ["pure"] }
 libsqlite3-sys = { version = "0.38", features = ["bundled"] }
 lz4_flex = "0.14.0"
 rustler = "0.38"

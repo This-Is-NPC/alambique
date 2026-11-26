@@ -117,6 +117,13 @@ defmodule Alambique.Replication.Native do
   @spec reflink(Path.t(), Path.t()) :: {:ok, boolean} | error
   def reflink(_src, _dst), do: nif_error()
 
+  @doc """
+  The page sidecar of the LTX file `segment` of `level` (`docs/segment-format.md`).
+  The file is decoded and checked first.
+  """
+  @spec page_sidecar(0..9, binary) :: {:ok, binary} | error
+  def page_sidecar(_level, _segment), do: nif_error()
+
   @doc "Applies an LTX file to a database file; `page_size` 0 accepts any."
   @spec apply_ltx(Path.t(), binary, integer, non_neg_integer) ::
           {:ok, header, post_apply :: integer} | error
@@ -138,6 +145,12 @@ defmodule Alambique.Replication.Native do
   def lazy_new(_path, _page_size, _wait_ms), do: nif_error()
   @doc false
   def lazy_stage(_lazy, _idx, _head, _tail, _total), do: nif_error()
+  @doc false
+  def lazy_stage_hashes(_lazy, _idx, _sidecar, _level, _min, _max), do: nif_error()
+  @doc false
+  def lazy_covered(_lazy), do: nif_error()
+  @doc false
+  def lazy_settle_hashes(_lazy, _file, _data), do: nif_error()
   @doc false
   def lazy_apply(_lazy, _idx), do: nif_error()
   @doc false
