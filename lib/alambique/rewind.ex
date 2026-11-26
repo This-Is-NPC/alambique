@@ -342,10 +342,11 @@ defmodule Alambique.Rewind do
 
   # A failure leaves the entry to the sweeper: the rewind is done.
   defp drop_old_entry(%{config: config, cell: cell, location: location}, info) do
-    if info.to_version != info.from_version do
-      deadline = Retry.deadline_in(config.op_timeout_ms)
-      _ = Schema.drop(config, location, cell, info.from_version, deadline)
-    end
+    _ =
+      if info.to_version != info.from_version do
+        deadline = Retry.deadline_in(config.op_timeout_ms)
+        Schema.drop(config, location, cell, info.from_version, deadline)
+      end
 
     :ok
   end
