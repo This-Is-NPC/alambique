@@ -46,7 +46,8 @@ defmodule Alambique.Placement do
   def default_id?(cell), do: is_binary(cell) and Regex.match?(@default_id, cell)
 
   @doc "Checks the id against the library's limits and the placement's rule."
-  @spec validate_id(Config.t(), term) :: :ok | {:error, term}
+  @spec validate_id(%{optional(atom) => term, placement: {module, term}}, term) ::
+          :ok | {:error, term}
   def validate_id(%{placement: {mod, opts}}, cell) do
     cond do
       not is_binary(cell) or cell in ["", ".", ".."] or byte_size(cell) > @max_id_bytes or

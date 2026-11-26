@@ -47,7 +47,7 @@ defmodule Alambique.Ops.Cluster do
     name = String.to_atom("alambique_ops_#{System.unique_integer([:positive])}@#{host(via)}")
     domain = if String.contains?(host(via), "."), do: :longnames, else: :shortnames
 
-    case Node.start(name, domain) do
+    case Node.start(name, name_domain: domain) do
       {:ok, _} -> :ok
       {:error, reason} -> Mix.raise("could not start distribution: #{inspect(reason)}")
     end
