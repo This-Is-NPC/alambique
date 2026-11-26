@@ -197,13 +197,7 @@ defmodule Alambique.Feed.Sender do
         batches = Enum.map(pieces, &Map.take(&1, [:txid, :ts, :changes, :partial]))
         w = Enum.reduce(batches, w, &accept(&2, &1, arrived))
 
-        if more? do
-          last = List.last(pieces)
-          next = if last.partial, do: {last.txid, last.seq}, else: {last.txid + 1, -1}
-          read_pages(w, reader, next, if(last.partial, do: next), upto, arrived)
-        else
-          w
-        end
+        next_pages(w, pieces, more?, reader, upto, arrived)
 
       {:error, reason} when reason in [:connection_closed, "interrupted"] ->
         exit(:normal)
@@ -211,6 +205,14 @@ defmodule Alambique.Feed.Sender do
       {:error, reason} ->
         exit({:feed_read_failed, reason})
     end
+  end
+
+  defp next_pages(w, _pieces, false, _reader, _upto, _arrived), do: w
+
+  defp next_pages(w, pieces, true, reader, upto, arrived) do
+    last = List.last(pieces)
+    next = if last.partial, do: {last.txid, last.seq}, else: {last.txid + 1, -1}
+    read_pages(w, reader, next, if(last.partial, do: next), upto, arrived)
   end
 
   # While the group is short, waits up to `linger_ms` from the oldest queued
@@ -226,20 +228,23 @@ defmodule Alambique.Feed.Sender do
     {batches, rest} = take(w.queue, w.size)
     wait = deadline - System.monotonic_time(:millisecond)
 
-    if length(batches) < w.size and wait > 0 and w.flush == nil and
-         not rewind_next?(rest) and
-         :queue.len(w.queue) < w.config.feed.max_backlog_batches do
-      receive do
-        {:batches, batches} -> w |> enqueue(batches) |> fill(deadline)
-        {:piece, token, pieces} -> w |> piece(token, pieces) |> fill(deadline)
-        {:range, from, upto, reader} -> w |> read(from, upto, reader) |> fill(deadline)
-        {:flush, ref} -> fill(%{w | flush: ref}, deadline)
-        {:DOWN, _, :process, _, _} -> exit(:normal)
-      after
-        wait -> w
-      end
-    else
-      w
+    if wait > 0 and short?(w, batches, rest), do: fill_more(w, deadline, wait), else: w
+  end
+
+  defp short?(w, batches, rest) do
+    length(batches) < w.size and w.flush == nil and not rewind_next?(rest) and
+      :queue.len(w.queue) < w.config.feed.max_backlog_batches
+  end
+
+  defp fill_more(w, deadline, wait) do
+    receive do
+      {:batches, batches} -> w |> enqueue(batches) |> fill(deadline)
+      {:piece, token, pieces} -> w |> piece(token, pieces) |> fill(deadline)
+      {:range, from, upto, reader} -> w |> read(from, upto, reader) |> fill(deadline)
+      {:flush, ref} -> fill(%{w | flush: ref}, deadline)
+      {:DOWN, _, :process, _, _} -> exit(:normal)
+    after
+      wait -> w
     end
   end
 
@@ -294,35 +299,49 @@ defmodule Alambique.Feed.Sender do
     count = length(batches)
     Fault.point(:feed_before_group_put, %{cell: w.id, txid: last.txid, batches: count})
 
+    group = %{
+      batches: batches,
+      last: last,
+      lifted?: lifted?,
+      started: started,
+      count: count
+    }
+
     case put(w, batches, last, time) do
-      {:ok, result, put_time, bytes} ->
-        Fault.point(:feed_after_put, %{cell: w.id, txid: last.txid, pid: w.cell})
-
-        Telemetry.span_stop(
-          [:feed, :publish],
-          started,
-          %{records: records(batches), bytes: bytes},
-          meta(w, last, lifted?, result, count)
-        )
-
-        send(w.cell, {:feed_published, self(), last.txid, put_time, count})
-        {:ok, %{w | floor: max(w.floor, put_time), failures: 0}}
-
-      {:error, reason} ->
-        failures = w.failures + 1
-        delay = delay(w, failures)
-
-        Telemetry.span_stop(
-          [:feed, :publish],
-          started,
-          %{records: records(batches), bytes: 0},
-          w
-          |> meta(last, lifted?, :error, count)
-          |> Map.merge(%{reason: reason, failures: failures, retry_in_ms: delay})
-        )
-
-        {:error, warn(%{w | floor: time, failures: failures}, reason), delay}
+      {:ok, result, put_time, bytes} -> published(w, group, result, put_time, bytes)
+      {:error, reason} -> failed(w, group, time, reason)
     end
+  end
+
+  defp published(w, group, result, put_time, bytes) do
+    %{batches: batches, last: last, count: count} = group
+    Fault.point(:feed_after_put, %{cell: w.id, txid: last.txid, pid: w.cell})
+
+    Telemetry.span_stop(
+      [:feed, :publish],
+      group.started,
+      %{records: records(batches), bytes: bytes},
+      meta(w, last, group.lifted?, result, count)
+    )
+
+    send(w.cell, {:feed_published, self(), last.txid, put_time, count})
+    {:ok, %{w | floor: max(w.floor, put_time), failures: 0}}
+  end
+
+  defp failed(w, group, time, reason) do
+    failures = w.failures + 1
+    delay = delay(w, failures)
+
+    Telemetry.span_stop(
+      [:feed, :publish],
+      group.started,
+      %{records: records(group.batches), bytes: 0},
+      w
+      |> meta(group.last, group.lifted?, :error, group.count)
+      |> Map.merge(%{reason: reason, failures: failures, retry_in_ms: delay})
+    )
+
+    {:error, warn(%{w | floor: time, failures: failures}, reason), delay}
   end
 
   defp records(batches), do: Enum.reduce(batches, 0, &(count(&1.changes) + &2))
