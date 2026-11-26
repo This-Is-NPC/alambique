@@ -35,8 +35,20 @@ pub mod probe {
     pub(super) fn hit(site: &'static str) {
         if SITE.get() == Some(site) {
             SITE.set(None);
-            panic!("injected panic at {site}");
+            inject(site);
         }
+    }
+
+    // One per build that has the probe: the unit tests, where `clippy::panic`
+    // does not apply, and the `test-panic` build.
+    #[cfg(test)]
+    fn inject(site: &'static str) {
+        panic!("injected panic at {site}");
+    }
+
+    #[cfg(all(feature = "test-panic", not(test)))]
+    fn inject(site: &'static str) {
+        panic!("injected panic at {site}");
     }
 
     /// Panics at `site` on its next hit, or never if the guard is dropped
