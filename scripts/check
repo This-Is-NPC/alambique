@@ -22,7 +22,8 @@ step() { printf '\n==> %s\n' "$*"; }
 "$root/scripts/quick-check" --force
 
 step "cargo clippy"
-cargo clippy --manifest-path native/alambique_nif/Cargo.toml --all-targets -- -D warnings
+# From the crate directory: its .cargo/config.toml sets the SQLite flags.
+(cd native/alambique_nif && cargo clippy --all-targets -- -D warnings)
 
 step "docs links"
 "$root/scripts/link-check"

@@ -372,7 +372,11 @@ fn merge_ltx<'a>(env: Env<'a>, inputs: Vec<Binary>) -> Term<'a> {
 static ALLOCATOR: alloc::Counted = alloc::Counted;
 
 fn on_load(_env: Env, _info: Term) -> bool {
-    alloc::install_sqlite() && vfs::register().is_ok()
+    if let Err(e) = alloc::install_sqlite() {
+        eprintln!("alambique_nif: {e}");
+        return false;
+    }
+    vfs::register().is_ok()
 }
 
 rustler::init!("Elixir.Alambique.Replication.Native", load = on_load);

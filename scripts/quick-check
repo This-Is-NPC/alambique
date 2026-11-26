@@ -31,8 +31,8 @@ step "mix format"
 mix format --check-formatted
 
 step "cargo fmt"
-cargo fmt --check --manifest-path native/alambique_nif/Cargo.toml
-cargo fmt --check --manifest-path native/alambique_nif/fuzz/Cargo.toml
+(cd native/alambique_nif && cargo fmt --check)
+(cd native/alambique_nif/fuzz && cargo fmt --check)
 
 step "readme markers"
 "$root/scripts/readme-check"
