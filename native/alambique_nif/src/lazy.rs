@@ -964,7 +964,10 @@ impl Drop for Lazy {
 /// belong to the process and not to a descriptor: closing any descriptor of
 /// the file drops all of them. So the descriptor of a plan is closed only
 /// when no SQLite file is open on the path, as SQLite itself defers closes.
-static OPEN: Mutex<Option<HashMap<PathBuf, (usize, Vec<File>)>>> = Mutex::new(None);
+static OPEN: Mutex<Option<OpenFiles>> = Mutex::new(None);
+
+/// The open count of each path and the descriptors parked for it.
+type OpenFiles = HashMap<PathBuf, (usize, Vec<File>)>;
 
 /// A main database file at `key` was opened by SQLite.
 pub fn opened(key: &Path) {
@@ -1505,8 +1508,8 @@ mod tests {
                 Box::new(|h: &mut Vec<u8>, _: &mut Vec<u8>| h[39] ^= 1),
             ),
             (
-                "wal salt",
-                Box::new(|h: &mut Vec<u8>, _: &mut Vec<u8>| h[64] ^= 1),
+                "timestamp high byte",
+                Box::new(|h: &mut Vec<u8>, _: &mut Vec<u8>| h[33] ^= 1),
             ),
             (
                 "node id",
