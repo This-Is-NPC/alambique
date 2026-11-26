@@ -211,19 +211,23 @@ defmodule Alambique.Lease do
         :ok
 
       {:error, reason} ->
-        case fetch(ctx, lease.cell) do
-          {:ok, %{moved_to: ^to} = stored} ->
-            if ours?(stored, lease), do: :ok, else: lost(:mark, lease)
+        reconcile_mark(ctx, lease, to, reason)
+    end
+  end
 
-          {:ok, _} ->
-            lost(:mark, lease)
+  defp reconcile_mark(ctx, lease, to, reason) do
+    case fetch(ctx, lease.cell) do
+      {:ok, %{moved_to: ^to} = stored} ->
+        if ours?(stored, lease), do: :ok, else: lost(:mark, lease)
 
-          {:error, :not_found} ->
-            lost(:mark, lease)
+      {:ok, _} ->
+        lost(:mark, lease)
 
-          {:error, _} ->
-            {:error, reason}
-        end
+      {:error, :not_found} ->
+        lost(:mark, lease)
+
+      {:error, _} ->
+        {:error, reason}
     end
   end
 
@@ -267,20 +271,11 @@ defmodule Alambique.Lease do
     case fetch(ctx, mine.cell) do
       {:ok, %{moved_from: from, moved_to: nil, released: true} = stored}
       when from == mine.moved_from ->
-        if stored.epoch >= mine.epoch do
-          :ok
-        else
-          with {:ok, _} <-
-                 put(ctx, %{mine | seq: stored.seq + 1}, {:if_match, stored.etag}),
-               do: :ok
-        end
+        raise_epoch(ctx, mine, stored)
 
       {:ok, %{moved_to: to, cleaned_at_ms: cleaned} = stored} when to != nil and cleaned != nil ->
         epoch = max(mine.epoch, stored.epoch + 1)
-
-        with {:ok, _} <-
-               put(ctx, %{mine | epoch: epoch, seq: stored.seq + 1}, {:if_match, stored.etag}),
-             do: :ok
+        overwrite(ctx, %{mine | epoch: epoch, seq: stored.seq + 1}, stored)
 
       {:ok, _} ->
         {:error, :destination_not_empty}
@@ -288,6 +283,13 @@ defmodule Alambique.Lease do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp raise_epoch(_ctx, %{epoch: epoch}, %{epoch: stored}) when stored >= epoch, do: :ok
+  defp raise_epoch(ctx, mine, stored), do: overwrite(ctx, %{mine | seq: stored.seq + 1}, stored)
+
+  defp overwrite(ctx, next, stored) do
+    with {:ok, _} <- put(ctx, next, {:if_match, stored.etag}), do: :ok
   end
 
   @doc """
@@ -381,7 +383,7 @@ defmodule Alambique.Lease do
   defp acquire_from(ctx, cell, owner, read) do
     case read do
       {:error, :not_found} ->
-        attempt(ctx, :acquire, cell, owner, 1, 1, :if_none_match)
+        attempt(ctx, :acquire, {cell, owner}, {1, 1}, :if_none_match)
 
       {:ok, %{moved_to: to}} when to != nil ->
         {:error, {:moved, to}}
@@ -402,7 +404,7 @@ defmodule Alambique.Lease do
     case fetch(ctx, cell) do
       {:error, :not_found} ->
         {check_epoch(0, expected, fn ->
-           ctx |> attempt(:take_over, cell, owner, 1, 1, :if_none_match) |> with_previous(nil)
+           ctx |> attempt(:take_over, {cell, owner}, {1, 1}, :if_none_match) |> with_previous(nil)
          end), nil}
 
       {:ok, %{moved_to: to}} when to != nil ->
@@ -430,15 +432,13 @@ defmodule Alambique.Lease do
     attempt(
       ctx,
       op,
-      current.cell,
-      owner,
-      current.epoch + 1,
-      current.seq + 1,
+      {current.cell, owner},
+      {current.epoch + 1, current.seq + 1},
       {:if_match, current.etag}
     )
   end
 
-  defp attempt(ctx, op, cell, owner, epoch, seq, condition) do
+  defp attempt(ctx, op, {cell, owner}, {epoch, seq}, condition) do
     mine = %__MODULE__{
       cell: cell,
       epoch: epoch,
@@ -457,17 +457,26 @@ defmodule Alambique.Lease do
         {:ok, %{mine | etag: etag}}
 
       {:error, :precondition_failed} ->
-        case fetch(ctx, cell) do
-          {:ok, current} -> {:error, rival(op, current)}
-          {:error, :not_found} -> {:error, :precondition_failed}
-          {:error, reason} -> {:error, reason}
-        end
+        lost_race(ctx, op, cell)
 
       {:error, reason} ->
-        case fetch(ctx, cell) do
-          {:ok, %{token: token} = stored} when token == mine.token -> {:ok, stored}
-          _ -> {:error, reason}
-        end
+        maybe_landed(ctx, mine, reason)
+    end
+  end
+
+  defp lost_race(ctx, op, cell) do
+    case fetch(ctx, cell) do
+      {:ok, current} -> {:error, rival(op, current)}
+      {:error, :not_found} -> {:error, :precondition_failed}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # The put failed without an answer: it may have landed all the same.
+  defp maybe_landed(ctx, mine, reason) do
+    case fetch(ctx, mine.cell) do
+      {:ok, %{token: token} = stored} when token == mine.token -> {:ok, stored}
+      _ -> {:error, reason}
     end
   end
 
@@ -578,6 +587,14 @@ defmodule Alambique.Lease do
   # never ours.
   defp decode(body, etag) do
     with {:ok, %{} = map} <- Jason.decode(body),
+         {:ok, lease} <- from_map(map) do
+      {:ok, %{lease | etag: etag}}
+    else
+      _ -> {:error, :corrupt_lease}
+    end
+  end
+
+  defp from_map(
          %{
            "cell" => cell,
            "epoch" => epoch,
@@ -586,29 +603,28 @@ defmodule Alambique.Lease do
            "seq" => seq,
            "expires_at_ms" => expires,
            "released" => released
-         }
-         when is_binary(cell) and is_integer(epoch) and is_binary(owner) and is_binary(token) and
-                is_integer(seq) and is_integer(expires) and is_boolean(released) <- map do
-      {:ok,
-       %__MODULE__{
-         cell: cell,
-         epoch: epoch,
-         owner: owner,
-         incarnation: incarnation(map["incarnation"]),
-         token: token,
-         seq: seq,
-         expires_at_ms: expires,
-         released: released,
-         moved_to: map["moved_to"],
-         moved_from: map["moved_from"],
-         moved_at_ms: map["moved_at_ms"],
-         cleaned_at_ms: map["cleaned_at_ms"],
-         etag: etag
-       }}
-    else
-      _ -> {:error, :corrupt_lease}
-    end
+         } = map
+       )
+       when is_binary(cell) and is_integer(epoch) and is_binary(owner) and is_binary(token) and
+              is_integer(seq) and is_integer(expires) and is_boolean(released) do
+    {:ok,
+     %__MODULE__{
+       cell: cell,
+       epoch: epoch,
+       owner: owner,
+       incarnation: incarnation(map["incarnation"]),
+       token: token,
+       seq: seq,
+       expires_at_ms: expires,
+       released: released,
+       moved_to: map["moved_to"],
+       moved_from: map["moved_from"],
+       moved_at_ms: map["moved_at_ms"],
+       cleaned_at_ms: map["cleaned_at_ms"]
+     }}
   end
+
+  defp from_map(_map), do: :error
 
   defp incarnation(value) when is_binary(value), do: value
   defp incarnation(_value), do: nil
