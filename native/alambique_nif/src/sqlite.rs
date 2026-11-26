@@ -2712,7 +2712,7 @@ mod tests {
                 run(db, "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n \
                          WHERE x < 1000000000) SELECT count(*) FROM n")
             };
-            let took = started.elapsed().as_millis() as u64;
+            let took = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
             proptest::prop_assert!(ran.is_err());
             proptest::prop_assert!(ctl.timed_out.load(Relaxed));
