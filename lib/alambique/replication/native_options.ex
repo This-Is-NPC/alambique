@@ -20,10 +20,6 @@ defmodule Alambique.Replication.NativeOptions do
   #   * `trim_idle_ms` - how long the trim thread waits for a wake-up before it
   #     looks anyway (default 30000); the tests set it high to see the wake-ups.
 
-  alias Alambique.Replication.Native
-
-  require Logger
-
   @defaults [
     enabled: true,
     reserved_mib: 4096,
@@ -42,20 +38,35 @@ defmodule Alambique.Replication.NativeOptions do
     _ = Application.load(:alambique)
 
     configured = Application.get_env(:alambique, :page_arena, [])
-    unknown = Keyword.keys(configured) -- Keyword.keys(@defaults)
-
-    if unknown != [],
-      do: raise(ArgumentError, "unknown :page_arena settings: #{inspect(unknown)}")
+    reject_unknown!(configured)
 
     opts = Keyword.merge(@defaults, configured)
     validate!(opts)
     Map.new(opts)
   end
 
+  defp reject_unknown!(configured) do
+    unknown = Keyword.keys(configured) -- Keyword.keys(@defaults)
+
+    if unknown != [],
+      do: raise(ArgumentError, "unknown :page_arena settings: #{inspect(unknown)}")
+  end
+
   defp validate!(opts) do
     unless is_boolean(opts[:enabled]),
       do: raise(ArgumentError, ":page_arena :enabled must be true or false")
 
+    for key <- [:trim_after_kib, :keep_kib],
+        do: check!(opts, key, &(&1 >= 0), "a non-negative integer")
+
+    for key <- [:trim_idle_ms, :max_trim_kib],
+        do: check!(opts, key, &(&1 > 0), "a positive integer")
+
+    check!(opts, :max_regions, &(&1 >= 1), "a positive integer")
+    validate_sizes!(opts)
+  end
+
+  defp validate_sizes!(opts) do
     check!(opts, :reserved_mib, &(&1 >= 64 and &1 <= 1_048_576), "from 64 up to 1048576")
 
     check!(
@@ -64,13 +75,6 @@ defmodule Alambique.Replication.NativeOptions do
       &(&1 > 0 and &1 <= 1024 and rem(&1, 4) == 0),
       "a multiple of 4 up to 1024"
     )
-
-    for key <- [:trim_after_kib, :keep_kib],
-        do: check!(opts, key, &(&1 >= 0), "a non-negative integer")
-
-    check!(opts, :trim_idle_ms, &(&1 > 0), "a positive integer")
-    check!(opts, :max_regions, &(&1 >= 1), "a positive integer")
-    check!(opts, :max_trim_kib, &(&1 > 0), "a positive integer")
   end
 
   defp check!(opts, key, ok?, what) do
@@ -82,68 +86,5 @@ defmodule Alambique.Replication.NativeOptions do
           ArgumentError,
           ":page_arena #{inspect(key)} must be #{what}, got: #{inspect(value)}"
         )
-  end
-
-  # What the library applied, by the key that set it.
-  @applied %{
-    reserved_mib: :page_arena_reserved_mib,
-    extent_kib: :page_arena_extent_kib,
-    trim_after_kib: :page_arena_trim_after_kib,
-    keep_kib: :page_arena_keep_kib,
-    max_trim_kib: :page_arena_max_trim_kib,
-    max_regions: :page_arena_max_regions,
-    trim_idle_ms: :page_arena_trim_idle_ms
-  }
-
-  @doc """
-  The keys of `config :alambique, :page_arena` that differ from what the
-  library applied when it loaded (`[:invalid]` for a setting `load_data/0`
-  refuses). The library reads them once, so a setting that arrives later, as
-  from `config/runtime.exs` of a release that is started, is ignored.
-  """
-  @spec differing() :: [atom]
-  def differing do
-    stats = Native.stats()
-    wanted = load_data()
-    on? = stats.page_arena_state != 0
-
-    cond do
-      wanted.enabled != on? ->
-        [:enabled]
-
-      stats.page_arena_state == 1 ->
-        for {key, stat} <- @applied, Map.fetch!(stats, stat) != wanted[key], do: key
-
-      true ->
-        []
-    end
-  rescue
-    ArgumentError -> [:invalid]
-  end
-
-  @doc """
-  Warns, and emits `[:alambique, :page_arena, :config_ignored]` with the keys
-  in its metadata, when `differing/0` finds any. Called when an instance starts.
-  """
-  @spec check_applied(term) :: :ok
-  def check_applied(instance) do
-    case differing() do
-      [] ->
-        :ok
-
-      keys ->
-        Logger.warning(
-          "Alambique #{inspect(instance)}: config :alambique, :page_arena differs from " <>
-            "what the library loaded with (#{inspect(keys)}). It is read once, when the " <>
-            "library loads: set it in config/config.exs (the sys.config of a release); " <>
-            "config/runtime.exs is read after a release started with bin/<app> start has " <>
-            "loaded it."
-        )
-
-        Alambique.Telemetry.emit([:page_arena, :config_ignored], %{keys: length(keys)}, %{
-          instance: instance,
-          keys: keys
-        })
-    end
   end
 end
