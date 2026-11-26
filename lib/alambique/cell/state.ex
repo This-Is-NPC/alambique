@@ -43,6 +43,9 @@ defmodule Alambique.Cell.State do
     :pipe,
     # Counter of callers accepted and not answered yet, read by `Cell.load/2`.
     :load,
+    # The options this cell set for itself (`Cell.Options`): only the keys it
+    # changed. Read through `cell_opt/2`.
+    cell_opts: %{},
     mode: :waking,
     # Writes that wait for the end of the hydration (design §16), oldest last:
     # `{call, from}`.
@@ -88,6 +91,22 @@ defmodule Alambique.Cell.State do
 
   @spec now_ms(t) :: integer
   def now_ms(%__MODULE__{config: %{clock: {clock, clock_config}}}), do: clock.now_ms(clock_config)
+
+  @doc """
+  An option a cell may set for itself: its own value (`nil` included) or the
+  node's.
+  """
+  @spec cell_opt(
+          t,
+          :cache_kib | :idle_cache_after_ms | :idle_cache_kib | :idle_gc | :idle_timeout_ms
+        ) ::
+          term
+  def cell_opt(%__MODULE__{cell_opts: opts, config: config}, key) do
+    case opts do
+      %{^key => value} -> value
+      _ -> Alambique.Cell.Options.node_value(config, key)
+    end
+  end
 
   @doc "Whether the lease may still be used, by this node's clock and the skew margin."
   @spec lease_valid?(t) :: boolean
