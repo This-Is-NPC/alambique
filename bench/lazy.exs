@@ -9,6 +9,9 @@
 # (open, then a point lookup) and to a complete file. Stores: the in-memory
 # store with 0 and 20 ms added to every request, and the disposable SeaweedFS
 # from `mise run seaweedfs:up`.
+#
+# ALAMBIQUE_BENCH_SIDECAR=1 writes a page-hash sidecar beside each object
+# larger than the verify size, and prints what the sidecars add (design §16).
 
 defmodule Bench do
   alias Alambique.Cell.Db
@@ -121,10 +124,13 @@ defmodule Bench do
     t = now()
 
     {:ok, result} =
-      Replication.restore(ctx, "cell", lazy_path, :latest, lazy: %{min_bytes: 0, wait_ms: 30_000})
+      Replication.restore(ctx, "cell", lazy_path, :latest,
+        lazy: %{min_bytes: 0, wait_ms: 30_000, verify_bytes: verify_bytes()}
+      )
 
     plan_ms = ms(t)
     lazy = Lazy.new(result, ctx, verify_bytes: verify_bytes())
+    covered = length(Alambique.Replication.Native.lazy_covered(lazy.handle))
     {:ok, hydrator} = Hydrator.start_link(lazy, concurrency: 8, fetch_ms: 30_000)
     {:ok, db} = Db.open(lazy_path)
 
@@ -170,6 +176,29 @@ defmodule Bench do
         String.pad_leading(fmt(gated_write_ms), 13) <>
         String.pad_leading(Integer.to_string(misses), 8)
     )
+
+    IO.puts("  #{sizes(store)}; files covered by a sidecar: #{covered}")
+  end
+
+  # Bytes of the objects of the cell and of their sidecars.
+  defp sizes({module, config} = store) do
+    {:ok, keys, nil} = module.list(config, "bench/cells/cell/", nil, 10_000)
+
+    {pages, objects} =
+      keys
+      |> Enum.filter(&String.contains?(&1, "/0"))
+      |> Enum.split_with(&String.ends_with?(&1, ".pages"))
+
+    bytes = fn keys ->
+      Enum.sum(
+        for key <- keys do
+          {:ok, _body, total, _meta} = Alambique.Store.call_get_range(store, key, 0, 1, nil)
+          total
+        end
+      )
+    end
+
+    "objects #{length(objects)}, #{mb(bytes.(objects))} MB; sidecars #{length(pages)}, #{bytes.(pages)} bytes"
   end
 
   defp seaweedfs(conn, path, dir) do
@@ -199,7 +228,15 @@ defmodule Bench do
   end
 
   defp ctx(store) do
-    Replication.ctx(store: store, prefix: "bench", node: "bench", timeout_ms: 600_000)
+    sidecar = if System.get_env("ALAMBIQUE_BENCH_SIDECAR") == "1", do: verify_bytes()
+
+    Replication.ctx(
+      store: store,
+      prefix: "bench",
+      node: "bench",
+      timeout_ms: 600_000,
+      page_sidecar: sidecar
+    )
   end
 
   # TXID 1 is the whole database; then 20 batches of a few rows.
