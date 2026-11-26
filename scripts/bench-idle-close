@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Runs the idle-close benchmark, bounded by `timeout`. Argument: number of
+# cells (default 250). ALAMBIQUE_BENCH_TIMEOUT: seconds (default 600).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+MIX_ENV=test exec timeout "${ALAMBIQUE_BENCH_TIMEOUT:-600}" mix run bench/idle_close.exs "$@"

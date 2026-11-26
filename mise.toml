@@ -139,6 +139,10 @@ run = "scripts/bench-feed-handover"
 description = "Report the memory of awake cells by purpose and the read and write latency (arguments: cell counts, default 1 100 500; ALAMBIQUE_BENCH_ROWS, _OPS, _OPTS)"
 run = "scripts/bench-memory"
 
+[tasks."bench:idle-close"]
+description = "Measure what closing the connection of an idle cell saves and costs: memory, descriptors, close and reopen time, first-call latency, renewals and a close/reopen cycle (argument: number of cells, default 250; ALAMBIQUE_BENCH_ROWS, _CLOSE, _CYCLES, _RENEWAL, _TIMEOUT)"
+run = "scripts/bench-idle-close"
+
 [tasks."bench:query"]
 description = "Query thousands of cells cold and warm and report requests and time (argument: number of cells)"
 run = "scripts/bench-query"
