@@ -129,8 +129,9 @@ Fewer requests, or requests that run together, make the wake faster. Design
      it as the page arrives, and does not read the files it covers whole at the
      end of the download: `check_covered` in the hydrate event counts them, and
      `check_bytes` shrinks by their size. It costs one more `PUT` for each
-     such object written, in the acknowledgment of a commit whose segment is
-     that large, `80 + 20 × pages` bytes stored for each, and one `GET` of that
+     such object written, after the acknowledgment of the commit (a failed one is
+     reported by `[:alambique, :replication, :sidecar]` and costs only the
+     whole read of that object at a wake), `80 + 20 × pages` bytes stored for each, and one `GET` of that
      size for each covered file at a wake. Reading uses a sidecar whenever one
      exists, so turn it on for the writers first. Writes still wait for the end
      of the download (`verify_writes`): the sidecar vouches for pages as they

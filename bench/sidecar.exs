@@ -4,10 +4,11 @@
 #   mise run bench:sidecar -- 1000
 #
 # Each commit changes a few rows of a WAL database and syncs; the time of
-# `Replicator.sync/2` is the time before the commit is acknowledged. Every
+# `Replicator.sync/3` is the time before the commit is acknowledged. Every
 # segment is uploaded and, with the sidecar on, followed by its sidecar (the
-# size rule is off, so every segment has one). Stores: the in-memory store
-# with 0 and 20 ms added to every put.
+# size rule is off, so every segment has one): `inline` writes it before sync
+# returns, `async` after, in a process of its own, as a cell does. Stores:
+# the in-memory store with 0 and 20 ms added to every put.
 
 defmodule Bench do
   alias Alambique.Replication
@@ -19,7 +20,7 @@ defmodule Bench do
     IO.puts("commits per case: #{commits}")
     IO.puts("put latency  sidecar     p50       p99      max   store puts per commit")
 
-    for latency <- [0, 20], sidecar <- [false, true] do
+    for latency <- [0, 20], sidecar <- [:off, :inline, :async] do
       {:ok, pid} = MemoryStore.start_link()
       config = MemoryStore.config(pid)
       store = {MemoryStore, config}
@@ -46,7 +47,7 @@ defmodule Bench do
         prefix: "bench",
         node: "bench",
         timeout_ms: 60_000,
-        page_sidecar: if(sidecar, do: 0)
+        page_sidecar: if(sidecar != :off, do: 0)
       )
 
     state = Replicator.new("cell", path, 4096, 1)
@@ -60,10 +61,13 @@ defmodule Bench do
             "INSERT OR REPLACE INTO t VALUES (#{rem(i, 50)}, randomblob(1000))"
           )
 
-        {us, {:ok, state}} = :timer.tc(fn -> Replicator.sync(state, ctx) end)
+        opts = if sidecar == :off, do: [], else: [sidecar: sidecar]
+        {us, {:ok, state}} = :timer.tc(fn -> Replicator.sync(state, ctx, opts) end)
         {us, state}
       end)
 
+    # The last sidecars of the async case are still on their way.
+    Process.sleep(500)
     sorted = Enum.sort(times)
     at = fn q -> Enum.at(sorted, min(length(sorted) - 1, trunc(length(sorted) * q))) end
     {:ok, keys, nil} = MemoryStore.list(elem(store, 1), "bench/", nil, 100_000)

@@ -1295,6 +1295,8 @@ defmodule Alambique.Cell do
       result = Replicator.upload(up, ctx, deadline: deadline)
       Process.unlink(parent)
       send(parent, {:landed, ref, result})
+      # After the report, so that no commit waits for it (design §16).
+      if result == :ok, do: Replicator.write_sidecar(up, ctx)
     end)
   end
 

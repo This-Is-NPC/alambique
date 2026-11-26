@@ -886,7 +886,10 @@ BLAKE3-128 hash per page, and one of the header, the page index and the
 trailer, bound to the level, the TXIDs, the size and the file checksum of the
 file. Every writer (the upload of a commit, the snapshot, the replace of a
 rewind, the merged files and snapshots of compaction) calls one function after
-the object landed. Reading does not depend on the setting: a restore that
+the object landed. A commit is acknowledged first: the upload process of a
+batch reports that it landed and then writes the sidecar, so no commit waits
+for a sidecar and the next batch is not delayed by it; the commits that run
+inline (the fence of a wake, a migration) write it in a process of their own. Reading does not depend on the setting: a restore that
 lists a sidecar beside a file above `verify_bytes` reads it, once per file,
 before the first statement, at most a quarter of `restore: [max_inflight_bytes:]`
 of them in total (20 bytes per page, kept in the page map until the end of the
@@ -917,9 +920,10 @@ event reports `check_objects`, `check_bytes`, `check_duration` and
 
 With sidecars, per object written above `verify_bytes`: one more `PUT` (and
 one `GET` and, if it differs, one `PUT` when a key existed), the CPU to decode
-the file and hash each page, and `80 + 20 × pages` bytes stored. The `PUT` is on
-the path of the acknowledgment of a commit whose segment is that large; it is
-retried once and never fails the commit. Per restore: one `GET` of
+the file and hash each page, and `80 + 20 × pages` bytes stored. The `PUT` is
+after the acknowledgment of a commit, retried once and never fails the commit;
+a crash before it, or a failure, leaves the object without a sidecar and
+`[:alambique, :replication, :sidecar]` reports it. Per restore: one `GET` of
 `80 + 20 × pages` bytes for each covered file before the first query, one
 decode and one hash per page delivered, and one more decode to install it.
 These costs are not measured.

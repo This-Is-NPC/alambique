@@ -162,7 +162,10 @@ defmodule Alambique.Replication.Replicator do
   the deadline; the segment may or may not have landed.
 
   Options: `:deadline`, an absolute `System.monotonic_time(:millisecond)`
-  (default: now plus the context's `:timeout_ms`).
+  (default: now plus the context's `:timeout_ms`), and `:sidecar` (see
+  `write_sidecar/3`): `:inline` (default) writes the page-hash sidecar before
+  returning, `:async` in a process of its own after the object landed, so
+  that the caller is not kept waiting for it.
   """
   @spec sync(t, Alambique.Replication.ctx(), keyword) :: {:ok, t} | {:error, term}
   def sync(%__MODULE__{} = s, ctx, opts \\ []) do
@@ -172,7 +175,7 @@ defmodule Alambique.Replication.Replicator do
 
       {:ok, next, up} ->
         case upload(up, ctx, opts) do
-          :ok -> {:ok, next}
+          :ok -> sidecar(up, ctx, opts, {:ok, next})
           :taken -> {:error, :fenced}
           {:error, _} = error -> error
         end
@@ -273,7 +276,6 @@ defmodule Alambique.Replication.Replicator do
     case result do
       :ok ->
         Fault.point(:repl_after_put, %{cell: up.cell, txid: up.txid, owner_pid: up.owner_pid})
-        Sidecar.write(ctx, up.key, 0, up.segment, up.info, deadline, :ours)
         if landed = opts[:landed], do: landed.(up)
         Telemetry.span_stop([:replication, :sync], up.started, bytes, Map.put(meta, :result, :ok))
         :ok
@@ -299,6 +301,31 @@ defmodule Alambique.Replication.Replicator do
 
         {:error, reason}
     end
+  end
+
+  @doc """
+  Writes the page-hash sidecar of the segment `upload/3` put, when the
+  context asks for sidecars (design §16). Call it after the upload returned and
+  the commit was acknowledged: a sidecar that is missing, because this was not
+  called or failed or the process died, only makes a restore read the object
+  whole. A failure is reported by telemetry, never raised. Option `:deadline`.
+  """
+  @spec write_sidecar(upload, Alambique.Replication.ctx(), keyword) ::
+          :ok | :skipped | {:error, term}
+  def write_sidecar(up, ctx, opts \\ []) do
+    deadline = Keyword.get_lazy(opts, :deadline, fn -> Retry.deadline_in(ctx.timeout_ms) end)
+    Sidecar.write(ctx, up.key, 0, up.segment, up.info, deadline, :ours)
+  end
+
+  # The sidecar of an uploaded segment, as the caller of `sync/3` or `fence/3`
+  # asked; `result` is what they return.
+  defp sidecar(up, ctx, opts, result) do
+    case Keyword.get(opts, :sidecar, :inline) do
+      :async -> spawn(fn -> write_sidecar(up, ctx) end)
+      :inline -> write_sidecar(up, ctx, Keyword.take(opts, [:deadline]))
+    end
+
+    result
   end
 
   # While a lazy restore is hydrating, the CRC of a page that a batch replaces
@@ -366,7 +393,7 @@ defmodule Alambique.Replication.Replicator do
   def fence(%__MODULE__{} = s, ctx, opts \\ []) do
     with {:ok, next, up} <- encode(s, ctx, :fence, opts) do
       case upload(up, ctx, opts) do
-        :ok -> {:ok, next}
+        :ok -> sidecar(up, ctx, opts, {:ok, next})
         :taken -> {:error, :txid_taken}
         {:error, _} = error -> error
       end
