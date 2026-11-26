@@ -26,6 +26,7 @@
 #   ALAMBIQUE_BENCH_ROWS    notes per cell, one run each     (default "0 2000")
 #   ALAMBIQUE_BENCH_CLOSE   idle_close_after_ms              (default "300")
 #   ALAMBIQUE_BENCH_CYCLES  rounds of the cycle              (default "3")
+#   ALAMBIQUE_BENCH_SEED    cells seeded at a time          (default "16")
 #   ALAMBIQUE_BENCH_RENEWAL seconds the renewals are counted (default "30")
 #
 # The run is bounded by `timeout` in scripts/bench-idle-close.
@@ -295,21 +296,26 @@ defmodule Bench do
 
   defp path(id), do: Alambique.Cell.Local.db_path(Alambique.Config.fetch!(@instance), id)
 
+  # Fewer at a time than the default: on a disk, the fsync of the first writes
+  # of many cells at once outlasts the call timeout. A write that timed out may
+  # have landed, so the seed is written to be repeated.
+  def seed_concurrency, do: String.to_integer(System.get_env("ALAMBIQUE_BENCH_SEED", "16"))
+
   defp seed(ids, rows) do
     ids
     |> Task.async_stream(
       fn id ->
         sql =
           if rows == 0,
-            do: "INSERT INTO notes VALUES (0, 0, 'x')",
+            do: "INSERT OR REPLACE INTO notes VALUES (0, 0, 'x')",
             else:
               "WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < #{rows}) " <>
-                "INSERT INTO notes SELECT i, i % 50, printf('%0120d', i) FROM s"
+                "INSERT OR REPLACE INTO notes SELECT i, i % 50, printf('%0120d', i) FROM s"
 
         {:ok, _} = retry(fn -> Alambique.execute(@instance, id, sql) end)
         {:ok, _} = retry(fn -> Alambique.query(@instance, id, "SELECT count(*) FROM notes") end)
       end,
-      max_concurrency: 64,
+      max_concurrency: Bench.seed_concurrency(),
       timeout: :infinity
     )
     |> Stream.run()
@@ -317,7 +323,7 @@ defmodule Bench do
 
   defp retry(fun) do
     case fun.() do
-      {:error, reason} when reason in [:overloaded, :busy] ->
+      {:error, reason} when reason in [:overloaded, :busy, :timeout] ->
         Process.sleep(10)
         retry(fun)
 
