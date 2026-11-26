@@ -886,10 +886,12 @@ BLAKE3-128 hash per page, and one of the header, the page index and the
 trailer, bound to the level, the TXIDs, the size and the file checksum of the
 file. Every writer (the upload of a commit, the snapshot, the replace of a
 rewind, the merged files and snapshots of compaction) calls one function after
-the object landed. A commit is acknowledged first: the upload process of a
-batch reports that it landed and then writes the sidecar, so no commit waits
-for a sidecar and the next batch is not delayed by it; the commits that run
-inline (the fence of a wake, a migration) write it in a process of their own. Reading does not depend on the setting: a restore that
+the object landed. A commit is acknowledged first: the cell
+writes the sidecar of a landed batch in a process of its own, so no commit
+waits for it. A cell has one sidecar write under way at a time: a segment that
+lands meanwhile has none (a slow store cannot pile writes up), and a restore
+reads it whole. The commits that run inline (the fence of a wake, a migration)
+write theirs in a process of their own. Reading does not depend on the setting: a restore that
 lists a sidecar beside a file above `verify_bytes` reads it, once per file,
 before the first statement, at most a quarter of `restore: [max_inflight_bytes:]`
 of them in total (20 bytes per page, kept in the page map until the end of the

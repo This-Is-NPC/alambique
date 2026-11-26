@@ -28,7 +28,7 @@ defmodule Alambique.Replication.Sidecar do
   @spec write(map, String.t(), 0..9, binary, map, integer, :ours | :verify) ::
           :ok | :skipped | {:error, term}
   def write(ctx, key, level, object, info, deadline, owner) do
-    if enabled?(ctx, byte_size(object)) do
+    if wanted?(ctx, byte_size(object)) do
       ctx = %{ctx | max_attempts: min(ctx.max_attempts, 2)}
 
       case owner == :ours or same_object?(ctx, key, object, deadline) do
@@ -41,8 +41,10 @@ defmodule Alambique.Replication.Sidecar do
     end
   end
 
-  defp enabled?(%{page_sidecar: min}, size) when is_integer(min), do: size > min
-  defp enabled?(_ctx, _size), do: false
+  @doc "Whether an object of `size` bytes gets a sidecar under `ctx`."
+  @spec wanted?(map, non_neg_integer) :: boolean
+  def wanted?(%{page_sidecar: min}, size) when is_integer(min), do: size > min
+  def wanted?(_ctx, _size), do: false
 
   defp put(ctx, key, level, object, info, deadline) do
     Fault.point(:repl_before_sidecar, %{key: key})
