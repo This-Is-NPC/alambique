@@ -7,7 +7,7 @@ use std::io;
 #[cfg(all(not(miri), target_os = "linux"))]
 pub fn page_size() -> usize {
     // SAFETY: `sysconf` has no preconditions.
-    (unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).max(4096) as usize
+    usize::try_from((unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).max(4096)).unwrap_or(4096)
 }
 
 #[cfg(miri)]

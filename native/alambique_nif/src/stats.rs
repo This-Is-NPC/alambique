@@ -3,7 +3,7 @@
 //! Counters only grow; gauges go up and down. All are relaxed atomics, so a
 //! read is a consistent value per field, not a snapshot across fields.
 
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
 
 use libsqlite3_sys as ffi;
@@ -39,14 +39,15 @@ static SHARDS: [Shard; 64] = [const {
 
 thread_local! {
     static MINE: usize = {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        NEXT.fetch_add(1, Relaxed) as usize % SHARDS.len()
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        NEXT.fetch_add(1, Relaxed) % SHARDS.len()
     };
 }
 
 /// The calling thread's shard.
 pub fn shard() -> &'static Shard {
-    &SHARDS[MINE.try_with(|i| *i).unwrap_or(0)]
+    let mine = MINE.try_with(|i| *i).unwrap_or(0);
+    SHARDS.get(mine).unwrap_or(&SHARDS[0])
 }
 
 fn sum(f: impl Fn(&Shard) -> &AtomicU64) -> i64 {
@@ -120,7 +121,7 @@ impl Drop for Timer {
     fn drop(&mut self) {
         crate::alloc::flush_thread_cache();
         crate::alloc::poke_trim();
-        let ns = self.start.elapsed().as_nanos() as u64;
+        let ns = u64::try_from(self.start.elapsed().as_nanos()).unwrap_or(u64::MAX);
         self.calls.count.fetch_add(1, Relaxed);
         self.calls.total_ns.fetch_add(ns, Relaxed);
         self.calls.max_ns.fetch_max(ns, Relaxed);
@@ -182,8 +183,10 @@ fn page_arena() -> Vec<(String, i64)> {
 /// is reset by the read, so it is the peak since the previous read.
 #[rustler::nif]
 fn stats(env: Env) -> rustler::NifResult<Term> {
-    // SAFETY: both only read SQLite's global memory counters.
-    let (used, high) = unsafe { (ffi::sqlite3_memory_used(), ffi::sqlite3_memory_highwater(1)) };
+    // SAFETY: only reads SQLite's global memory counter.
+    let used = unsafe { ffi::sqlite3_memory_used() };
+    // SAFETY: only reads (and resets) SQLite's global memory high-water mark.
+    let high = unsafe { ffi::sqlite3_memory_highwater(1) };
     let get = |c: &AtomicU64| c.load(Relaxed) as i64;
     let calls = |name: &str, c: &Calls| {
         [

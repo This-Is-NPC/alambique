@@ -275,7 +275,9 @@ impl Arena {
     /// batch outside it. Returns the bytes released.
     pub fn trim_cycle(&self, claims: &mut Vec<Claim>) -> usize {
         let start = Instant::now();
-        let mut budget = (self.excess().saturating_sub(self.cfg.keep as u64) as usize)
+        let over = self.excess().saturating_sub(self.cfg.keep as u64);
+        let mut budget = usize::try_from(over)
+            .unwrap_or(usize::MAX)
             .min(self.cfg.max_trim)
             / self.page;
         let (mut visited, mut freed) = (0, 0);
@@ -313,8 +315,10 @@ impl Arena {
         }
         self.released.fetch_add((freed * self.page) as u64, Relaxed);
         self.trims.fetch_add(1, Relaxed);
-        self.trim_ns_max
-            .fetch_max(start.elapsed().as_nanos() as u64, Relaxed);
+        self.trim_ns_max.fetch_max(
+            u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            Relaxed,
+        );
         freed * self.page
     }
 }
