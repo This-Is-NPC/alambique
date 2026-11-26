@@ -87,33 +87,40 @@ fn commit_behind_back<'a>(env: Env<'a>, conn: ResourceArc<sqlite::Conn>) -> Term
 #[rustler::nif(schedule = "DirtyIo")]
 fn panic_in_callback(site: String, path: String) -> (i32, i32) {
     let site: &'static str = Box::leak(site.into_boxed_str());
-    let path = CString::new(path).expect("path without NUL");
+    let Ok(path) = CString::new(path) else {
+        return (ffi::SQLITE_MISUSE, ffi::SQLITE_MISUSE);
+    };
     let sql = c"PRAGMA user_version; PRAGMA journal_mode = WAL; \
                 CREATE TABLE t (a); INSERT INTO t VALUES (1); SELECT a FROM t";
     let mut db = ptr::null_mut();
     let control = sqlite::Control::new(false, 0);
     let _armed = probe::panic_at(site);
-    // SAFETY: `path`, `sql` and the VFS name are NUL-terminated and outlive
-    // the calls; `db` is closed once, below.
-    unsafe {
-        let open = ffi::sqlite3_open_v2(
+    // SAFETY: `path` and the VFS name are NUL-terminated and outlive the call.
+    let open = unsafe {
+        ffi::sqlite3_open_v2(
             path.as_ptr(),
             &mut db,
             ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_CREATE,
             vfs::NAME.as_ptr(),
-        );
-        let mut exec: c_int = open;
-        if open == ffi::SQLITE_OK {
+        )
+    };
+    let mut exec: c_int = open;
+    if open == ffi::SQLITE_OK {
+        // SAFETY: `db` is the open connection; `control` outlives it.
+        unsafe {
             ffi::sqlite3_set_authorizer(
                 db,
                 Some(sqlite::authorize),
                 &control as *const sqlite::Control as *mut _,
-            );
-            exec = ffi::sqlite3_exec(db, sql.as_ptr(), None, ptr::null_mut(), ptr::null_mut());
-        }
-        ffi::sqlite3_close(db);
-        (open, exec)
+            )
+        };
+        // SAFETY: `sql` is NUL-terminated and outlives the call.
+        exec =
+            unsafe { ffi::sqlite3_exec(db, sql.as_ptr(), None, ptr::null_mut(), ptr::null_mut()) };
     }
+    // SAFETY: `db` is closed once.
+    unsafe { ffi::sqlite3_close(db) };
+    (open, exec)
 }
 
 /// Runs `sql` on a connection of its own, with SQLite's default VFS and
@@ -124,28 +131,32 @@ pub(crate) fn foreign_exec_raw(path: &str, sql: &str) -> c_int {
         return ffi::SQLITE_MISUSE;
     };
     let mut db = ptr::null_mut();
-    // SAFETY: both strings are NUL-terminated and outlive the calls; `db` is
-    // closed once.
-    unsafe {
-        let mut rc = ffi::sqlite3_open_v2(
+    // SAFETY: both strings are NUL-terminated and outlive the calls.
+    let mut rc = unsafe {
+        ffi::sqlite3_open_v2(
             path.as_ptr(),
             &mut db,
             ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_URI,
             ptr::null(),
-        );
-        if rc == ffi::SQLITE_OK {
-            let mut out: c_int = 0;
+        )
+    };
+    if rc == ffi::SQLITE_OK {
+        let mut out: c_int = 0;
+        // SAFETY: `db` is the open connection; `out` is the out-pointer.
+        unsafe {
             ffi::sqlite3_db_config(
                 db,
                 ffi::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
                 1 as c_int,
                 &mut out as *mut c_int,
-            );
-            rc = ffi::sqlite3_exec(db, sql.as_ptr(), None, ptr::null_mut(), ptr::null_mut());
-        }
-        ffi::sqlite3_close(db);
-        rc
+            )
+        };
+        // SAFETY: as above.
+        rc = unsafe { ffi::sqlite3_exec(db, sql.as_ptr(), None, ptr::null_mut(), ptr::null_mut()) };
     }
+    // SAFETY: `db` is closed once.
+    unsafe { ffi::sqlite3_close(db) };
+    rc
 }
 
 /// `foreign_exec_raw` as a NIF: the result code.
@@ -259,8 +270,8 @@ fn matching(name: *const c_char, sync: bool) -> Option<MutexGuard<'static, Optio
     for_this.then_some(slot)
 }
 
-fn fire(slot: &mut Option<Fault>) -> c_int {
-    let f = slot.as_mut().expect("armed");
+fn fire(slot: &mut Option<Fault>) -> Option<c_int> {
+    let f = slot.as_mut()?;
     let rc = f.rc;
     f.page_at = None;
     f.times -= 1;
@@ -269,7 +280,7 @@ fn fire(slot: &mut Option<Fault>) -> c_int {
         *slot = None;
         ARMED.store(false, Ordering::SeqCst);
     }
-    rc
+    Some(rc)
 }
 
 /// Called by `xWrite` after the write reached the file: the error to return
@@ -285,11 +296,11 @@ pub(crate) fn after_write(
     let mut slot = matching(name, false)?;
     let f = slot.as_mut()?;
     if f.page_at == Some(offset) {
-        return Some(fire(&mut slot));
+        return fire(&mut slot);
     }
     if amt == 24 {
         // SAFETY: SQLite passes `amt` readable bytes.
-        let header = unsafe { std::slice::from_raw_parts(buf as *const u8, 24) };
+        let header = unsafe { &*(buf as *const [u8; 24]) };
         let commits = header[4..8] != [0; 4];
         if commits == (f.kind == Kind::CommitFrame) {
             if f.skip > 0 {
@@ -310,7 +321,7 @@ pub(crate) fn after_sync(name: *const c_char) -> Option<c_int> {
         f.skip -= 1;
         return None;
     }
-    Some(fire(&mut slot))
+    fire(&mut slot)
 }
 
 /// Arms a fault on the file `path` (the whole path, as SQLite opens it):
