@@ -817,7 +817,10 @@ is that frames committed and not yet replicated imply a write in flight
 ## 16. Lazy restore
 
 A waking cell with no reusable local file (§7) can serve before its file is
-downloaded. `lazy_restore: false` turns this off. The two gates are
+downloaded. `lazy_restore: false` turns this off, and `lazy_restore: [mode:
+:whole]` makes a cell read its whole chain before its first statement (the
+full restore of §6, with no hydrator and no gate to wait for); `Config.lazy_mode/2`
+is the one place that decides the mode. The two gates are
 `lazy_restore: [verify_writes:, verify_reads:]`:
 
 - `verify_writes` (default `true`), the write gate: `:transaction`,
@@ -832,8 +835,9 @@ page and waits. The statement fails with `SQLITE_IOERR` if the fetch gives
 up, or if no answer comes within `op_timeout_ms` + 1 s.
 
 **Hydrator.** One process per lazy cell fetches the missing pages. When every
-page is local it reads each object of the chain whole and compares it with
-the pages it installed, then checks the database checksum. If both match it
+page is local it reads each object of the chain whole, except the files a
+page-hash sidecar vouched for, and compares it with the pages it installed,
+then checks the database checksum. If both match it
 sends `{:hydrated, pid}`. Otherwise it stops the cell with
 `{:hydration_failed, reason}`, and parked callers get
 `{:error, {:hydration_failed, reason}}`.
@@ -872,14 +876,62 @@ not know its keys. A file at or below
 `verify_bytes` is read whole and checked against its file checksum before any
 of its pages is served.
 
-**Cost.** Each lazy hydration reads every object of the chain whole, after
-the ranged reads. The `[:alambique, :replication, :hydrate]` event
-reports `check_objects`, `check_bytes` and `check_duration`.
+**Page-hash sidecar.** With `lazy_restore: [page_sidecar: true]` the writers
+of the instance put a sidecar object beside each segment and snapshot larger
+than `verify_bytes` (format in [segment-format.md](segment-format.md)): a
+BLAKE3-128 hash per page, and one of the header, the page index and the
+trailer, bound to the level, the TXIDs, the size and the file checksum of the
+file. Every writer (the upload of a commit, the snapshot, the replace of a
+rewind, the merged files and snapshots of compaction) calls one function after
+the object landed. Reading does not depend on the setting: a restore that
+lists a sidecar beside a file above `verify_bytes` reads it, once per file,
+before the first statement, at most a quarter of `restore: [max_inflight_bytes:]`
+of them in total (20 bytes per page, kept in the page map until the end of the
+hydration and counted against the budget of the hydration).
+
+- The restore binds the sidecar to the file it staged: level, TXIDs, page
+  size, size, file checksum, the hash of the header and index it read, and the
+  page numbers of the index. Anything else, a sidecar that is damaged (its own
+  hash fails), of another version, or too large for the share, is dropped with
+  `[:alambique, :replication, :sidecar]` and the file is read whole at the end
+  as without a sidecar. A bad sidecar is never an outage.
+- A run of frames is decoded and every page hashed before any of its pages is
+  installed: a run with one wrong page installs nothing.
+- On a mismatch the whole object decides. If it fails its file checksum the
+  read fails as it would without a sidecar. If it agrees with the sidecar the
+  ranged read was wrong, and fails with `{:bad_range, offset}`. Otherwise the
+  sidecar is wrong: it is dropped, the run is read again, and the file is read
+  whole at the end.
+- A file covered by its sidecar is not read whole at the end. The check of the
+  database checksum stays, and so do the gates: the sidecar vouches for each
+  page as it arrives, not for the chain, and not for pages not fetched yet, so
+  writes still wait for the end of the hydration.
+
+**Cost.** A hydration reads every object of the chain whole after the ranged
+reads, except the covered files. The `[:alambique, :replication, :hydrate]`
+event reports `check_objects`, `check_bytes`, `check_duration` and
+`check_covered`.
+
+With sidecars, per object written above `verify_bytes`: one more `PUT` (and
+one `GET` and, if it differs, one `PUT` when a key existed), the CPU to decode
+the file and hash each page, and `80 + 20 × pages` bytes stored. The `PUT` is on
+the path of the acknowledgment of a commit whose segment is that large; it is
+retried once and never fails the commit. Per restore: one `GET` of
+`80 + 20 × pages` bytes for each covered file before the first query, one
+decode and one hash per page delivered, and one more decode to install it.
+These costs are not measured.
+
+**Deleting.** Trash, retention, compaction and the cleanup of a moved cell
+delete a sidecar with its object: `Keys.data_keys/3` returns the sidecars among
+the keys it is given and `Keys.parse/3` never does, so planning a restore, `ops
+inspect` and the listings of replicas and queries do not see them. An object
+sorts before its sidecar, so a crash between the two leaves an orphan
+sidecar; retention marks the sidecars whose object is not listed.
 
 **Limit: unchecked pages.** Until the end of the hydration a page of a file
-above `verify_bytes` is served with the arrival checks only: its content can
-be wrong, and statements can read it. The write gate keeps such pages out of
-acknowledged writes. `verify_reads: true` covers reads too.
+above `verify_bytes` with no sidecar is served with the arrival checks only: its
+content can be wrong, and statements can read it. The write gate keeps such
+pages out of acknowledged writes. `verify_reads: true` covers reads too.
 
 ## 17. Versioned migrations
 
