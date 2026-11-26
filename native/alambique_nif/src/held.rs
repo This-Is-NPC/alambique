@@ -11,7 +11,7 @@
 //! restart of the WAL. `Watch` compares it with what the cell's own
 //! operations account for.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::ffi::{c_void, OsStr};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
@@ -25,9 +25,50 @@ use libsqlite3_sys as ffi;
 /// Device and inode of a main database file.
 pub type FileId = (u64, u64);
 
-static HELD: Mutex<BTreeSet<FileId>> = Mutex::new(BTreeSet::new());
+/// Who may take a file back that its cell closed and kept held: the process
+/// of the cell, as the term of its pid (an immediate, so it identifies it).
+pub type Owner = u64;
+
+/// A file in the table: held by an open connection, or kept by its cell while
+/// the connection is closed, until `token` is dropped or the cell opens again.
+enum Entry {
+    Open,
+    Kept { owner: Owner, token: u64 },
+}
+
+static HELD: Mutex<BTreeMap<FileId, Entry>> = Mutex::new(BTreeMap::new());
+
+/// What `Stamp::of` read of a file: enough to tell that it is the file that
+/// was closed, untouched. The inode number alone is not: closing every
+/// descriptor lets the file system reuse it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stamp {
+    id: FileId,
+    size: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+
+impl Stamp {
+    /// `None` when the file does not exist.
+    pub fn of(path: &Path) -> Option<Stamp> {
+        std::fs::metadata(path).ok().map(|m| Stamp {
+            id: (m.dev(), m.ino()),
+            size: m.size(),
+            mtime: (m.mtime(), m.mtime_nsec()),
+            ctime: (m.ctime(), m.ctime_nsec()),
+        })
+    }
+
+    pub fn id(&self) -> FileId {
+        self.id
+    }
+}
 
 thread_local! {
+    /// The file the calling thread reopens for its cell: its open is not
+    /// refused (`permit`).
+    static REOPENING: std::cell::Cell<Option<FileId>> = const { std::cell::Cell::new(None) };
     /// Set by the VFS when it refused an open because the file is held, so the
     /// thread that called `sqlite3_open_v2` can tell why it failed.
     static REFUSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -64,24 +105,84 @@ pub fn file_id(path: &Path) -> Option<FileId> {
     std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
 }
 
-/// Whether a cell's connection holds the file.
+/// Whether a cell's connection holds the file, or its cell keeps it.
 pub fn is_held(id: FileId) -> bool {
-    HELD.lock().unwrap_or_else(|e| e.into_inner()).contains(&id)
+    table().contains_key(&id)
+}
+
+fn table() -> std::sync::MutexGuard<'static, BTreeMap<FileId, Entry>> {
+    HELD.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Takes the file; `false` when it is held already.
 pub fn hold(id: FileId) -> bool {
-    HELD.lock().unwrap_or_else(|e| e.into_inner()).insert(id)
+    match table().entry(id) {
+        std::collections::btree_map::Entry::Vacant(v) => {
+            v.insert(Entry::Open);
+            true
+        }
+        std::collections::btree_map::Entry::Occupied(_) => false,
+    }
 }
 
 pub fn release(id: FileId) {
-    HELD.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    table().remove(&id);
+}
+
+/// The cell `owner` closed its connection: the file stays in the table,
+/// kept under `token`, so that no other read-write open gets in meanwhile.
+pub fn keep(id: FileId, owner: Owner, token: u64) {
+    table().insert(id, Entry::Kept { owner, token });
+}
+
+/// Gives back a file kept under `token`; a file taken again or kept under
+/// another token is not touched.
+pub fn drop_kept(id: FileId, token: u64) {
+    let mut table = table();
+    if matches!(table.get(&id), Some(Entry::Kept { token: t, .. }) if *t == token) {
+        table.remove(&id);
+    }
+}
+
+/// While the value lives, the calling thread's open of `path` is allowed:
+/// the file is kept by `owner`, which opens it again.
+pub struct Permit;
+
+pub fn permit(path: &Path, owner: Owner) -> Option<Permit> {
+    let id = file_id(path)?;
+    match table().get(&id) {
+        Some(Entry::Kept { owner: o, .. }) if *o == owner => {
+            REOPENING.with(|r| r.set(Some(id)));
+            Some(Permit)
+        }
+        _ => None,
+    }
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        REOPENING.with(|r| r.set(None));
+    }
+}
+
+/// The reopened file is held by an open connection again. `false` when it is
+/// not kept by `owner`.
+pub fn reclaim(id: FileId, owner: Owner) -> bool {
+    let mut table = table();
+    match table.get(&id) {
+        Some(Entry::Kept { owner: o, .. }) if *o == owner => {
+            table.insert(id, Entry::Open);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// The check of the VFS: whether a read-write open of the main database file
 /// `path` must be refused. Notes the refusal for `take_refused`.
 pub fn refuse_open(path: &Path) -> bool {
-    let refused = !bypassed() && file_id(path).is_some_and(is_held);
+    let refused = !bypassed()
+        && file_id(path).is_some_and(|id| is_held(id) && REOPENING.with(|r| r.get()) != Some(id));
     if refused {
         REFUSED.with(|r| r.set(true));
     }
@@ -406,6 +507,70 @@ mod tests {
         assert!(!hold(id));
         release(id);
         assert!(!is_held(id));
+    }
+
+    #[test]
+    fn a_kept_file_stays_held_until_its_cell_takes_it_or_the_keeper_drops() {
+        let id = (u64::MAX, 424_243);
+        assert!(hold(id));
+        keep(id, 7, 1);
+        assert!(is_held(id));
+        assert!(!hold(id), "a kept file is not free");
+        // Only the keeper takes it back, and only once.
+        assert!(!reclaim(id, 8));
+        assert!(reclaim(id, 7));
+        assert!(!reclaim(id, 7));
+        // The old keeper dropping later does not release the new hold.
+        drop_kept(id, 1);
+        assert!(is_held(id));
+        release(id);
+
+        // A keeper dropped without a reopen gives the file back; a token of
+        // another keeping does not.
+        assert!(hold(id));
+        keep(id, 7, 2);
+        drop_kept(id, 1);
+        assert!(is_held(id));
+        drop_kept(id, 2);
+        assert!(!is_held(id));
+    }
+
+    #[test]
+    fn a_stamp_tells_a_changed_or_replaced_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cell.db");
+        std::fs::write(&path, b"abc").unwrap();
+        let at = |secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        let set = |t| {
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(t)
+                .unwrap()
+        };
+        set(at(1_000));
+        let before = Stamp::of(&path).unwrap();
+        assert_eq!(Stamp::of(&path), Some(before));
+        // The same size and the same name, written at another time.
+        set(at(2_000));
+        assert_ne!(Stamp::of(&path), Some(before));
+
+        // Another file of the same size and time under the name: the inode
+        // and the change time tell it.
+        let copy = dir.path().join("copy");
+        std::fs::copy(&path, &copy).unwrap();
+        let file = std::fs::File::options().write(true).open(&copy).unwrap();
+        file.set_modified(at(2_000)).unwrap();
+        drop(file);
+        let now = Stamp::of(&path).unwrap();
+        std::fs::rename(&copy, &path).unwrap();
+        let replaced = Stamp::of(&path).unwrap();
+        assert_eq!((replaced.size, replaced.mtime), (now.size, now.mtime));
+        assert_ne!(replaced, now);
+
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(Stamp::of(&path), None);
     }
 
     #[test]
