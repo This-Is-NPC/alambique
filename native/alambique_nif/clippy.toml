@@ -1,0 +1,10 @@
+# Thresholds of the lints denied in Cargo.toml ([lints.clippy]).
+cognitive-complexity-threshold = 15
+too-many-lines-threshold = 60
+too-many-arguments-threshold = 7
+
+# Tests may unwrap, expect, panic and index: a failure there is the test failing.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true

@@ -30,8 +30,25 @@ unsafe_op_in_unsafe_fn = "deny"
 # `fuzzing` is set by cargo-fuzz.
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 
+# Thresholds (cognitive complexity, lines, arguments) and the test exemptions
+# are in clippy.toml.
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+multiple_unsafe_ops_per_block = "deny"
+unnecessary_safety_comment = "deny"
+allow_attributes_without_reason = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+cast_possible_truncation = "deny"
+cast_sign_loss = "deny"
+as_conversions = "deny"
+cognitive_complexity = "deny"
+too_many_lines = "deny"
+too_many_arguments = "deny"
 
 [dev-dependencies]
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
