@@ -539,7 +539,7 @@ defmodule Alambique.Cell do
   # Only the pragma runs native code, so only it holds the marker.
   defp set_cache(state, kib) do
     Inflight.busy(state.inflight, fn ->
-      with :ok <- refresh_fault(state),
+      with :ok <- pragma_fault(state, :cell_before_refresh_pragma),
            :ok <- Sqlite.execute(state.conn, "PRAGMA cache_size = -#{kib}", write: true) do
         :ok
       else
@@ -548,8 +548,8 @@ defmodule Alambique.Cell do
     end)
   end
 
-  defp refresh_fault(state) do
-    case Fault.point(:cell_before_refresh_pragma, %{cell: state.id}) do
+  defp pragma_fault(state, point) do
+    case Fault.point(point, %{cell: state.id}) do
       {:error, _} = error -> error
       _ -> :ok
     end
@@ -1451,18 +1451,18 @@ defmodule Alambique.Cell do
       {:noreply, arm_idle_cache(state)}
     else
       # A pragma that fails leaves the cache as it was: not shrunk, tried again.
-      case Sqlite.execute(
-             state.conn,
-             "PRAGMA cache_size = -#{State.cell_opt(state, :idle_cache_kib)}",
-             write: true
-           ) do
-        :ok ->
-          # The garbage of the last calls would stay for as long as the cell is idle.
-          if State.cell_opt(state, :idle_gc), do: :erlang.garbage_collect()
-          {:noreply, %{state | idle_cache: :shrunk}}
-
-        {:error, _reason} ->
-          {:noreply, arm_idle_cache(state)}
+      with :ok <- pragma_fault(state, :cell_before_shrink_pragma),
+           :ok <-
+             Sqlite.execute(
+               state.conn,
+               "PRAGMA cache_size = -#{State.cell_opt(state, :idle_cache_kib)}",
+               write: true
+             ) do
+        # The garbage of the last calls would stay for as long as the cell is idle.
+        if State.cell_opt(state, :idle_gc), do: :erlang.garbage_collect()
+        {:noreply, %{state | idle_cache: :shrunk}}
+      else
+        {:error, _reason} -> {:noreply, arm_idle_cache(state)}
       end
     end
   end
