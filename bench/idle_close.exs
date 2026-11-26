@@ -137,7 +137,7 @@ defmodule Bench do
         line("first call, hibernated (local file)", latency(asleep))
 
         renewals(ids, close_ms, renewal_s)
-        cycle(ids, close_ms, cycles)
+        cycle(ids, cycles)
       end)
     after
       :telemetry.detach(handler)
@@ -198,7 +198,7 @@ defmodule Bench do
   end
 
   # Each cell is called a little after it closed, so every call reopens.
-  defp cycle(ids, close_ms, cycles) do
+  defp cycle(ids, cycles) do
     settle(ids, :closed)
     flush([:alambique, :cell, :reopen])
     flush([:alambique, :cell, :idle_close])
@@ -271,7 +271,7 @@ defmodule Bench do
              compaction: false,
              sql: [orphan_frames: :replicate],
              idle_timeout_ms: 600_000,
-             lease_ttl_ms: 60_000,
+             lease_ttl_ms: 6_000,
              awake: awake
            ]}
         ],
@@ -311,7 +311,7 @@ defmodule Bench do
 
   defp retry(fun) do
     case fun.() do
-      {:error, :overloaded} ->
+      {:error, reason} when reason in [:overloaded, :busy] ->
         Process.sleep(10)
         retry(fun)
 
