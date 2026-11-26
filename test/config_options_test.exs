@@ -105,6 +105,36 @@ defmodule Alambique.ConfigOptionsTest do
     end
   end
 
+  test "awake.idle_close_after_ms is off by default, below idle_timeout_ms and above the shrink",
+       ctx do
+    assert Alambique.Config.build(base(ctx)).awake.idle_close_after_ms == nil
+
+    on =
+      base(ctx,
+        idle_timeout_ms: 1_000,
+        awake: [idle_cache_after_ms: 100, idle_cache_kib: 0, idle_close_after_ms: 101]
+      )
+
+    assert %{idle_close_after_ms: 101} = Alambique.Config.build(on).awake
+
+    for {bad, message} <- [
+          {1_000, ~r/idle_close_after_ms must be less than :idle_timeout_ms/},
+          {5_000, ~r/idle_close_after_ms must be less than :idle_timeout_ms/},
+          {100, ~r/idle_close_after_ms must be greater than :idle_cache_after_ms/},
+          {0, ~r/idle_close_after_ms must be nil or a positive/},
+          {:soon, ~r/idle_close_after_ms must be nil or a positive/}
+        ] do
+      assert_raise ArgumentError, message, fn ->
+        Alambique.Config.build(
+          base(ctx,
+            idle_timeout_ms: 1_000,
+            awake: [idle_cache_after_ms: 100, idle_cache_kib: 0, idle_close_after_ms: bad]
+          )
+        )
+      end
+    end
+  end
+
   describe "feed cleanup" do
     defp feed(ctx, opts, rest \\ []),
       do: Alambique.Config.build(base(ctx, [feed: opts] ++ rest)).feed
@@ -427,6 +457,7 @@ defmodule Alambique.ConfigOptionsTest do
           {:cache_kib, 64, 0},
           {:idle_cache_after_ms, nil, 0},
           {:idle_cache_kib, 0, -1},
+          {:idle_close_after_ms, nil, 0},
           {:idle_gc, false, 1},
           {:idle_timeout_ms, 5, 0}
         ] do
@@ -440,6 +471,7 @@ defmodule Alambique.ConfigOptionsTest do
                :cache_kib,
                :idle_cache_after_ms,
                :idle_cache_kib,
+               :idle_close_after_ms,
                :idle_gc,
                :idle_timeout_ms,
                :locking_mode

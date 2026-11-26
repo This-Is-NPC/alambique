@@ -104,6 +104,36 @@ defmodule Alambique.CellOptionsTest do
       assert is_reference(in_cell(pid(inst, "node"), & &1.idle_cache))
     end
 
+    test "with idle_close_after_ms nil turns the node's close off for its cell", ctx do
+      inst = start(ctx, awake: [idle_close_after_ms: 100])
+
+      Callbacks.set(fn
+        "off" -> [awake: [idle_close_after_ms: nil]]
+        _ -> []
+      end)
+
+      assert {:ok, _} = wake(inst, "off")
+      assert {:ok, _} = wake(inst, "node")
+      eventually(fn -> in_cell(pid(inst, "node"), & &1.conn) == nil end)
+      # The cell that closed is the proof the timer ran for the other.
+      assert in_cell(pid(inst, "off"), & &1.idle_close) == nil
+      assert in_cell(pid(inst, "off"), & &1.conn) != nil
+    end
+
+    test "turns the close on for its cell where the node has it off", ctx do
+      inst = start(ctx)
+
+      Callbacks.set(fn
+        "on" -> [awake: [idle_close_after_ms: 100]]
+        _ -> []
+      end)
+
+      assert {:ok, _} = wake(inst, "on")
+      assert {:ok, _} = wake(inst, "node")
+      eventually(fn -> in_cell(pid(inst, "on"), & &1.conn) == nil end)
+      assert in_cell(pid(inst, "node"), & &1.conn) != nil
+    end
+
     test "turns the shrink on for its cell where the node has it off", ctx do
       inst = start(ctx)
 
@@ -323,6 +353,32 @@ defmodule Alambique.CellOptionsTest do
       await_event(
         [:alambique, :cell, :options, :repaired],
         "after",
+        5_000,
+        &(&1.field == :idle_cache_after_ms)
+      )
+    end
+
+    test "turns the close off when it is not below the idle timeout", %{inst: inst} do
+      Callbacks.set(fn _ -> [idle_timeout_ms: 2_000, awake: [idle_close_after_ms: 2_000]] end)
+      assert {:ok, _} = wake(inst, "close")
+      assert cell_opts(inst, "close") == %{idle_timeout_ms: 2_000, idle_close_after_ms: nil}
+
+      await_event(
+        [:alambique, :cell, :options, :repaired],
+        "close",
+        5_000,
+        &(&1.field == :idle_close_after_ms)
+      )
+    end
+
+    test "turns the shrink off when it is not below the close", %{inst: inst} do
+      Callbacks.set(fn _ -> [awake: [idle_cache_after_ms: 300, idle_close_after_ms: 300]] end)
+      assert {:ok, _} = wake(inst, "shrink")
+      assert cell_opts(inst, "shrink") == %{idle_cache_after_ms: nil, idle_close_after_ms: 300}
+
+      await_event(
+        [:alambique, :cell, :options, :repaired],
+        "shrink",
         5_000,
         &(&1.field == :idle_cache_after_ms)
       )
