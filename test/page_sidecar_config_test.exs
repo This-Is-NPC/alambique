@@ -5,12 +5,13 @@ defmodule Alambique.PageSidecarConfigTest do
   import Alambique.CellHelpers
 
   alias Alambique.{Config, Placement, Tx}
+  alias AlambiqueTestkit.MemoryStore
 
   @schema [{1, "CREATE TABLE t (n INTEGER PRIMARY KEY, v BLOB)"}]
   @lazy [min_bytes: 0, verify_bytes: 0, concurrency: 2, batch_bytes: 1_024, miss_pages: 4]
 
   setup do
-    capture([[:alambique, :replication, :hydrate]])
+    capture([[:alambique, :replication, :hydrate], [:alambique, :replication, :sidecar]])
     setup_store()
   end
 
@@ -60,6 +61,29 @@ defmodule Alambique.PageSidecarConfigTest do
         start_instance(ctx, migrations: @schema, lazy_restore: [page_sidecar: 1])
       end
     end
+  end
+
+  test "a commit is acknowledged before its sidecar is written", ctx do
+    inst = start_instance(ctx, migrations: @schema, lazy_restore: @lazy ++ [page_sidecar: true])
+    cell = unique_cell()
+    {:ok, _} = Alambique.execute(inst, cell, "INSERT INTO t VALUES (1, x'00')")
+
+    # The put of a sidecar takes longer than the call may: on the path of
+    # the acknowledgment the next commit would fail.
+    MemoryStore.inject(ctx.store_config,
+      kind: :latency,
+      ms: 5_000,
+      ops: [:put],
+      key: ~r/\.pages$/
+    )
+
+    assert {:ok, _} = Alambique.execute(inst, cell, "INSERT INTO t VALUES (2, x'00')")
+    assert {:ok, %{rows: [[2]]}} = Alambique.query(inst, cell, "SELECT count(*) FROM t")
+
+    # The sidecar gave up at its deadline, and reported it.
+    assert_receive {:telemetry, [:alambique, :replication, :sidecar], _,
+                    %{result: :write_failed}},
+                   15_000
   end
 
   describe "a cell that wrote sidecars" do

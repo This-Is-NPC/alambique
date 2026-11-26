@@ -2,6 +2,7 @@ defmodule Alambique.PageSidecarWritersTest do
   @moduledoc "Every writer of a segment or snapshot writes its page-hash sidecar after it (design §16)."
   use ExUnit.Case, async: false
 
+  import Alambique.CellHelpers, only: [eventually: 1]
   import Alambique.CompactionHelpers
 
   alias Alambique.Replication
@@ -38,6 +39,15 @@ defmodule Alambique.PageSidecarWritersTest do
     k = key(env, 0, 1, 1)
     assert sidecar(env, k) == expected(env, 0, k)
     assert sidecar(env, key(env, 0, 2, 2)) == expected(env, 0, key(env, 0, 2, 2))
+  end
+
+  test "a sync that asks for it writes the sidecar after it returned, in its own process", env do
+    owner = new_owner(env, "a.db")
+    Enum.each([{:put, 1, 300}], &Alambique.ReplicationHelpers.safe_op(owner.conn, &1))
+    assert {:ok, _} = Replicator.sync(owner.state, env.ctx, sidecar: :async)
+    k = key(env, 0, 1, 1)
+    assert stored(env, k) != nil
+    eventually(fn -> sidecar(env, k) == expected(env, 0, k) end)
   end
 
   test "a context without the setting gets none", env do

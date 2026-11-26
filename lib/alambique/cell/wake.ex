@@ -324,6 +324,7 @@ defmodule Alambique.Cell.Wake do
         Replicator.fence(repl, state.repl_ctx,
           conn: conn,
           deadline: State.deadline(state),
+          sidecar: :async,
           landed: &Hold.put_upload(state.config, state.repl_ctx, &1)
         )
 

@@ -144,7 +144,8 @@ linear, so errors cannot cancel in it, and it names the page and the file it
 belongs to. A sidecar is `80 + 20 × pages` bytes: 5 MiB for 1 GiB of 4 KiB
 pages.
 
-A writer puts the file first and its sidecar after it, only for files larger
+A writer puts the file first and its sidecar after it (after the commit that
+wrote the file was acknowledged), only for files larger
 than `lazy_restore: [verify_bytes:]` and only with `lazy_restore:
 [page_sidecar: true]`. A crash between the two leaves a file without a
 sidecar, which a restore reads whole. A sidecar of a file that was
