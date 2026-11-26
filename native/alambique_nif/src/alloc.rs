@@ -262,9 +262,27 @@ extern "C" fn x_init(_: *mut c_void) -> c_int {
 
 extern "C" fn x_shutdown(_: *mut c_void) {}
 
-/// Makes SQLite allocate through the BEAM. Must run before SQLite
-/// initializes; SQLite copies the table.
-pub fn install_sqlite() -> bool {
+/// Refuses a SQLite built with `SQLITE_ENABLE_MEMORY_MANAGEMENT`: that option
+/// pools the page caches of all connections at run time, so `cache_kib` would
+/// be a share of a pool and the shrink of an idle cell would free nothing
+/// (`.cargo/config.toml` builds without it).
+fn refuse_pooled_caches(memory_management: bool) -> Result<(), String> {
+    if memory_management {
+        return Err("SQLite is built with SQLITE_ENABLE_MEMORY_MANAGEMENT; \
+                    build it with -USQLITE_ENABLE_MEMORY_MANAGEMENT (LIBSQLITE3_FLAGS) \
+                    from native/alambique_nif"
+            .into());
+    }
+    Ok(())
+}
+
+/// Makes SQLite allocate through the BEAM, with a page cache of its own for
+/// each connection. Must run before SQLite initializes; SQLite copies the
+/// table.
+pub fn install_sqlite() -> Result<(), String> {
+    // SAFETY: a NUL-terminated name; the function only reads it.
+    let pooled = unsafe { ffi::sqlite3_compileoption_used(c"ENABLE_MEMORY_MANAGEMENT".as_ptr()) };
+    refuse_pooled_caches(pooled != 0)?;
     let methods = ffi::sqlite3_mem_methods {
         xMalloc: Some(x_malloc),
         xFree: Some(x_free),
@@ -276,12 +294,24 @@ pub fn install_sqlite() -> bool {
         pAppData: std::ptr::null_mut(),
     };
     // SAFETY: SQLite copies the table; `sqlite3_config` runs before
-    // initialization (`on_load`).
-    unsafe {
+    // initialization (`on_load`). `PAGECACHE` with no buffer keeps SQLite from
+    // carving pages out of bulk blocks, which a shrink could not free.
+    let ok = unsafe {
         ffi::sqlite3_config(
             ffi::SQLITE_CONFIG_MALLOC,
             &methods as *const ffi::sqlite3_mem_methods,
         ) == ffi::SQLITE_OK
+            && ffi::sqlite3_config(
+                ffi::SQLITE_CONFIG_PAGECACHE,
+                std::ptr::null_mut::<c_void>(),
+                0 as c_int,
+                0 as c_int,
+            ) == ffi::SQLITE_OK
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err("sqlite3_config failed".into())
     }
 }
 
@@ -306,6 +336,21 @@ mod tests {
         }
         let _p = probe::panic_at("x_roundup");
         assert_eq!(x_roundup(13), 13);
+    }
+
+    // The crate's .cargo/config.toml sets the flag; a build started from
+    // another directory would not read it.
+    #[test]
+    fn sqlite_is_built_without_memory_management() {
+        // SAFETY: a NUL-terminated name.
+        let used = unsafe { ffi::sqlite3_compileoption_used(c"ENABLE_MEMORY_MANAGEMENT".as_ptr()) };
+        assert_eq!(used, 0);
+    }
+
+    #[test]
+    fn a_build_with_memory_management_is_refused() {
+        assert!(refuse_pooled_caches(true).is_err());
+        assert!(refuse_pooled_caches(false).is_ok());
     }
 
     #[test]

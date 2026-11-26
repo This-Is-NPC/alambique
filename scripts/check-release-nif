@@ -38,7 +38,8 @@ for name in "${names[@]}"; do
 done
 
 target="${CARGO_TARGET_DIR:-$crate/target}/release-check-$expect"
-cargo build --release --manifest-path "$crate/Cargo.toml" --target-dir "$target" "${features[@]}"
+# From the crate directory: its .cargo/config.toml sets the SQLite flags.
+(cd "$crate" && cargo build --release --target-dir "$target" "${features[@]}")
 lib="$target/release/libalambique_nif.so"
 
 # Rustler keeps each NIF name as a string of the init table; symbols are listed too.
