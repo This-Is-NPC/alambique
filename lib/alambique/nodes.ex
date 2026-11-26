@@ -131,11 +131,7 @@ defmodule Alambique.Nodes do
   @spec register(ctx, String.t(), String.t(), String.t(), keyword) :: {:ok, t} | error
   def register(ctx, node_id, incarnation, advertise, opts \\ [])
       when is_binary(node_id) and is_binary(incarnation) and is_binary(advertise) do
-    meta = Keyword.get(opts, :meta, %{})
-    takeover = Keyword.get(opts, :takeover, :restart)
-
-    unless is_map(meta) and takeover in [:restart, :free],
-      do: raise(ArgumentError, "invalid register options: #{inspect(opts)}")
+    {meta, takeover} = register_options!(opts)
 
     mine = %__MODULE__{
       node_id: node_id,
@@ -149,17 +145,26 @@ defmodule Alambique.Nodes do
     }
 
     case fetch(ctx, node_id) do
-      {:error, :not_found} ->
-        write(ctx, mine, :if_none_match, :new)
+      {:error, :not_found} -> write(ctx, mine, :if_none_match, :new)
+      {:ok, current} -> register_over(ctx, current, mine, takeover)
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
-      {:ok, current} ->
-        case takeover_kind(ctx, current, mine, takeover) do
-          {:ok, kind} -> take(ctx, current, mine, kind)
-          {:error, _} = held -> held
-        end
+  defp register_options!(opts) do
+    meta = Keyword.get(opts, :meta, %{})
+    takeover = Keyword.get(opts, :takeover, :restart)
 
-      {:error, reason} ->
-        {:error, reason}
+    unless is_map(meta) and takeover in [:restart, :free],
+      do: raise(ArgumentError, "invalid register options: #{inspect(opts)}")
+
+    {meta, takeover}
+  end
+
+  defp register_over(ctx, current, mine, takeover) do
+    case takeover_kind(ctx, current, mine, takeover) do
+      {:ok, kind} -> take(ctx, current, mine, kind)
+      {:error, _} = held -> held
     end
   end
 
@@ -229,18 +234,17 @@ defmodule Alambique.Nodes do
 
   defp reconcile_renew(ctx, entry, reason) do
     case fetch(ctx, entry.node_id) do
-      {:ok, stored} ->
-        cond do
-          stored.token != entry.token or stored.released -> lost(entry, :renew)
-          stored.seq > entry.seq -> {:ok, stored}
-          true -> {:error, reason}
-        end
+      {:ok, stored} -> renewed_meanwhile(stored, entry, reason)
+      {:error, :not_found} -> lost(entry, :renew)
+      {:error, read_reason} -> {:error, read_reason}
+    end
+  end
 
-      {:error, :not_found} ->
-        lost(entry, :renew)
-
-      {:error, read_reason} ->
-        {:error, read_reason}
+  defp renewed_meanwhile(stored, entry, reason) do
+    cond do
+      stored.token != entry.token or stored.released -> lost(entry, :renew)
+      stored.seq > entry.seq -> {:ok, stored}
+      true -> {:error, reason}
     end
   end
 
@@ -262,14 +266,18 @@ defmodule Alambique.Nodes do
         :ok
 
       {:error, reason} ->
-        case fetch(ctx, entry.node_id) do
-          {:ok, %{token: token}} when token != entry.token -> lost(entry, :deregister)
-          {:ok, %{released: true}} -> :ok
-          {:ok, stored} when stored.seq > entry.seq and retry? -> release(ctx, stored, false)
-          {:ok, _} -> {:error, reason}
-          {:error, :not_found} -> lost(entry, :deregister)
-          {:error, read_reason} -> {:error, read_reason}
-        end
+        release_failed(ctx, entry, retry?, reason)
+    end
+  end
+
+  defp release_failed(ctx, entry, retry?, reason) do
+    case fetch(ctx, entry.node_id) do
+      {:ok, %{token: token}} when token != entry.token -> lost(entry, :deregister)
+      {:ok, %{released: true}} -> :ok
+      {:ok, stored} when stored.seq > entry.seq and retry? -> release(ctx, stored, false)
+      {:ok, _} -> {:error, reason}
+      {:error, :not_found} -> lost(entry, :deregister)
+      {:error, read_reason} -> {:error, read_reason}
     end
   end
 
@@ -298,21 +306,20 @@ defmodule Alambique.Nodes do
   def sweep(ctx, opts \\ []) do
     limit = Keyword.get(opts, :limit, :infinity)
 
-    with {:ok, entries} <- entries(ctx) do
-      entries
-      |> Enum.filter(&dead?(ctx, &1))
-      |> take(limit)
-      |> Enum.reduce_while({:ok, 0}, fn entry, {:ok, removed} ->
-        case remove(ctx, entry) do
-          {:ok, n} -> {:cont, {:ok, removed + n}}
-          {:error, _} = error -> {:halt, error}
-        end
-      end)
-      |> case do
-        {:ok, removed} -> {:ok, %{removed: removed}}
-        error -> error
-      end
+    with {:ok, entries} <- entries(ctx),
+         {:ok, removed} <-
+           entries |> Enum.filter(&dead?(ctx, &1)) |> take(limit) |> remove_all(ctx) do
+      {:ok, %{removed: removed}}
     end
+  end
+
+  defp remove_all(entries, ctx) do
+    Enum.reduce_while(entries, {:ok, 0}, fn entry, {:ok, removed} ->
+      case remove(ctx, entry) do
+        {:ok, n} -> {:cont, {:ok, removed + n}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
   end
 
   defp take(entries, :infinity), do: entries
@@ -320,21 +327,20 @@ defmodule Alambique.Nodes do
 
   defp remove(ctx, entry) do
     case fetch(ctx, entry.node_id) do
-      {:ok, current} ->
-        if dead?(ctx, current) do
-          with :ok <- Conditional.delete(ctx, key(ctx, entry.node_id)) do
-            unless current.released, do: expired(current, :sweep)
-            {:ok, 1}
-          end
-        else
-          {:ok, 0}
-        end
+      {:ok, current} -> remove_dead(ctx, current)
+      {:error, :not_found} -> {:ok, 0}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
-      {:error, :not_found} ->
-        {:ok, 0}
+  defp remove_dead(ctx, current) do
+    if dead?(ctx, current), do: delete_entry(ctx, current), else: {:ok, 0}
+  end
 
-      {:error, reason} ->
-        {:error, reason}
+  defp delete_entry(ctx, current) do
+    with :ok <- Conditional.delete(ctx, key(ctx, current.node_id)) do
+      unless current.released, do: expired(current, :sweep)
+      {:ok, 1}
     end
   end
 
@@ -438,18 +444,17 @@ defmodule Alambique.Nodes do
   # Unknown fields are ignored; `nil` is an object that is not a node entry.
   defp decode(body, etag) do
     with {:ok, %{} = map} <- Jason.decode(body),
-         %{
-           "node_id" => node_id,
-           "incarnation" => incarnation,
-           "advertise" => advertise,
-           "expires_at_ms" => expires,
-           "seq" => seq,
-           "token" => token,
-           "released" => released
-         }
-         when is_binary(node_id) and is_binary(incarnation) and is_binary(advertise) and
-                is_integer(expires) and is_integer(seq) and is_binary(token) and
-                is_boolean(released) <- map do
+         true <- entry_fields?(map) do
+      %{
+        "node_id" => node_id,
+        "incarnation" => incarnation,
+        "advertise" => advertise,
+        "expires_at_ms" => expires,
+        "seq" => seq,
+        "token" => token,
+        "released" => released
+      } = map
+
       %__MODULE__{
         node_id: node_id,
         incarnation: incarnation,
@@ -465,5 +470,23 @@ defmodule Alambique.Nodes do
     else
       _ -> nil
     end
+  end
+
+  defp entry_fields?(map) do
+    match?(
+      %{
+        "node_id" => node_id,
+        "incarnation" => incarnation,
+        "advertise" => advertise,
+        "expires_at_ms" => expires,
+        "seq" => seq,
+        "token" => token,
+        "released" => released
+      }
+      when is_binary(node_id) and is_binary(incarnation) and is_binary(advertise) and
+             is_integer(expires) and is_integer(seq) and is_binary(token) and
+             is_boolean(released),
+      map
+    )
   end
 end

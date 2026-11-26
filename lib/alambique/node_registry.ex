@@ -16,6 +16,7 @@ defmodule Alambique.NodeRegistry do
   alias Alambique.{Config, Membership, Nodes, Placement, Telemetry}
 
   @doc false
+  @spec child_spec(Config.t()) :: Supervisor.child_spec()
   def child_spec(config) do
     %{
       id: __MODULE__,
@@ -25,6 +26,7 @@ defmodule Alambique.NodeRegistry do
     }
   end
 
+  @spec start_link(Config.t()) :: GenServer.on_start()
   def start_link(config), do: GenServer.start_link(__MODULE__, config, name: config.node_registry)
 
   @doc "The live peers of this node from the last listing; `[]` when the registry is off."
@@ -87,7 +89,8 @@ defmodule Alambique.NodeRegistry do
 
   @impl true
   def terminate(_reason, state) do
-    leave(state)
+    # The state of a process that stops is discarded.
+    _ = leave(state)
     :ok
   end
 
