@@ -9,10 +9,10 @@ defmodule Alambique.CellOptionsRefreshTest do
   import Alambique.CellHelpers
 
   alias Alambique.{Cell, Config, Sqlite}
-  alias Alambique.Cell.Facts
+  alias Alambique.Cell.Layout
   alias AlambiqueTestkit.{CrashPoints, MemoryStore}
 
-  require Facts
+  require Layout
 
   @moduletag :capture_log
 
@@ -80,7 +80,7 @@ defmodule Alambique.CellOptionsRefreshTest do
 
   defp admitted(inst, cell) do
     {_pid, load} = Cell.find(Config.fetch!(inst), cell)
-    :atomics.get(load, Facts.slot(:admitted))
+    :atomics.get(load, Layout.slot(:admitted))
   end
 
   defp lease_keys(%{store_config: config}) do

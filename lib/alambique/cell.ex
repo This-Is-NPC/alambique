@@ -17,9 +17,9 @@ defmodule Alambique.Cell do
   use GenServer, restart: :temporary, shutdown: @shutdown_ms
 
   require Logger
-  require Alambique.Cell.Facts
+  require Alambique.Cell.Layout
 
-  alias Alambique.Cell.{Commit, Db, Facts, Hydration, Local, Options, Pipe, State, Wake}
+  alias Alambique.Cell.{Commit, Db, Facts, Hydration, Layout, Local, Options, Pipe, State, Wake}
   alias Alambique.Compaction.{Compactor, Hold, Slots}
 
   alias Alambique.{
@@ -103,7 +103,7 @@ defmodule Alambique.Cell do
   @doc false
   @spec pending_calls(:atomics.atomics_ref()) :: non_neg_integer
   def pending_calls(load),
-    do: :atomics.get(load, Facts.slot(:callers)) + :atomics.get(load, Facts.slot(:admitted))
+    do: :atomics.get(load, Layout.slot(:callers)) + :atomics.get(load, Layout.slot(:admitted))
 
   @doc false
   # The process of `id` unless it already stopped serving and only has to
@@ -112,17 +112,17 @@ defmodule Alambique.Cell do
   @spec serving(Alambique.Config.t(), String.t()) :: pid | nil
   def serving(config, id) do
     with {pid, load} <- find(config, id),
-         do: if(:atomics.get(load, Facts.slot(:stopped)) == 0, do: pid)
+         do: if(:atomics.get(load, Layout.slot(:stopped)) == 0, do: pid)
   end
 
   # Set when the cell stops serving, before its stop event.
-  defp mark_stopped(state), do: :atomics.put(state.load, Facts.slot(:stopped), 1)
+  defp mark_stopped(state), do: :atomics.put(state.load, Layout.slot(:stopped), 1)
 
   @doc false
   # The monotonic ms of the last call, `nil` until the wake ends.
   @spec last_used(:atomics.atomics_ref()) :: integer | nil
   def last_used(load) do
-    case :atomics.get(load, Facts.slot(:last_used)) do
+    case :atomics.get(load, Layout.slot(:last_used)) do
       0 -> nil
       last -> last
     end
@@ -131,11 +131,11 @@ defmodule Alambique.Cell do
   @doc false
   # The wake has not ended: `last_used` is set when the cell starts serving.
   @spec waking?(:atomics.atomics_ref()) :: boolean
-  def waking?(load), do: :atomics.get(load, Facts.slot(:last_used)) == 0
+  def waking?(load), do: :atomics.get(load, Layout.slot(:last_used)) == 0
 
   @doc false
   @spec wal_bytes(:atomics.atomics_ref()) :: non_neg_integer
-  def wal_bytes(load), do: :atomics.get(load, Facts.slot(:wal_bytes))
+  def wal_bytes(load), do: :atomics.get(load, Layout.slot(:wal_bytes))
 
   @doc false
   # Counts a call before it is sent, so it counts while it waits in the
@@ -147,9 +147,9 @@ defmodule Alambique.Cell do
   # A hibernation is not counted: callers outside the router send it too.
   @spec admit(:atomics.atomics_ref(), pos_integer) :: :ok | :busy
   def admit(load, max) do
-    admitted = Facts.slot(:admitted)
+    admitted = Layout.slot(:admitted)
 
-    if :atomics.add_get(load, admitted, 1) + :atomics.get(load, Facts.slot(:callers)) <= max do
+    if :atomics.add_get(load, admitted, 1) + :atomics.get(load, Layout.slot(:callers)) <= max do
       :ok
     else
       :atomics.sub(load, admitted, 1)
@@ -347,7 +347,7 @@ defmodule Alambique.Cell do
     Facts.put(state.load, :awake_since, System.system_time(:millisecond))
     Facts.put(state.load, :awake_since_mono, state.last_active)
     # Last: a reader that finds it set finds every fact above.
-    :atomics.put(state.load, Facts.slot(:last_used), state.last_active)
+    :atomics.put(state.load, Layout.slot(:last_used), state.last_active)
     state |> arm_idle_cache() |> arm_idle_close()
   end
 
@@ -500,13 +500,13 @@ defmodule Alambique.Cell do
     )
   end
 
-  @option_keys Config.cell_option_keys()
-
   defp apply_options(state, override) do
     next = %{state | cell_opts: override}
 
     changed =
-      for key <- @option_keys, State.cell_opt(state, key) != State.cell_opt(next, key), do: key
+      for key <- Config.cell_option_keys(),
+          State.cell_opt(state, key) != State.cell_opt(next, key),
+          do: key
 
     with :ok <- locking_unchanged(state, next),
          :ok <- refresh_cache(state, next, changed) do
@@ -691,7 +691,7 @@ defmodule Alambique.Cell do
         do: park(state, call, from),
         else: handle_call(request, from, state)
     else
-      :atomics.sub(state.load, Facts.slot(:admitted), 1)
+      :atomics.sub(state.load, Layout.slot(:admitted), 1)
       {:noreply, state}
     end
   end
@@ -702,7 +702,7 @@ defmodule Alambique.Cell do
   def handle_call(:refresh_options, from, %State{mode: :serving} = state) do
     # The router counted the call (`admit/2`); taken back at once, as the
     # call is answered later without being parked.
-    :atomics.sub(state.load, Facts.slot(:admitted), 1)
+    :atomics.sub(state.load, Layout.slot(:admitted), 1)
     refresh_options(state, from)
   end
 
@@ -714,7 +714,7 @@ defmodule Alambique.Cell do
         state.inflight |> Inflight.busy(fn -> call(request, from, state) end) |> tracked(true)
 
       # Taken back once the call is parked or answered, so it counts all along.
-      unless hibernation?(request), do: :atomics.sub(state.load, Facts.slot(:admitted), 1)
+      unless hibernation?(request), do: :atomics.sub(state.load, Layout.slot(:admitted), 1)
       answer
     end
   end
@@ -812,7 +812,7 @@ defmodule Alambique.Cell do
 
   defp call(request, from, state) do
     state = %{state | last_active: System.monotonic_time(:millisecond)}
-    :atomics.put(state.load, Facts.slot(:last_used), state.last_active)
+    :atomics.put(state.load, Layout.slot(:last_used), state.last_active)
 
     if State.lease_valid?(state) do
       case reopen_for(request, state) do
@@ -990,7 +990,7 @@ defmodule Alambique.Cell do
   defp committed(state, from, value, isolated?) do
     state = Publisher.committed(state)
     state = %{state | pending: [{:write, from, {:ok, value}} | state.pending]}
-    :atomics.add(state.load, Facts.slot(:callers), 1)
+    :atomics.add(state.load, Layout.slot(:callers), 1)
     Fault.point(:cell_after_commit, %{cell: state.id, txid: state.repl.txid})
     if isolated?, do: encode_now(state), else: {:noreply, queue_flush(state)}
   end
@@ -1186,7 +1186,7 @@ defmodule Alambique.Cell do
     idle = State.cell_opt(state, :idle_timeout_ms)
     elapsed = System.monotonic_time(:millisecond) - state.last_active
 
-    busy? = not idle?(state) or :atomics.get(state.load, Facts.slot(:admitted)) != 0
+    busy? = not idle?(state) or :atomics.get(state.load, Layout.slot(:admitted)) != 0
 
     cond do
       elapsed < idle ->
@@ -1211,7 +1211,7 @@ defmodule Alambique.Cell do
       elapsed < after_ms ->
         {:noreply, arm_idle_cache(state, after_ms - elapsed)}
 
-      not idle?(state) or :atomics.get(state.load, Facts.slot(:admitted)) != 0 ->
+      not idle?(state) or :atomics.get(state.load, Layout.slot(:admitted)) != 0 ->
         {:noreply, arm_idle_cache(state)}
 
       true ->
@@ -1322,7 +1322,7 @@ defmodule Alambique.Cell do
     state.mode == :serving and State.lease_valid?(state) and not Hydration.hydrating?(state) and
       if state.config.feed.cleanup == :after_publish,
         do: not Pipe.full?(state.pipe),
-        else: idle?(state) and :atomics.get(state.load, Facts.slot(:admitted)) == 0
+        else: idle?(state) and :atomics.get(state.load, Layout.slot(:admitted)) == 0
   end
 
   # Quiet time the idle modes still wait for; `:after_publish` waits for none.
@@ -1362,7 +1362,7 @@ defmodule Alambique.Cell do
   # A cleanup that is due is the close's own first step, so `quiet?/1` leaves
   # it out and `closable?/1` does not.
   defp quiet?(%State{conn: conn} = state) do
-    conn != nil and idle?(state) and :atomics.get(state.load, Facts.slot(:admitted)) == 0 and
+    conn != nil and idle?(state) and :atomics.get(state.load, Layout.slot(:admitted)) == 0 and
       state.parked == [] and state.hydrator == nil and not state.feed.unsent and
       Publisher.delivered?(state) and State.lease_valid?(state)
   end
@@ -1552,13 +1552,13 @@ defmodule Alambique.Cell do
   # batches without one, the feed cleanups, are not waited for.
   defp wait(%State{pending: []} = state, item) do
     with {:ok, pipe} <- Pipe.attach_to_write(state.pipe, [item]) do
-      :atomics.add(state.load, Facts.slot(:callers), 1)
+      :atomics.add(state.load, Layout.slot(:callers), 1)
       {:ok, %{state | pipe: pipe}}
     end
   end
 
   defp wait(state, item) do
-    :atomics.add(state.load, Facts.slot(:callers), 1)
+    :atomics.add(state.load, Layout.slot(:callers), 1)
     {:ok, %{state | pending: [item | state.pending]}}
   end
 
@@ -1850,7 +1850,7 @@ defmodule Alambique.Cell do
         _ -> 0
       end
 
-    :atomics.put(state.load, Facts.slot(:wal_bytes), size)
+    :atomics.put(state.load, Layout.slot(:wal_bytes), size)
     size
   end
 
@@ -2027,7 +2027,7 @@ defmodule Alambique.Cell do
 
       :replicate ->
         item = {:write, from, {:error, {:committed, reason}}}
-        :atomics.add(state.load, Facts.slot(:callers), 1)
+        :atomics.add(state.load, Layout.slot(:callers), 1)
         state = %{state | pending: [item | state.pending]}
 
         if Db.fatal?(reason),
@@ -2090,7 +2090,7 @@ defmodule Alambique.Cell do
 
   # A checked read whose lease is lost gets no answer: it exits with the cell.
   defp answer(state, pending, verdict) do
-    :atomics.sub(state.load, Facts.slot(:callers), length(pending))
+    :atomics.sub(state.load, Layout.slot(:callers), length(pending))
 
     # Items are kept newest first; callers are answered in arrival order.
     pending

@@ -21,43 +21,12 @@ defmodule Alambique.Cell.Facts do
   #   * `stopped`: 1 once the cell stopped serving.
 
   alias Alambique.{Admission, Sqlite}
-  alias Alambique.Cell.State
+  alias Alambique.Cell.{Layout, State}
 
   @nil_value -9_223_372_036_854_775_808
 
-  @slots [
-    callers: :raw,
-    admitted: :raw,
-    last_used: :raw,
-    wal_bytes: :raw,
-    stopped: :raw,
-    txid: :int,
-    acked_txid: :int,
-    batches_in_flight: :int,
-    parked: :int,
-    feed_published: :int,
-    feed_sent: :int,
-    feed_cleaned: :int,
-    feed_backlog: :int,
-    feed_capped: :bool,
-    feed_reader_open: :bool,
-    lease_epoch: :int,
-    lease_expires_at: :int,
-    cache: {:enum, [:full, :shrunk, :closed]},
-    hydrating: :bool,
-    cache_used: :int,
-    schema_used: :int,
-    stmt_used: :int,
-    lookaside_used: :int,
-    process_bytes: :int,
-    wake_source: {:enum, [:local, :empty, :restore]},
-    wake_started_at: :int,
-    wake_started_at_mono: :int,
-    awake_since: :int,
-    awake_since_mono: :int
-  ]
-
-  @index @slots |> Keyword.keys() |> Enum.with_index(1) |> Map.new()
+  @slots Layout.table()
+  @index Layout.index()
 
   # What the wake and `publish/2` write, in the order `read/2` returns it. A
   # reader reads the acknowledged TXID before the newest one, because the
@@ -86,18 +55,11 @@ defmodule Alambique.Cell.Facts do
     :awake_since_mono
   ]
 
-  # `slot/1` cannot be used in the module that defines it.
   @raw_callers Map.fetch!(@index, :callers)
   @raw_admitted Map.fetch!(@index, :admitted)
   @raw_last_used Map.fetch!(@index, :last_used)
   @raw_wal_bytes Map.fetch!(@index, :wal_bytes)
   @raw_stopped Map.fetch!(@index, :stopped)
-
-  @doc """
-  The index of the slot `name`, known at compile time, for the slots that
-  hold what the cell stores itself (`:raw`).
-  """
-  defmacro slot(name) when is_atom(name), do: Map.fetch!(@index, name)
 
   @doc "A new array: the raw slots at 0, every other at nil."
   @spec new() :: :atomics.atomics_ref()
