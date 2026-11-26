@@ -45,39 +45,50 @@ defmodule Alambique.LazyWholeModeTest do
     cell
   end
 
-  # An instance that reads through a counting store.
-  defp counted(ctx, lazy_restore) do
+  # What a cold wake of the cell asks of the store: the number of reads of each
+  # segment, whole and by range. The instance leaves the cell so the next one
+  # can take it, and does not compact, so that the chain stays as it was.
+  defp store_calls(ctx, cell, lazy_restore, opts \\ []) do
     {_, counter} = counted = CountingStore.wrap(ctx.store)
 
     inst =
-      start_instance(%{ctx | store: counted}, migrations: @schema, lazy_restore: lazy_restore)
-
-    {inst, counter}
-  end
-
-  # A full restore reads the first range of each object, which is the whole
-  # object when it is small, and nothing by range after it. A lazy restore
-  # reads the edges and then the pages it needs.
-  defp one_range_each(counter) do
-    ranges = counter |> CountingStore.keys(:get_range) |> Enum.frequencies()
-    ranges != %{} and Enum.all?(ranges, fn {_key, n} -> n == 1 end)
-  end
-
-  test "whole mode reads each object once, with no page read by range", ctx do
-    cell = seed(ctx, 200)
-    {inst, counter} = counted(ctx, min_bytes: 0, mode: :whole)
+      start_instance(
+        %{ctx | store: counted},
+        [migrations: @schema, lazy_restore: lazy_restore, compaction: false] ++ opts
+      )
 
     assert {:ok, %{rows: [[200]]}} = Alambique.query(inst, cell, "SELECT count(*) FROM t")
-    assert one_range_each(counter)
+    :ok = Alambique.hibernate(inst, cell)
+
+    for op <- [:get, :get_range],
+        key <- CountingStore.keys(counter, op),
+        String.ends_with?(key, ".ltx"),
+        reduce: %{},
+        do: (calls -> Map.update(calls, {op, key}, 1, &(&1 + 1)))
+  end
+
+  # The reads of the same chain by a full restore (`lazy_restore: false`),
+  # which also asks for the first range of each segment: it says the size of
+  # the segment, and is the whole of a small one (`Restore.fetch_bounded/2`).
+  # The next wake reads the fence the one before wrote, so only the segments
+  # both read are compared.
+  defp same_as_full_restore(ctx, cell, whole) do
+    full = store_calls(ctx, cell, false)
+    assert Enum.any?(full, &match?({{:get_range, _}, _}, &1))
+    assert Map.take(full, Map.keys(whole)) == whole
+  end
+
+  test "whole mode makes the store calls of a full restore", ctx do
+    cell = seed(ctx, 200)
+    whole = store_calls(ctx, cell, min_bytes: 0, mode: :whole)
+    same_as_full_restore(ctx, cell, whole)
     assert drain([:alambique, :replication, :hydrate], cell) == []
   end
 
-  test "ranged mode, the default, reads by range", ctx do
+  test "ranged mode, the default, reads pages by range", ctx do
     cell = seed(ctx, 200)
-    {inst, counter} = counted(ctx, min_bytes: 0)
-
-    assert {:ok, %{rows: [[200]]}} = Alambique.query(inst, cell, "SELECT count(*) FROM t")
-    refute one_range_each(counter)
+    ranged = store_calls(ctx, cell, min_bytes: 0)
+    assert Enum.any?(ranged, fn {{op, _key}, n} -> op == :get_range and n > 1 end)
     assert {_, %{result: :ok}} = await_event([:alambique, :replication, :hydrate], cell, 30_000)
   end
 
@@ -87,19 +98,13 @@ defmodule Alambique.LazyWholeModeTest do
       def options(_cell), do: [lazy_restore: [mode: :whole]]
     end
 
-    test "a cell that asks for :whole reads each object once", ctx do
+    test "a cell that asks for :whole makes the store calls of a full restore", ctx do
       cell = seed(ctx, 200)
-      {_, counter} = counted = CountingStore.wrap(ctx.store)
 
-      inst =
-        start_instance(%{ctx | store: counted},
-          migrations: @schema,
-          lazy_restore: [min_bytes: 0],
-          cell_options: {Mode, :options}
-        )
+      whole =
+        store_calls(ctx, cell, [min_bytes: 0], cell_options: {Mode, :options})
 
-      assert {:ok, %{rows: [[200]]}} = Alambique.query(inst, cell, "SELECT count(*) FROM t")
-      assert one_range_each(counter)
+      same_as_full_restore(ctx, cell, whole)
       assert drain([:alambique, :replication, :hydrate], cell) == []
     end
   end
