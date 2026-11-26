@@ -61,6 +61,7 @@ defmodule Alambique.OptionBehaviourTest do
              failure_backoff_ms: 5_000,
              backoff_ms: 200,
              backoff_max_ms: 10_000,
+             migrations_timeout_ms: 899,
              backoff_factor: 2,
              backoff_jitter: 0.2
            }
