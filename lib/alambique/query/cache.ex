@@ -1,6 +1,9 @@
 defmodule Alambique.Query.Cache do
   @moduledoc false
   # On-disk cache of read-only replicas (design §14). One directory per cell,
+  alias Alambique.Replication.Keys
+  alias Alambique.Replication.Native
+
   # `<cell>.r/`, with one file per TXID:
   # `<txid hex>-<epoch>-<checksum hex>.db`, the database checksum (LTX) of the
   # file, so a refresh need not read it to continue the chain. Files are
@@ -59,7 +62,7 @@ defmodule Alambique.Query.Cache do
 
   @spec path(Path.t(), String.t(), non_neg_integer, non_neg_integer, non_neg_integer) :: Path.t()
   def path(dir, cell, txid, epoch, checksum) do
-    hex = &Alambique.Replication.Keys.hex/1
+    hex = &Keys.hex/1
     Path.join(cell_dir(dir, cell), "#{hex.(txid)}-#{epoch}-#{hex.(checksum)}.db")
   end
 
@@ -122,7 +125,7 @@ defmodule Alambique.Query.Cache do
   """
   @spec clone(Path.t(), Path.t(), boolean) :: {:ok, :reflink | :copy} | {:error, term}
   def clone(src, dst, reflink?) do
-    case reflink? and Alambique.Replication.Native.reflink(src, dst) do
+    case reflink? and Native.reflink(src, dst) do
       {:ok, true} ->
         {:ok, :reflink}
 

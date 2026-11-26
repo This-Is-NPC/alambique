@@ -8,8 +8,8 @@ defmodule Alambique.Cell.Hydration do
   # starts a new lazy restore: no marker is written, so the half-filled file
   # is never taken for a complete one.
 
-  alias Alambique.{Config, Inflight}
   alias Alambique.Cell.State
+  alias Alambique.{Config, Inflight}
   alias Alambique.Replication.{Hydrator, Lazy, Native, Replicator, Retry}
 
   # Options of `Replication.restore/5` for this cell.

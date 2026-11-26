@@ -37,8 +37,8 @@ defmodule Alambique.Cell do
   }
 
   alias Alambique.Feed.Publisher
-  alias Alambique.Store.{Breaker, Metered}
   alias Alambique.Replication.{Replicator, Retry, Sidecar}
+  alias Alambique.Store.{Breaker, Metered}
 
   # Lifecycle
 

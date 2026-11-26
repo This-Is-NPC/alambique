@@ -3,8 +3,8 @@ defmodule Alambique.Replication.Restore do
   # Rebuilds a database file from snapshots and segments (design §6).
 
   alias Alambique.Fault
-  alias Alambique.Telemetry
   alias Alambique.Replication.{Budget, Chain, Keys, Native, Objects, Retry}
+  alias Alambique.Telemetry
 
   @flag Bitwise.bsl(1, 63)
 

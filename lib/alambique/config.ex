@@ -5,6 +5,10 @@ defmodule Alambique.Config do
 
   alias Alambique.Cell.LocalCache
   alias Alambique.{Compaction, Lease, Location, Replication, Retention, Scrub, Trash}
+  alias Alambique.Feed.Capture
+  alias Alambique.Feed.Keys
+  alias Alambique.Feed.Record
+  alias Alambique.Store.Breaker
 
   @defaults [
     join: true,
@@ -176,11 +180,11 @@ defmodule Alambique.Config do
     hand_over: :cell,
     reader_cache_kib: nil,
     reader_close: nil,
-    shards: Alambique.Feed.Keys.default_shards(),
+    shards: Keys.default_shards(),
     internal_prefixes: [],
     tables: %{},
     other_tables: :capture,
-    max_object_bytes: Alambique.Feed.Record.default_max_bytes()
+    max_object_bytes: Record.default_max_bytes()
   ]
 
   @drain_defaults [
@@ -289,7 +293,7 @@ defmodule Alambique.Config do
             reader_close: :after_read | :after_burst | nil,
             shards: pos_integer,
             internal_prefixes: [String.t()],
-            tables: %{String.t() => Alambique.Feed.Capture.spec()},
+            tables: %{String.t() => Capture.spec()},
             other_tables: :capture | :skip,
             max_object_bytes: pos_integer
           },
@@ -622,7 +626,7 @@ defmodule Alambique.Config do
 
   # Every store call of the cell, the compactor and the router goes through a
   # context built here, so the store is guarded once (design §3).
-  defp guarded(config, location), do: Alambique.Store.Breaker.guard(config, location)
+  defp guarded(config, location), do: Breaker.guard(config, location)
 
   @doc "Lease context for the cell data in `location`."
   @spec lease_ctx(t, Location.t()) :: Lease.ctx()

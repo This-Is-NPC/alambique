@@ -32,8 +32,8 @@ defmodule Alambique.Feed do
   oldest object left.
   """
 
-  alias Alambique.{Location, Placement, Store, Telemetry}
   alias Alambique.Feed.{Keys, Record, Rejected, Rewind}
+  alias Alambique.{Location, Placement, Store, Telemetry}
   alias Alambique.Replication.Retry
 
   @typedoc "An opaque string that marks how far every shard of every location was read."

@@ -25,11 +25,11 @@ defmodule Alambique.Relocate do
   # A destination that the cell left earlier holds a `moved_to` lease; it is
   # accepted once its objects were cleaned up and the cleanup is over (step 2).
 
+  alias Alambique.Cell.{Db, Local}
+  alias Alambique.{Compaction.Compactor, Telemetry}
   alias Alambique.{Config, Fault, Freeze, Inflight, Lease, Location, Placement, Replication}
   alias Alambique.{Exclusive, Schema}
-  alias Alambique.{Compaction.Compactor, Telemetry}
   alias Alambique.Relocate.Cleanup
-  alias Alambique.Cell.{Db, Local}
   alias Alambique.Replication.{Objects, Replicator, Retry}
 
   @owner "relocate"

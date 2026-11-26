@@ -10,8 +10,8 @@ defmodule Alambique.Feed.Publisher do
   # A reader that could not be opened is tried again after this long.
   @reader_retry_ms 1_000
 
-  alias Alambique.Fault
   alias Alambique.Cell.{Db, State}
+  alias Alambique.Fault
   alias Alambique.Feed.{Capture, Pieces, Sender}
   alias Alambique.Replication.Replicator
   alias Alambique.Sqlite

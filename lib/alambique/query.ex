@@ -64,8 +64,8 @@ defmodule Alambique.Query do
       `false`: the order they finish in).
   """
 
-  alias Alambique.{Config, DiskFull, Inflight, Location, Placement, Telemetry}
   alias Alambique.Cell.Db
+  alias Alambique.{Config, DiskFull, Inflight, Location, Placement, Telemetry}
   alias Alambique.Query.{Cache, Gate, Replica}
   alias Alambique.Replication.Retry
   alias Alambique.Store.Breaker

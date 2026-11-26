@@ -70,8 +70,8 @@ defmodule Alambique.Compaction do
   Telemetry is described in `docs/telemetry.md`, section "Compaction events".
   """
 
-  alias Alambique.Fault
   alias Alambique.Compaction.{Hold, Plan}
+  alias Alambique.Fault
   alias Alambique.Replication.{Keys, Native, Objects, Retry, Sidecar}
   alias Alambique.{Store, Telemetry, Trash}
 

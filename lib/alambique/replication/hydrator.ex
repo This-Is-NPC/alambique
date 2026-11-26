@@ -11,8 +11,8 @@ defmodule Alambique.Replication.Hydrator do
 
   use GenServer
 
-  alias Alambique.Replication.{Lazy, Native, Retry}
   alias Alambique.{Fault, Telemetry}
+  alias Alambique.Replication.{Lazy, Native, Retry}
 
   @doc """
   Starts the hydrator for `lazy` (an `Alambique.Replication.Lazy`), linked to the
