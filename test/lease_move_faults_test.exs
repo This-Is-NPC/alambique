@@ -127,7 +127,7 @@ defmodule Alambique.LeaseMoveFaultsTest do
           | puts: 0,
             on_put: fn
               1 ->
-                {:ok, body, _etag} = MemoryStore.get(store, lease_key(prefix, "c"))
+                {:ok, body, _etag, _meta} = MemoryStore.get(store, lease_key(prefix, "c"))
                 {:ok, _} = MemoryStore.put(store, lease_key(prefix, "c"), body, :none, %{})
 
               _ ->
