@@ -460,7 +460,14 @@ defmodule Alambique.IdleCloseTest do
          ctx do
       {:ok, gate} = GatedStore.start_link()
       on_exit(fn -> if Process.alive?(gate), do: GenServer.stop(gate) end)
-      inst = feed_start(%{ctx | store: GatedStore.wrap(gate, ctx.store)}, [], 800)
+
+      inst =
+        feed_start(
+          %{ctx | store: GatedStore.wrap(gate, ctx.store)},
+          [cleanup_after_ms: 30_000],
+          800
+        )
+
       cell = unique_cell()
       assert {:ok, _} = insert(inst, cell, 1)
       eventually(fn -> (s = state(inst, cell)).feed_published > 0 and s.pipe.queue == [] end)
