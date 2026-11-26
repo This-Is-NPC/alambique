@@ -88,22 +88,27 @@ defmodule Alambique.Replication.Lazy do
 
     with :ok <- Budget.acquire(lazy.budget, weight, deadline) do
       try do
-        case fetch_range(lazy.ctx, key, offset, len, etag, deadline) do
-          {:ok, body, total, meta} ->
-            cond do
-              total != size or Objects.epoch_of(meta) != epoch -> {:error, {:changed, key}}
-              byte_size(body) != len -> {:error, {:short_read, key}}
-              true -> Native.lazy_deliver(lazy.handle, file, body, pages)
-            end
-
-          {:error, reason} ->
-            {:error, if(reason == :not_found, do: {:not_found, key}, else: reason)}
-        end
+        lazy.ctx
+        |> fetch_range(key, offset, len, etag, deadline)
+        |> delivered(lazy, {file, key, len, pages}, {size, epoch})
       after
         Budget.release(lazy.budget, weight)
       end
     end
   end
+
+  defp delivered({:ok, body, total, meta}, lazy, {file, key, len, pages}, {size, epoch}) do
+    cond do
+      total != size or Objects.epoch_of(meta) != epoch -> {:error, {:changed, key}}
+      byte_size(body) != len -> {:error, {:short_read, key}}
+      true -> Native.lazy_deliver(lazy.handle, file, body, pages)
+    end
+  end
+
+  defp delivered({:error, :not_found}, _lazy, {_file, key, _len, _pages}, _pin),
+    do: {:error, {:not_found, key}}
+
+  defp delivered({:error, _} = error, _lazy, _run, _pin), do: error
 
   # A page of a covered file did not match its hash, and none of the run was
   # installed. The whole object says who is wrong. If it fails its file
