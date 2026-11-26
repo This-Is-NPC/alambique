@@ -83,6 +83,7 @@ defmodule Alambique.Feed.Sender do
 
   @doc false
   # Entry after hibernation: waits for the next batch.
+  @spec resume(map) :: no_return
   def resume(w), do: w |> receive_batches(:infinity) |> loop()
 
   defp receive_batches(w, :infinity) do

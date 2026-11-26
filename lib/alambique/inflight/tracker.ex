@@ -19,6 +19,7 @@ defmodule Alambique.Inflight.Tracker do
   alias Alambique.{Config, Freeze, Inflight, Placement, Quarantine, Telemetry}
   alias Alambique.Replication.Retry
 
+  @spec start_link(Alambique.Config.t()) :: GenServer.on_start()
   def start_link(config), do: GenServer.start_link(__MODULE__, config, name: config.inflight)
 
   @doc "Remembers the marker at `path` of the calling process."

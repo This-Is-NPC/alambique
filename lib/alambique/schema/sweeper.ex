@@ -27,6 +27,7 @@ defmodule Alambique.Schema.Sweeper do
 
   @empty %{cells: 0, migrated: 0, stale: 0, skipped: 0, errors: 0}
 
+  @spec start_link(Alambique.Config.t()) :: GenServer.on_start()
   def start_link(config), do: GenServer.start_link(__MODULE__, config)
 
   # One pass

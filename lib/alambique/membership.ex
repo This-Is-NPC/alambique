@@ -25,6 +25,7 @@ defmodule Alambique.Membership do
 
   @members :members
 
+  @spec start_link(Alambique.Config.t()) :: GenServer.on_start()
   def start_link(config), do: GenServer.start_link(__MODULE__, config)
 
   @impl true

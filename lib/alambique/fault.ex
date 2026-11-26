@@ -35,9 +35,11 @@ defmodule Alambique.Fault do
   defp error_or_ok(_), do: :ok
 
   @doc false
+  @spec install((atom, term -> term)) :: :ok
   def install(handler) when is_function(handler, 2), do: :persistent_term.put(@key, handler)
 
   @doc false
+  @spec uninstall() :: :ok
   def uninstall do
     _ = :persistent_term.erase(@key)
     :ok
