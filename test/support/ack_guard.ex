@@ -59,7 +59,7 @@ defmodule Alambique.AckGuard do
 
   @doc "Runs on a peer: sends each acknowledgement of its cells to the node of `guard`."
   def watch(%{id: id} = guard) do
-    _ = :telemetry.attach(id, @event, &__MODULE__.handle_peer/4, guard)
+    :ok = :telemetry.attach(id, @event, &__MODULE__.handle_peer/4, guard)
     :ok
   end
 
