@@ -3,7 +3,9 @@ defmodule Alambique.Replication.NativeOptions do
   # Load data of the NIF (`config :alambique, :page_arena, ...`). SQLite's
   # allocator is installed when the library loads, so these settings are read
   # then and cannot change while the node runs. `Native.stats/0` reports the
-  # settings the library loaded with.
+  # settings the library loaded with. Set them in `config/config.exs`: a
+  # release started with `bin/<app> start` loads the library before it reads
+  # `config/runtime.exs`.
   #
   #   * `enabled` - page-cache blocks live in the page arena (default true).
   #   * `reserved_mib` - address space reserved, from 64 up to 1048576 (default 4096).
