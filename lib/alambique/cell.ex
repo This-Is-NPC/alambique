@@ -541,7 +541,7 @@ defmodule Alambique.Cell do
       State.cell_opt(next, :idle_cache_after_ms) == nil ->
         set_cache(state, State.cell_opt(next, :cache_kib))
 
-      :idle_cache_kib in changed ->
+      kib_changed?(changed) ->
         set_cache(state, State.cell_opt(next, :idle_cache_kib))
 
       true ->
@@ -552,6 +552,8 @@ defmodule Alambique.Cell do
   defp refresh_cache(state, next, changed) do
     if :cache_kib in changed, do: set_cache(state, State.cell_opt(next, :cache_kib)), else: :ok
   end
+
+  defp kib_changed?(changed), do: :idle_cache_kib in changed
 
   # Only the pragma runs native code, so only it holds the marker.
   defp set_cache(state, kib) do
@@ -1006,12 +1008,16 @@ defmodule Alambique.Cell do
 
   defp write_failed(state, from, reason) do
     cond do
-      Sqlite.wal_advanced?(state.conn) -> orphaned_write(state, from, reason)
+      frames_left?(state) -> orphaned_write(state, from, reason)
       # A commit of no frames whose `query_only` failed.
-      Db.fatal?(reason) -> stop_serving(state, reason, {:error, reason})
+      fatal?(reason) -> stop_serving(state, reason, {:error, reason})
       true -> {:reply, {:error, reason}, state}
     end
   end
+
+  defp frames_left?(state), do: Sqlite.wal_advanced?(state.conn)
+
+  defp fatal?(reason), do: Db.fatal?(reason)
 
   defp encode_now(state) do
     case flush_now(state) do
@@ -1187,13 +1193,11 @@ defmodule Alambique.Cell do
     idle = State.cell_opt(state, :idle_timeout_ms)
     elapsed = System.monotonic_time(:millisecond) - state.last_active
 
-    busy? = not idle?(state) or :atomics.get(state.load, Layout.slot(:admitted)) != 0
-
     cond do
       elapsed < idle ->
         {:noreply, arm_idle(state, idle - elapsed)}
 
-      busy? ->
+      busy?(state) ->
         {:noreply, arm_idle(state, idle)}
 
       true ->
@@ -1551,6 +1555,8 @@ defmodule Alambique.Cell do
   # Commit
 
   defp idle?(state), do: state.pending == [] and state.pipe.queue == []
+
+  defp busy?(state), do: not idle?(state) or :atomics.get(state.load, Layout.slot(:admitted)) != 0
 
   # Makes a read wait for the open batch when it has items, else for the newest
   # batch with a user write; its release implies that every earlier write is
