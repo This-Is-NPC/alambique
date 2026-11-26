@@ -27,6 +27,12 @@ defmodule Alambique.Cell.State do
     # Idle cache shrink: `nil` (off), the ref of the `:idle_cache` timer, or
     # `:shrunk` while the page cache holds the smaller limit.
     :idle_cache,
+    # Idle close: `nil` (off, or the connection is closed), or the ref of the
+    # `:idle_close` timer.
+    :idle_close,
+    # While the connection is closed: what `Sqlite.close_keep/1` kept, which
+    # holds the file for this cell.
+    :kept,
     # Marker of work in flight (design §10), `nil` when quarantine is off.
     :inflight,
     # Set by `Alambique.take_over/4`: `%{reason, epoch}`, and `previous` (the
@@ -46,6 +52,8 @@ defmodule Alambique.Cell.State do
     # The options this cell set for itself (`Cell.Options`): only the keys it
     # changed. Read through `cell_opt/2`.
     cell_opts: %{},
+    # The memory admission counts for the cell while its connection is closed.
+    reopen_floor: 0,
     mode: :waking,
     # Writes that wait for the end of the hydration (design §16), oldest last:
     # `{call, from}`.
@@ -98,7 +106,12 @@ defmodule Alambique.Cell.State do
   """
   @spec cell_opt(
           t,
-          :cache_kib | :idle_cache_after_ms | :idle_cache_kib | :idle_gc | :idle_timeout_ms
+          :cache_kib
+          | :idle_cache_after_ms
+          | :idle_cache_kib
+          | :idle_close_after_ms
+          | :idle_gc
+          | :idle_timeout_ms
         ) ::
           term
   def cell_opt(%__MODULE__{cell_opts: opts, config: config}, key) do

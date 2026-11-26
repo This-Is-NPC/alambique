@@ -114,6 +114,33 @@ defmodule Alambique.Feed.Publisher do
   # Publication
 
   @doc """
+  Whether nothing of the feed is on its way or due: every acknowledged batch
+  with rows is handed over and published, no piece or retry is scheduled, and
+  no published row waits for a cleanup. The cell may then close its
+  connection: nothing that is queued reads it.
+
+  With `hand_over: :cell` a batch without rows (a cleanup, a change that is
+  not captured) leaves `feed_published` behind the acknowledged TXID, so the
+  rows after the last batch handed over are looked for instead.
+  """
+  @spec settled?(State.t()) :: boolean
+  def settled?(%State{config: %{feed_capture: false}}), do: true
+
+  def settled?(state) do
+    state.feed_backlog == 0 and not state.feed_capped and state.feed_part == nil and
+      state.feed_tick == nil and not cleanup_due?(state) and published?(state)
+  end
+
+  defp published?(%State{feed_published: txid, pipe: %{acked: %{txid: txid}}}), do: true
+
+  defp published?(%State{config: %{feed: %{hand_over: :cell}}} = state) do
+    Capture.rows_from(state.conn, {state.feed_sent + 1, -1}, state.pipe.acked.txid, 1) ==
+      {:ok, []}
+  end
+
+  defp published?(_state), do: false
+
+  @doc """
   Hands the rows of every acknowledged batch not yet handed over to the
   sender, in TXID order, and returns at once. Rows of batches still in the
   pipeline wait: they are not durable. At most `feed.max_backlog_batches`
@@ -280,8 +307,13 @@ defmodule Alambique.Feed.Publisher do
     %{state | feed_reader: nil}
   end
 
-  @doc "Handles the end of the sender; the batches it had are handed over again."
+  @doc """
+  Handles the end of the sender; the batches it had are handed over again.
+  A cell with its connection closed has none (`settled?/1`): the next hand-over
+  follows the next commit.
+  """
   @spec sender_down(State.t(), pid) :: State.t()
+  def sender_down(%State{feed_pid: pid, conn: nil} = state, pid), do: reset(state)
   def sender_down(%State{feed_pid: pid} = state, pid), do: after_ack(reset(state))
   def sender_down(state, _pid), do: state
 
