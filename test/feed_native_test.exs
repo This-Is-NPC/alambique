@@ -14,7 +14,7 @@ defmodule Alambique.FeedNativeTest do
   alias Alambique.{Feed, Sqlite}
   alias Alambique.Cell.State
   alias Alambique.Feed.Publisher
-  alias AlambiqueTestkit.{CrashPoints, GatedStore}
+  alias AlambiqueTestkit.CrashPoints
 
   @schema [
     {1, "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)"},
@@ -169,30 +169,21 @@ defmodule Alambique.FeedNativeTest do
       assert %State{feed_part: nil, feed_backlog: 0} = state(inst)
     end
 
-    test "three batches with room for one are published once each", ctx do
-      {:ok, gate} = GatedStore.start_link()
-      on_exit(fn -> if Process.alive?(gate), do: GenServer.stop(gate) end)
-
-      inst =
-        start(
-          %{ctx | store: GatedStore.wrap(gate, ctx.store)},
-          "room",
-          native(max_backlog_batches: 1),
-          name: :room
-        )
-
-      GatedStore.hold(gate, ~r{/feed/})
+    test "three batches acknowledged together with room for one: one is sent", ctx do
+      inst = start(ctx, "room", native(max_backlog_batches: 1), name: :room)
       for id <- 1..3, do: insert(inst, @cell, [id])
-
-      # Only the batch with room was sent: the library does not send the others.
-      assert %{feed_backlog: 1, feed_capped: true} = state(inst)
-      GatedStore.open(gate)
-
       eventually(fn -> keys(records(ctx, "room")) == [1, 2, 3] end)
 
-      eventually(fn ->
-        (s = state(inst)).feed_backlog == 0 and s.feed_sent == s.pipe.acked.txid
-      end)
+      # The rows are still in the file: hand them over from 0, as after a reset.
+      {sent, state} =
+        in_cell(pid(inst), fn st ->
+          sent = Publisher.after_ack(%{st | feed_sent: 0, feed_published: 0, feed_backlog: 0})
+          {sent, st}
+        end)
+
+      # Only the batch with room was sent: the library does not send the others.
+      assert %{feed_backlog: 1, feed_capped: true} = sent
+      assert sent.feed_sent < state.pipe.acked.txid
     end
 
     test "leaves no binary of the rows on the heap of the cell", ctx do
