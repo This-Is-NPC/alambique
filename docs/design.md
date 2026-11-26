@@ -102,7 +102,7 @@ call.
 the application environment when the NIF loads; the module loads the
 application first, so that its environment is readable then.
 `Native.stats/0` reports what the library loaded with, and a setting that did
-not reach the load leaves the arena off.
+not reach the load keeps the defaults, with the arena on.
 
 **Lookaside.** `sqlite3_db_config(SQLITE_DBCONFIG_LOOKASIDE)` runs right after
 the open, before any statement, with the cell's `awake.lookaside_bytes` and
@@ -328,7 +328,8 @@ rebuilds, instead of 0.
 **Options of a cell.** `cell_options` names a function that returns the
 per-cell options of one cell (`idle_timeout_ms`, `awake.cache_kib`,
 `idle_cache_after_ms`, `idle_cache_kib`, `idle_close_after_ms`, `idle_gc`,
-`track_bytes`, `sql.locking_mode`, `feed.cleanup_after_ms`, and `lazy_restore.mode`,
+`track_bytes`, `awake.lookaside_bytes` and `lookaside_count`, `sql.locking_mode`,
+`feed.cleanup_after_ms`, and `lazy_restore.mode`,
 which §16 reads at the restore of the wake). The cell calls it once per
 wake, after it holds a wake slot and before the lease, in a monitored process
 that it waits for at most `cell_options_timeout_ms`; the wait is outside the
@@ -340,7 +341,9 @@ cross-field rules are repaired with a fixed result (an idle timeout not above
 return to the node's value; an idle shrink not below
 the idle timeout or the idle close is turned off; an `idle_close_after_ms` not
 below the idle timeout is turned off; an `idle_cache_kib` not below `cache_kib`
-returns to the node's value, or the shrink is turned off; `locking_mode:
+returns to the node's value, or the shrink is turned off; a lookaside pair SQLite
+cannot use (one key alone, or more than 1 MiB) drops both keys, so the node's
+pair applies; `locking_mode:
 :exclusive` returns to the node's value where the feed hands over to the sender
 or a lazy restore is on, the combinations the build refuses; an
 `idle_close_after_ms` is turned off for a cell whose merged `locking_mode` is
@@ -398,7 +401,9 @@ the feed rely on it, so a refresh whose merged `locking_mode` differs from the
 cell's is refused whole, before any pragma or timer, and applies at the next
 wake. `lazy_restore.mode` is only read when the cell restores a file, so a
 refresh stores it and lists it in `changed`, and nothing about the running cell
-changes. Every other per-cell key applies live.
+changes. The lookaside pair is stored and listed in the same way: it is read
+when the connection opens, at a wake or a reopen after an idle close.
+Every other per-cell key applies live.
 
 A function that fails or an override that is invalid keeps the options the
 cell has, with either `cell_options_invalid`: stopping a serving cell for a
