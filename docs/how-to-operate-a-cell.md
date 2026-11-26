@@ -2,7 +2,8 @@
 
 **The question:** how do I run and maintain a cell that is in the store:
 look at it, restore it, freeze it, move it, read the scrub results, restart a
-node, and keep its disk from filling or stalling?
+node, change the options of an awake cell, and keep its disk from filling or
+stalling?
 
 This guide stands alone. It needs the store, and the running cluster for the
 steps that call a node (`--connect`). The background (compaction, retention,
@@ -563,6 +564,32 @@ this error did not run.
 
 Expected result: the next write that fits is acknowledged with `{:ok, _}`. The
 wake event shows `reason: :disk_full` (`[:alambique, :cell, :wake]`).
+
+## 13. Change the options of an awake cell now
+
+The per-cell options (`cell_options`, see `Alambique`) are read at each wake.
+To apply a change to cells that are awake, without putting them to sleep:
+
+```elixir
+{:ok, :override, changed: [:cache_kib]} = Alambique.refresh_options(MyApp.Cells, "org-1")
+```
+
+The cell calls your function again, in a process of its own, and applies the
+result: the page cache limit at once, and the idle timers from the time of the
+cell's last call. It keeps serving meanwhile. The call goes to the node that
+owns the cell.
+
+| Answer | Meaning | What to do |
+| --- | --- | --- |
+| `{:ok, :override, changed: keys}` | The function returned options; `keys` are the ones whose value changed (`[]` when none did). | Nothing. |
+| `{:ok, :node, changed: keys}` | The function returned `nil` or `[]`, or there is none: the cell uses the node's values. | Nothing. |
+| `{:ok, :asleep}` | Nobody owns the cell. It is not woken; it reads the options at its next wake. | Nothing. |
+| `{:error, {:cell_options, message}}` | The function raised, did not return in `cell_options_timeout_ms`, or returned an invalid override, or the page cache could not be set. The cell keeps the options it had. | Fix the function and repeat the call. |
+
+A refresh is not a call to the cell: it does not keep it awake, does not give
+back a shrunk cache and does not open a closed connection (the next request
+that runs SQL does, with the new options). `[:alambique, :cell, :options,
+:refresh]` reports each one (see [telemetry.md](telemetry.md)).
 
 ## Troubleshooting
 
