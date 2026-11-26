@@ -321,8 +321,15 @@ defmodule Alambique.Cell do
 
   defp serve(state) do
     Process.send_after(self(), :renew, first_renewal_in(state))
-    Process.send_after(self(), :idle, State.cell_opt(state, :idle_timeout_ms))
-    state = %{state | mode: :serving, last_active: System.monotonic_time(:millisecond)}
+    idle_timer = :erlang.start_timer(State.cell_opt(state, :idle_timeout_ms), self(), :idle)
+
+    state = %{
+      state
+      | mode: :serving,
+        idle_timer: idle_timer,
+        last_active: System.monotonic_time(:millisecond)
+    }
+
     wal_size(state)
     Facts.publish(state, true)
     Facts.put(state.load, :awake_since, System.system_time(:millisecond))
@@ -331,6 +338,8 @@ defmodule Alambique.Cell do
     :atomics.put(state.load, Facts.slot(:last_used), state.last_active)
     state |> arm_idle_cache() |> arm_idle_close()
   end
+
+  defp arm_idle(state, ms), do: %{state | idle_timer: :erlang.start_timer(ms, self(), :idle)}
 
   # The shrink timer carries its ref, so a message that was already queued
   # when the timer was replaced is ignored.
@@ -856,7 +865,9 @@ defmodule Alambique.Cell do
     end
   end
 
-  defp info(:idle, %State{mode: :serving} = state) do
+  # The idle timer carries its ref, so a message that was already queued when
+  # the timer was replaced is ignored.
+  defp info({:timeout, ref, :idle}, %State{mode: :serving, idle_timer: ref} = state) do
     idle = State.cell_opt(state, :idle_timeout_ms)
     elapsed = System.monotonic_time(:millisecond) - state.last_active
 
@@ -864,12 +875,10 @@ defmodule Alambique.Cell do
 
     cond do
       elapsed < idle ->
-        Process.send_after(self(), :idle, idle - elapsed)
-        {:noreply, state}
+        {:noreply, arm_idle(state, idle - elapsed)}
 
       busy? ->
-        Process.send_after(self(), :idle, idle)
-        {:noreply, state}
+        {:noreply, arm_idle(state, idle)}
 
       true ->
         case hibernate(state, :idle, :infinity) do
