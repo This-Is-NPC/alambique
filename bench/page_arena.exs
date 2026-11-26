@@ -32,6 +32,9 @@
 #   ALAMBIQUE_BENCH_KIB        page cache filled per connection   (default "1024")
 #   ALAMBIQUE_BENCH_LIMIT_MIB  memory limit of capacity           (default "1024")
 #   ALAMBIQUE_BENCH_SECONDS    seconds of each hot window         (default "5")
+#   ALAMBIQUE_BENCH_MAX_CELLS  cells capacity stops at            (default "5000")
+#   ALAMBIQUE_BENCH_DATA_DIR   where the cells of capacity keep their files
+#                              (default: under TMPDIR)
 
 defmodule Bench do
   alias Alambique.{NativeStats, Sqlite}
@@ -405,7 +408,14 @@ defmodule Bench do
     limit = env_int("ALAMBIQUE_BENCH_LIMIT_MIB", 1024) * 1_048_576
 
     for idle <- [:none, :shrink, :close] do
-      dir = tmp()
+      # The cells of one pass are a gigabyte or more: ALAMBIQUE_BENCH_DATA_DIR
+      # puts them on a disk (removed after the pass) and not on a RAM disk.
+      dir =
+        case System.get_env("ALAMBIQUE_BENCH_DATA_DIR") do
+          nil -> tmp()
+          root -> Path.join(root, "capacity-#{idle}") |> tap(&File.mkdir_p!/1)
+        end
+
       {:ok, store} = MemoryStore.start_link()
       name = :"bench_capacity_#{idle}"
 
@@ -440,6 +450,7 @@ defmodule Bench do
       line("capacity",
         idle: idle,
         cells: cells,
+        capped: cells >= env_int("ALAMBIQUE_BENCH_MAX_CELLS", 5_000),
         limit_mib: div(limit, 1_048_576),
         mem_mib: mib(memory() - base)
       )
@@ -503,7 +514,7 @@ defmodule Bench do
               name,
               id,
               "WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 160) " <>
-                "INSERT INTO t SELECT i, zeroblob(3000) FROM s"
+                "INSERT OR IGNORE INTO t SELECT i, zeroblob(3000) FROM s"
             )
           end)
 
@@ -516,7 +527,7 @@ defmodule Bench do
 
     wait_idle(name, idle, batch)
 
-    if memory() >= ceiling or woken >= 20_000,
+    if memory() >= ceiling or woken >= env_int("ALAMBIQUE_BENCH_MAX_CELLS", 5_000),
       do: woken + 50,
       else: wake_until(name, idle, woken + 50, ceiling)
   end
