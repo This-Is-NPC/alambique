@@ -488,7 +488,10 @@ defmodule Bench do
 
     for id <- ids do
       pid = Alambique.Cell.whereis(config, id)
-      wait_until(deadline, "#{id} did not go #{idle}", fn -> idle?(:sys.get_state(pid), idle) end)
+
+      wait_until(deadline, "#{id} did not go #{idle}", fn ->
+        idle?(:sys.get_state(pid, 60_000), idle)
+      end)
     end
   end
 
