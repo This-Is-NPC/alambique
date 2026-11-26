@@ -1238,21 +1238,22 @@ defmodule Alambique.Config do
     {queue, rest} = Keyword.pop(rest, :max_wake_queue)
     {idle_after, rest} = Keyword.pop(rest, :idle_cache_after_ms)
     {idle_kib, rest} = Keyword.pop(rest, :idle_cache_kib, @idle_cache_kib)
-
     {idle_gc, rest} = Keyword.pop(rest, :idle_gc, true)
     {track_bytes, rest} = Keyword.pop(rest, :track_bytes, true)
+    {cache_kib, rest} = Keyword.pop(rest, :cache_kib, @awake_defaults[:cache_kib])
 
-    unless is_integer(idle_kib) and idle_kib >= 0,
-      do: bad!(":awake :idle_cache_kib must be a non-negative integer")
-
-    unless is_boolean(idle_gc), do: bad!(":awake :idle_gc must be true or false")
+    check_cell_option!(:idle_cache_kib, idle_kib)
+    check_cell_option!(:idle_gc, idle_gc)
     unless is_boolean(track_bytes), do: bad!(":awake :track_bytes must be true or false")
 
     for {key, value} <- [max_bytes: max_bytes, max_wake_queue: queue],
         not (is_nil(value) or (is_integer(value) and value > 0)),
         do: bad!(":awake #{inspect(key)} must be nil or a positive integer")
 
-    awake = options!(:awake, rest, @awake_defaults)
+    check_cell_option!(:cache_kib, cache_kib)
+    awake = options!(:awake, rest, Keyword.delete(@awake_defaults, :cache_kib))
+    awake = Map.put(awake, :cache_kib, cache_kib)
+    check_cell_option!(:idle_cache_after_ms, idle_after)
     idle_cache!(awake, idle_after, idle_kib, idle_timeout_ms)
 
     awake
@@ -1264,15 +1265,55 @@ defmodule Alambique.Config do
     |> Map.put(:max_wake_queue, queue || 4 * awake.max_wakes)
   end
 
+  # The options a cell may set for itself (`:cell_options`), with the rule of
+  # each. `awake!/2` and the resolution at wake use these same rules.
+  @cell_option_keys [
+    :cache_kib,
+    :idle_cache_after_ms,
+    :idle_cache_kib,
+    :idle_gc,
+    :idle_timeout_ms
+  ]
+
+  @doc false
+  @spec cell_option_keys() :: [atom]
+  def cell_option_keys, do: @cell_option_keys
+
+  @doc false
+  @spec check_cell_option(atom, term) :: :ok | {:error, String.t()}
+  def check_cell_option(:cache_kib, v) when is_integer(v) and v > 0, do: :ok
+
+  def check_cell_option(:cache_kib, _),
+    do: {:error, ":awake :cache_kib must be a positive integer"}
+
+  def check_cell_option(:idle_cache_after_ms, v) when is_nil(v) or (is_integer(v) and v > 0),
+    do: :ok
+
+  def check_cell_option(:idle_cache_after_ms, _),
+    do: {:error, ":awake :idle_cache_after_ms must be nil or a positive integer"}
+
+  def check_cell_option(:idle_cache_kib, v) when is_integer(v) and v >= 0, do: :ok
+
+  def check_cell_option(:idle_cache_kib, _),
+    do: {:error, ":awake :idle_cache_kib must be a non-negative integer"}
+
+  def check_cell_option(:idle_gc, v) when is_boolean(v), do: :ok
+  def check_cell_option(:idle_gc, _), do: {:error, ":awake :idle_gc must be true or false"}
+  def check_cell_option(:idle_timeout_ms, v) when is_integer(v) and v > 0, do: :ok
+
+  def check_cell_option(:idle_timeout_ms, _),
+    do: {:error, ":idle_timeout_ms must be a positive integer"}
+
+  defp check_cell_option!(key, value) do
+    with {:error, message} <- check_cell_option(key, value), do: bad!(message)
+  end
+
   # `idle_cache_after_ms: nil` (the default) keeps the full page cache until the
   # cell hibernates; a value that is not below `idle_timeout_ms` would never
   # shrink it.
   defp idle_cache!(_awake, nil, _kib, _idle_timeout_ms), do: :ok
 
   defp idle_cache!(awake, after_ms, kib, idle_timeout_ms) do
-    unless is_integer(after_ms) and after_ms > 0,
-      do: bad!(":awake :idle_cache_after_ms must be nil or a positive integer")
-
     if after_ms >= idle_timeout_ms,
       do: bad!(":awake :idle_cache_after_ms must be less than :idle_timeout_ms")
 
