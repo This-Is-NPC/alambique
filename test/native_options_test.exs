@@ -4,6 +4,7 @@ defmodule Alambique.NativeOptionsTest do
   use ExUnit.Case, async: false
 
   alias Alambique.Replication.NativeOptions
+  alias Alambique.Replication.PageArena
   alias Alambique.Replication.Native
 
   setup do
@@ -129,7 +130,7 @@ defmodule Alambique.NativeOptionsTest do
       log = capture_log(fn -> start_instance(ctx, []) end)
 
       refute log =~ "differs from what the library loaded with"
-      assert NativeOptions.differing() == []
+      assert PageArena.differing() == []
       refute_received {:ignored, _, _}
     end
   end

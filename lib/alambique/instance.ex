@@ -9,14 +9,15 @@ defmodule Alambique.Instance do
   alias Alambique.Cell.Local
   alias Alambique.Cell.LocalCache
   alias Alambique.{Config, Membership, Store}
-  alias Alambique.Replication.NativeOptions
+  alias Alambique.Replication.PageArena
 
   require Logger
 
   # The store is checked and the data directory locked before the tree
   # starts, so a refused start touches no file (design §1).
+  @spec start_link(Config.t()) :: Supervisor.on_start()
   def start_link(config) do
-    NativeOptions.check_applied(config.name)
+    PageArena.check_applied(config.name)
 
     with :ok <- check_stores(config),
          {:ok, lock} <- Alambique.DataDir.acquire(config.data_dir) do
@@ -70,52 +71,52 @@ defmodule Alambique.Instance do
     Config.put(config)
     Membership.init_state(config)
 
-    children = [
+    Supervisor.init(children(config, lock), strategy: :rest_for_one)
+  end
+
+  # The compactor and the node registry come last, so that a crash of either
+  # restarts nothing else; they stop first, so the node leaves the registry
+  # before its cells hibernate.
+  defp children(config, lock) do
+    # Last, so that a compactor crash restarts nothing else. It stops first.
+    # Last, like the compactor: a crash restarts nothing else, and it stops
+    # first, so the node leaves the registry before its cells hibernate.
+    base(config, lock) ++
+      tracker(config) ++
+      cells(config) ++
+      only_if(config.feed.retention_ms, [{Alambique.Feed.Janitor, config}]) ++
+      only_if(config.compaction, [compactor(config)]) ++
+      only_if(config.sweeper, [sweeper(config)]) ++
+      Alambique.Trash.children(config) ++
+      Alambique.Scrub.children(config) ++
+      Alambique.WalBudget.children(config) ++
+      LocalCache.children(config) ++
+      replicas(config) ++
+      only_if(config.nodes, [Alambique.NodeRegistry.child_spec(config)])
+  end
+
+  defp base(config, lock) do
+    [
       %{id: DataDir, start: {Alambique.DataDir, :start_link, [lock]}},
       %{id: :pg, start: {:pg, :start_link, [config.scope]}},
       %{id: Live, start: {Alambique.Live, :start_link, [config]}},
       {Registry, keys: :unique, name: config.registry, listeners: [config.live]}
     ]
-
-    children = children ++ tracker(config)
-
-    children =
-      children ++
-        [
-          %{id: Wakes, start: {Alambique.Admission.Wakes, :start_link, [config]}},
-          %{id: Membership, start: {Membership, :start_link, [config]}},
-          {DynamicSupervisor,
-           strategy: :one_for_one, name: config.supervisor, max_children: config.awake.max_cells},
-          # Stops before the supervisor: leaves the members and hibernates the cells.
-          {Alambique.Drain, config},
-          {Task.Supervisor, name: config.query_supervisor}
-        ]
-
-    children =
-      if config.feed.retention_ms,
-        do: children ++ [{Alambique.Feed.Janitor, config}],
-        else: children
-
-    # Last, so that a compactor crash restarts nothing else. It stops first.
-    children = if config.compaction, do: children ++ [compactor(config)], else: children
-
-    children = if config.sweeper, do: children ++ [sweeper(config)], else: children
-
-    children =
-      children ++
-        Alambique.Trash.children(config) ++
-        Alambique.Scrub.children(config) ++
-        Alambique.WalBudget.children(config) ++ LocalCache.children(config)
-
-    children = children ++ replicas(config)
-
-    # Last, like the compactor: a crash restarts nothing else, and it stops
-    # first, so the node leaves the registry before its cells hibernate.
-    children =
-      if config.nodes, do: children ++ [Alambique.NodeRegistry.child_spec(config)], else: children
-
-    Supervisor.init(children, strategy: :rest_for_one)
   end
+
+  defp cells(config) do
+    [
+      %{id: Wakes, start: {Alambique.Admission.Wakes, :start_link, [config]}},
+      %{id: Membership, start: {Membership, :start_link, [config]}},
+      {DynamicSupervisor,
+       strategy: :one_for_one, name: config.supervisor, max_children: config.awake.max_cells},
+      # Stops before the supervisor: leaves the members and hibernates the cells.
+      {Alambique.Drain, config},
+      {Task.Supervisor, name: config.query_supervisor}
+    ]
+  end
+
+  defp only_if(setting, children), do: if(setting, do: children, else: [])
 
   # Before the membership, so the crashes of the previous VM are settled before
   # this node takes calls. It stops after the cells.
