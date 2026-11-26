@@ -1151,6 +1151,8 @@ fn main_filename(db: *mut ffi::sqlite3) -> Option<String> {
 ///
 /// The calling process is the opener and the user (see `Conn`); the
 /// connection closes when the opener ends.
+/// `lookaside` is `{slot_bytes, slots}` for the connection's lookaside memory
+/// (`nil` keeps SQLite's default); `{0, 0}` has none.
 /// Returns `{:ok, conn, secret}`, the secret 0 for a connection that is not gated.
 #[rustler::nif(schedule = "DirtyIo")]
 #[allow(clippy::too_many_arguments)]
@@ -1163,9 +1165,10 @@ fn sqlite_open<'a>(
     timeout_ms: u64,
     gated: bool,
     exclusive: bool,
+    lookaside: Option<(u32, u32)>,
 ) -> Term<'a> {
     open(
-        env, path, readonly, vfs, attach, timeout_ms, gated, exclusive,
+        env, path, readonly, vfs, attach, timeout_ms, gated, exclusive, lookaside,
     )
 }
 
@@ -1180,6 +1183,7 @@ pub(crate) fn open<'a>(
     timeout_ms: u64,
     gated: bool,
     exclusive: bool,
+    lookaside: Option<(u32, u32)>,
 ) -> Term<'a> {
     let _t = crate::stats::SQLITE_CALLS.time();
     // The region exists before the first page does: the schema and the first
@@ -1267,6 +1271,9 @@ pub(crate) fn open<'a>(
             }
             id.filter(|_| gated)
         };
+        if let Some((size, slots)) = lookaside {
+            set_lookaside(db, size, slots);
+        }
         // SAFETY: `db` is a live connection that nothing else uses yet.
         unsafe {
             // Match the options the cells were built with: no double-quoted
@@ -1339,6 +1346,28 @@ pub(crate) fn open<'a>(
         Ok((atoms::ok(), conn, key).encode(env))
     };
     reply(env, run())
+}
+
+/// Gives a connection that has run nothing its own lookaside memory: slots of
+/// `size` bytes, `slots` of them (SQLite splits the memory into large and
+/// small slots). Failing leaves SQLite's default, which costs only memory or
+/// speed, so the open goes on.
+fn set_lookaside(db: *mut ffi::sqlite3, size: u32, slots: u32) -> c_int {
+    // SAFETY: `db` is a live connection that nothing else uses yet; no buffer
+    // means SQLite allocates the memory itself.
+    let rc = unsafe {
+        ffi::sqlite3_db_config(
+            db,
+            ffi::SQLITE_DBCONFIG_LOOKASIDE,
+            ptr::null_mut::<std::ffi::c_void>(),
+            size as c_int,
+            slots as c_int,
+        )
+    };
+    if rc != ffi::SQLITE_OK {
+        eprintln!("alambique_nif: lookaside {size}x{slots} refused, code {rc}");
+    }
+    rc
 }
 
 /// Closes the connection. Statements that are still alive report
@@ -2308,6 +2337,44 @@ mod tests {
         }
         // SAFETY: `db` is live and not used afterwards.
         unsafe { close_v2(db) };
+    }
+
+    /// Lookaside requests SQLite served from the slots, after a few statements.
+    fn lookaside_hits(setting: Option<(u32, u32)>) -> i32 {
+        let db = mem();
+        if let Some((size, slots)) = setting {
+            assert_eq!(set_lookaside(db, size, slots), ffi::SQLITE_OK);
+        }
+        for sql in [
+            "CREATE TABLE t (a, b)",
+            "INSERT INTO t VALUES (1, 'x'), (2, 'y')",
+            "SELECT a, b FROM t WHERE a > 0 ORDER BY b",
+        ] {
+            assert!(run(db, sql).is_ok(), "{sql}");
+        }
+        let (mut cur, mut hits) = (0, 0);
+        // SAFETY: `db` is live; the status call only reads counters.
+        unsafe {
+            ffi::sqlite3_db_status(
+                db,
+                ffi::SQLITE_DBSTATUS_LOOKASIDE_HIT,
+                &mut cur,
+                &mut hits,
+                0,
+            );
+            close_v2(db);
+        }
+        hits
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "calls SQLite")]
+    fn lookaside_follows_the_setting() {
+        assert!(lookaside_hits(None) > 0, "the default has slots");
+        assert!(lookaside_hits(Some((1200, 40))) > 0);
+        assert!(lookaside_hits(Some((512, 16))) > 0);
+        assert_eq!(lookaside_hits(Some((0, 0))), 0, "{{0, 0}} has none");
+        assert_eq!(lookaside_hits(Some((1200, 0))), 0);
     }
 
     #[test]

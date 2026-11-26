@@ -66,6 +66,9 @@ defmodule Alambique.Sqlite do
   connection takes SQLite's lock on the file at its first access and keeps it
   until it closes, and uses no shared memory for the WAL, so another
   connection that honours SQLite's locks gets `{:error, :busy}`.
+  `:lookaside`, `{slot_bytes, slots}` for the connection's lookaside memory
+  (default `nil`: SQLite's own, 1200 bytes by 40 slots; `{0, 0}` for none).
+  SQLite splits the memory into large slots of `slot_bytes` and small ones.
 
   A read-write connection on a database file that a cell holds open
   read-write is refused with `{:error, :held_by_cell}`, whether it goes
@@ -85,7 +88,8 @@ defmodule Alambique.Sqlite do
       Keyword.get(opts, :attach, false),
       Keyword.get(opts, :timeout_ms, 0),
       Keyword.get(opts, :gated, false),
-      Keyword.get(opts, :locking, :normal) == :exclusive
+      Keyword.get(opts, :locking, :normal) == :exclusive,
+      Keyword.get(opts, :lookaside)
     )
     |> case do
       {:ok, ref, 0} -> {:ok, ref}

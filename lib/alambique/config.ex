@@ -78,6 +78,10 @@ defmodule Alambique.Config do
     cache_kib: 512,
     wake_queue_ms: 500
   ]
+  # SQLite's lookaside memory of a connection: slot bytes times slots; at most
+  # `@lookaside_max_bytes` per connection, slots of a multiple of 8 above 8.
+  @lookaside_max_slot 65_528
+  @lookaside_max_bytes 1_048_576
   @relocate_defaults [fence_attempts: 5, timeout_ms: 60_000, poll_ms: 100]
   @rewind_defaults [fence_attempts: 5, timeout_ms: 60_000, poll_ms: 100, max_bytes: 268_435_456]
   @schema_defaults [check_page: 1_000, listing_timeout_ms: nil]
@@ -357,6 +361,8 @@ defmodule Alambique.Config do
             idle_cache_after_ms: pos_integer | nil,
             idle_close_after_ms: pos_integer | nil,
             idle_cache_kib: non_neg_integer,
+            lookaside_bytes: non_neg_integer | nil,
+            lookaside_count: non_neg_integer | nil,
             idle_gc: boolean,
             track_bytes: boolean,
             wake_queue_ms: pos_integer,
@@ -1355,6 +1361,8 @@ defmodule Alambique.Config do
         :idle_cache_after_ms,
         :idle_cache_kib,
         :idle_close_after_ms,
+        :lookaside_bytes,
+        :lookaside_count,
         :idle_gc,
         :track_bytes,
         :cell_cache_kib_max,
@@ -1367,6 +1375,11 @@ defmodule Alambique.Config do
     {idle_after, rest} = Keyword.pop(rest, :idle_cache_after_ms)
     {close_after, rest} = Keyword.pop(rest, :idle_close_after_ms)
     {idle_kib, rest} = Keyword.pop(rest, :idle_cache_kib, @idle_cache_kib)
+
+    {lookaside_bytes, rest} = Keyword.pop(rest, :lookaside_bytes)
+    {lookaside_count, rest} = Keyword.pop(rest, :lookaside_count)
+    lookaside!(lookaside_bytes, lookaside_count)
+
     {idle_gc, rest} = Keyword.pop(rest, :idle_gc, true)
     {track_bytes, rest} = Keyword.pop(rest, :track_bytes, true)
     {cache_kib, rest} = Keyword.pop(rest, :cache_kib, @awake_defaults[:cache_kib])
@@ -1401,6 +1414,8 @@ defmodule Alambique.Config do
     awake
     |> Map.merge(Map.new(limits))
     |> Map.put(:idle_cache_kib, idle_kib)
+    |> Map.put(:lookaside_bytes, lookaside_bytes)
+    |> Map.put(:lookaside_count, lookaside_count)
     |> Map.put(:idle_gc, idle_gc)
     |> Map.put(:track_bytes, track_bytes)
     |> Map.put(:idle_cache_after_ms, idle_after)
@@ -1433,6 +1448,36 @@ defmodule Alambique.Config do
     if (not is_nil(idle_min) and idle_timeout_ms < idle_min) or
          (not is_nil(idle_max) and idle_timeout_ms > idle_max),
        do: bad!(":idle_timeout_ms must be within :awake :cell_idle_timeout_ms_min and _max")
+
+    :ok
+  end
+
+  # Both `nil` (the default) leave SQLite's lookaside memory (1200 bytes by 40
+  # slots) on every connection. Otherwise both are set: `0` in either gives
+  # none; else the slot size is a multiple of 8 above 8 and the memory of one
+  # connection is bounded.
+  defp lookaside!(nil, nil), do: :ok
+
+  defp lookaside!(bytes, count) do
+    unless is_integer(bytes) and is_integer(count) and bytes >= 0 and count >= 0,
+      do:
+        bad!(
+          ":awake :lookaside_bytes and :lookaside_count must be set together, non-negative integers"
+        )
+
+    if bytes > 0 and count > 0 do
+      unless bytes > 8 and rem(bytes, 8) == 0 and bytes <= @lookaside_max_slot,
+        do:
+          bad!(
+            ":awake :lookaside_bytes must be 0 or a multiple of 8 from 16 up to #{@lookaside_max_slot}"
+          )
+
+      if bytes * count > @lookaside_max_bytes,
+        do:
+          bad!(
+            ":awake :lookaside_bytes times :lookaside_count must not exceed #{@lookaside_max_bytes}"
+          )
+    end
 
     :ok
   end
