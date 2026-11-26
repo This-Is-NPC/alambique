@@ -194,6 +194,7 @@ defmodule Alambique.Config do
     verify_bytes: 1_048_576,
     verify_writes: true,
     verify_reads: false,
+    page_sidecar: false,
     mode: :ranged
   ]
 
@@ -664,9 +665,15 @@ defmodule Alambique.Config do
       fetch_concurrency: config.restore.fetch_concurrency,
       max_inflight_bytes: config.restore.max_inflight_bytes,
       max_object_bytes: config.read_limits.max_object_bytes,
-      max_control_bytes: config.read_limits.max_control_bytes
+      max_control_bytes: config.read_limits.max_control_bytes,
+      page_sidecar: page_sidecar(config.lazy_restore)
     )
   end
+
+  # Objects larger than `:verify_bytes` get a page-hash sidecar; smaller ones
+  # are read whole and checked before they are served anyway.
+  defp page_sidecar(%{page_sidecar: true, verify_bytes: bytes}), do: bytes
+  defp page_sidecar(_lazy_restore), do: nil
 
   # `:placement` names the module; `:store` and `:prefix` are the shorthand for
   # `Alambique.Placement.Single`.
@@ -1164,12 +1171,13 @@ defmodule Alambique.Config do
     opts = checked_keyword!(:lazy_restore, opts, Keyword.keys(@lazy_defaults))
     merged = Keyword.merge(@lazy_defaults, opts)
 
-    for {key, value} <- Keyword.drop(merged, [:verify_writes, :verify_reads, :mode]),
+    for {key, value} <-
+          Keyword.drop(merged, [:verify_writes, :verify_reads, :page_sidecar, :mode]),
         not (is_integer(value) and
                (value > 0 or (key in [:min_bytes, :verify_bytes] and value == 0))),
         do: bad!(":lazy_restore #{inspect(key)} must be a positive integer")
 
-    for key <- [:verify_writes, :verify_reads],
+    for key <- [:verify_writes, :verify_reads, :page_sidecar],
         not is_boolean(merged[key]),
         do: bad!(":lazy_restore #{inspect(key)} must be a boolean")
 
