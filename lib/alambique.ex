@@ -95,7 +95,8 @@ defmodule Alambique do
       `awake` limits `:cell_cache_kib_max`, `:cell_idle_timeout_ms_min` and
       `:cell_idle_timeout_ms_max` clamp what a cell may choose.
     * `:cell_options_timeout_ms` - how long a wake waits for `:cell_options`
-      (default 1 000; with a function set, below the lease renewal interval,
+      (default 1 000, or one less than the lease renewal interval when that is
+      shorter; with a function set, a given value must be below that interval,
       which is a third of `:lease_ttl_ms` less `:lease_renew_jitter`). A call
       that does not return in time is killed.
     * `:cell_options_invalid` - what a cell does when its override is invalid,
@@ -261,7 +262,8 @@ defmodule Alambique do
       of each delay taken away at random, from 0 up to 1, default 0.2). Calls
       for the cell during the delay get the remembered error and start no
       wake; a wake that succeeds starts the count over. `:migrations_timeout_ms`
-      (default 1 000) is how long a wake, `migrate/3`, the sweeper and
+      (default 1 000, or one less than the lease renewal interval when that is
+      shorter) is how long a wake, `migrate/3`, the sweeper and
       `check_deploy/2` wait for a per-cell `:migrations` function; with one
       set it must be below the lease renewal interval. A failure of that
       function, one that times out included, is remembered for

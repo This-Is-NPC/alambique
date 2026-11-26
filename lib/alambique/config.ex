@@ -37,7 +37,7 @@ defmodule Alambique.Config do
     wal: [],
     awake: [],
     cell_options: nil,
-    cell_options_timeout_ms: 1_000,
+    cell_options_timeout_ms: nil,
     cell_options_invalid: :fallback,
     relocate: [],
     rewind: [],
@@ -61,8 +61,7 @@ defmodule Alambique.Config do
     fence_attempts: 5,
     failure_backoff_ms: 5_000,
     backoff_ms: 200,
-    backoff_max_ms: 10_000,
-    migrations_timeout_ms: 1_000
+    backoff_max_ms: 10_000
   ]
   @wake_backoff_factor 2
   @wake_backoff_jitter 0.2
@@ -449,14 +448,20 @@ defmodule Alambique.Config do
     query = query!(opts[:query])
     migrations = migrations!(opts[:migrations])
     cell_options = cell_options!(opts[:cell_options])
-    cell_options_timeout = pos_int!(opts, :cell_options_timeout_ms)
+
+    cell_options_timeout =
+      callback_timeout!(
+        :cell_options_timeout_ms,
+        opts[:cell_options_timeout_ms],
+        not is_nil(cell_options),
+        ttl,
+        jitter
+      )
+
     cell_options_invalid = opts[:cell_options_invalid]
 
     unless cell_options_invalid in [:fallback, :refuse],
       do: bad!(":cell_options_invalid must be :fallback or :refuse")
-
-    unless is_nil(cell_options) or cell_options_timeout < renew_floor(ttl, jitter),
-      do: bad!(":cell_options_timeout_ms must be less than the lease renewal interval")
 
     %{
       name: name,
@@ -1212,11 +1217,12 @@ defmodule Alambique.Config do
       checked_keyword!(
         :wake,
         opts,
-        [:backoff_factor, :backoff_jitter | Keyword.keys(@wake_defaults)]
+        [:backoff_factor, :backoff_jitter, :migrations_timeout_ms | Keyword.keys(@wake_defaults)]
       )
 
     {factor, rest} = Keyword.pop(opts, :backoff_factor, @wake_backoff_factor)
     {jitter, rest} = Keyword.pop(rest, :backoff_jitter, @wake_backoff_jitter)
+    {timeout, rest} = Keyword.pop(rest, :migrations_timeout_ms)
 
     unless is_number(factor) and factor >= 1,
       do: bad!(":wake :backoff_factor must be a number of at least 1")
@@ -1229,10 +1235,20 @@ defmodule Alambique.Config do
     unless wake.backoff_ms <= wake.backoff_max_ms,
       do: bad!(":wake :backoff_ms must not exceed :backoff_max_ms")
 
-    unless is_list(migrations) or wake.migrations_timeout_ms < renew_floor(ttl, renew_jitter),
-      do: bad!(":wake :migrations_timeout_ms must be less than the lease renewal interval")
+    timeout =
+      callback_timeout!(
+        :migrations_timeout_ms,
+        timeout,
+        not is_list(migrations),
+        ttl,
+        renew_jitter
+      )
 
-    Map.merge(wake, %{backoff_factor: factor, backoff_jitter: jitter})
+    Map.merge(wake, %{
+      backoff_factor: factor,
+      backoff_jitter: jitter,
+      migrations_timeout_ms: timeout
+    })
   end
 
   # `max_bytes: nil` (the default) sets no budget for the WAL files of the
@@ -1326,7 +1342,7 @@ defmodule Alambique.Config do
     if kib_max && max_bytes && kib_max * 1024 > max_bytes,
       do: bad!(":awake :cell_cache_kib_max must fit in :max_bytes")
 
-    if idle_min && idle_max && idle_min > idle_max,
+    if not is_nil(idle_min) and not is_nil(idle_max) and idle_min > idle_max,
       do: bad!(":awake :cell_idle_timeout_ms_min must not exceed :cell_idle_timeout_ms_max")
 
     if (not is_nil(idle_min) and idle_timeout_ms < idle_min) or
@@ -1355,6 +1371,27 @@ defmodule Alambique.Config do
 
   defp cell_options!(_),
     do: bad!(":cell_options must be nil, {module, function} or {module, function, extra_args}")
+
+  # The timeout of a callback the cell waits for: a positive integer; `nil` is
+  # one second, or less where the renewal interval is shorter. When `waited?`
+  # a given value must be below that interval.
+  defp callback_timeout!(name, given, waited?, ttl, jitter) do
+    floor = renew_floor(ttl, jitter)
+
+    case given do
+      nil ->
+        max(min(1_000, floor - 1), 1)
+
+      ms when is_integer(ms) and ms > 0 ->
+        if waited? and ms >= floor,
+          do: bad!(":#{name} must be less than the lease renewal interval")
+
+        ms
+
+      _ ->
+        bad!(":#{name} must be a positive integer")
+    end
+  end
 
   # The shortest interval `Cell.renew_interval/1` can give: a callback that
   # the cell waits for must end before it.
