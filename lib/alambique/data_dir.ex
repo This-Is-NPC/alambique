@@ -69,6 +69,7 @@ defmodule Alambique.DataDir do
   def release(lock), do: Native.dir_unlock(lock)
 
   @doc "The first child of the instance: holds the lock until a clean stop."
+  @spec start_link(reference) :: GenServer.on_start()
   def start_link(lock), do: GenServer.start_link(__MODULE__, lock)
 
   @impl true

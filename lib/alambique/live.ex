@@ -13,6 +13,7 @@ defmodule Alambique.Live do
 
   alias Alambique.Cell.Facts
 
+  @spec start_link(Alambique.Config.t()) :: GenServer.on_start()
   def start_link(config), do: GenServer.start_link(__MODULE__, config.live, name: config.live)
 
   @impl true
