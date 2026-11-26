@@ -1,9 +1,10 @@
 defmodule Alambique.Cell.Options do
   @moduledoc false
   # The options of one cell, resolved once per wake and again at each refresh
-  # (`Alambique.refresh_options/3`) from `:cell_options` (design §7). The result is a map with only the keys the override set; a key
-  # that is present, even with `nil`, replaces the node's value, and a key
-  # that is absent leaves it. `State.cell_opt/2` reads it.
+  # (`Alambique.refresh_options/3`) from `:cell_options` (design §7). The
+  # result is a map with only the keys the override set; a key that is present,
+  # even with `nil`, replaces the node's value, and a key that is absent leaves
+  # it. `State.cell_opt/2` reads it.
   #
   # Order: the callback (bounded) -> each key checked by the rule of
   # `Config.check_cell_option/2` -> each value clamped to the node limits ->
@@ -25,6 +26,14 @@ defmodule Alambique.Cell.Options do
     :track_bytes,
     :lookaside_bytes,
     :lookaside_count
+  ]
+
+  # The keyword lists nested in the override, and the keys each may set.
+  @sections [
+    awake: @awake_keys,
+    sql: [:locking_mode],
+    lazy_restore: [:mode],
+    feed: [:cleanup_after_ms]
   ]
 
   @type info :: %{
@@ -88,27 +97,37 @@ defmodule Alambique.Cell.Options do
 
   defp validate(value) do
     with true <- Keyword.keyword?(value) or {:error, "must return a keyword list or nil"},
-         {awake, top} = Keyword.pop(value, :awake, []),
-         {sql, top} = Keyword.pop(top, :sql, []),
-         {lazy, top} = Keyword.pop(top, :lazy_restore, []),
-         {feed, top} = Keyword.pop(top, :feed, []),
-         true <- Keyword.keyword?(awake) or {:error, ":awake must be a keyword list"},
-         true <- Keyword.keyword?(sql) or {:error, ":sql must be a keyword list"},
-         true <- Keyword.keyword?(lazy) or {:error, ":lazy_restore must be a keyword list"},
-         true <- Keyword.keyword?(feed) or {:error, ":feed must be a keyword list"},
+         {:ok, sections, top} <- split_sections(value),
          :ok <- known(top, [:idle_timeout_ms]),
-         :ok <- known(awake, @awake_keys),
-         :ok <- known(sql, [:locking_mode]),
-         :ok <- known(lazy, [:mode]),
-         :ok <- known(feed, [:cleanup_after_ms]),
-         flat =
-           Keyword.take(top, [:idle_timeout_ms]) ++
-             awake ++
-             sql ++ feed ++ for({:mode, mode} <- lazy, do: {:lazy_restore_mode, mode}),
+         :ok <- known_sections(sections),
+         flat = flatten(top, sections),
          true <- Keyword.keys(flat) == Enum.uniq(Keyword.keys(flat)) or {:error, "repeats a key"},
          :ok <- check(flat) do
       {:ok, Map.new(flat)}
     end
+  end
+
+  defp split_sections(value) do
+    Enum.reduce_while(@sections, {:ok, %{}, value}, fn {key, _allowed}, {:ok, found, rest} ->
+      {opts, rest} = Keyword.pop(rest, key, [])
+
+      if Keyword.keyword?(opts),
+        do: {:cont, {:ok, Map.put(found, key, opts), rest}},
+        else: {:halt, {:error, ":#{key} must be a keyword list"}}
+    end)
+  end
+
+  defp known_sections(sections) do
+    Enum.find_value(@sections, :ok, fn {key, allowed} ->
+      with :ok <- known(Map.fetch!(sections, key), allowed), do: nil
+    end)
+  end
+
+  defp flatten(top, sections) do
+    Keyword.take(top, [:idle_timeout_ms]) ++
+      sections.awake ++
+      sections.sql ++
+      sections.feed ++ for({:mode, mode} <- sections.lazy_restore, do: {:lazy_restore_mode, mode})
   end
 
   defp known(opts, allowed) do
@@ -174,90 +193,98 @@ defmodule Alambique.Cell.Options do
   #    use (one alone, or too much memory): both keys are dropped, so the
   #    node's pair applies.
   defp repair(config, id, override) do
-    steps = [
-      {:cleanup_after_ms,
-       fn o ->
-         if value(config, o, :cleanup_after_ms) >= value(config, o, :idle_timeout_ms), do: :drop
-       end},
-      {:idle_timeout_ms,
-       fn o -> if o[:idle_timeout_ms] <= value(config, o, :cleanup_after_ms), do: :drop end},
-      {:idle_cache_after_ms,
-       fn o ->
-         with after_ms when not is_nil(after_ms) <- value(config, o, :idle_cache_after_ms),
-              true <- after_ms >= value(config, o, :idle_timeout_ms),
-              do: {:put, nil},
-              else: (_ -> nil)
-       end},
-      {:idle_close_after_ms,
-       fn o ->
-         with after_ms when not is_nil(after_ms) <- value(config, o, :idle_close_after_ms),
-              true <- after_ms >= value(config, o, :idle_timeout_ms),
-              do: {:put, nil},
-              else: (_ -> nil)
-       end},
-      {:idle_close_after_ms,
-       fn o ->
-         with close when not is_nil(close) <- value(config, o, :idle_close_after_ms),
-              :exclusive <- value(config, o, :locking_mode),
-              do: {:put, nil},
-              else: (_ -> nil)
-       end},
-      {:idle_cache_after_ms,
-       fn o ->
-         with close when not is_nil(close) <- value(config, o, :idle_close_after_ms),
-              after_ms when not is_nil(after_ms) <- value(config, o, :idle_cache_after_ms),
-              true <- after_ms >= close,
-              do: {:put, nil},
-              else: (_ -> nil)
-       end},
-      {:idle_cache_kib,
-       fn o ->
-         with after_ms when not is_nil(after_ms) <- value(config, o, :idle_cache_after_ms),
-              true <- value(config, o, :idle_cache_kib) >= value(config, o, :cache_kib) do
-           node_kib = config.awake.idle_cache_kib
-           if node_kib < value(config, o, :cache_kib), do: {:put, node_kib}, else: :off
-         else
-           _ -> nil
-         end
-       end},
-      {:lookaside_bytes,
-       fn o ->
-         bytes = value(config, o, :lookaside_bytes)
-         count = value(config, o, :lookaside_count)
-         if Config.lookaside_error(bytes, count), do: :drop_lookaside
-       end},
-      {:locking_mode,
-       fn o ->
-         if o.locking_mode == :exclusive and
-              (config.feed.hand_over == :sender or config.lazy_restore != nil),
-            do: :drop
-       end}
-    ]
-
     {repaired, override} =
-      Enum.reduce(steps, {[], override}, fn {key, rule}, {repaired, acc} ->
-        case if(rule_applies?(key, acc), do: rule.(acc)) do
-          nil ->
-            {repaired, acc}
-
-          :drop ->
-            {[key | repaired], Map.delete(acc, key)}
-
-          :drop_lookaside ->
-            {[key | repaired], Map.drop(acc, [:lookaside_bytes, :lookaside_count])}
-
-          {:put, v} ->
-            {[key | repaired], Map.put(acc, key, v)}
-
-          :off ->
-            {[:idle_cache_after_ms | repaired], Map.put(acc, :idle_cache_after_ms, nil)}
-        end
+      Enum.reduce(repairs(), {[], override}, fn {key, rule}, {repaired, acc} ->
+        repair_step({key, rule}, config, repaired, acc)
       end)
 
     for field <- repaired,
         do: Telemetry.emit([:cell, :options, :repaired], %{}, %{cell: id, field: field})
 
     {Enum.reverse(repaired), override}
+  end
+
+  # In order: the numbers of the list above.
+  defp repairs do
+    [
+      {:cleanup_after_ms, &cleanup_not_below_idle/2},
+      {:idle_timeout_ms, &idle_not_above_cleanup/2},
+      {:idle_cache_after_ms, &shrink_not_below_idle/2},
+      {:idle_close_after_ms, &close_not_below_idle/2},
+      {:idle_close_after_ms, &close_not_exclusive/2},
+      {:idle_cache_after_ms, &shrink_not_below_close/2},
+      {:idle_cache_kib, &shrink_below_cache/2},
+      {:lookaside_bytes, &lookaside_usable/2},
+      {:locking_mode, &exclusive_allowed/2}
+    ]
+  end
+
+  defp cleanup_not_below_idle(config, o) do
+    if value(config, o, :cleanup_after_ms) >= value(config, o, :idle_timeout_ms), do: :drop
+  end
+
+  defp idle_not_above_cleanup(config, o),
+    do: if(o[:idle_timeout_ms] <= value(config, o, :cleanup_after_ms), do: :drop)
+
+  defp shrink_not_below_idle(config, o) do
+    with after_ms when not is_nil(after_ms) <- value(config, o, :idle_cache_after_ms),
+         true <- after_ms >= value(config, o, :idle_timeout_ms),
+         do: {:put, nil},
+         else: (_ -> nil)
+  end
+
+  defp close_not_below_idle(config, o) do
+    with after_ms when not is_nil(after_ms) <- value(config, o, :idle_close_after_ms),
+         true <- after_ms >= value(config, o, :idle_timeout_ms),
+         do: {:put, nil},
+         else: (_ -> nil)
+  end
+
+  defp close_not_exclusive(config, o) do
+    with close when not is_nil(close) <- value(config, o, :idle_close_after_ms),
+         :exclusive <- value(config, o, :locking_mode),
+         do: {:put, nil},
+         else: (_ -> nil)
+  end
+
+  defp shrink_not_below_close(config, o) do
+    with close when not is_nil(close) <- value(config, o, :idle_close_after_ms),
+         after_ms when not is_nil(after_ms) <- value(config, o, :idle_cache_after_ms),
+         true <- after_ms >= close,
+         do: {:put, nil},
+         else: (_ -> nil)
+  end
+
+  defp shrink_below_cache(config, o) do
+    with after_ms when not is_nil(after_ms) <- value(config, o, :idle_cache_after_ms),
+         true <- value(config, o, :idle_cache_kib) >= value(config, o, :cache_kib) do
+      node_kib = config.awake.idle_cache_kib
+      if node_kib < value(config, o, :cache_kib), do: {:put, node_kib}, else: :off
+    else
+      _ -> nil
+    end
+  end
+
+  defp lookaside_usable(config, o) do
+    bytes = value(config, o, :lookaside_bytes)
+    count = value(config, o, :lookaside_count)
+    if Config.lookaside_error(bytes, count), do: :drop_lookaside
+  end
+
+  defp exclusive_allowed(config, o) do
+    if o.locking_mode == :exclusive and
+         (config.feed.hand_over == :sender or config.lazy_restore != nil),
+       do: :drop
+  end
+
+  defp repair_step({key, rule}, config, repaired, acc) do
+    case if(rule_applies?(key, acc), do: rule.(config, acc)) do
+      nil -> {repaired, acc}
+      :drop -> {[key | repaired], Map.delete(acc, key)}
+      :drop_lookaside -> {[key | repaired], Map.drop(acc, [:lookaside_bytes, :lookaside_count])}
+      {:put, v} -> {[key | repaired], Map.put(acc, key, v)}
+      :off -> {[:idle_cache_after_ms | repaired], Map.put(acc, :idle_cache_after_ms, nil)}
+    end
   end
 
   # Steps 1 and 7 read the key they may drop; the others read the merged values.
