@@ -108,8 +108,12 @@ defmodule Alambique.PageSidecarConfigTest do
     pid = Alambique.Cell.whereis(Config.fetch!(inst), cell)
     writer = in_cell(pid, & &1.sidecar)
     assert is_pid(writer) and Process.alive?(writer)
+    ref = Process.monitor(writer)
     :ok = Alambique.hibernate(inst, cell)
-    eventually(fn -> not Process.alive?(writer) end)
+
+    # Gone with the cell, not at the deadline of its put (the call timeout,
+    # 2 s here).
+    assert_receive {:DOWN, ^ref, :process, ^writer, _}, 500
   end
 
   describe "a cell that wrote sidecars" do
