@@ -757,7 +757,7 @@ defmodule Alambique.TxControlFailedWriteTest do
       c = boot(env)
       s = cstate(c)
       missing = Path.join(env.dir, "no-such-dir/x.db-wal")
-      assert {:ok, false} = Native.wal_pending(missing, s.repl.page_size, s.repl.wal_pos, nil)
+      assert {:ok, false} = Native.wal_pending(missing, s.repl.page_size, s.repl.wal_pos)
     end
   end
 

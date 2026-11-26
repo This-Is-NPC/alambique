@@ -264,13 +264,32 @@ defmodule Alambique.Sqlite do
   def foreign_write(conn), do: Native.sqlite_foreign_write(ref(conn), key(conn), 0)
 
   @doc """
-  Where the committed log of a cell's own connection ends, by the wal-index:
-  `{:ok, pos}` for the position a WAL scan by path must stop at (frames past
-  it are no transaction, such as a commit frame whose write failed after it
-  reached the file), `:none` for a connection with no header to read.
+  `Alambique.Replication.Native.capture_incremental/8` of the files of a
+  cell's own connection, reading the WAL up to the end its wal-index records:
+  frames past it are no transaction (a commit frame whose write failed after
+  it reached the file). The header is read in the same native call.
   """
-  @spec wal_end(conn) :: {:ok, Alambique.Replication.Native.wal_pos()} | :none | {:error, term}
-  def wal_end(conn), do: Native.sqlite_wal_end(ref(conn), key(conn))
+  def capture_incremental(conn, db, wal, page_size, pos, sums, pre, txid, timestamp) do
+    Native.sqlite_capture_incremental(
+      ref(conn),
+      key(conn),
+      db,
+      wal,
+      page_size,
+      pos,
+      sums,
+      pre,
+      txid,
+      timestamp
+    )
+  end
+
+  @doc """
+  `Alambique.Replication.Native.wal_pending/3` of the WAL of a cell's own
+  connection, up to the end its wal-index records.
+  """
+  def wal_pending(conn, wal, page_size, pos),
+    do: Native.sqlite_wal_pending(ref(conn), key(conn), wal, page_size, pos)
 
   @doc """
   Takes the header that the latest `foreign_write/1` saw as accounted for,

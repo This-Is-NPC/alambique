@@ -94,7 +94,7 @@ defmodule Alambique.TxControlEndedTransactionTest do
     s = :sys.get_state(pid(env))
 
     {:ok, pending?} =
-      Native.wal_pending(s.repl.db_path <> "-wal", s.repl.page_size, s.repl.wal_pos, nil)
+      Native.wal_pending(s.repl.db_path <> "-wal", s.repl.page_size, s.repl.wal_pos)
 
     %{
       unreplicated: pending?,
@@ -642,7 +642,7 @@ defmodule Alambique.TxControlEndedTransactionTest do
       s = :sys.get_state(Cell.whereis(Config.fetch!(inst), cell))
 
       {:ok, unreplicated} =
-        Native.wal_pending(s.repl.db_path <> "-wal", s.repl.page_size, s.repl.wal_pos, nil)
+        Native.wal_pending(s.repl.db_path <> "-wal", s.repl.page_size, s.repl.wal_pos)
 
       in_flight = s.pending != [] or s.pipe.queue != []
 
