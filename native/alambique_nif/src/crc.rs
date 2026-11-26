@@ -78,7 +78,9 @@ mod tests {
     fn the_polynomial_as_a_message_error_leaves_the_checksum_unchanged() {
         // x^64 + x^4 + x^3 + x + 1 with the last bit of the data as x^0: the
         // reflected algorithm reads the low bit of each byte first.
-        let mut data: Vec<u8> = (0..64u32).map(|i| (i * 7 + 3) as u8).collect();
+        let mut data: Vec<u8> = (0..64u8)
+            .map(|i| i.wrapping_mul(7).wrapping_add(3))
+            .collect();
         let before = crc64(&data);
         let n = data.len();
         data[n - 9] ^= 0x80;
