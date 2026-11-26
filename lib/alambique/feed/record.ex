@@ -203,7 +203,8 @@ defmodule Alambique.Feed.Record do
   # more make a group, which never holds a rewind. The JSON is then compressed
   # with zlib at level 6 (design §13).
   @type change :: {String.t(), String.t(), String.t(), String.t() | nil}
-  @spec encode(String.t(), [{pos_integer, [change]}, ...]) :: binary
+  @type changes :: [change] | {:encoded, iodata, pos_integer}
+  @spec encode(String.t(), [{pos_integer, changes}, ...]) :: binary
   def encode(cell, batches) do
     body = batches |> iodata(cell) |> IO.iodata_to_binary()
     pack(if String.valid?(body), do: body, else: String.replace_invalid(body))
@@ -257,6 +258,9 @@ defmodule Alambique.Feed.Record do
 
     [~s({"cell":), Jason.encode!(cell), ~s(,"batches":[), batches, "]}"]
   end
+
+  # The text of the records, built by the library (`hand_over: :native`).
+  defp rows({:encoded, text, _count}), do: text
 
   defp rows(changes) do
     changes

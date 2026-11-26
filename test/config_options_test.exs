@@ -179,7 +179,7 @@ defmodule Alambique.ConfigOptionsTest do
       assert feed(ctx, hand_over: :sender, reader_cache_kib: 256).reader_cache_kib == 256
 
       for bad <- [nil, :reader, "sender", 1] do
-        assert_raise ArgumentError, ~r/:feed hand_over must be :cell or :sender/, fn ->
+        assert_raise ArgumentError, ~r/:feed hand_over must be :cell, :sender or :native/, fn ->
           feed(ctx, hand_over: bad)
         end
       end
