@@ -454,7 +454,7 @@ defmodule AlambiqueTestkit.Cluster do
   defp ensure_distributed! do
     unless Node.alive?() do
       ensure_epmd!()
-      {:ok, _} = Node.start(:"alambique_test_#{System.pid()}@127.0.0.1", :longnames)
+      {:ok, _} = Node.start(:"alambique_test_#{System.pid()}@127.0.0.1", name_domain: :longnames)
     end
   end
 

@@ -298,8 +298,9 @@ defmodule Alambique.Replication.Native do
   @spec sqlite_wal_advanced(conn) :: boolean | sql_error
   def sqlite_wal_advanced(_conn), do: nif_error()
   @doc false
-  @spec sqlite_foreign_write(conn, non_neg_integer, 0..2) ::
-          :none | :advanced | :restarted | :ok | sql_error
+  @spec sqlite_foreign_write(conn, non_neg_integer, 0) ::
+          :none | :advanced | :restarted | sql_error
+  @spec sqlite_foreign_write(conn, non_neg_integer, 1 | 2) :: :ok | sql_error
   def sqlite_foreign_write(_conn, _key, _mode), do: nif_error()
   @doc false
   @spec sqlite_capture_incremental(
