@@ -70,28 +70,19 @@ fn int(s: *mut ffi::sqlite3_stmt, i: i32) -> i64 {
 /// The bytes of a text or blob column, `None` for SQL NULL. An empty text is
 /// `Some(&[])`: the pointer SQLite gives for it may be null.
 fn bytes<'s>(s: *mut ffi::sqlite3_stmt, i: i32) -> Option<&'s [u8]> {
-    // SAFETY: `s` is a live statement positioned on a row; the pointer and
-    // the length are read before the next call on `s` and the slice is used
-    // before it (the caller copies it).
-    unsafe {
-        if ffi::sqlite3_column_type(s, i) == ffi::SQLITE_NULL {
-            return None;
-        }
-        let data = ffi::sqlite3_column_blob(s, i) as *const u8;
-        let len = ffi::sqlite3_column_bytes(s, i) as usize;
-        if data.is_null() || len == 0 {
-            Some(&[])
-        } else {
-            Some(std::slice::from_raw_parts(data, len))
-        }
+    // SAFETY: `s` is a live statement positioned on a row.
+    if unsafe { ffi::sqlite3_column_type(s, i) } == ffi::SQLITE_NULL {
+        return None;
     }
+    Some(crate::sqlite::column_data(s, i))
 }
 
 /// `Jason.encode!/1` of a valid UTF-8 string, without the quotes: `"` and `\`
 /// escaped, `\b \t \n \f \r` short, other bytes under 0x20 as `\u00XX` in
 /// upper case; `/`, 0x7F and U+2028 stay as they are.
 fn escape(out: &mut Vec<u8>, text: &str) {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    // The upper-case hexadecimal digit of a nibble.
+    let hex = |n: u8| if n < 10 { b'0' + n } else { b'A' + n - 10 };
     for &b in text.as_bytes() {
         match b {
             b'"' => out.extend_from_slice(b"\\\""),
@@ -103,8 +94,8 @@ fn escape(out: &mut Vec<u8>, text: &str) {
             0x0d => out.extend_from_slice(b"\\r"),
             0x00..=0x1f => {
                 out.extend_from_slice(b"\\u00");
-                out.push(HEX[(b >> 4) as usize]);
-                out.push(HEX[(b & 15) as usize]);
+                out.push(hex(b >> 4));
+                out.push(hex(b & 15));
             }
             _ => out.push(b),
         }
@@ -300,7 +291,11 @@ fn sqlite_feed_rows<'a>(
                 });
             };
             let _guard = Finalize(s);
-            refuse_tail(db, &sql[end..])?;
+            refuse_tail(
+                db,
+                sql.get(end..)
+                    .ok_or_else(|| Failure::Message("statement end".into()))?,
+            )?;
             bind_all(db, s, params)?;
             read_groups(db, &conn.control, s, &plan)
         })?;

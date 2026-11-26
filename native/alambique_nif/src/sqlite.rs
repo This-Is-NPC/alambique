@@ -54,7 +54,9 @@ unsafe impl Sync for DbPtr {}
 /// Microseconds on a clock that starts at the first call, never 0.
 fn now_us() -> u64 {
     static BASE: OnceLock<Instant> = OnceLock::new();
-    BASE.get_or_init(Instant::now).elapsed().as_micros() as u64 + 1
+    u64::try_from(BASE.get_or_init(Instant::now).elapsed().as_micros())
+        .unwrap_or(u64::MAX)
+        .saturating_add(1)
 }
 
 /// What the authorizer and the progress handler of a connection consult. Its
@@ -385,9 +387,11 @@ fn reply<'a>(env: Env<'a>, outcome: Outcome<'a>) -> Term<'a> {
 }
 
 fn message(db: *mut ffi::sqlite3) -> String {
-    // SAFETY: `db` is a live connection; `sqlite3_errmsg` returns a
-    // NUL-terminated string that is valid until the next call on `db`.
-    unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(db)) }
+    // SAFETY: `db` is a live connection.
+    let msg = unsafe { ffi::sqlite3_errmsg(db) };
+    // SAFETY: `sqlite3_errmsg` returns a NUL-terminated string that is valid
+    // until the next call on `db`.
+    unsafe { CStr::from_ptr(msg) }
         .to_string_lossy()
         .into_owned()
 }
@@ -496,12 +500,9 @@ pub(crate) unsafe extern "C" fn authorize(
             ffi::SQLITE_PRAGMA if !name.is_null() => {
                 // SAFETY: for a pragma SQLite passes NUL-terminated names,
                 // `arg` possibly null.
-                let (name, arg) = unsafe {
-                    (
-                        CStr::from_ptr(name).to_bytes(),
-                        (!arg.is_null()).then(|| CStr::from_ptr(arg).to_bytes()),
-                    )
-                };
+                let name = unsafe { CStr::from_ptr(name) }.to_bytes();
+                // SAFETY: as above.
+                let arg = (!arg.is_null()).then(|| unsafe { CStr::from_ptr(arg) }.to_bytes());
                 pragma_allowed(name, arg, read_only) && (writes || pragma_reads(name, arg))
             }
             ffi::SQLITE_CREATE_INDEX
@@ -615,7 +616,8 @@ unsafe extern "C" fn wal_committed(
     guard("wal_hook", ffi::SQLITE_OK, || {
         // SAFETY: the context is the `Control` of this connection (see there).
         let ctl = unsafe { &*(ctx as *const Control) };
-        ctl.wal_frames.store(frames as u64, Relaxed);
+        ctl.wal_frames
+            .store(u64::try_from(frames).unwrap_or(0), Relaxed);
         ctl.wal_commits.fetch_add(1, Relaxed);
         ffi::SQLITE_OK
     })
@@ -702,7 +704,7 @@ impl<'a> Call<'a> {
             ctl.deadline.store(deadline, Relaxed);
         }
         let length = (limits.read_only && limits.max_bytes > 0).then(|| {
-            let cap = limits.max_bytes.min(c_int::MAX as u64) as c_int;
+            let cap = c_int::try_from(limits.max_bytes).unwrap_or(c_int::MAX);
             // SAFETY: `db` is a live connection (callers hold the lock).
             unsafe { ffi::sqlite3_limit(db, ffi::SQLITE_LIMIT_LENGTH, cap) }
         });
@@ -743,7 +745,7 @@ fn count_cache(db: *mut ffi::sqlite3) {
         let (mut cur, mut high) = (0, 0);
         // SAFETY: `db` is a live connection (callers hold the lock).
         unsafe { ffi::sqlite3_db_status(db, op, &mut cur, &mut high, 1) };
-        counter.fetch_add(cur as u64, Relaxed);
+        counter.fetch_add(u64::try_from(cur).unwrap_or(0), Relaxed);
     }
 }
 
@@ -794,24 +796,32 @@ fn binary<'a>(env: Env<'a>, bytes: &[u8]) -> Term<'a> {
     Binary::from(b).to_term(env)
 }
 
+/// The bytes of a text or blob column, valid until the next call on `s`.
+pub(crate) fn column_data<'s>(s: *mut ffi::sqlite3_stmt, i: c_int) -> &'s [u8] {
+    // SAFETY: `s` is a live statement positioned on a row and `i` is a column
+    // index.
+    let data = unsafe { ffi::sqlite3_column_blob(s, i) }.cast::<u8>();
+    // SAFETY: as above; the length is read after the blob.
+    let len = unsafe { ffi::sqlite3_column_bytes(s, i) };
+    let len = usize::try_from(len).unwrap_or(0);
+    if data.is_null() || len == 0 {
+        &[]
+    } else {
+        // SAFETY: SQLite holds `len` bytes at `data` until the next call on `s`.
+        unsafe { std::slice::from_raw_parts(data, len) }
+    }
+}
+
 fn column<'a>(env: Env<'a>, s: *mut ffi::sqlite3_stmt, i: c_int) -> Term<'a> {
     // SAFETY: `s` is a live statement positioned on a row and `i` is a column
-    // index; a column pointer is read before the next call on `s`.
-    unsafe {
-        match ffi::sqlite3_column_type(s, i) {
-            ffi::SQLITE_INTEGER => ffi::sqlite3_column_int64(s, i).encode(env),
-            ffi::SQLITE_FLOAT => ffi::sqlite3_column_double(s, i).encode(env),
-            ffi::SQLITE_TEXT | ffi::SQLITE_BLOB => {
-                let data = ffi::sqlite3_column_blob(s, i) as *const u8;
-                let len = ffi::sqlite3_column_bytes(s, i) as usize;
-                if data.is_null() || len == 0 {
-                    binary(env, &[])
-                } else {
-                    binary(env, std::slice::from_raw_parts(data, len))
-                }
-            }
-            _ => atoms::nil().encode(env),
-        }
+    // index.
+    match unsafe { ffi::sqlite3_column_type(s, i) } {
+        // SAFETY: as above.
+        ffi::SQLITE_INTEGER => unsafe { ffi::sqlite3_column_int64(s, i) }.encode(env),
+        // SAFETY: as above.
+        ffi::SQLITE_FLOAT => unsafe { ffi::sqlite3_column_double(s, i) }.encode(env),
+        ffi::SQLITE_TEXT | ffi::SQLITE_BLOB => binary(env, column_data(s, i)),
+        _ => atoms::nil().encode(env),
     }
 }
 
@@ -830,15 +840,14 @@ fn column_names<'a>(env: Env<'a>, s: *mut ffi::sqlite3_stmt) -> Term<'a> {
     let n = column_count(s);
     let names: Vec<Term> = (0..n)
         .map(|i| {
-            // SAFETY: `s` is a live statement and `i` a column index; the name
-            // is NUL-terminated and valid until the next call on `s`.
-            unsafe {
-                let name = ffi::sqlite3_column_name(s, i);
-                if name.is_null() {
-                    binary(env, &[])
-                } else {
-                    binary(env, CStr::from_ptr(name).to_bytes())
-                }
+            // SAFETY: `s` is a live statement and `i` a column index.
+            let name = unsafe { ffi::sqlite3_column_name(s, i) };
+            if name.is_null() {
+                binary(env, &[])
+            } else {
+                // SAFETY: the name is NUL-terminated and valid until the next
+                // call on `s`.
+                binary(env, unsafe { CStr::from_ptr(name) }.to_bytes())
             }
         })
         .collect();
@@ -850,11 +859,12 @@ fn row_bytes(s: *mut ffi::sqlite3_stmt) -> u64 {
     (0..column_count(s))
         .map(|i| {
             // SAFETY: `s` is a live statement positioned on a row.
-            unsafe {
-                match ffi::sqlite3_column_type(s, i) {
-                    ffi::SQLITE_TEXT | ffi::SQLITE_BLOB => ffi::sqlite3_column_bytes(s, i) as u64,
-                    _ => 8,
+            match unsafe { ffi::sqlite3_column_type(s, i) } {
+                ffi::SQLITE_TEXT | ffi::SQLITE_BLOB => {
+                    // SAFETY: as above.
+                    u64::try_from(unsafe { ffi::sqlite3_column_bytes(s, i) }).unwrap_or(0)
                 }
+                _ => 8,
             }
         })
         .sum()
@@ -925,8 +935,11 @@ fn prepare_at(db: *mut ffi::sqlite3, sql: &[u8]) -> Result<(Option<StmtPtr>, usi
 /// end (`;` included). `None` when only blanks, comments and `;` are there.
 fn next_statement(db: *mut ffi::sqlite3, sql: &[u8]) -> Result<(Option<StmtPtr>, usize), Failure> {
     let mut at = 0;
-    while !sql[at..].iter().all(u8::is_ascii_whitespace) {
-        let (stmt, used) = prepare_at(db, &sql[at..])?;
+    while let Some(rest) = sql
+        .get(at..)
+        .filter(|rest| !rest.iter().all(u8::is_ascii_whitespace))
+    {
+        let (stmt, used) = prepare_at(db, rest)?;
         at += used;
         if stmt.is_some() || used == 0 {
             return Ok((stmt, at));
@@ -984,27 +997,23 @@ impl Drop for Finalize {
 /// The text is one statement already, so nothing can follow the keyword that
 /// the caller does not see.
 fn starts_ddl(text: &[u8]) -> bool {
-    let mut i = 0;
+    let mut rest = text;
     loop {
-        match text.get(i..) {
-            Some([b' ' | b'\t' | b'\n' | 0x0c | b'\r', ..]) => i += 1,
-            Some([0xEF, 0xBB, 0xBF, ..]) => i += 3,
-            Some([b'-', b'-', ..]) => {
-                i += text[i..]
-                    .iter()
-                    .position(|&c| c == b'\n')
-                    .map_or(text.len() - i, |n| n + 1)
-            }
-            Some([b'/', b'*', ..]) => {
-                i += text[i + 2..]
-                    .windows(2)
-                    .position(|w| w == b"*/")
-                    .map_or(text.len() - i, |n| n + 4)
-            }
+        rest = match rest {
+            [b' ' | b'\t' | b'\n' | 0x0c | b'\r', tail @ ..] => tail,
+            [0xEF, 0xBB, 0xBF, tail @ ..] => tail,
+            [b'-', b'-', tail @ ..] => match tail.iter().position(|&c| c == b'\n') {
+                Some(n) => tail.get(n + 1..).unwrap_or_default(),
+                None => &[],
+            },
+            [b'/', b'*', tail @ ..] => match tail.windows(2).position(|w| w == b"*/") {
+                Some(n) => tail.get(n + 2..).unwrap_or_default(),
+                None => &[],
+            },
             _ => break,
         }
     }
-    let word: Vec<u8> = text[i.min(text.len())..]
+    let word: Vec<u8> = rest
         .iter()
         .take_while(|c| c.is_ascii_alphanumeric() || **c == b'_')
         .map(u8::to_ascii_lowercase)
@@ -1033,7 +1042,7 @@ fn bind_all(db: *mut ffi::sqlite3, s: *mut ffi::sqlite3_stmt, params: Term) -> R
         .decode()
         .map_err(|_| Failure::Argument("parameters must be a list".into()))?;
     // SAFETY: `s` is a live statement.
-    let expected = unsafe { ffi::sqlite3_bind_parameter_count(s) } as usize;
+    let expected = usize::try_from(unsafe { ffi::sqlite3_bind_parameter_count(s) }).unwrap_or(0);
     if expected != params.len() {
         return Err(Failure::Argument(format!(
             "expected {expected} arguments, got {}",
@@ -1043,7 +1052,9 @@ fn bind_all(db: *mut ffi::sqlite3, s: *mut ffi::sqlite3_stmt, params: Term) -> R
     // SAFETY: as above.
     unsafe { ffi::sqlite3_reset(s) };
     for (i, term) in params.into_iter().enumerate() {
-        let rc = bind_one(s, i as c_int + 1, term)?;
+        let idx =
+            c_int::try_from(i + 1).map_err(|_| Failure::Argument("too many arguments".into()))?;
+        let rc = bind_one(s, idx, term)?;
         if rc != ffi::SQLITE_OK {
             return Err(Failure::Message(message(db)));
         }
@@ -1061,29 +1072,36 @@ enum Value<'a> {
 }
 
 fn bind_value(s: *mut ffi::sqlite3_stmt, idx: c_int, value: Value) -> Result<c_int, Failure> {
-    // SAFETY: `s` is a live statement; SQLITE_TRANSIENT makes SQLite copy the
-    // bytes before the call returns.
-    unsafe {
-        Ok(match value {
-            Value::Int(i) => ffi::sqlite3_bind_int64(s, idx, i),
-            Value::Float(f) => ffi::sqlite3_bind_double(s, idx, f),
-            Value::Null => ffi::sqlite3_bind_null(s, idx),
-            Value::Text(b) => ffi::sqlite3_bind_text(
-                s,
-                idx,
-                b.as_ptr() as *const c_char,
-                c_len(b.len())?,
-                ffi::SQLITE_TRANSIENT(),
-            ),
-            Value::Blob(b) => ffi::sqlite3_bind_blob(
-                s,
-                idx,
-                b.as_ptr() as *const _,
-                c_len(b.len())?,
-                ffi::SQLITE_TRANSIENT(),
-            ),
-        })
-    }
+    Ok(match value {
+        Value::Int(i) => {
+            // SAFETY: `s` is a live statement.
+            unsafe { ffi::sqlite3_bind_int64(s, idx, i) }
+        }
+        Value::Float(f) => {
+            // SAFETY: `s` is a live statement.
+            unsafe { ffi::sqlite3_bind_double(s, idx, f) }
+        }
+        Value::Null => {
+            // SAFETY: `s` is a live statement.
+            unsafe { ffi::sqlite3_bind_null(s, idx) }
+        }
+        Value::Text(b) => {
+            let len = c_len(b.len())?;
+            // SAFETY: `s` is a live statement; SQLITE_TRANSIENT makes SQLite copy the
+            // bytes before the call returns.
+            unsafe {
+                ffi::sqlite3_bind_text(s, idx, b.as_ptr().cast(), len, ffi::SQLITE_TRANSIENT())
+            }
+        }
+        Value::Blob(b) => {
+            let len = c_len(b.len())?;
+            // SAFETY: `s` is a live statement; SQLITE_TRANSIENT makes SQLite copy the
+            // bytes before the call returns.
+            unsafe {
+                ffi::sqlite3_bind_blob(s, idx, b.as_ptr().cast(), len, ffi::SQLITE_TRANSIENT())
+            }
+        }
+    })
 }
 
 fn iodata(term: Term) -> Option<Binary> {
@@ -1134,11 +1152,10 @@ fn owner(env: Env) -> held::Owner {
 
 /// The file name of the main database of `db`.
 fn main_filename(db: *mut ffi::sqlite3) -> Option<String> {
-    // SAFETY: `db` is a live connection; the name is read at once.
-    unsafe {
-        let n = ffi::sqlite3_db_filename(db, c"main".as_ptr());
-        (!n.is_null()).then(|| CStr::from_ptr(n).to_string_lossy().into_owned())
-    }
+    // SAFETY: `db` is a live connection.
+    let n = unsafe { ffi::sqlite3_db_filename(db, c"main".as_ptr()) };
+    // SAFETY: the name is NUL-terminated and read at once.
+    (!n.is_null()).then(|| unsafe { CStr::from_ptr(n) }.to_string_lossy().into_owned())
 }
 
 /// Opens `path` (a file name or a `file:` URI). `readonly` opens an existing
@@ -1189,128 +1206,17 @@ pub(crate) fn open<'a>(env: Env<'a>, path: String, opts: OpenOpts) -> Term<'a> {
     let region = crate::alloc::Region::open();
     let _in_region = crate::alloc::RegionGuard::enter(region.slot());
     let run = || -> Outcome<'a> {
-        let path = CString::new(path).map_err(|_| Failure::Message("invalid file name".into()))?;
-        let vfs = vfs
-            .map(|v| CString::new(v).map_err(|_| Failure::Message("invalid vfs name".into())))
-            .transpose()?;
-        let mut flags = ffi::SQLITE_OPEN_URI;
-        flags |= if readonly {
-            ffi::SQLITE_OPEN_READONLY
-        } else {
-            ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_CREATE
-        };
-        let mut db: *mut ffi::sqlite3 = ptr::null_mut();
-        held::clear_refused();
-        // A cell that closed its connection and kept the file opens it again.
-        let permit = (!readonly && gated)
-            .then(|| path.to_str().ok())
-            .flatten()
-            .and_then(|p| held::permit(std::path::Path::new(p), owner(env)));
-        // SAFETY: `path` and `vfs` are NUL-terminated and outlive the call.
-        let rc = unsafe {
-            ffi::sqlite3_open_v2(
-                path.as_ptr(),
-                &mut db,
-                flags,
-                vfs.as_ref().map_or(ptr::null(), |v| v.as_ptr()),
-            )
-        };
-        drop(permit);
-        if rc != ffi::SQLITE_OK {
-            let failure = if held::take_refused() {
-                Failure::HeldByCell
-            } else if db.is_null() {
-                Failure::Message("out of memory".into())
-            } else {
-                failure(db)
-            };
-            // SAFETY: `db` is the handle `sqlite3_open_v2` returned.
-            unsafe { close_v2(db) };
-            return Err(failure);
-        }
+        let db = open_raw(env, path, vfs, readonly, gated)?;
         // Before the first access of the file, so that the lock is taken at
         // the first read and the WAL keeps its index in memory.
         if exclusive && !readonly {
-            // SAFETY: `db` is the live connection `sqlite3_open_v2` returned.
-            let rc = unsafe {
-                ffi::sqlite3_exec(
-                    db,
-                    c"PRAGMA locking_mode = EXCLUSIVE".as_ptr(),
-                    None,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                )
-            };
-            if rc != ffi::SQLITE_OK {
-                let failure = failure(db);
-                // SAFETY: `db` is the handle `sqlite3_open_v2` returned.
-                unsafe { close_v2(db) };
-                return Err(failure);
-            }
+            lock_exclusive(db)?;
         }
-        // A cell's own connection takes the file; any other read-write open
-        // of a held file is refused, whichever VFS opened it (the Alambique
-        // VFS refuses its own opens, and ATTACH, in `x_open`).
-        let held = if readonly {
-            None
-        } else {
-            let name = main_filename(db);
-            let id = name.and_then(|n| held::file_id(std::path::Path::new(&n)));
-            let free = match id {
-                _ if held::bypassed() => true,
-                Some(id) if gated => held::hold(id) || held::reclaim(id, owner(env)),
-                Some(id) => !held::is_held(id),
-                None => true,
-            };
-            if !free {
-                // SAFETY: `db` is the handle `sqlite3_open_v2` returned.
-                unsafe { close_v2(db) };
-                return Err(Failure::HeldByCell);
-            }
-            id.filter(|_| gated)
-        };
+        let held = claim_file(env, db, readonly, gated)?;
         if let Some((size, slots)) = lookaside {
             set_lookaside(db, size, slots);
         }
-        // SAFETY: `db` is a live connection that nothing else uses yet.
-        unsafe {
-            // Match the options the cells were built with: no double-quoted
-            // string literals.
-            let mut out: c_int = 0;
-            ffi::sqlite3_db_config(
-                db,
-                ffi::SQLITE_DBCONFIG_DQS_DML,
-                0 as c_int,
-                &mut out as *mut c_int,
-            );
-            ffi::sqlite3_db_config(
-                db,
-                ffi::SQLITE_DBCONFIG_DQS_DDL,
-                0 as c_int,
-                &mut out as *mut c_int,
-            );
-            // Only an explicit checkpoint moves WAL frames into the file
-            // (design §6): not closing, which also happens when the
-            // connection is garbage collected or its owner crashes, and not
-            // the automatic checkpoint after a commit.
-            ffi::sqlite3_db_config(
-                db,
-                ffi::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
-                1 as c_int,
-                &mut out as *mut c_int,
-            );
-            ffi::sqlite3_wal_autocheckpoint(db, 0);
-            // Hardening against a hostile file or statement: no writes to
-            // the schema or shadow tables, no unsafe functions in views and
-            // triggers, no extension loading.
-            for (op, on) in [
-                (ffi::SQLITE_DBCONFIG_DEFENSIVE, 1 as c_int),
-                (ffi::SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0),
-                (ffi::SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0),
-            ] {
-                ffi::sqlite3_db_config(db, op, on, &mut out as *mut c_int);
-            }
-        }
+        configure(db);
         CONNECTIONS_OPEN.fetch_add(1, Relaxed);
         let key = if gated { new_token() } else { 0 };
         let mut control = Control::new(attach, timeout_ms);
@@ -1332,18 +1238,153 @@ pub(crate) fn open<'a>(env: Env<'a>, path: String, opts: OpenOpts) -> Term<'a> {
             released: AtomicBool::new(false),
             region,
         });
-        let ctx = &*conn.control as *const Control as *mut std::ffi::c_void;
-        // SAFETY: `db` is live and not shared yet; `ctx` outlives it (see
-        // `Control`).
-        unsafe {
-            ffi::sqlite3_set_authorizer(db, Some(authorize), ctx);
-            ffi::sqlite3_progress_handler(db, PROGRESS_OPS, Some(progress), ctx);
-            ffi::sqlite3_wal_hook(db, Some(wal_committed), ctx);
-        }
+        let ctx = std::ptr::from_ref::<Control>(&conn.control)
+            .cast_mut()
+            .cast::<std::ffi::c_void>();
+        install_hooks(db, ctx);
         conn.monitor(Some(env), &opener);
         Ok((atoms::ok(), conn, key).encode(env))
     };
     reply(env, run())
+}
+
+/// Closes a handle that `sqlite3_open_v2` returned and that is not kept.
+fn close_unused(db: *mut ffi::sqlite3) {
+    // SAFETY: `db` is the handle `sqlite3_open_v2` returned.
+    unsafe { close_v2(db) };
+}
+
+/// `sqlite3_open_v2` of `path`; a handle that is not returned is closed.
+fn open_raw(
+    env: Env,
+    path: String,
+    vfs: Option<String>,
+    readonly: bool,
+    gated: bool,
+) -> Result<*mut ffi::sqlite3, Failure> {
+    let path = CString::new(path).map_err(|_| Failure::Message("invalid file name".into()))?;
+    let vfs = vfs
+        .map(|v| CString::new(v).map_err(|_| Failure::Message("invalid vfs name".into())))
+        .transpose()?;
+    let mut flags = ffi::SQLITE_OPEN_URI;
+    flags |= if readonly {
+        ffi::SQLITE_OPEN_READONLY
+    } else {
+        ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_CREATE
+    };
+    let mut db: *mut ffi::sqlite3 = ptr::null_mut();
+    held::clear_refused();
+    // A cell that closed its connection and kept the file opens it again.
+    let permit = (!readonly && gated)
+        .then(|| path.to_str().ok())
+        .flatten()
+        .and_then(|p| held::permit(std::path::Path::new(p), owner(env)));
+    // SAFETY: `path` and `vfs` are NUL-terminated and outlive the call.
+    let rc = unsafe {
+        ffi::sqlite3_open_v2(
+            path.as_ptr(),
+            &mut db,
+            flags,
+            vfs.as_ref().map_or(ptr::null(), |v| v.as_ptr()),
+        )
+    };
+    drop(permit);
+    if rc != ffi::SQLITE_OK {
+        let failure = if held::take_refused() {
+            Failure::HeldByCell
+        } else if db.is_null() {
+            Failure::Message("out of memory".into())
+        } else {
+            failure(db)
+        };
+        close_unused(db);
+        return Err(failure);
+    }
+    Ok(db)
+}
+
+/// `PRAGMA locking_mode = EXCLUSIVE`; the handle is closed on failure.
+fn lock_exclusive(db: *mut ffi::sqlite3) -> Result<(), Failure> {
+    // SAFETY: `db` is the live connection `sqlite3_open_v2` returned.
+    let rc = unsafe {
+        ffi::sqlite3_exec(
+            db,
+            c"PRAGMA locking_mode = EXCLUSIVE".as_ptr(),
+            None,
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    };
+    if rc != ffi::SQLITE_OK {
+        let failure = failure(db);
+        close_unused(db);
+        return Err(failure);
+    }
+    Ok(())
+}
+
+/// A cell's own connection takes the file; any other read-write open of a held
+/// file is refused, whichever VFS opened it (the Alambique VFS refuses its own
+/// opens, and ATTACH, in `x_open`). The handle is closed on a refusal.
+fn claim_file(
+    env: Env,
+    db: *mut ffi::sqlite3,
+    readonly: bool,
+    gated: bool,
+) -> Result<Option<held::FileId>, Failure> {
+    if readonly {
+        return Ok(None);
+    }
+    let name = main_filename(db);
+    let id = name.and_then(|n| held::file_id(std::path::Path::new(&n)));
+    let free = match id {
+        _ if held::bypassed() => true,
+        Some(id) if gated => held::hold(id) || held::reclaim(id, owner(env)),
+        Some(id) => !held::is_held(id),
+        None => true,
+    };
+    if !free {
+        close_unused(db);
+        return Err(Failure::HeldByCell);
+    }
+    Ok(id.filter(|_| gated))
+}
+
+/// One `sqlite3_db_config` call of an on/off option of a fresh connection.
+fn db_flag(db: *mut ffi::sqlite3, op: c_int, on: c_int) {
+    let mut out: c_int = 0;
+    // SAFETY: `db` is a live connection that nothing else uses yet; `out` is
+    // the out-pointer of the on/off options.
+    unsafe { ffi::sqlite3_db_config(db, op, on, &mut out as *mut c_int) };
+}
+
+/// The options every connection has. They match the cells' own: no
+/// double-quoted string literals; only an explicit checkpoint moves WAL frames
+/// into the file (design §6), not closing, which also happens when the
+/// connection is garbage collected or its owner crashes, and not the automatic
+/// checkpoint after a commit; and, against a hostile file or statement, no
+/// writes to the schema or shadow tables, no unsafe functions in views and
+/// triggers, and no extension loading.
+fn configure(db: *mut ffi::sqlite3) {
+    db_flag(db, ffi::SQLITE_DBCONFIG_DQS_DML, 0);
+    db_flag(db, ffi::SQLITE_DBCONFIG_DQS_DDL, 0);
+    db_flag(db, ffi::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, 1);
+    // SAFETY: `db` is a live connection that nothing else uses yet.
+    unsafe { ffi::sqlite3_wal_autocheckpoint(db, 0) };
+    db_flag(db, ffi::SQLITE_DBCONFIG_DEFENSIVE, 1);
+    db_flag(db, ffi::SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0);
+    db_flag(db, ffi::SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0);
+}
+
+/// The authorizer, the progress handler and the WAL hook of a new connection.
+/// `ctx` outlives it (see `Control`).
+fn install_hooks(db: *mut ffi::sqlite3, ctx: *mut std::ffi::c_void) {
+    // SAFETY: `db` is live and not shared yet; `ctx` is its `Control`.
+    unsafe { ffi::sqlite3_set_authorizer(db, Some(authorize), ctx) };
+    // SAFETY: as above.
+    unsafe { ffi::sqlite3_progress_handler(db, PROGRESS_OPS, Some(progress), ctx) };
+    // SAFETY: as above.
+    unsafe { ffi::sqlite3_wal_hook(db, Some(wal_committed), ctx) };
 }
 
 /// Gives a connection that has run nothing its own lookaside memory: slots of
@@ -1358,8 +1399,8 @@ fn set_lookaside(db: *mut ffi::sqlite3, size: u32, slots: u32) -> c_int {
             db,
             ffi::SQLITE_DBCONFIG_LOOKASIDE,
             ptr::null_mut::<std::ffi::c_void>(),
-            size as c_int,
-            slots as c_int,
+            c_int::try_from(size).unwrap_or(c_int::MAX),
+            c_int::try_from(slots).unwrap_or(c_int::MAX),
         )
     };
     if rc != ffi::SQLITE_OK {
