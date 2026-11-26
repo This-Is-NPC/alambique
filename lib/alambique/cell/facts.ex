@@ -43,7 +43,7 @@ defmodule Alambique.Cell.Facts do
     feed_reader_open: :bool,
     lease_epoch: :int,
     lease_expires_at: :int,
-    cache: {:enum, [:full, :shrunk]},
+    cache: {:enum, [:full, :shrunk, :closed]},
     hydrating: :bool,
     cache_used: :int,
     schema_used: :int,
@@ -158,11 +158,15 @@ defmodule Alambique.Cell.Facts do
     put(load, :feed_reader_open, state.feed_reader != nil)
     put(load, :lease_epoch, state.lease.epoch)
     put(load, :lease_expires_at, state.lease.expires_at_ms)
-    put(load, :cache, if(state.idle_cache == :shrunk, do: :shrunk, else: :full))
+    put(load, :cache, cache(state))
     put(load, :hydrating, state.hydrator != nil)
     if measure? and track_bytes?(state.config), do: measure(state)
     :ok
   end
+
+  defp cache(%State{conn: nil}), do: :closed
+  defp cache(%State{idle_cache: :shrunk}), do: :shrunk
+  defp cache(_state), do: :full
 
   @doc "Whether the memory of the cells is measured: `awake.track_bytes`, or a budget."
   @spec track_bytes?(Alambique.Config.t()) :: boolean
@@ -173,6 +177,18 @@ defmodule Alambique.Cell.Facts do
   # feed sender holds its connection while it reads, and the cell must not wait
   # for it. The sum the budget keeps is the one admission has always used (no
   # lookaside).
+  # A closed connection holds nothing. Admission counts what reopening it
+  # costs before the first read (`closed_floor/1`) instead of 0: the cell is
+  # still a cell, and its budget must not be given to cells that will not fit
+  # once it reopens.
+  defp measure(%State{conn: nil} = state) do
+    for slot <- [:cache_used, :schema_used, :stmt_used, :lookaside_used],
+        do: put(state.load, slot, 0)
+
+    Admission.record(state.config, self(), state.reopen_floor)
+    put_process_bytes(state)
+  end
+
   defp measure(state) do
     memories = Enum.map([state.conn | List.wrap(state.feed_reader)], &Sqlite.memory/1)
 
@@ -189,8 +205,28 @@ defmodule Alambique.Cell.Facts do
       Admission.record(state.config, self(), cache + schema + stmt)
     end
 
+    put_process_bytes(state)
+  end
+
+  defp put_process_bytes(state) do
     {:memory, bytes} = Process.info(self(), :memory)
     put(state.load, :process_bytes, bytes)
+  end
+
+  @doc """
+  The memory a closed connection will need again before the first read is
+  served: the schema and the statements it holds now, which reopening
+  rebuilds. The page cache is not counted; it grows with the reads, and the
+  budget sees it then. 0 when the memory is not measured.
+  """
+  @spec closed_floor(State.t()) :: non_neg_integer
+  def closed_floor(%State{conn: conn} = state) do
+    with true <- track_bytes?(state.config),
+         {:ok, memory} <- Sqlite.memory(conn) do
+      memory.schema_used + memory.stmt_used
+    else
+      _ -> 0
+    end
   end
 
   @doc """
