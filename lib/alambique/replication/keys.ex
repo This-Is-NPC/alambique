@@ -43,6 +43,10 @@ defmodule Alambique.Replication.Keys do
 
   defp level_dir(level), do: level |> Integer.to_string(16) |> String.pad_leading(4, "0")
 
+  @doc "Key of the page-hash sidecar of the segment or snapshot at `key` (design §16)."
+  @spec sidecar(String.t()) :: String.t()
+  def sidecar(key), do: key <> ".pages"
+
   @doc "Key whose presence freezes the cell (design §10)."
   @spec frozen(String.t(), String.t()) :: String.t()
   def frozen(prefix, cell), do: cell_prefix(prefix, cell) <> "/frozen"

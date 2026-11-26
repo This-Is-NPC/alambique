@@ -72,7 +72,7 @@ defmodule Alambique.Compaction do
 
   alias Alambique.Fault
   alias Alambique.Compaction.{Hold, Plan}
-  alias Alambique.Replication.{Keys, Native, Objects, Retry}
+  alias Alambique.Replication.{Keys, Native, Objects, Retry, Sidecar}
   alias Alambique.{Store, Telemetry, Trash}
 
   @defaults [
@@ -592,10 +592,12 @@ defmodule Alambique.Compaction do
     case Objects.put_new(state.ctx, key, merged, info, state.deadline) do
       :ok ->
         Fault.point(:compact_after_put, %{cell: state.cell, key: key})
+        sidecar(state, key, group.level, merged, info, :ours)
         keep_merged(state, group, inputs, merged, info)
         {:ok, :ok, byte_size(merged)}
 
       :exists ->
+        sidecar(state, key, group.level, merged, info, :verify)
         keep_merged(state, group, inputs, merged, info)
         {:ok, :exists, 0}
 
@@ -603,6 +605,11 @@ defmodule Alambique.Compaction do
         error
     end
   end
+
+  # The sidecar of an output (design §16), after the object. A key that
+  # existed holds the same file only if its checksum says so.
+  defp sidecar(state, key, level, merged, info, owner),
+    do: Sidecar.write(state.ctx, key, level, merged, info, state.deadline, owner)
 
   # The output is the input of the next level; the inputs are done with.
   defp keep_merged(%{hold: nil}, _group, _inputs, _merged, _info), do: :ok
@@ -764,12 +771,14 @@ defmodule Alambique.Compaction do
         case Objects.put_new(state.ctx, key, merged, info, state.deadline) do
           :ok ->
             Fault.point(:compact_after_snapshot, %{cell: state.cell, txid: head})
+            sidecar(state, key, Keys.snapshot_level(), merged, info, :ours)
             keep_snapshot(state, key, ts, chain)
             put_chain(state, head, byte_size(merged), 0)
             thin_snapshots(state)
             {:ok, :ok, byte_size(merged)}
 
           :exists ->
+            sidecar(state, key, Keys.snapshot_level(), merged, info, :verify)
             keep_snapshot(state, key, ts, chain)
             {:ok, :exists, 0}
 
