@@ -24,7 +24,6 @@ use rustler::EnifAllocator;
 
 use crate::arena::{self, Arena};
 use crate::guard::guard;
-#[cfg(any(test, not(feature = "fuzzing")))]
 use crate::stats::shard;
 
 /// The BEAM's allocator, which unit tests (outside the BEAM) replace by a
