@@ -80,6 +80,8 @@ defmodule Alambique.Config do
   ]
   # SQLite's lookaside memory of a connection: slot bytes times slots; at most
   # `@lookaside_max_bytes` per connection, slots of a multiple of 8 above 8.
+  @lookaside_default_bytes 512
+  @lookaside_default_count 16
   @lookaside_max_slot 65_528
   @lookaside_max_bytes 1_048_576
   @relocate_defaults [fence_attempts: 5, timeout_ms: 60_000, poll_ms: 100]
@@ -1376,8 +1378,8 @@ defmodule Alambique.Config do
     {close_after, rest} = Keyword.pop(rest, :idle_close_after_ms)
     {idle_kib, rest} = Keyword.pop(rest, :idle_cache_kib, @idle_cache_kib)
 
-    {lookaside_bytes, rest} = Keyword.pop(rest, :lookaside_bytes)
-    {lookaside_count, rest} = Keyword.pop(rest, :lookaside_count)
+    {lookaside_bytes, rest} = Keyword.pop(rest, :lookaside_bytes, @lookaside_default_bytes)
+    {lookaside_count, rest} = Keyword.pop(rest, :lookaside_count, @lookaside_default_count)
     lookaside!(lookaside_bytes, lookaside_count)
 
     {idle_gc, rest} = Keyword.pop(rest, :idle_gc, true)
@@ -1452,8 +1454,8 @@ defmodule Alambique.Config do
     :ok
   end
 
-  # Both `nil` (the default) leave SQLite's lookaside memory (1200 bytes by 40
-  # slots) on every connection. Otherwise both are set: `0` in either gives
+  # The default is 512 bytes by 16 slots. Both `nil` leave SQLite's own
+  # lookaside memory (1200 bytes by 40 slots) on every connection. Otherwise both are set: `0` in either gives
   # none; else the slot size is a multiple of 8 above 8 and the memory of one
   # connection is bounded.
   defp lookaside!(bytes, count) do

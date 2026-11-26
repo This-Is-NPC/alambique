@@ -206,7 +206,7 @@ defmodule Alambique.CellOptionsTest do
     end
 
     test "opens with the cell's lookaside, and the node's where it sets none", ctx do
-      inst = start(ctx)
+      inst = start(ctx, awake: [lookaside_bytes: nil, lookaside_count: nil])
 
       Callbacks.set(fn
         "none" <> _ -> [awake: [lookaside_bytes: 0, lookaside_count: 0]]
