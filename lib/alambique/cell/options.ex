@@ -72,10 +72,13 @@ defmodule Alambique.Cell.Options do
   defp validate(value) do
     with true <- Keyword.keyword?(value) or {:error, "must return a keyword list or nil"},
          {awake, top} = Keyword.pop(value, :awake, []),
+         {sql, top} = Keyword.pop(top, :sql, []),
          true <- Keyword.keyword?(awake) or {:error, ":awake must be a keyword list"},
+         true <- Keyword.keyword?(sql) or {:error, ":sql must be a keyword list"},
          :ok <- known(top, [:idle_timeout_ms]),
          :ok <- known(awake, @awake_keys),
-         flat = Keyword.take(top, [:idle_timeout_ms]) ++ awake,
+         :ok <- known(sql, [:locking_mode]),
+         flat = Keyword.take(top, [:idle_timeout_ms]) ++ awake ++ sql,
          true <- Keyword.keys(flat) == Enum.uniq(Keyword.keys(flat)) or {:error, "repeats a key"},
          :ok <- check(flat) do
       {:ok, Map.new(flat)}
@@ -130,6 +133,9 @@ defmodule Alambique.Cell.Options do
   # 2. `idle_cache_after_ms` not below `idle_timeout_ms`: the shrink is off.
   # 3. `idle_cache_kib` not below `cache_kib`: the node's `idle_cache_kib`,
   #    or the shrink off when that is not below either.
+  # 4. `locking_mode: :exclusive` where the node's feed hands over to the
+  #    sender or a lazy restore is on: the node's value (the build refuses
+  #    the combination for the node's own value).
   defp repair(config, id, override) do
     steps = [
       {:idle_timeout_ms,
@@ -150,6 +156,12 @@ defmodule Alambique.Cell.Options do
          else
            _ -> nil
          end
+       end},
+      {:locking_mode,
+       fn o ->
+         if o.locking_mode == :exclusive and
+              (config.feed.hand_over == :sender or config.lazy_restore != nil),
+            do: :drop
        end}
     ]
 
@@ -169,8 +181,9 @@ defmodule Alambique.Cell.Options do
     {Enum.reverse(repaired), override}
   end
 
-  # Step 1 reads the key it may drop; the others read the merged values.
+  # Steps 1 and 4 read the key they may drop; the others read the merged values.
   defp rule_applies?(:idle_timeout_ms, override), do: Map.has_key?(override, :idle_timeout_ms)
+  defp rule_applies?(:locking_mode, override), do: Map.has_key?(override, :locking_mode)
   defp rule_applies?(_key, _override), do: true
 
   defp value(config, override, key) do
@@ -183,6 +196,7 @@ defmodule Alambique.Cell.Options do
   @doc false
   @spec node_value(Config.t(), atom) :: term
   def node_value(config, :idle_timeout_ms), do: config.idle_timeout_ms
+  def node_value(config, :locking_mode), do: config.sql.locking_mode
   def node_value(config, key), do: Map.fetch!(config.awake, key)
 
   defp invalid(config, id, message, time) do

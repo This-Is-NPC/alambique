@@ -149,6 +149,7 @@ defmodule Alambique.Config do
   @list_cells_defaults [page_size: 100, max_limit: 1_000, timeout_ms: nil]
 
   @orphan_frames [:stop, :replicate]
+  @locking_modes [:normal, :exclusive]
 
   @feed_cleanups [:in_write, :idle, :after_publish, :idle_or_write]
 
@@ -1220,8 +1221,6 @@ defmodule Alambique.Config do
     |> Map.put(:locking_mode, locking)
   end
 
-  @locking_modes [:normal, :exclusive]
-
   # An exclusive connection keeps SQLite's lock on the file for its life, so
   # every second connection that honours SQLite's locks gets `SQLITE_BUSY`
   # (the feed's sender reader), and any descriptor of the file that is closed
@@ -1451,7 +1450,8 @@ defmodule Alambique.Config do
     :idle_cache_after_ms,
     :idle_cache_kib,
     :idle_gc,
-    :idle_timeout_ms
+    :idle_timeout_ms,
+    :locking_mode
   ]
 
   @doc false
@@ -1482,6 +1482,11 @@ defmodule Alambique.Config do
 
   def check_cell_option(:idle_timeout_ms, _),
     do: {:error, ":idle_timeout_ms must be a positive integer"}
+
+  def check_cell_option(:locking_mode, v) when v in @locking_modes, do: :ok
+
+  def check_cell_option(:locking_mode, _),
+    do: {:error, ":sql :locking_mode must be one of #{inspect(@locking_modes)}"}
 
   defp check_cell_option!(key, value) do
     with {:error, message} <- check_cell_option(key, value), do: bad!(message)

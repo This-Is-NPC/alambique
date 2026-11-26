@@ -214,7 +214,7 @@ and releases the lease.
 
 **Options of a cell.** `cell_options` names a function that returns the
 per-cell options of one cell (`idle_timeout_ms`, `awake.cache_kib`,
-`idle_cache_after_ms`, `idle_cache_kib`, `idle_gc`). The cell calls it once per
+`idle_cache_after_ms`, `idle_cache_kib`, `idle_gc`, `sql.locking_mode`). The cell calls it once per
 wake, after it holds a wake slot and before the lease, in a monitored process
 that it waits for at most `cell_options_timeout_ms`; the wait is outside the
 busy marker (§10), because it runs no native code. The result is merged over
@@ -223,7 +223,9 @@ the node's values, each value is clamped to the node limits
 cross-field rules are repaired with a fixed result (an idle timeout not above
 `feed.cleanup_after_ms` returns to the node's value; an idle shrink not below
 the idle timeout is turned off; an `idle_cache_kib` not below `cache_kib`
-returns to the node's value, or the shrink is turned off). The cell keeps only
+returns to the node's value, or the shrink is turned off; `locking_mode:
+:exclusive` returns to the node's value where the feed hands over to the sender
+or a lazy restore is on, the combinations the build refuses). The cell keeps only
 the keys it changed, in `State.cell_opts`, and reads every one through
 `State.cell_opt/2`: a key that is present with `nil` is off, a key that is
 absent is the node's value. The wake resolves once; the fence's retry after
