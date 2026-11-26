@@ -353,6 +353,7 @@ defmodule Alambique.Config do
             max_pending: pos_integer,
             cache_kib: pos_integer,
             idle_cache_after_ms: pos_integer | nil,
+            idle_close_after_ms: pos_integer | nil,
             idle_cache_kib: non_neg_integer,
             idle_gc: boolean,
             track_bytes: boolean,
@@ -1317,6 +1318,7 @@ defmodule Alambique.Config do
         :max_wake_queue,
         :idle_cache_after_ms,
         :idle_cache_kib,
+        :idle_close_after_ms,
         :idle_gc,
         :track_bytes,
         :cell_cache_kib_max,
@@ -1327,6 +1329,7 @@ defmodule Alambique.Config do
     {max_bytes, rest} = Keyword.pop(opts, :max_bytes)
     {queue, rest} = Keyword.pop(rest, :max_wake_queue)
     {idle_after, rest} = Keyword.pop(rest, :idle_cache_after_ms)
+    {close_after, rest} = Keyword.pop(rest, :idle_close_after_ms)
     {idle_kib, rest} = Keyword.pop(rest, :idle_cache_kib, @idle_cache_kib)
     {idle_gc, rest} = Keyword.pop(rest, :idle_gc, true)
     {track_bytes, rest} = Keyword.pop(rest, :track_bytes, true)
@@ -1348,6 +1351,8 @@ defmodule Alambique.Config do
     awake = Map.put(awake, :cache_kib, cache_kib)
     check_cell_option!(:idle_cache_after_ms, idle_after)
     idle_cache!(awake, idle_after, idle_kib, idle_timeout_ms)
+    check_cell_option!(:idle_close_after_ms, close_after)
+    idle_close!(close_after, idle_after, idle_timeout_ms)
 
     limits = [
       cell_cache_kib_max: kib_max,
@@ -1363,6 +1368,7 @@ defmodule Alambique.Config do
     |> Map.put(:idle_gc, idle_gc)
     |> Map.put(:track_bytes, track_bytes)
     |> Map.put(:idle_cache_after_ms, idle_after)
+    |> Map.put(:idle_close_after_ms, close_after)
     |> Map.put(:max_bytes, max_bytes)
     |> Map.put(:max_wake_queue, queue || 4 * awake.max_wakes)
   end
@@ -1449,6 +1455,7 @@ defmodule Alambique.Config do
     :cache_kib,
     :idle_cache_after_ms,
     :idle_cache_kib,
+    :idle_close_after_ms,
     :idle_gc,
     :idle_timeout_ms,
     :locking_mode
@@ -1475,6 +1482,12 @@ defmodule Alambique.Config do
 
   def check_cell_option(:idle_cache_kib, _),
     do: {:error, ":awake :idle_cache_kib must be a non-negative integer"}
+
+  def check_cell_option(:idle_close_after_ms, v) when is_nil(v) or (is_integer(v) and v > 0),
+    do: :ok
+
+  def check_cell_option(:idle_close_after_ms, _),
+    do: {:error, ":awake :idle_close_after_ms must be nil or a positive integer"}
 
   def check_cell_option(:idle_gc, v) when is_boolean(v), do: :ok
   def check_cell_option(:idle_gc, _), do: {:error, ":awake :idle_gc must be true or false"}
@@ -1503,6 +1516,19 @@ defmodule Alambique.Config do
 
     if kib >= awake.cache_kib,
       do: bad!(":awake :idle_cache_kib must be less than :cache_kib")
+  end
+
+  # `idle_close_after_ms: nil` (the default) keeps the connection open until
+  # the cell hibernates; the close comes after the shrink and before the
+  # hibernation.
+  defp idle_close!(nil, _idle_after, _idle_timeout_ms), do: :ok
+
+  defp idle_close!(after_ms, idle_after, idle_timeout_ms) do
+    if after_ms >= idle_timeout_ms,
+      do: bad!(":awake :idle_close_after_ms must be less than :idle_timeout_ms")
+
+    if idle_after && after_ms <= idle_after,
+      do: bad!(":awake :idle_close_after_ms must be greater than :idle_cache_after_ms")
   end
 
   # `max_bytes: nil` turns the size limit of a rewind off.
