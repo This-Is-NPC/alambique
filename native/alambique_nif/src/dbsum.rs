@@ -149,19 +149,21 @@ mod tests {
 
     pub fn page(pgno: u32, fill: u8, ps: usize) -> Vec<u8> {
         (0..ps)
-            .map(|i| fill.wrapping_add(pgno as u8).wrapping_add((i % 13) as u8))
+            .map(|i| {
+                fill.wrapping_add((pgno & 0xff) as u8)
+                    .wrapping_add(u8::try_from(i % 13).unwrap())
+            })
             .collect()
     }
 
     fn snapshot(pages: &[Vec<u8>], txid: u64) -> (Vec<u8>, u64) {
         let ps = pages[0].len();
-        let acc = pages
-            .iter()
-            .enumerate()
-            .fold(0, |a, (i, p)| a ^ page_crc(i as u32 + 1, p));
+        let acc = pages.iter().enumerate().fold(0, |a, (i, p)| {
+            a ^ page_crc(u32::try_from(i).unwrap() + 1, p)
+        });
         let h = Header {
-            page_size: ps as u32,
-            commit: pages.len() as u32,
+            page_size: u32::try_from(ps).unwrap(),
+            commit: u32::try_from(pages.len()).unwrap(),
             min_txid: 1,
             max_txid: txid,
             post_apply: CHECKSUM_FLAG | acc,
@@ -169,7 +171,7 @@ mod tests {
         };
         let mut e = Encoder::new(h).unwrap();
         for (i, p) in pages.iter().enumerate() {
-            e.add_page(i as u32 + 1, p).unwrap();
+            e.add_page(u32::try_from(i).unwrap() + 1, p).unwrap();
         }
         (e.finish().unwrap(), CHECKSUM_FLAG | acc)
     }
@@ -187,10 +189,9 @@ mod tests {
         // Change page 2, add page 6, drop nothing.
         pages[1] = page(2, 9, 512);
         pages.push(page(6, 4, 512));
-        let acc: u64 = pages
-            .iter()
-            .enumerate()
-            .fold(0, |a, (i, p)| a ^ page_crc(i as u32 + 1, p));
+        let acc: u64 = pages.iter().enumerate().fold(0, |a, (i, p)| {
+            a ^ page_crc(u32::try_from(i).unwrap() + 1, p)
+        });
         let h = Header {
             page_size: 512,
             commit: 6,
