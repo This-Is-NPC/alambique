@@ -477,6 +477,41 @@ defmodule Alambique.CellOptionsTest do
       assert locking_mode(inst, "lazy") == "normal"
     end
 
+    test "turns the node's idle close off for a cell that asks for exclusive", ctx do
+      capture([[:alambique, :cell, :options, :repaired]])
+      inst = start(ctx, lazy_restore: false, awake: [idle_close_after_ms: 100])
+      Callbacks.set(fn _ -> [sql: [locking_mode: :exclusive]] end)
+
+      assert {:ok, _} = wake(inst, "locked")
+      assert cell_opts(inst, "locked") == %{locking_mode: :exclusive, idle_close_after_ms: nil}
+      assert in_cell(pid(inst, "locked"), & &1.idle_close) == nil
+
+      await_event(
+        [:alambique, :cell, :options, :repaired],
+        "locked",
+        5_000,
+        &(&1.field == :idle_close_after_ms)
+      )
+    end
+
+    test "turns the idle close a cell asks for off where the node is exclusive", ctx do
+      inst = start(ctx, lazy_restore: false, sql: [locking_mode: :exclusive])
+      Callbacks.set(fn _ -> [awake: [idle_close_after_ms: 100]] end)
+
+      assert {:ok, _} = wake(inst, "close")
+      assert cell_opts(inst, "close") == %{idle_close_after_ms: nil}
+      assert in_cell(pid(inst, "close"), & &1.idle_close) == nil
+    end
+
+    test "keeps the idle close of a cell that is normal where the node is exclusive", ctx do
+      inst = start(ctx, lazy_restore: false, sql: [locking_mode: :exclusive])
+      Callbacks.set(fn _ -> [sql: [locking_mode: :normal], awake: [idle_close_after_ms: 100]] end)
+
+      assert {:ok, _} = wake(inst, "both")
+      assert cell_opts(inst, "both") == %{locking_mode: :normal, idle_close_after_ms: 100}
+      eventually(fn -> in_cell(pid(inst, "both"), & &1.conn) == nil end)
+    end
+
     test "a mode that does not exist makes the override invalid", ctx do
       capture([[:alambique, :cell, :options, :invalid]])
       inst = start(ctx, lazy_restore: false)

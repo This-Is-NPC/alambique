@@ -135,6 +135,24 @@ defmodule Alambique.ConfigOptionsTest do
     end
   end
 
+  test "awake.idle_close_after_ms is refused with sql locking_mode: :exclusive", ctx do
+    exclusive = [lazy_restore: false, sql: [locking_mode: :exclusive]]
+
+    assert_raise ArgumentError,
+                 ~r/idle_close_after_ms does not work with :sql locking_mode/,
+                 fn ->
+                   Alambique.Config.build(
+                     base(ctx, exclusive ++ [awake: [idle_close_after_ms: 100]])
+                   )
+                 end
+
+    # Either alone is fine.
+    assert %{idle_close_after_ms: nil} = Alambique.Config.build(base(ctx, exclusive)).awake
+
+    assert %{idle_close_after_ms: 100} =
+             Alambique.Config.build(base(ctx, awake: [idle_close_after_ms: 100])).awake
+  end
+
   describe "feed cleanup" do
     defp feed(ctx, opts, rest \\ []),
       do: Alambique.Config.build(base(ctx, [feed: opts] ++ rest)).feed

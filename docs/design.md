@@ -265,7 +265,9 @@ the idle timeout or the idle close is turned off; an `idle_close_after_ms` not
 below the idle timeout is turned off; an `idle_cache_kib` not below `cache_kib`
 returns to the node's value, or the shrink is turned off; `locking_mode:
 :exclusive` returns to the node's value where the feed hands over to the sender
-or a lazy restore is on, the combinations the build refuses). The cell keeps only
+or a lazy restore is on, the combinations the build refuses; an
+`idle_close_after_ms` is turned off for a cell whose merged `locking_mode` is
+`:exclusive`, because the close would drop the lock). The cell keeps only
 the keys it changed, in `State.cell_opts`, and reads every one through
 `State.cell_opt/2`: a key that is present with `nil` is off, a key that is
 absent is the node's value. The wake resolves once; the fence's retry after

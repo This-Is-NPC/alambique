@@ -84,7 +84,8 @@ defmodule Alambique do
       idle_cache_kib:, idle_close_after_ms:, idle_gc:]` and `sql: [locking_mode:]`.
       A key that is absent keeps the node's value; `locking_mode: :exclusive` is
       dropped back to the node's value (an event says so) where the node's feed
-      has `hand_over: :sender` or `:lazy_restore` is on;
+      has `hand_over: :sender` or `:lazy_restore` is on, and `idle_close_after_ms`
+      is turned off for a cell that is exclusive;
       `idle_cache_after_ms: nil` turns the idle shrink off for that cell, and
       `idle_close_after_ms: nil` the idle close. Any
       other key, a repeated key or a value the option refuses makes the whole
@@ -470,7 +471,10 @@ defmodule Alambique do
       refused instead of found afterwards (`:orphan_frames`). It is refused
       with `feed: [hand_over: :sender]` (the sender's reader would be busy)
       and with `lazy_restore` on (the file a lazy restore fills would drop
-      the lock when it closes). A statement of a caller cannot change it:
+      the lock when it closes), and with `awake: [idle_close_after_ms:]` (the
+      close would drop the lock): the build refuses the pair, and a cell whose
+      options would combine them has its idle close turned off. A statement of
+      a caller cannot change it:
       `PRAGMA locking_mode = ...` gets `{:error, :not_authorized}`.
     * `:query` - defaults of `Alambique.Query`: `:cache_bytes` (default 1 GiB),
       `:concurrency` (cells read at once, default 16: the wait for the store
