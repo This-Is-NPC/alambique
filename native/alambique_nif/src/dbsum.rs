@@ -129,7 +129,7 @@ pub fn apply(path: &Path, data: &[u8], current: u64, page_size: u32) -> Result<A
     if snapshot {
         file.set_len(0)?;
     }
-    let mut acc = if snapshot {
+    let acc = if snapshot {
         0
     } else {
         current & !CHECKSUM_FLAG
