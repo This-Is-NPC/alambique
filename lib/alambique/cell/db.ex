@@ -10,6 +10,7 @@ defmodule Alambique.Cell.Db do
 
   @type result :: %{columns: [String.t()], rows: [[term]]}
 
+  @spec active_key() :: atom
   def active_key, do: @active
 
   @doc """
