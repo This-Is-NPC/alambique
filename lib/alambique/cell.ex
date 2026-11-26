@@ -279,7 +279,8 @@ defmodule Alambique.Cell do
       }
     )
 
-    abandon(state)
+    # The wake failed: the release answer changes nothing, it logs its failure.
+    _ = abandon(state)
     {:stop, {:shutdown, {:wake_failed, reason}}, %{state | mode: :stopped}}
   end
 
@@ -2348,7 +2349,7 @@ defmodule Alambique.Cell do
   defp abandon(%State{lease: nil} = state), do: close(state)
 
   defp abandon(state) do
-    close(state)
+    _ = close(state)
     release(state)
   end
 
