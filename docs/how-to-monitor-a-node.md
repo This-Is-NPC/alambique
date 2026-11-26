@@ -145,7 +145,7 @@ signal fires on a node with that many busy cells, raise `compaction: [concurrenc
 | `:erlang.memory(:system)` against the memory of the node | Watch it. Alambique sets no limit. Compare the growth with what an awake cell costs. | [cost-of-a-cell.md](cost-of-a-cell.md) |
 | `sqlite_memory_used` of `[:alambique, :native, :stats]` | Watch. It should be most of the growth per awake cell. | [telemetry.md](telemetry.md), Native events |
 | `connections_open` of the same event | Watch against the number of awake cells. | [telemetry.md](telemetry.md), Native events |
-| `page_arena_state` of the same event | Check it after a deploy: 1 when `config :alambique, :page_arena, enabled: true` reached the library, 0 when it did not, 2 or 3 when the arena could not start. | [cost-of-a-cell.md](cost-of-a-cell.md), section 5 |
+| `page_arena_state` of the same event | Check it after a deploy: 1 when the arena is on (the default), 0 when `config :alambique, :page_arena, enabled: false` reached the library, 2 or 3 when the arena could not start. | [cost-of-a-cell.md](cost-of-a-cell.md), section 5 |
 | `page_arena_resident_bytes` minus `page_arena_in_use_bytes` | Watch. Free memory the process still holds, which a trim returns above `keep_kib`. With the arena on, the page caches are not in `:erlang.memory/0`: add `page_arena_resident_bytes`. | [telemetry.md](telemetry.md), Native events |
 | `page_arena_fallbacks` | Page on any increase. The reserved range is full and the BEAM serves page-cache blocks. | `config :alambique, :page_arena, reserved_mib: 4096` |
 
