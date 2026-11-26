@@ -68,7 +68,7 @@ defmodule Alambique.MixProject do
     [
       plt_local_path: "_build/plts",
       plt_core_path: "_build/plts",
-      plt_add_apps: [:mix],
+      plt_add_apps: [:mix, :ex_unit],
       flags: [:unmatched_returns, :error_handling, :extra_return, :missing_return]
     ]
   end
