@@ -124,11 +124,18 @@ defmodule Alambique.Feed.Publisher do
   rows after the last batch handed over are looked for instead.
   """
   @spec settled?(State.t()) :: boolean
-  def settled?(%State{config: %{feed_capture: false}}), do: true
+  def settled?(state), do: delivered?(state) and not cleanup_due?(state)
 
-  def settled?(state) do
+  @doc """
+  `settled?/1` without the cleanup: every acknowledged batch with rows is
+  handed over and published, and no piece or retry is scheduled.
+  """
+  @spec delivered?(State.t()) :: boolean
+  def delivered?(%State{config: %{feed_capture: false}}), do: true
+
+  def delivered?(state) do
     state.feed_backlog == 0 and not state.feed_capped and state.feed_part == nil and
-      state.feed_tick == nil and not cleanup_due?(state) and published?(state)
+      state.feed_tick == nil and published?(state)
   end
 
   defp published?(%State{feed_published: txid, pipe: %{acked: %{txid: txid}}}), do: true
