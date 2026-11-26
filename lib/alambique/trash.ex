@@ -336,7 +336,7 @@ defmodule Alambique.Trash do
       {:ok, cell, keys} ->
         with {:ok, n} <-
                delete_all(ctx, cell, keys, settings.concurrency, settings.rate, deadline),
-             _ = Fault.point(:trash_before_entry_delete, %{cell: cell, key: manifest}),
+             Fault.point(:trash_before_entry_delete, %{cell: cell, key: manifest}),
              :ok <- Objects.delete(ctx, manifest, deadline) do
           {:ok, n}
         end

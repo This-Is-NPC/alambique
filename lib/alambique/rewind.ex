@@ -202,7 +202,7 @@ defmodule Alambique.Rewind do
          Fault.point(:rewind_after_head, %{cell: cell, txid: now.txid}),
          :ok <- same_page_size(now, target),
          {:ok, info} <- compare(args, current, target.path),
-         _ = Fault.point(:rewind_before_reconcile, %{cell: cell, txid: now.txid}),
+         Fault.point(:rewind_before_reconcile, %{cell: cell, txid: now.txid}),
          {:ok, %{kept: kept, pages: pages}} <- reconcile(args, current, target, now, info),
          :ok <- renew(args, lease),
          :ok <- index(args, info) do
