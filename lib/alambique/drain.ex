@@ -97,7 +97,10 @@ defmodule Alambique.Drain do
     table = config.drain_status
 
     row = fn key, default ->
-      with [{_, v}] <- :ets.lookup(table, key), do: v, else: (_ -> default)
+      case :ets.lookup(table, key) do
+        [{_, v}] -> v
+        _ -> default
+      end
     end
 
     %{
