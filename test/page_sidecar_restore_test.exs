@@ -187,7 +187,7 @@ defmodule Alambique.PageSidecarRestoreTest do
   end
 
   describe "a damaged ranged read" do
-    for kind <- [:codeword, {:flip, 30}, {:flip, 60}, :shifted] do
+    for kind <- [:codeword, {:flip, 10}, {:flip, 30}, {:flip, 60}] do
       test "#{inspect(kind)} is refused before any page of the run is installed", %{
         env: env,
         hostile: hostile

@@ -48,8 +48,9 @@ defmodule Alambique.LazyWholeModeTest do
   # What a cold wake of the cell asks of the store: the number of reads of each
   # segment, whole and by range. The instance leaves the cell so the next one
   # can take it, and does not compact, so that the chain stays as it was.
-  defp store_calls(ctx, cell, lazy_restore, opts \\ []) do
-    {_, counter} = counted = CountingStore.wrap(ctx.store)
+  defp store_calls({ctx, {_, counter} = counted}, cell, lazy_restore, opts \\ []) do
+    CountingStore.reset(counter)
+    {hydrates?, opts} = Keyword.pop(opts, :hydrates, false)
 
     inst =
       start_instance(
@@ -58,6 +59,11 @@ defmodule Alambique.LazyWholeModeTest do
       )
 
     assert {:ok, %{rows: [[200]]}} = Alambique.query(inst, cell, "SELECT count(*) FROM t")
+
+    # A lazy wake that leaves before its hydration ends has read less.
+    if hydrates?,
+      do: {_, %{result: :ok}} = await_event([:alambique, :replication, :hydrate], cell, 30_000)
+
     :ok = Alambique.hibernate(inst, cell)
 
     for op <- [:get, :get_range],
@@ -72,24 +78,25 @@ defmodule Alambique.LazyWholeModeTest do
   # the segment, and is the whole of a small one (`Restore.fetch_bounded/2`).
   # The next wake reads the fence the one before wrote, so only the segments
   # both read are compared.
-  defp same_as_full_restore(ctx, cell, whole) do
-    full = store_calls(ctx, cell, false)
+  defp same_as_full_restore(store, cell, whole) do
+    full = store_calls(store, cell, false)
     assert Enum.any?(full, &match?({{:get_range, _}, _}, &1))
     assert Map.take(full, Map.keys(whole)) == whole
   end
 
   test "whole mode makes the store calls of a full restore", ctx do
     cell = seed(ctx, 200)
-    whole = store_calls(ctx, cell, min_bytes: 0, mode: :whole)
-    same_as_full_restore(ctx, cell, whole)
+    store = {ctx, CountingStore.wrap(ctx.store)}
+    whole = store_calls(store, cell, min_bytes: 0, mode: :whole)
+    same_as_full_restore(store, cell, whole)
     assert drain([:alambique, :replication, :hydrate], cell) == []
   end
 
   test "ranged mode, the default, reads pages by range", ctx do
     cell = seed(ctx, 200)
-    ranged = store_calls(ctx, cell, min_bytes: 0)
+    store = {ctx, CountingStore.wrap(ctx.store)}
+    ranged = store_calls(store, cell, [min_bytes: 0], hydrates: true)
     assert Enum.any?(ranged, fn {{op, _key}, n} -> op == :get_range and n > 1 end)
-    assert {_, %{result: :ok}} = await_event([:alambique, :replication, :hydrate], cell, 30_000)
   end
 
   describe "per cell" do
@@ -101,10 +108,9 @@ defmodule Alambique.LazyWholeModeTest do
     test "a cell that asks for :whole makes the store calls of a full restore", ctx do
       cell = seed(ctx, 200)
 
-      whole =
-        store_calls(ctx, cell, [min_bytes: 0], cell_options: {Mode, :options})
-
-      same_as_full_restore(ctx, cell, whole)
+      store = {ctx, CountingStore.wrap(ctx.store)}
+      whole = store_calls(store, cell, [min_bytes: 0], cell_options: {Mode, :options})
+      same_as_full_restore(store, cell, whole)
       assert drain([:alambique, :replication, :hydrate], cell) == []
     end
   end
