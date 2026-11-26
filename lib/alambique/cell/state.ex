@@ -152,8 +152,14 @@ defmodule Alambique.Cell.State do
 
   @doc "Milliseconds until the lease may no longer be used, by this node's clock and the skew margin."
   @spec lease_left_ms(t) :: integer
-  def lease_left_ms(%__MODULE__{config: config, lease: lease} = state),
-    do: lease.expires_at_ms - config.skew_margin_ms - now_ms(state)
+  def lease_left_ms(
+        %__MODULE__{
+          config: %{skew_margin_ms: skew},
+          lease: %{expires_at_ms: expires}
+        } = state
+      )
+      when is_integer(skew) and is_integer(expires),
+      do: expires - skew - now_ms(state)
 
   @doc "Monotonic deadline for one store operation: the call budget, capped by the lease."
   @spec deadline(t) :: integer
