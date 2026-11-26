@@ -372,8 +372,35 @@ fn merge_ltx<'a>(env: Env<'a>, inputs: Vec<Binary>) -> Term<'a> {
 #[global_allocator]
 static ALLOCATOR: alloc::Counted = alloc::Counted;
 
-fn on_load(_env: Env, _info: Term) -> bool {
-    if let Err(e) = alloc::install_sqlite() {
+/// The arena settings of the load data (`Alambique.Replication.NativeOptions`);
+/// what is missing keeps its default.
+fn arena_request(info: Term) -> alloc::ArenaRequest {
+    let get = |key: &str| -> Option<Term> {
+        let k = rustler::Atom::from_str(info.get_env(), key).ok()?;
+        info.map_get(k.encode(info.get_env())).ok()
+    };
+    let int = |key: &str, default: usize| -> usize {
+        get(key)
+            .and_then(|t| t.decode::<usize>().ok())
+            .unwrap_or(default)
+    };
+    alloc::ArenaRequest {
+        enabled: get("enabled")
+            .and_then(|t| t.decode().ok())
+            .unwrap_or(false),
+        config: arena::Config {
+            reserved: int("reserved_mib", 4096) << 20,
+            extent_bytes: int("extent_kib", 64) << 10,
+            keep: int("keep_kib", 4096) << 10,
+            threshold: int("trim_after_kib", 1024) << 10,
+            max_trim: int("max_trim_kib", 4096) << 10,
+            max_regions: int("max_regions", 65_536),
+        },
+    }
+}
+
+fn on_load(_env: Env, info: Term) -> bool {
+    if let Err(e) = alloc::install_sqlite(&arena_request(info)) {
         eprintln!("alambique_nif: {e}");
         return false;
     }

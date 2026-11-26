@@ -9,6 +9,9 @@ use std::time::Instant;
 use libsqlite3_sys as ffi;
 use rustler::{Encoder, Env, Term};
 
+use crate::alloc::RegionGuard;
+use crate::sqlite::Conn;
+
 macro_rules! counters {
     ($($name:ident),* $(,)?) => {
         $(pub static $name: AtomicU64 = AtomicU64::new(0);)*
@@ -87,6 +90,17 @@ impl Calls {
         Timer {
             calls: self,
             start: Instant::now(),
+            _region: None,
+        }
+    }
+
+    /// Times a call on `conn`: the page-cache blocks it allocates go to the
+    /// connection's region until the timer is dropped.
+    pub fn time_for(&'static self, conn: &Conn) -> Timer {
+        Timer {
+            calls: self,
+            start: Instant::now(),
+            _region: Some(RegionGuard::enter(conn.region_slot())),
         }
     }
 }
@@ -98,11 +112,14 @@ pub static LAZY_CALLS: Calls = Calls::new();
 pub struct Timer {
     calls: &'static Calls,
     start: Instant,
+    /// Dropped after the body of `drop`, which restores the thread's region.
+    _region: Option<RegionGuard>,
 }
 
 impl Drop for Timer {
     fn drop(&mut self) {
         crate::alloc::flush_thread_cache();
+        crate::alloc::poke_trim();
         let ns = self.start.elapsed().as_nanos() as u64;
         self.calls.count.fetch_add(1, Relaxed);
         self.calls.total_ns.fetch_add(ns, Relaxed);
