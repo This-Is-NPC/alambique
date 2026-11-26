@@ -75,7 +75,35 @@ defmodule Alambique do
       request each) before it sleeps; lower this for hosts that touch many
       cells once. It is part of the memory budget of a node: an awake cell
       keeps its page cache until it sleeps (see `:awake`, and
-      `docs/cost-of-a-cell.md`).
+      `docs/cost-of-a-cell.md`). A cell can set its own with `:cell_options`.
+    * `:cell_options` - `{module, function}` or `{module, function, extra_args}`
+      (default `nil`): options of one cell. At each wake the cell calls
+      `apply(module, function, [cell_id | extra_args])`, which returns a keyword
+      list in the shape of these options, with only the per-cell keys:
+      `idle_timeout_ms:` and `awake: [cache_kib:, idle_cache_after_ms:,
+      idle_cache_kib:, idle_gc:]`. A key that is absent keeps the node's value;
+      `idle_cache_after_ms: nil` turns the idle shrink off for that cell. Any
+      other key, a repeated key or a value the option refuses makes the whole
+      override invalid. The function must be exported with arity
+      `1 + length(extra_args)` and be cheap: it runs in a process of its own,
+      while the wake holds a slot of `awake.max_wakes`, and is waited for at
+      most `:cell_options_timeout_ms`. Nothing is stored: every wake asks again,
+      on whichever node wakes the cell, so a cell that moves or restarts gets
+      the same options from the same function. A change applies at the next
+      wake. Set it only when every node runs a version that knows it: an older
+      node stops at boot with `unknown options [:cell_options]`. The
+      `awake` limits `:cell_cache_kib_max`, `:cell_idle_timeout_ms_min` and
+      `:cell_idle_timeout_ms_max` clamp what a cell may choose.
+    * `:cell_options_timeout_ms` - how long a wake waits for `:cell_options`
+      (default 1 000; with a function set, below the lease renewal interval,
+      which is a third of `:lease_ttl_ms` less `:lease_renew_jitter`). A call
+      that does not return in time is killed.
+    * `:cell_options_invalid` - what a cell does when its override is invalid,
+      raises, exits, returns another shape or times out: `:fallback` (default)
+      serves with the node's options, `:refuse` fails the wake with
+      `{:error, {:cell_options, message}}` and writes no lease. Both emit
+      `[:alambique, :cell, :options, :invalid]`; the warning in the log is
+      limited to one line every `:breaker` `:log_interval_ms`.
     * `:op_timeout_ms` - time budget of one store operation such as an upload or
       a restore, capped by the lease (default 10 000). Every attempt of a store
       call runs under this deadline and is killed when it passes, so a store
@@ -232,7 +260,13 @@ defmodule Alambique do
       2), `:backoff_max_ms` (cap, default 10 000) and `:backoff_jitter` (share
       of each delay taken away at random, from 0 up to 1, default 0.2). Calls
       for the cell during the delay get the remembered error and start no
-      wake; a wake that succeeds starts the count over.
+      wake; a wake that succeeds starts the count over. `:migrations_timeout_ms`
+      (default 1 000) is how long a wake, `migrate/3`, the sweeper and
+      `check_deploy/2` wait for a per-cell `:migrations` function; with one
+      set it must be below the lease renewal interval. A failure of that
+      function, one that times out included, is remembered for
+      `:failure_backoff_ms` like the failures above, so retries do not each
+      hold a wake slot for the whole timeout.
     * `:wal` - `:checkpoint_bytes` (size of the `-wal` file of an awake cell
       above which it moves the WAL into the database file once its uploads are
       acknowledged, default 67 108 864, 64 MiB; design §6) and
@@ -256,7 +290,20 @@ defmodule Alambique do
       caller gave up before the cell reached it is not run). The memory of the awake
       cells is bounded by `:cache_kib` (page cache of each cell's SQLite
       connection, `PRAGMA cache_size`, default 512 KiB; SQLite's own default
-      is 2 000) and by `:max_bytes` (default `nil`, no budget).
+      is 2 000) and by `:max_bytes` (default `nil`, no budget). A cell can
+      set `:cache_kib`, `:idle_cache_after_ms`, `:idle_cache_kib` and
+      `:idle_gc` through `:cell_options`. Until the page caches are per
+      connection, a cell's `:cache_kib` is a share of the node's pool, not an
+      isolated cap: one cell with a large value can push out the pages of the
+      others. `:cell_cache_kib_max` (default `nil`, no limit; in KiB, and at
+      most `:max_bytes` when that is set) and `:cell_idle_timeout_ms_min` and
+      `:cell_idle_timeout_ms_max` (default `nil`) clamp the values a cell
+      chose, and the node's own `:cache_kib` and `:idle_timeout_ms` must be
+      inside them. After the clamp, a rule that the merge broke is repaired:
+      an idle timeout not above `:feed` `:cleanup_after_ms` goes back to the
+      node's, an idle shrink not below the idle timeout is turned off, and an
+      `:idle_cache_kib` not below `:cache_kib` goes back to the node's, or the
+      shrink is turned off if that is not below either.
       `:idle_cache_after_ms` (default `nil`, off; when set, a positive integer
       below `:idle_timeout_ms`) makes an awake cell that has had no call for
       that long lower its page cache to `:idle_cache_kib` (default 64, `0`
@@ -450,8 +497,10 @@ defmodule Alambique do
   must be exported with arity `1 + length(extra_args)`; the extra arguments
   let instances that share a VM pass their own name or settings. N is then the highest version of
   that cell's list, and the list may change between wakes. A raise, throw or
-  exit, or an invalid list, fails the wake with
-  `{:error, {:bad_migrations, message}}` and nothing is migrated. The index
+  exit, a call that takes longer than `wake: [migrations_timeout_ms: ...]`, or an
+  invalid list, fails the wake with
+  `{:error, {:bad_migrations, message}}` and nothing is migrated; `migrate/3`
+  on a serving cell returns the same error and the cell goes on serving. The index
   holds every cell that has woken, `sweep/2` calls the function for each
   listed cell at version 1 or later, and `check_deploy/2` for each live cell. A cell that is awake when
   the list grows migrates with `migrate/3`.
