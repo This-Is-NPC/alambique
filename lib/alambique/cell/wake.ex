@@ -239,12 +239,13 @@ defmodule Alambique.Cell.Wake do
   # The local file is the store's head when the marker names its TXID and
   # checksum; from_restore() then checks the file itself against it.
   defp matching_head(state, marker) do
-    with {:ok, %{txid: txid, checksum: sum} = head}
-         when txid == marker.txid and sum == marker.checksum <-
-           Replication.head(state.repl_ctx, state.id) do
-      {:ok, head}
-    else
-      _ -> :miss
+    case Replication.head(state.repl_ctx, state.id) do
+      {:ok, %{txid: txid, checksum: sum} = head}
+      when txid == marker.txid and sum == marker.checksum ->
+        {:ok, head}
+
+      _ ->
+        :miss
     end
   end
 
@@ -380,6 +381,7 @@ defmodule Alambique.Cell.Wake do
     end
   end
 
+  @spec open(State.t()) :: {:ok, Alambique.Sqlite.conn()} | {:error, {:open, term}, State.t()}
   def open(state) do
     case Db.open(state.path,
            cache_kib: State.cell_opt(state, :cache_kib),
@@ -421,21 +423,23 @@ defmodule Alambique.Cell.Wake do
     state = Publisher.restore_floor(state)
 
     with {:ok, current} <- user_version(state),
-         :ok <- check_window(state, current) do
-      pending = Enum.filter(state.migrations, fn {version, _} -> version > current end)
+         :ok <- check_window(state, current),
+         pending = Enum.filter(state.migrations, fn {version, _} -> version > current end),
+         {:ok, state} <- verified(state, pending) do
+      apply_pending(state, current, pending)
+    end
+  end
 
-      with {:ok, state} <- verified(state, pending) do
-        case apply_all(state, pending) do
-          {:ok, state} ->
-            settle(state, current, pending)
+  defp apply_pending(state, current, pending) do
+    case apply_all(state, pending) do
+      {:ok, state} ->
+        settle(state, current, pending)
 
-          {:error, reason, [], state} ->
-            {:error, reason, state}
+      {:error, reason, [], state} ->
+        {:error, reason, state}
 
-          {:error, reason, applied, state} ->
-            with {:ok, state} <- settle(state, current, applied), do: {:error, reason, state}
-        end
-      end
+      {:error, reason, applied, state} ->
+        with {:ok, state} <- settle(state, current, applied), do: {:error, reason, state}
     end
   end
 
@@ -555,18 +559,21 @@ defmodule Alambique.Cell.Wake do
   end
 
   defp finish_migration(state, previous, pending) do
-    with {:ok, state} <- Publisher.try_stamp(state) do
-      case sync(state, length(pending)) do
-        {:ok, state, txid} ->
-          if txid, do: Commit.after_ack(state, txid)
-          if pending != [], do: drop_previous(state, previous)
-          {:ok, state}
-
-        {:error, _reason, _state} = error ->
-          error
-      end
-    else
+    case Publisher.try_stamp(state) do
+      {:ok, state} -> synced_migration(state, previous, pending)
       {:error, reason} -> {:error, {:stamp_failed, reason}, state}
+    end
+  end
+
+  defp synced_migration(state, previous, pending) do
+    case sync(state, length(pending)) do
+      {:ok, state, txid} ->
+        if txid, do: Commit.after_ack(state, txid)
+        if pending != [], do: drop_previous(state, previous)
+        {:ok, state}
+
+      {:error, _reason, _state} = error ->
+        error
     end
   end
 

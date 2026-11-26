@@ -112,6 +112,7 @@ defmodule Alambique.Cell.Facts do
   end
 
   for {name, kind} <- @slots, kind != :raw do
+    @spec put(:atomics.atomics_ref(), unquote(name), term) :: :ok
     def put(load, unquote(name), value),
       do:
         :atomics.put(
@@ -122,6 +123,7 @@ defmodule Alambique.Cell.Facts do
   end
 
   for {name, kind} <- @slots, kind != :raw do
+    @spec get(:atomics.atomics_ref(), unquote(name)) :: term
     def get(load, unquote(name)),
       do:
         decode(unquote(Macro.escape(kind)), :atomics.get(load, unquote(Map.fetch!(@index, name))))
@@ -150,18 +152,22 @@ defmodule Alambique.Cell.Facts do
     put(load, :acked_txid, state.pipe.acked.txid)
     put(load, :batches_in_flight, length(state.pipe.queue))
     put(load, :parked, length(state.parked))
-    put(load, :feed_published, state.feed_published)
-    put(load, :feed_sent, state.feed_sent)
-    put(load, :feed_cleaned, state.feed_cleaned)
-    put(load, :feed_backlog, state.feed_backlog)
-    put(load, :feed_capped, state.feed_capped)
-    put(load, :feed_reader_open, state.feed_reader != nil)
+    publish_feed(load, state)
     put(load, :lease_epoch, state.lease.epoch)
     put(load, :lease_expires_at, state.lease.expires_at_ms)
     put(load, :cache, cache(state))
     put(load, :hydrating, state.hydrator != nil)
     if measure? and track_bytes?(state), do: measure(state)
     :ok
+  end
+
+  defp publish_feed(load, state) do
+    put(load, :feed_published, state.feed_published)
+    put(load, :feed_sent, state.feed_sent)
+    put(load, :feed_cleaned, state.feed_cleaned)
+    put(load, :feed_backlog, state.feed_backlog)
+    put(load, :feed_capped, state.feed_capped)
+    put(load, :feed_reader_open, state.feed_reader != nil)
   end
 
   defp cache(%State{conn: nil}), do: :closed
@@ -204,21 +210,21 @@ defmodule Alambique.Cell.Facts do
 
   defp measure(state) do
     memories = Enum.map([state.conn | List.wrap(state.feed_reader)], &Sqlite.memory/1)
-
-    if Enum.all?(memories, &match?({:ok, _}, &1)) do
-      sum = fn key -> Enum.sum(for {:ok, m} <- memories, do: Map.fetch!(m, key)) end
-      cache = sum.(:cache_used)
-      schema = sum.(:schema_used)
-      stmt = sum.(:stmt_used)
-
-      put(state.load, :cache_used, cache)
-      put(state.load, :schema_used, schema)
-      put(state.load, :stmt_used, stmt)
-      put(state.load, :lookaside_used, sum.(:lookaside_used))
-      Admission.record(state.config, self(), cache + schema + stmt)
-    end
-
+    if Enum.all?(memories, &match?({:ok, _}, &1)), do: record_memories(state, memories)
     put_process_bytes(state)
+  end
+
+  defp record_memories(state, memories) do
+    sum = fn key -> memories |> Enum.map(fn {:ok, m} -> Map.fetch!(m, key) end) |> Enum.sum() end
+    cache = sum.(:cache_used)
+    schema = sum.(:schema_used)
+    stmt = sum.(:stmt_used)
+
+    put(state.load, :cache_used, cache)
+    put(state.load, :schema_used, schema)
+    put(state.load, :stmt_used, stmt)
+    put(state.load, :lookaside_used, sum.(:lookaside_used))
+    Admission.record(state.config, self(), cache + schema + stmt)
   end
 
   defp put_process_bytes(state) do

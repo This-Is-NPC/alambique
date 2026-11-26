@@ -39,19 +39,7 @@ defmodule Alambique.Cell.Commit do
         {:ok, state, nil}
 
       {:ok, next} ->
-        Compactor.notify(state.config, state.id, next.txid)
-
-        queued_ms =
-          System.convert_time_unit(System.monotonic_time() - started, :native, :millisecond)
-
-        emit(
-          started,
-          %{transactions: size, inflight: 1, queued_ms: queued_ms},
-          Map.put(meta, :result, :ok)
-        )
-
-        state = %{state | repl: next, pipe: %{state.pipe | acked: Pipe.acked(next)}}
-        {:ok, state, next.txid}
+        landed(state, next, started, size, meta)
 
       {:error, reason} ->
         result = if reason == :fenced, do: :fenced, else: :error
@@ -64,6 +52,21 @@ defmodule Alambique.Cell.Commit do
 
         {:error, reason, state}
     end
+  end
+
+  defp landed(state, next, started, size, meta) do
+    Compactor.notify(state.config, state.id, next.txid)
+
+    queued_ms = System.convert_time_unit(System.monotonic_time() - started, :native, :millisecond)
+
+    emit(
+      started,
+      %{transactions: size, inflight: 1, queued_ms: queued_ms},
+      Map.put(meta, :result, :ok)
+    )
+
+    state = %{state | repl: next, pipe: %{state.pipe | acked: Pipe.acked(next)}}
+    {:ok, state, next.txid}
   end
 
   @doc "Emits `[:cell, :commit]` for a batch that started at `started`."

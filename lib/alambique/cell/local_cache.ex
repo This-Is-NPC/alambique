@@ -74,26 +74,31 @@ defmodule Alambique.Cell.LocalCache do
   defp info(config, name) do
     dir = Path.join(config.data_dir, name)
 
-    with {:ok, files} <- File.ls(dir) do
-      stats =
-        for file <- files,
-            {:ok, stat} <- [File.stat(Path.join(dir, file), time: :posix)],
-            do: stat
-
-      used =
-        case File.stat(Path.join(dir, "cell.db.meta"), time: :posix) do
-          {:ok, stat} -> stat.mtime
-          {:error, _} -> stats |> Enum.map(& &1.mtime) |> Enum.max(fn -> 0 end)
-        end
-
-      %{
-        cell: String.replace_suffix(name, ".cell", ""),
-        dir: dir,
-        bytes: stats |> Enum.map(& &1.size) |> Enum.sum(),
-        used: used
-      }
-    else
+    case File.ls(dir) do
+      {:ok, files} -> summarize(name, dir, stats(dir, files))
       _ -> nil
+    end
+  end
+
+  defp stats(dir, files) do
+    for file <- files,
+        {:ok, stat} <- [File.stat(Path.join(dir, file), time: :posix)],
+        do: stat
+  end
+
+  defp summarize(name, dir, stats) do
+    %{
+      cell: String.replace_suffix(name, ".cell", ""),
+      dir: dir,
+      bytes: stats |> Enum.map(& &1.size) |> Enum.sum(),
+      used: last_used(dir, stats)
+    }
+  end
+
+  defp last_used(dir, stats) do
+    case File.stat(Path.join(dir, "cell.db.meta"), time: :posix) do
+      {:ok, stat} -> stat.mtime
+      {:error, _} -> stats |> Enum.map(& &1.mtime) |> Enum.max(fn -> 0 end)
     end
   end
 
