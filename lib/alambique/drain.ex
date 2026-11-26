@@ -193,7 +193,7 @@ defmodule Alambique.Drain do
   defp deadline_cut(result), do: result
 
   defp record(config, results, cell, :ok) do
-    :ets.update_counter(config.drain_status, :done, 1)
+    _ = :ets.update_counter(config.drain_status, :done, 1)
     Map.put(results, cell, :ok)
   end
 

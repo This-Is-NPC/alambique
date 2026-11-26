@@ -104,7 +104,7 @@ defmodule Alambique.CompactionHelpers do
   def orphaned(env) do
     a = history(env, new_owner(env, "a.db"), 3)
     b = take_over(env, "b.db", 2, a.dumps)
-    safe_op(a.conn, {:put, 9, 100})
+    _ = safe_op(a.conn, {:put, 9, 100})
     {:ok, _} = Replicator.sync(%{a.state | txid: b.state.txid}, env.ctx)
     {a, b}
   end

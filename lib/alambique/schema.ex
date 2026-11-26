@@ -47,7 +47,12 @@ defmodule Alambique.Schema do
 
   @doc "The oldest version that code whose schema version is `n` accepts in a deploy."
   @spec oldest_readable(Config.t(), non_neg_integer) :: pos_integer
-  def oldest_readable(%{migration_window: w}, n) when is_integer(w), do: max(n - w, 1)
+  def oldest_readable(%{migration_window: w}, n) when is_integer(w) and is_integer(n) do
+    case n - w do
+      oldest when oldest > 1 -> oldest
+      _ -> 1
+    end
+  end
 
   # Keys
 

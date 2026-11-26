@@ -100,7 +100,7 @@ defmodule Alambique.Load.Host do
   def ema(previous, count), do: previous * @decay + count * (1 - @decay)
 
   @doc "The load the host has besides the test."
-  @spec net_load(float, float) :: float
+  @spec net_load(number, number) :: number
   def net_load(loadavg1, own_ema), do: max(loadavg1 - own_ema, 0.0)
 
   @doc "Whether memory is too low to go on."

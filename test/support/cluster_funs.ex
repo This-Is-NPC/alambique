@@ -87,7 +87,10 @@ defmodule Alambique.ClusterFuns do
   end
 
   @doc "A transaction that stops the whole VM while it runs in the cell, as a crashing NIF would."
-  def poison, do: fn _tx -> System.halt(137) end
+  def poison, do: &halt_tx/1
+
+  @spec halt_tx(term) :: no_return
+  defp halt_tx(_tx), do: System.halt(137)
 
   @doc "The process of `cell` on this node, or `nil` when it is not awake here."
   def cell_pid(instance, cell),
@@ -103,6 +106,7 @@ defmodule Alambique.ClusterFuns do
   end
 
   @doc "Crash point action: stops the whole VM, as a power cut would."
+  @spec halt(term, term) :: no_return
   def halt(_point, _context), do: System.halt(137)
 
   @doc """

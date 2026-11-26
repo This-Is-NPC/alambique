@@ -379,39 +379,10 @@ defmodule Alambique.Feed.Publisher do
 
     with true <- upto > state.feed.sent,
          {:ok, state} <- open_reader(state) do
-      Fault.point(:feed_before_publish, %{cell: state.id, txid: upto, sender: state.feed.pid})
-
-      state =
-        if state.feed.pid,
-          do: state,
-          else: %{state | feed: %{state.feed | pid: Sender.start(state)}}
-
-      :ok = Sqlite.assign(state.feed.reader, state.feed.pid)
-      reader = Sqlite.ref(state.feed.reader)
-      send(state.feed.pid, {:range, state.feed.sent + 1, upto, reader})
-
-      {%{
-         state
-         | feed: %{
-             state.feed
-             | sent: upto,
-               backlog: upto - state.feed.published,
-               capped: upto < acked,
-               reading: state.config.feed.reader_close == :after_read
-           }
-       }, false}
+      {send_range(state, upto, acked), false}
     else
-      false ->
-        {%{state | feed: %{state.feed | capped: false}}, false}
-
-      {:error, reason} ->
-        Logger.warning(
-          "Alambique could not open the feed reader of #{state.id}: #{inspect(reason)}"
-        )
-
-        ref = make_ref()
-        Process.send_after(self(), {:feed_part, ref}, @reader_retry_ms)
-        {%{state | feed: %{state.feed | tick: ref}}, false}
+      false -> {set_feed(state, capped: false), false}
+      {:error, reason} -> {retry_reader(state, reason), false}
     end
   end
 
@@ -460,29 +431,54 @@ defmodule Alambique.Feed.Publisher do
     {pieces, cut?} = take_room(pieces, room)
 
     case pieces do
-      [] ->
-        {%{state | feed: %{state.feed | part: nil, capped: false}}, false}
-
-      _ ->
-        Fault.point(:feed_before_publish, %{
-          cell: state.id,
-          txid: hd(pieces).txid,
-          sender: state.feed.pid
-        })
-
-        state =
-          if state.feed.pid,
-            do: state,
-            else: %{state | feed: %{state.feed | pid: Sender.start(state)}}
-
-        send(
-          state.feed.pid,
-          {:batches, Enum.map(pieces, &Map.take(&1, [:txid, :ts, :changes, :partial]))}
-        )
-
-        {sent(state, pieces, cut?), more? and not cut?}
+      [] -> {set_feed(state, part: nil, capped: false), false}
+      _ -> {send_pieces(state, pieces, cut?), more? and not cut?}
     end
   end
+
+  defp send_pieces(state, pieces, cut?) do
+    Fault.point(:feed_before_publish, %{
+      cell: state.id,
+      txid: hd(pieces).txid,
+      sender: state.feed.pid
+    })
+
+    state = ensure_sender(state)
+
+    send(
+      state.feed.pid,
+      {:batches, Enum.map(pieces, &Map.take(&1, [:txid, :ts, :changes, :partial]))}
+    )
+
+    sent(state, pieces, cut?)
+  end
+
+  defp send_range(state, upto, acked) do
+    Fault.point(:feed_before_publish, %{cell: state.id, txid: upto, sender: state.feed.pid})
+    state = ensure_sender(state)
+    :ok = Sqlite.assign(state.feed.reader, state.feed.pid)
+    reader = Sqlite.ref(state.feed.reader)
+    send(state.feed.pid, {:range, state.feed.sent + 1, upto, reader})
+
+    set_feed(state,
+      sent: upto,
+      backlog: upto - state.feed.published,
+      capped: upto < acked,
+      reading: state.config.feed.reader_close == :after_read
+    )
+  end
+
+  defp retry_reader(state, reason) do
+    Logger.warning("Alambique could not open the feed reader of #{state.id}: #{inspect(reason)}")
+    ref = make_ref()
+    Process.send_after(self(), {:feed_part, ref}, @reader_retry_ms)
+    set_feed(state, tick: ref)
+  end
+
+  defp ensure_sender(%State{feed: %{pid: nil}} = state),
+    do: set_feed(state, pid: Sender.start(state))
+
+  defp ensure_sender(state), do: state
 
   defp sent_rows({:ok, [], _more?, _cut?}, state, _token),
     do: {%{state | feed: %{state.feed | part: nil, capped: false}}, false}
