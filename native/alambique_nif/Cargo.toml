@@ -16,6 +16,9 @@ libsqlite3-sys = { version = "0.38", features = ["bundled"] }
 lz4_flex = "0.14.0"
 rustler = "0.38"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [features]
 # Test NIFs that panic (`mix test` builds with it; see design §2.1).
 test-panic = []

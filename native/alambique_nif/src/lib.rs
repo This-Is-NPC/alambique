@@ -2,6 +2,7 @@
 //! decoding, page application, checksums and merging. No network access.
 
 mod alloc;
+mod arena;
 mod capture;
 mod crc;
 mod dbsum;
