@@ -24,7 +24,10 @@ defmodule Alambique.FeedCloseReaderTest do
   test "a reader that closes is cleared without a warning", %{conn: conn} do
     log =
       capture_log(fn ->
-        assert %State{feed: %{reader: nil}} = Publisher.close_reader(with_reader(%State{}, conn))
+        assert %State{feed: %{reader: nil}} =
+                 Publisher.close_reader(
+                   with_reader(%State{config: nil, id: "reader-cell", path: ""}, conn)
+                 )
       end)
 
     refute log =~ "could not close the feed reader"
@@ -33,7 +36,7 @@ defmodule Alambique.FeedCloseReaderTest do
   test "a reader that will not close is cleared and logged", %{conn: conn} do
     # SQLite refuses to close the connection while its transaction is open.
     {:ok, _token} = Sqlite.begin_transaction(conn)
-    state = with_reader(%State{id: "reader-cell"}, conn)
+    state = with_reader(%State{config: nil, id: "reader-cell", path: ""}, conn)
 
     log =
       capture_log(fn ->
