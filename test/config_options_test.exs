@@ -308,10 +308,15 @@ defmodule Alambique.ConfigOptionsTest do
     end
   end
 
-  test "awake lookaside is SQLite's default unless both keys are set", ctx do
+  test "awake lookaside is 512 by 16, and nil leaves SQLite's own", ctx do
     awake = Alambique.Config.build(base(ctx, [])).awake
-    assert %{lookaside_bytes: nil, lookaside_count: nil} = awake
-    assert Alambique.Cell.Db.lookaside(%{awake: awake}) == nil
+    assert %{lookaside_bytes: 512, lookaside_count: 16} = awake
+    assert Alambique.Cell.Db.lookaside(%{awake: awake}) == {512, 16}
+
+    sqlite =
+      Alambique.Config.build(base(ctx, awake: [lookaside_bytes: nil, lookaside_count: nil])).awake
+
+    assert Alambique.Cell.Db.lookaside(%{awake: sqlite}) == nil
 
     for {bytes, count, expected} <- [{512, 16, {512, 16}}, {0, 0, {0, 0}}, {1200, 0, {1200, 0}}] do
       config =
@@ -573,8 +578,8 @@ defmodule Alambique.ConfigOptionsTest do
              idle_cache_after_ms: nil,
              idle_close_after_ms: nil,
              idle_cache_kib: 64,
-             lookaside_bytes: nil,
-             lookaside_count: nil,
+             lookaside_bytes: 512,
+             lookaside_count: 16,
              idle_gc: true,
              track_bytes: true,
              wake_queue_ms: 500,
@@ -747,8 +752,8 @@ defmodule Alambique.ConfigOptionsTest do
              idle_cache_after_ms: nil,
              idle_close_after_ms: nil,
              idle_cache_kib: 64,
-             lookaside_bytes: nil,
-             lookaside_count: nil,
+             lookaside_bytes: 512,
+             lookaside_count: 16,
              idle_gc: true,
              track_bytes: true,
              wake_queue_ms: 40,

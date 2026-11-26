@@ -366,14 +366,15 @@ defmodule Alambique do
       0.45 MiB with `true`. The cost is one collection of the cell process,
       with no measurable cost on the next call. It does nothing while
       `:idle_cache_after_ms` is `nil`; `false` shrinks the cache but keeps the
-      garbage. `:lookaside_bytes` and `:lookaside_count` (both `nil` by
-      default, which keeps SQLite's 1200 bytes by 40 slots; give both) set
-      the lookaside memory of every connection of the instance, the slots
-      SQLite serves its small allocations from while a statement runs, instead
-      of the allocator: bytes per slot, a multiple of 8 from 16 up to 65 528,
-      and the number of slots, at most 1 MiB in all. `0` in either gives a
-      connection none, which saves its memory (about 47 KiB at the default)
-      and sends every allocation of a statement to the allocator.
+      garbage. `:lookaside_bytes` and `:lookaside_count` (default 512 by 16; both
+      `nil` keeps SQLite's 1200 by 40; give both) set the lookaside memory of
+      every connection of the instance (a cell can set both through
+      `:cell_options`), the slots SQLite serves its small allocations from
+      while a statement runs, instead of the allocator: bytes per slot, a
+      multiple of 8 from 16 up to 65 528, and the number of slots, at most
+      1 MiB in all. `0` in either gives a connection none, which saves its
+      memory (8 KiB at the default, 47 KiB at SQLite's) and sends every
+      allocation of a statement to the allocator.
       `:track_bytes` (default `true`) makes every awake cell
       measure the bytes SQLite and its process hold, which `cells/2` and
       `facts/2` report, except while the feed sender is in the middle of a

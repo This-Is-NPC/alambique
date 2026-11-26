@@ -27,13 +27,14 @@ defmodule Alambique.LookasideCellTest do
   end
 
   test "a cell without lookaside holds the memory of its slots less", ctx do
-    default = held_by_cells(ctx, [])
+    sqlite = held_by_cells(ctx, lookaside_bytes: nil, lookaside_count: nil)
     none = held_by_cells(ctx, lookaside_bytes: 0, lookaside_count: 0)
-    small = held_by_cells(ctx, lookaside_bytes: 512, lookaside_count: 16)
+    default = held_by_cells(ctx, [])
 
-    # SQLite's default is 1200 bytes by 40 slots on every connection.
-    assert default - none >= @cells * 40_000
-    assert default - small >= @cells * 30_000
-    assert small - none >= @cells * 6_000
+    # SQLite's own is 1200 bytes by 40 slots on every connection; the default
+    # is 512 by 16.
+    assert sqlite - none >= @cells * 40_000
+    assert sqlite - default >= @cells * 30_000
+    assert default - none >= @cells * 6_000
   end
 end
