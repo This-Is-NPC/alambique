@@ -101,7 +101,7 @@ defmodule Alambique.Cell.LocalCache do
       Task.async(fn ->
         case Registry.register(config.registry, dir.cell, Alambique.Cell.Facts.new()) do
           {:ok, _} ->
-            File.rm_rf(dir.dir)
+            _ = File.rm_rf(dir.dir)
             :evicted
 
           {:error, {:already_registered, _}} ->

@@ -108,15 +108,16 @@ defmodule Alambique.Compaction.Compactor do
     # A crashing pass must not take the compactor down.
     Process.flag(:trap_exit, true)
 
-    :ets.new(config.compactor, [
-      :named_table,
-      :public,
-      :set,
-      write_concurrency: true,
-      read_concurrency: false
-    ])
+    _ =
+      :ets.new(config.compactor, [
+        :named_table,
+        :public,
+        :set,
+        write_concurrency: true,
+        read_concurrency: false
+      ])
 
-    :ets.new(config.cleanups, [:named_table, :public, :set])
+    _ = :ets.new(config.cleanups, [:named_table, :public, :set])
     Hold.create(config)
     Slots.create(config)
 
@@ -217,7 +218,7 @@ defmodule Alambique.Compaction.Compactor do
 
   defp finish(%{config: config} = state, pid, row, result) do
     {%{ref: ref, timer: timer}, running} = Map.pop!(state.running, pid)
-    Process.cancel_timer(timer)
+    _ = Process.cancel_timer(timer)
     Process.demonitor(ref, [:flush])
     after_pass(config, row, result)
     state = %{state | running: running, failed: failed(state.failed, row, result)}

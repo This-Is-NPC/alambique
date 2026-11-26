@@ -79,7 +79,7 @@ defmodule Alambique.Inflight.Tracker do
 
   @impl true
   def terminate(_reason, state) do
-    for {_pid, {_ref, paths}} <- state.procs, path <- paths, do: File.rm(path)
+    Enum.each(state.procs, fn {_pid, {_ref, paths}} -> Enum.each(paths, &File.rm/1) end)
     :ok
   end
 
@@ -114,7 +114,7 @@ defmodule Alambique.Inflight.Tracker do
       {cell, kind}
     else
       _ ->
-        File.rm(path)
+        _ = File.rm(path)
         nil
     end
   end

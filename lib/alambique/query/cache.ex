@@ -93,7 +93,7 @@ defmodule Alambique.Query.Cache do
   @doc "Marks `path` as used now."
   @spec touch(Path.t()) :: :ok
   def touch(path) do
-    File.touch(path)
+    _ = File.touch(path)
     :ok
   end
 
@@ -110,9 +110,9 @@ defmodule Alambique.Query.Cache do
   @spec remove([entry]) :: :ok
   def remove(entries) do
     Enum.each(entries, fn %{path: path} ->
-      File.rm(path)
-      File.rm(path <> "-wal")
-      File.rm(path <> "-shm")
+      _ = File.rm(path)
+      _ = File.rm(path <> "-wal")
+      _ = File.rm(path <> "-shm")
     end)
   end
 
@@ -136,7 +136,7 @@ defmodule Alambique.Query.Cache do
   def sync(path) do
     with {:ok, io} <- :file.open(path, [:read, :write, :raw, :binary]),
          :ok <- :file.sync(io) do
-      :file.close(io)
+      _ = :file.close(io)
     end
   end
 
@@ -145,7 +145,7 @@ defmodule Alambique.Query.Cache do
   def page_size(path) do
     with {:ok, io} <- :file.open(path, [:read, :raw, :binary]),
          {:ok, <<size::16>>} <- :file.pread(io, 16, 2) do
-      :file.close(io)
+      _ = :file.close(io)
       if size == 1, do: {:ok, 65_536}, else: {:ok, size}
     else
       _ -> :error
@@ -176,7 +176,7 @@ defmodule Alambique.Query.Cache do
     {evicted, remaining} = evict(Enum.sort_by(live, & &1.mtime), total, max_bytes)
     Enum.each(evicted, &remove([&1]))
 
-    for dir <- cell_dirs(dir), do: File.rmdir(dir)
+    Enum.each(cell_dirs(dir), &File.rmdir/1)
     {length(stale) + length(evicted), remaining}
   end
 

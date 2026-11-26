@@ -19,13 +19,14 @@ defmodule Alambique.Compaction.Hold do
   @doc "Creates the table of an instance."
   @spec create(Alambique.Config.t()) :: :ok
   def create(config) do
-    :ets.new(config.holds, [
-      :named_table,
-      :public,
-      :ordered_set,
-      write_concurrency: true,
-      read_concurrency: true
-    ])
+    _ =
+      :ets.new(config.holds, [
+        :named_table,
+        :public,
+        :ordered_set,
+        write_concurrency: true,
+        read_concurrency: true
+      ])
 
     :ets.insert(config.holds, [{:total, 0}, {:seq, 0}])
     :ok

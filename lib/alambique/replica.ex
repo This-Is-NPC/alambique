@@ -68,7 +68,7 @@ defmodule Alambique.Replica do
     settings = config.replicas
     suffix = location.id |> :erlang.phash2() |> Integer.to_string(16)
     dir = Path.join(dir(config), "#{cell}@#{suffix}")
-    File.rm_rf!(dir)
+    _ = File.rm_rf!(dir)
     File.mkdir_p!(dir)
     ctx = Config.repl_ctx(config, location)
 
@@ -436,13 +436,13 @@ defmodule Alambique.Replica do
   # the owner until a refresh confirms the new file.
   defp rebuild(state) do
     state = close(state)
-    File.rm(state.path)
+    _ = File.rm(state.path)
     state = %{state | confirmed_at: nil, txid: 0, epoch: 0, checksum: nil}
     {:noreply, start_build(state)}
   end
 
   defp schedule(state) do
-    if state.timer, do: Process.cancel_timer(state.timer)
+    if state.timer, do: _ = Process.cancel_timer(state.timer)
     delay = poll_interval(state.settings, now() - state.last_read)
     %{state | timer: Process.send_after(self(), :poll, delay)}
   end
@@ -532,7 +532,7 @@ defmodule Alambique.Replica do
     {ready, waiting} = Enum.split_with(state.waiters, &fresh?(state, &1.q, &1.bound))
 
     for w <- ready do
-      Process.cancel_timer(w.timer)
+      _ = Process.cancel_timer(w.timer)
       GenServer.reply(w.from, serve(state, w))
     end
 
@@ -560,7 +560,7 @@ defmodule Alambique.Replica do
   defp finish(state) do
     if state.task, do: Task.shutdown(state.task.handle, :brutal_kill)
     state = close(%{state | task: nil})
-    File.rm_rf(state.dir)
+    _ = File.rm_rf(state.dir)
     state
   end
 

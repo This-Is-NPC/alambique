@@ -102,7 +102,7 @@ defmodule Alambique.Query.Replica do
           publish(dir, key, tmp, {txid, epoch, checksum}, target, :restore, segments)
 
         {:error, reason} = error ->
-          File.rm(tmp)
+          _ = File.rm(tmp)
 
           if attempts > 1 and changed?(reason),
             do: restore(ctx, dir, {cell, key}, target, deadline, attempts - 1),
@@ -201,7 +201,7 @@ defmodule Alambique.Query.Replica do
         {:error, _} -> :fallback
       end
     after
-      File.rm(tmp)
+      _ = File.rm(tmp)
     end
   end
 
@@ -275,7 +275,7 @@ defmodule Alambique.Query.Replica do
       end
     else
       {:error, _} = error ->
-        File.rm(tmp)
+        _ = File.rm(tmp)
         error
     end
   end
