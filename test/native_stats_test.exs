@@ -14,6 +14,8 @@ defmodule Alambique.NativeStatsTest do
 
   defp stats, do: NativeStats.read()
 
+  defp arena?(stats), do: stats.page_arena_state == 1
+
   defp balance(s, side), do: s[:"#{side}_alloc_bytes"] - s[:"#{side}_free_bytes"]
 
   defp open!(dir, name, opts \\ []) do
@@ -62,7 +64,14 @@ defmodule Alambique.NativeStatsTest do
     open = stats()
     assert open.sqlite_memory_used - before.sqlite_memory_used >= 16_000_000
     assert open.sqlite_memory_highwater >= open.sqlite_memory_used
-    assert :erlang.memory(:total) - total >= 16_000_000
+
+    # The blocks of the page cache are in the BEAM's allocators, or in the page
+    # arena when it is on, which keeps them out of `:erlang.memory/1`.
+    if arena?(open) do
+      assert open.page_arena_in_use_bytes - before.page_arena_in_use_bytes >= 16_000_000
+    else
+      assert :erlang.memory(:total) - total >= 16_000_000
+    end
 
     # SQLite's accounting and ours agree, and nothing is left after close.
     assert balance(open, :sqlite) - balance(before, :sqlite) ==
@@ -72,6 +81,9 @@ defmodule Alambique.NativeStatsTest do
     closed = stats()
     assert closed.sqlite_memory_used == before.sqlite_memory_used
     assert balance(closed, :sqlite) == balance(before, :sqlite)
+
+    if arena?(closed),
+      do: assert(closed.page_arena_in_use_bytes == before.page_arena_in_use_bytes)
   end
 
   test "Rust allocations are counted and freed", %{tmp_dir: dir} do

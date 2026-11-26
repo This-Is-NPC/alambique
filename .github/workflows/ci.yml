@@ -185,6 +185,21 @@ jobs:
       - run: mise run test:native
       - run: mise run check:release-nif
 
+  # The tests that depend on where the page-cache blocks live, with the page
+  # arena off; the suite in `coverage-run` runs with it on.
+  arena-off:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30 # default 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          tools: erlang elixir rust
+          cache-name: arena-off
+      - run: mise run test:page-arena-off
+
   # The store contract tests against a SeaweedFS container, then the pinned
   # Litestream restoring what Alambique replicated to it. Docker is on the
   # runner image.
@@ -234,7 +249,7 @@ jobs:
 
   # The single check to require on master.
   ci:
-    needs: [gate, coverage-build, coverage-run, coverage, native, services, cluster]
+    needs: [gate, coverage-build, coverage-run, coverage, native, arena-off, services, cluster]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5 # default 5
