@@ -71,7 +71,12 @@ defmodule Bench do
           {"erlang system", & &1.mem.system},
           {"erlang processes", & &1.mem.processes},
           {"sqlite memory_used", & &1.sqlite_used},
-          {"driver (rust) alloc", & &1.rust}
+          {"driver (rust) alloc", & &1.rust},
+          {"allocator blocks in use", & &1.blocks},
+          {"allocator carriers", & &1.carriers},
+          {"  driver_alloc carriers", &Map.get(&1.types, :driver_alloc, 0)},
+          {"  binary_alloc carriers", &Map.get(&1.types, :binary_alloc, 0)},
+          {"  eheap_alloc carriers", &Map.get(&1.types, :eheap_alloc, 0)}
         ] do
       o = get.(open.now)
       c = get.(closed.now)
@@ -328,7 +333,12 @@ defmodule Bench do
       sqlite_used: s.sqlite_memory_used,
       rust: s.rust_alloc_bytes - s.rust_free_bytes,
       mem: Map.new(:erlang.memory()),
-      rss_anon: rss_kb("RssAnon") * 1024
+      rss_anon: rss_kb("RssAnon") * 1024,
+      # Blocks in use against the carriers that hold them: freed blocks stay
+      # in carriers, which is why RssAnon falls less than the memory freed.
+      blocks: :recon_alloc.memory(:used),
+      carriers: :recon_alloc.memory(:allocated),
+      types: Map.new(:recon_alloc.memory(:allocated_types))
     }
   end
 
