@@ -39,6 +39,7 @@ mod tests {
     use std::fs;
 
     #[test]
+    #[cfg_attr(miri, ignore = "calls ioctl, which Miri cannot run")]
     fn a_clone_has_the_content_or_is_declined() {
         let dir = tempfile::tempdir().unwrap();
         let (src, dst) = (dir.path().join("src"), dir.path().join("dst"));
