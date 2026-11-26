@@ -104,7 +104,12 @@ defmodule Alambique.Cell.State do
   """
   @spec cell_opt(
           t,
-          :cache_kib | :idle_cache_after_ms | :idle_cache_kib | :idle_gc | :idle_timeout_ms
+          :cache_kib
+          | :idle_cache_after_ms
+          | :idle_cache_kib
+          | :idle_gc
+          | :idle_timeout_ms
+          | :locking_mode
         ) ::
           term
   def cell_opt(%__MODULE__{cell_opts: opts, config: config}, key) do

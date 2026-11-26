@@ -436,7 +436,14 @@ defmodule Alambique.ConfigOptionsTest do
     end
 
     assert Enum.sort(Alambique.Config.cell_option_keys()) ==
-             [:cache_kib, :idle_cache_after_ms, :idle_cache_kib, :idle_gc, :idle_timeout_ms]
+             [
+               :cache_kib,
+               :idle_cache_after_ms,
+               :idle_cache_kib,
+               :idle_gc,
+               :idle_timeout_ms,
+               :locking_mode
+             ]
   end
 
   test "the statement limit is the dirty IO schedulers minus two, at least two slots" do

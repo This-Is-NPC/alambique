@@ -80,8 +80,11 @@ defmodule Alambique do
       (default `nil`): options of one cell. At each wake the cell calls
       `apply(module, function, [cell_id | extra_args])`, which returns a keyword
       list in the shape of these options, with only the per-cell keys:
-      `idle_timeout_ms:` and `awake: [cache_kib:, idle_cache_after_ms:,
-      idle_cache_kib:, idle_gc:]`. A key that is absent keeps the node's value;
+      `idle_timeout_ms:`, `awake: [cache_kib:, idle_cache_after_ms:,
+      idle_cache_kib:, idle_gc:]` and `sql: [locking_mode:]`. A key that is absent
+      keeps the node's value; `locking_mode: :exclusive` is dropped back to the
+      node's value (an event says so) where the node's feed has
+      `hand_over: :sender` or `:lazy_restore` is on;
       `idle_cache_after_ms: nil` turns the idle shrink off for that cell. Any
       other key, a repeated key or a value the option refuses makes the whole
       override invalid. The function must be exported with arity

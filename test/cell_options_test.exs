@@ -368,6 +368,70 @@ defmodule Alambique.CellOptionsTest do
     end
   end
 
+  describe "the locking mode" do
+    defp locking_mode(inst, cell) do
+      {:ok, %{rows: [[mode]]}} = Alambique.query(inst, cell, "PRAGMA locking_mode")
+      mode
+    end
+
+    test "is set per cell: the cell that asks is exclusive and the others are not", ctx do
+      inst = start(ctx, lazy_restore: false, migrations: @schema)
+
+      Callbacks.set(fn
+        "locked" -> [sql: [locking_mode: :exclusive]]
+        _ -> nil
+      end)
+
+      assert {:ok, _} = wake(inst, "locked")
+      assert {:ok, _} = wake(inst, "plain")
+      assert cell_opts(inst, "locked") == %{locking_mode: :exclusive}
+      assert locking_mode(inst, "locked") == "exclusive"
+      assert locking_mode(inst, "plain") == "normal"
+    end
+
+    test "a cell can be normal where the node is exclusive", ctx do
+      inst = start(ctx, lazy_restore: false, sql: [locking_mode: :exclusive])
+      Callbacks.set(fn _ -> [sql: [locking_mode: :normal]] end)
+      assert {:ok, _} = wake(inst, "open")
+      assert locking_mode(inst, "open") == "normal"
+    end
+
+    test "is repaired to the node's where the feed hands over to the sender", ctx do
+      capture([[:alambique, :cell, :options, :repaired]])
+      inst = start(ctx, lazy_restore: false, feed: [hand_over: :sender])
+      Callbacks.set(fn _ -> [sql: [locking_mode: :exclusive]] end)
+
+      assert {:ok, _} = wake(inst, "sender")
+      assert cell_opts(inst, "sender") == %{}
+      assert locking_mode(inst, "sender") == "normal"
+
+      await_event(
+        [:alambique, :cell, :options, :repaired],
+        "sender",
+        5_000,
+        &(&1.field == :locking_mode)
+      )
+    end
+
+    test "is repaired to the node's while a lazy restore is on", ctx do
+      inst = start(ctx)
+      Callbacks.set(fn _ -> [sql: [locking_mode: :exclusive]] end)
+      assert {:ok, _} = wake(inst, "lazy")
+      assert cell_opts(inst, "lazy") == %{}
+      assert locking_mode(inst, "lazy") == "normal"
+    end
+
+    test "a mode that does not exist makes the override invalid", ctx do
+      capture([[:alambique, :cell, :options, :invalid]])
+      inst = start(ctx, lazy_restore: false)
+      Callbacks.set(fn _ -> [sql: [locking_mode: :fast]] end)
+      assert {:ok, _} = wake(inst, "bad")
+      assert cell_opts(inst, "bad") == %{}
+      {_, meta} = await_event([:alambique, :cell, :options, :invalid], "bad")
+      assert meta.reason =~ "locking_mode"
+    end
+  end
+
   describe "an invalid override" do
     setup do
       capture([[:alambique, :cell, :options, :invalid], [:alambique, :cell, :wake]])
