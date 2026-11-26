@@ -64,35 +64,35 @@ defmodule Mix.Tasks.Alambique.CheckDeploy do
     if rest != [], do: fail("usage: mix alambique.check_deploy [options]")
     sample = sample(parsed)
     Options.boot()
-
-    result =
-      try do
-        Alambique.check_deploy(
-          [
-            placement: Options.placement(parsed),
-            migrations: migrations(parsed),
-            migration_window: window(parsed)
-          ],
-          timeout_ms: parsed[:timeout] || ops()[:timeout_ms] || 30_000
-        )
-      rescue
-        error in [ArgumentError, Mix.Error] -> fail(Exception.message(error))
-      end
-
-    case result do
-      {:ok, report} ->
-        print(report, sample)
-        Mix.shell().info(allowed(report))
-
-      {:error, {:too_old, report}} ->
-        print(report, sample)
-        Mix.shell().error(refusal(report, sample))
-        exit({:shutdown, 1})
-
-      {:error, reason} ->
-        fail("could not check the deploy: #{inspect(reason)}")
-    end
+    parsed |> check() |> report(sample)
   end
+
+  defp check(parsed) do
+    Alambique.check_deploy(
+      [
+        placement: Options.placement(parsed),
+        migrations: migrations(parsed),
+        migration_window: window(parsed)
+      ],
+      timeout_ms: parsed[:timeout] || ops()[:timeout_ms] || 30_000
+    )
+  rescue
+    error in [ArgumentError, Mix.Error] -> fail(Exception.message(error))
+  end
+
+  defp report({:ok, report}, sample) do
+    print(report, sample)
+    Mix.shell().info(allowed(report))
+  end
+
+  defp report({:error, {:too_old, report}}, sample) do
+    print(report, sample)
+    Mix.shell().error(refusal(report, sample))
+    exit({:shutdown, 1})
+  end
+
+  defp report({:error, reason}, _sample),
+    do: fail("could not check the deploy: #{inspect(reason)}")
 
   defp migrations(parsed) do
     case parsed[:migrations] || ops()[:migrations] do
@@ -129,9 +129,9 @@ defmodule Mix.Tasks.Alambique.CheckDeploy do
     shell = Mix.shell()
     shell.info("Migrations are chosen per cell; each cell is compared with its own version.")
 
-    for %{location: id, versions: versions, too_old_cells: cells} <- report.locations do
+    Enum.each(report.locations, fn %{location: id, versions: versions, too_old_cells: cells} ->
       shell.info("  location #{id}: #{versions(versions)}#{cells(cells, sample)}")
-    end
+    end)
   end
 
   defp print(report, _sample) do
@@ -141,11 +141,11 @@ defmodule Mix.Tasks.Alambique.CheckDeploy do
       "Code at schema version #{report.code_version} reads cells from version #{report.oldest_readable}."
     )
 
-    for %{location: id, versions: versions, too_old: too_old} <- report.locations do
+    Enum.each(report.locations, fn %{location: id, versions: versions, too_old: too_old} ->
       shell.info(
         "  location #{id}: #{versions(versions)}#{if too_old, do: "  <- too old", else: ""}"
       )
-    end
+    end)
   end
 
   defp versions([]), do: "no cells"
