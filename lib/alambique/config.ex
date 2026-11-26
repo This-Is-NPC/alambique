@@ -298,6 +298,9 @@ defmodule Alambique.Config do
           compactor: atom,
           cleanups: atom,
           holds: atom,
+          nodes: map | nil,
+          node_registry: atom,
+          peers: atom,
           release_slots: atom,
           lazy_restore: map | nil,
           drain: map,
@@ -920,6 +923,7 @@ defmodule Alambique.Config do
   defp with_ops(what, [:delete, :insert, :update]), do: what
   defp with_ops(what, ops), do: {:ops, ops, what}
 
+  @spec spec_error!(term) :: no_return
   defp spec_error!(name),
     do:
       bad!(
@@ -1283,7 +1287,8 @@ defmodule Alambique.Config do
 
   @doc false
   @spec default_statement_slots(pos_integer) :: pos_integer
-  def default_statement_slots(dirty_io), do: max(dirty_io - 2, min(dirty_io, 2))
+  def default_statement_slots(dirty_io) when is_integer(dirty_io),
+    do: max(dirty_io - 2, min(dirty_io, 2))
 
   defp options!(name, opts, defaults) do
     opts = checked_keyword!(name, opts, Keyword.keys(defaults))
@@ -1890,5 +1895,6 @@ defmodule Alambique.Config do
     depth
   end
 
+  @spec bad!(String.t()) :: no_return
   defp bad!(message), do: raise(ArgumentError, "invalid Alambique options: #{message}")
 end
