@@ -116,6 +116,13 @@ fn round_up(n: usize, to: usize) -> usize {
     n.div_ceil(to) * to
 }
 
+/// An empty vector with room for `n` items, or `None` when that fails.
+fn reserved<T>(n: usize) -> Option<Vec<T>> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(n).ok()?;
+    Some(v)
+}
+
 impl Book {
     /// `None` when the geometry cannot hold an extent.
     pub fn new(g: Geometry) -> Option<Book> {
@@ -142,23 +149,16 @@ impl Book {
         let rel_words = pages_per_ext.div_ceil(64);
         // Every table gets its whole capacity now; a failure is a refusal,
         // not an abort of the VM.
-        let mut regions = Vec::new();
-        regions.try_reserve_exact(g.max_regions).ok()?;
+        let mut regions = reserved(g.max_regions)?;
         regions.push(Region {
             id: 0,
             live: true,
             avail: [NONE; CLASSES],
         });
-        let mut exts = Vec::new();
-        exts.try_reserve_exact(max_ext).ok()?;
-        let mut free = Vec::new();
-        free.try_reserve_exact(max_ext.checked_mul(free_words)?)
-            .ok()?;
-        let mut rel = Vec::new();
-        rel.try_reserve_exact(max_ext.checked_mul(rel_words)?)
-            .ok()?;
-        let mut spare_regions = Vec::new();
-        spare_regions.try_reserve_exact(g.max_regions).ok()?;
+        let exts = reserved(max_ext)?;
+        let free = reserved(max_ext.checked_mul(free_words)?)?;
+        let rel = reserved(max_ext.checked_mul(rel_words)?)?;
+        let spare_regions = reserved(g.max_regions)?;
         Some(Book {
             page: g.page,
             shift: ext_bytes.trailing_zeros(),
@@ -653,40 +653,57 @@ impl Book {
             let (from, to) = ((s * stride).div_ceil(self.page), end_byte / self.page);
             let (first, end, pages) = self.resident_span(e, from, to);
             if pages > 0 {
-                let (Ok(first_slot), Ok(count), Ok(first_page), Ok(end_page)) = (
-                    u32::try_from(s),
-                    u32::try_from(n),
-                    u32::try_from(first),
-                    u32::try_from(end),
-                ) else {
+                if !self.take_run(e, class, (s, n), (first, end), out) {
                     return (claimed_pages, true);
-                };
-                for i in s..s + n {
-                    self.set_fbit(e, i, false);
                 }
-                let Some(x) = self.exts.get_mut(e as usize) else {
-                    return (claimed_pages, true);
-                };
-                x.free -= count;
-                x.claimed += count;
-                let (owner, none_free) = (x.owner, x.free == 0);
-                if none_free {
-                    self.remove(List::Avail(owner, class), e);
-                }
-                out.push(Claim {
-                    ext: e,
-                    first_slot,
-                    count,
-                    first_page,
-                    end_page,
-                    whole: false,
-                    released: false,
-                });
                 claimed_pages += pages;
             }
             s += n;
         }
         (claimed_pages, true)
+    }
+
+    /// Takes the `n` free slots from `s` out of the free lists and records
+    /// their claim over the pages `first..end`. False when a number does not
+    /// fit a claim or the extent is gone.
+    fn take_run(
+        &mut self,
+        e: u32,
+        class: usize,
+        (s, n): (usize, usize),
+        (first, end): (usize, usize),
+        out: &mut Vec<Claim>,
+    ) -> bool {
+        let (Ok(first_slot), Ok(count), Ok(first_page), Ok(end_page)) = (
+            u32::try_from(s),
+            u32::try_from(n),
+            u32::try_from(first),
+            u32::try_from(end),
+        ) else {
+            return false;
+        };
+        for i in s..s + n {
+            self.set_fbit(e, i, false);
+        }
+        let Some(x) = self.exts.get_mut(e as usize) else {
+            return false;
+        };
+        x.free -= count;
+        x.claimed += count;
+        let (owner, none_free) = (x.owner, x.free == 0);
+        if none_free {
+            self.remove(List::Avail(owner, class), e);
+        }
+        out.push(Claim {
+            ext: e,
+            first_slot,
+            count,
+            first_page,
+            end_page,
+            whole: false,
+            released: false,
+        });
+        true
     }
 
     /// The first and end page of the resident pages in `from..to` and how
