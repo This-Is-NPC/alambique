@@ -63,6 +63,7 @@ defmodule Alambique.Replication.Restore do
           # and the keys that were asked for.
           sidecar_bodies: :ets.new(:restore_sidecars, [:set, :public]),
           sidecar_keys: MapSet.new(),
+          sidecar_tag: nil,
           # The read ahead process and the messages it and the walk exchange:
           # `{tag, :changed}` to the walk, `:room` and `:stop` to the read ahead.
           owner: self(),
@@ -494,13 +495,16 @@ defmodule Alambique.Replication.Restore do
       deadline = env.deadline
       bodies = env.sidecar_bodies
       owner = env.owner
-      tag = env.tag
+      # One tag for each attempt: what a failed one left is never taken for
+      # the next one's.
+      tag = make_ref()
       concurrency = env.concurrency
+      budget = env.budget
 
       fetcher =
         spawn_link(fn ->
           keys
-          |> Task.async_stream(&{&1, fetch_sidecar(ctx, &1, limit, deadline)},
+          |> Task.async_stream(&{&1, reserved_sidecar(budget, bodies, ctx, &1, limit, deadline)},
             max_concurrency: concurrency,
             timeout: :infinity
           )
@@ -512,7 +516,7 @@ defmodule Alambique.Replication.Restore do
           end)
         end)
 
-      {%{env | sidecar_keys: MapSet.new(keys)}, fetcher}
+      {%{env | sidecar_keys: MapSet.new(keys), sidecar_tag: tag}, fetcher}
     end
   end
 
@@ -524,6 +528,29 @@ defmodule Alambique.Replication.Restore do
   end
 
   defp within(result, total, _limit), do: {result, total}
+
+  # A sidecar is reserved in the budget of the restore at the most it may be
+  # before it is read, so that the ones under way hold no more than it allows
+  # (a request waits for room); what is not used is given back at once, and
+  # the size of what was read stays held until the walk takes it.
+  # What each holds is a `{:held, key}` row of the table, so that stopping the
+  # attempt gives back whatever a killed fetcher held.
+  defp reserved_sidecar(budget, bodies, ctx, key, limit, deadline) do
+    weight = Budget.weigh(budget, limit)
+
+    case Budget.acquire(budget, weight, deadline) do
+      :ok ->
+        :ets.insert(bodies, {{:held, key}, weight})
+        result = fetch_sidecar(ctx, key, limit, deadline)
+        held = with {:ok, body} <- result, do: min(byte_size(body), weight), else: (_ -> 0)
+        :ets.insert(bodies, {{:held, key}, held})
+        Budget.release(budget, weight - held)
+        result
+
+      {:error, reason} ->
+        {:read_failed, reason}
+    end
+  end
 
   defp fetch_sidecar(ctx, key, limit, deadline) do
     case Objects.fetch_optional(%{ctx | max_object_bytes: limit}, Keys.sidecar(key), deadline) do
@@ -545,11 +572,15 @@ defmodule Alambique.Replication.Restore do
   defp wait_sidecar(env, key) do
     case :ets.take(env.sidecar_bodies, key) do
       [{_, result}] ->
+        # The walk counts it from here on (`grow/2`).
+        release_held(env, key)
         result
 
       [] ->
+        tag = env.sidecar_tag
+
         receive do
-          {tag, :sidecar} when tag == env.tag -> wait_sidecar(env, key)
+          {^tag, :sidecar} -> wait_sidecar(env, key)
         after
           max(env.deadline - System.monotonic_time(:millisecond), 0) ->
             {:read_failed, :timeout}
@@ -557,14 +588,32 @@ defmodule Alambique.Replication.Restore do
     end
   end
 
+  defp release_held(env, key) do
+    case :ets.take(env.sidecar_bodies, {:held, key}) do
+      [{_, weight}] -> Budget.release(env.budget, weight)
+      [] -> :ok
+    end
+  end
+
+  # Ends the fetcher, waits until it is gone (so that nothing more arrives),
+  # gives back what its sidecars still hold and drops its messages.
   defp stop_sidecars(env, fetcher) do
     if fetcher do
+      ref = Process.monitor(fetcher)
       Process.unlink(fetcher)
       Process.exit(fetcher, :kill)
+
+      receive do
+        {:DOWN, ^ref, :process, ^fetcher, _} -> :ok
+      end
+
+      for {{:held, key}, _} <- :ets.tab2list(env.sidecar_bodies), do: release_held(env, key)
+
+      :ets.delete_all_objects(env.sidecar_bodies)
+      flush({env.sidecar_tag, :sidecar})
     end
 
-    :ets.delete_all_objects(env.sidecar_bodies)
-    flush({env.tag, :sidecar})
+    :ok
   end
 
   # Always false: the caller falls back to reading the file whole.
