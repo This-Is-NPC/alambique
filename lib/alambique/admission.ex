@@ -261,7 +261,13 @@ defmodule Alambique.Admission do
   def record(config, pid, bytes) do
     old = recorded(config, pid)
     :ets.insert(config.admission, {{:cell, pid}, bytes})
-    if bytes != old, do: :ets.update_counter(config.admission, :bytes, bytes - old)
+    add_bytes(config, bytes - old)
+  end
+
+  defp add_bytes(_config, 0), do: :ok
+
+  defp add_bytes(config, delta) when is_integer(delta) do
+    :ets.update_counter(config.admission, :bytes, delta)
     :ok
   end
 
@@ -278,10 +284,10 @@ defmodule Alambique.Admission do
   """
   @spec forget(Config.t(), pid) :: :ok
   def forget(config, pid) do
-    with [{_, bytes}] <- :ets.take(config.admission, {:cell, pid}),
-         do: :ets.update_counter(config.admission, :bytes, -bytes)
-
-    :ok
+    case :ets.take(config.admission, {:cell, pid}) do
+      [{_, bytes}] -> add_bytes(config, -bytes)
+      [] -> :ok
+    end
   end
 
   @doc """

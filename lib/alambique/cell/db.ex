@@ -54,7 +54,8 @@ defmodule Alambique.Cell.Db do
   defp settle(conn, :ok), do: {:ok, conn}
 
   defp settle(conn, {:error, _} = error) do
-    Sqlite.close(conn)
+    # The setup error is the one to report; a failed close adds nothing.
+    _ = Sqlite.close(conn)
     error
   end
 
@@ -205,7 +206,7 @@ defmodule Alambique.Cell.Db do
         :ok
 
       {:error, _} = error ->
-        read_only(conn)
+        back_to_read_only(conn)
         error
     end
   end
@@ -255,12 +256,18 @@ defmodule Alambique.Cell.Db do
         transact(conn, token, txid, fun, opts)
 
       {:error, _} = error ->
-        read_only(conn)
+        back_to_read_only(conn)
         error
     end
   end
 
   defp read_only(conn), do: Sqlite.execute(conn, "PRAGMA query_only = ON", write: true)
+
+  # After a failure: the error being returned is the one that matters.
+  defp back_to_read_only(conn) do
+    _ = read_only(conn)
+    :ok
+  end
 
   @doc """
   Whether the `{:error, reason}` of `transaction/4` leaves a connection that
@@ -333,7 +340,7 @@ defmodule Alambique.Cell.Db do
         :ok -> Sqlite.finish_transaction(conn, token, :rollback)
       end
 
-    read_only(conn)
+    back_to_read_only(conn)
     result
   end
 

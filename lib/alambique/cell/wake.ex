@@ -340,7 +340,7 @@ defmodule Alambique.Cell.Wake do
 
         {{:error, :txid_taken}, _} when attempts > 1 ->
           # A stale owner wrote the next TXID first: take it with a restore.
-          Db.close(conn)
+          _ = Db.close(conn)
           restore_and_fence(Hydration.discard(%{state | conn: nil}), attempts - 1)
 
         {{:error, reason}, _} ->
@@ -581,14 +581,15 @@ defmodule Alambique.Cell.Wake do
   defp drop_previous(state, previous), do: drop(state, previous)
 
   defp drop(state, previous) do
-    Schema.drop(
-      state.config,
-      state.location,
-      state.id,
-      previous,
-      State.deadline(state),
-      state.repl_ctx
-    )
+    _ =
+      Schema.drop(
+        state.config,
+        state.location,
+        state.id,
+        previous,
+        State.deadline(state),
+        state.repl_ctx
+      )
 
     :ok
   end

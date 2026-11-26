@@ -235,8 +235,9 @@ defmodule Alambique.Cell.Facts do
   @spec closed_floor(State.t()) :: non_neg_integer
   def closed_floor(%State{conn: conn} = state) do
     with true <- track_bytes?(state),
-         {:ok, memory} <- Sqlite.memory(conn) do
-      memory.schema_used + memory.stmt_used
+         {:ok, %{schema_used: schema, stmt_used: stmts}}
+         when is_integer(schema) and is_integer(stmts) <- Sqlite.memory(conn) do
+      schema + stmts
     else
       _ -> 0
     end
