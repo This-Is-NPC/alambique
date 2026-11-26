@@ -64,16 +64,18 @@ defmodule Alambique.Rewind.Reconcile do
     tables = query(tx, "SELECT name, sql FROM cur.sqlite_schema WHERE type = 'table'")
     kept = for [name, sql] <- tables, kept?(name, prefixes), do: {name, sql}
 
+    names = Enum.map(kept, &elem(&1, 0))
+
     for {name, sql} <- kept,
         Regex.match?(~r/\A\s*create\s+virtual/i, sql),
         do: Tx.rollback(tx, {:keep_unsupported, name})
 
     drop_existing(tx, prefixes)
     Enum.each(kept, fn {name, sql} -> execute(tx, sql, [], name) end)
-    Enum.each(kept, fn {name, _} -> copy(tx, name) end)
-    sequences(tx, Enum.map(kept, &elem(&1, 0)))
+    Enum.each(names, &copy(tx, &1))
+    sequences(tx, names)
     dependents(tx, prefixes)
-    Enum.map(kept, &elem(&1, 0)) |> Enum.sort()
+    Enum.sort(names)
   end
 
   # Indexes, triggers and views of the carried tables; the objects of the
@@ -88,8 +90,11 @@ defmodule Alambique.Rewind.Reconcile do
 
     for [name, table, sql] <- rows,
         kept?(table, prefixes),
-        not String.starts_with?(name, @builtin),
-        do: execute(tx, sql, [], name)
+        not String.starts_with?(name, @builtin) do
+      execute(tx, sql, [], name)
+    end
+
+    :ok
   end
 
   defp drop_existing(tx, prefixes) do
@@ -98,6 +103,8 @@ defmodule Alambique.Rewind.Reconcile do
         kept?(name, prefixes) do
       execute(tx, "DROP #{String.upcase(type)} IF EXISTS main.#{ident(name)}", [], name)
     end
+
+    :ok
   end
 
   defp copy(tx, table) do
