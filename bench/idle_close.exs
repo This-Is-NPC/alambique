@@ -26,7 +26,7 @@
 #   ALAMBIQUE_BENCH_ROWS    notes per cell, one run each     (default "0 2000")
 #   ALAMBIQUE_BENCH_CLOSE   idle_close_after_ms              (default "300")
 #   ALAMBIQUE_BENCH_CYCLES  rounds of the cycle              (default "3")
-#   ALAMBIQUE_BENCH_RENEWAL seconds the renewals are counted (default "10")
+#   ALAMBIQUE_BENCH_RENEWAL seconds the renewals are counted (default "30")
 #
 # The run is bounded by `timeout` in scripts/bench-idle-close.
 
@@ -276,7 +276,7 @@ defmodule Bench do
              compaction: false,
              sql: [orphan_frames: :replicate],
              idle_timeout_ms: 600_000,
-             lease_ttl_ms: 6_000,
+             lease_ttl_ms: 30_000,
              awake: awake
            ]}
         ],
@@ -373,7 +373,7 @@ sizes =
 env = fn name, default -> String.to_integer(System.get_env(name, default)) end
 close_ms = env.("ALAMBIQUE_BENCH_CLOSE", "300")
 cycles = env.("ALAMBIQUE_BENCH_CYCLES", "3")
-renewal = env.("ALAMBIQUE_BENCH_RENEWAL", "10")
+renewal = env.("ALAMBIQUE_BENCH_RENEWAL", "30")
 
 Alambique.TestDirs.sweep()
 
