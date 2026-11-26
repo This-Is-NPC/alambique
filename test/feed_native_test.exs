@@ -319,29 +319,60 @@ defmodule Alambique.FeedNativeTest do
     end
   end
 
+  describe "a rewind" do
+    test "is published as the marker of :cell, between the records around it", ctx do
+      plain = start(ctx, "rw-plain", [], name: :rw_plain)
+      library = start(ctx, "rw-native", native(), name: :rw_native)
+
+      for inst <- [plain, library] do
+        insert(inst, @cell, [1])
+        {:ok, %{txid: before}} = Alambique.position(inst, @cell)
+        insert(inst, @cell, [2])
+        {:ok, _} = Alambique.rewind(inst, @cell, {:txid, before})
+        insert(inst, @cell, [3])
+      end
+
+      # The records, the marker and the record after it; the time of publication aside.
+      items = fn prefix ->
+        {:ok, items, _} =
+          Feed.read(Feed.ctx(store: ctx.store, prefix: prefix, settle_ms: 0), nil, 1_000)
+
+        for item <- items, item.cell == @cell, do: Map.delete(item, :at)
+      end
+
+      eventually(fn -> length(items.("rw-plain")) == 4 and length(items.("rw-native")) == 4 end)
+      assert items.("rw-native") == items.("rw-plain")
+      assert Enum.any?(items.("rw-native"), &match?(%Alambique.Feed.Rewind{}, &1))
+    end
+  end
+
   describe "a captured table name that is not UTF-8" do
     for mode <- [:cell, :native] do
       test "is handed over again and again as with hand_over: #{inspect(mode)}", ctx do
         inst = start(ctx, "bad-#{unquote(mode)}", hand_over: unquote(mode))
-        # The hand-over loops, and every turn logs.
-        capture_log(fn ->
-          hands = count_hands(@cell)
+        # The hand-over loops: the library logs the refusal once, not every turn.
+        log =
+          capture_log(fn ->
+            hands = count_hands(@cell)
 
-          # A row of the feed as a trigger writes it, for a table that has such a name.
-          {:ok, _} =
-            Alambique.execute(
-              inst,
-              @cell,
-              "INSERT INTO _alambique_feed (txid, ts, tbl, op, key) " <>
-                "VALUES (-2, 0, CAST(x'ff' AS TEXT), 'insert', '{}')"
-            )
+            # A row of the feed as a trigger writes it, for a table that has such a name.
+            {:ok, _} =
+              Alambique.execute(
+                inst,
+                @cell,
+                "INSERT INTO _alambique_feed (txid, ts, tbl, op, key) " <>
+                  "VALUES (-2, 0, CAST(x'ff' AS TEXT), 'insert', '{}')"
+              )
 
-          eventually(fn -> :counters.get(hands, 1) >= 3 end)
+            eventually(fn -> :counters.get(hands, 1) >= 3 end)
 
-          # The cell serves meanwhile, and nothing was published.
-          assert {:ok, %{rows: [[1]]}} = Alambique.query(inst, @cell, "SELECT 1")
-          assert records(ctx, "bad-#{unquote(mode)}") == []
-        end)
+            # The cell serves meanwhile, and nothing was published.
+            assert {:ok, %{rows: [[1]]}} = Alambique.query(inst, @cell, "SELECT 1")
+            assert records(ctx, "bad-#{unquote(mode)}") == []
+          end)
+
+        if unquote(mode) == :native,
+          do: assert(length(String.split(log, "that is not UTF-8")) == 2)
       end
     end
   end
