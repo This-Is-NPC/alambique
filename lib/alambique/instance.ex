@@ -13,6 +13,8 @@ defmodule Alambique.Instance do
   # The store is checked and the data directory locked before the tree
   # starts, so a refused start touches no file (design §1).
   def start_link(config) do
+    Alambique.Replication.NativeOptions.check_applied(config.name)
+
     with :ok <- check_stores(config),
          {:ok, lock} <- Alambique.DataDir.acquire(config.data_dir) do
       case Supervisor.start_link(__MODULE__, {config, lock}, name: config.name) do
