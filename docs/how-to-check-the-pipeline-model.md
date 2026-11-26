@@ -19,10 +19,11 @@ are outside it.
 ## Prerequisites
 
 - `mise` installed. `mise install` provides Java (`openjdk-17.0.2`).
-- Network access once. `scripts/tla-tools` downloads `tla2tools.jar` (release
-  v1.8.0 of github.com/tlaplus/tlaplus) into `~/.cache/alambique/tla/`
-  (`$XDG_CACHE_HOME` is honoured). It checks the SHA-256 against
-  `ALAMBIQUE_TLA_SHA256` in `mise.toml`.
+- Network access once. `scripts/tla-tools` downloads `tla2tools.jar` into
+  `~/.cache/alambique/tla/` (`$XDG_CACHE_HOME` is honoured). The file is
+  TLC 1.8.0 (github.com/tlaplus/tlaplus), served from the
+  `tools-tla2tools-1.8.0` release of this repository. It checks the SHA-256
+  against `ALAMBIQUE_TLA_SHA256` in `mise.toml`.
 - Enough free memory for TLC. If the run runs out of memory, lower `MaxTx` or
   `Depth` (step 2).
 

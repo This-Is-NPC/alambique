@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Prints the path of tla2tools.jar ($ALAMBIQUE_TLA_VERSION), downloading the
-# release into the cache when it is missing and checking its SHA-256
-# ($ALAMBIQUE_TLA_SHA256). Both are pinned in mise.toml.
+# pinned copy from this repository's tools release into the cache when it is
+# missing and checking its SHA-256 ($ALAMBIQUE_TLA_SHA256). Both are pinned in
+# mise.toml. The upstream asset of that version no longer has this hash.
 set -euo pipefail
 : "${ALAMBIQUE_TLA_VERSION:?run through mise, which sets it}"
 : "${ALAMBIQUE_TLA_SHA256:?run through mise, which sets it}"
@@ -16,7 +17,7 @@ if [ ! -f "$jar" ] || ! verify "$jar"; then
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
   curl -fsSL -o "$tmp/tla2tools.jar" \
-    "https://github.com/tlaplus/tlaplus/releases/download/v$ALAMBIQUE_TLA_VERSION/tla2tools.jar" >&2
+    "https://github.com/This-Is-NPC/alambique/releases/download/tools-tla2tools-$ALAMBIQUE_TLA_VERSION/tla2tools.jar" >&2
   verify "$tmp/tla2tools.jar" || {
     echo "tla2tools.jar v$ALAMBIQUE_TLA_VERSION does not match ALAMBIQUE_TLA_SHA256" >&2
     exit 1

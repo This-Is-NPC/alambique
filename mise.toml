@@ -15,7 +15,8 @@ ALAMBIQUE_CARGO_FUZZ = "0.13.2"
 # (scripts/test-coverage; mix.exs reads it too).
 ALAMBIQUE_COVERAGE_MIN = "90"
 # TLC, the TLA+ model checker (release v1.8.0 of github.com/tlaplus/tlaplus);
-# scripts/tla-tools downloads it into the cache and checks the hash.
+# scripts/tla-tools downloads the pinned copy from the tools-tla2tools-<version>
+# release of this repository into the cache and checks the hash.
 ALAMBIQUE_TLA_VERSION = "1.8.0"
 ALAMBIQUE_TLA_SHA256 = "011267fca25d0752cf18894dd585cd28b96960c112ea8a20b823ea770e7e10cd"
 
