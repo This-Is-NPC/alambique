@@ -1,11 +1,14 @@
 //! Entry points of the fuzz targets (`fuzz/`), kept in the crate to reach its
 //! private modules. Each takes arbitrary bytes, must never panic, and checks
-//! the properties that hold for every input. The unit tests replay the seed
-//! corpus through them, so they also run under Miri.
+//! the properties that hold for every input: a violated property is an
+//! assertion, a step of the harness that fails (a scratch file, an input that
+//! should have been accepted) is an `Err`, which the fuzz target and the tests
+//! turn into a failure. The unit tests replay the seed corpus through them,
+//! so they also run under Miri.
 
 use std::path::PathBuf;
 
-use crate::capture::testing::{Chain, Step, Tx};
+use crate::capture::testing::{ok, Chain, Failure, Step, Tx};
 use crate::dbsum::{self, fold};
 use crate::ltx::{
     self, page_crc, Encoder, Header, CHECKSUM_FLAG, HEADER_FLAG_NO_CHECKSUM, HEADER_SIZE,
@@ -46,8 +49,20 @@ impl Input<'_> {
     }
 }
 
+/// A small count as `u32`, saturating.
+fn count(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// The frame of `len` bytes at `start` of file `file`, where a run says it is.
+fn frame_at(files: &[Vec<u8>], file: u32, start: u64, len: u32) -> Option<&[u8]> {
+    let bytes = files.get(usize::try_from(file).ok()?)?;
+    let start = usize::try_from(start).ok()?;
+    bytes.get(start..start.checked_add(usize::try_from(len).ok()?)?)
+}
+
 /// Decoder, verifier and the lazy-restore parser over arbitrary bytes.
-pub fn ltx_decode(data: &[u8]) {
+pub fn ltx_decode(data: &[u8]) -> Result<(), Failure> {
     let _ = ltx::peek(data);
     let _ = Header::from_bytes(data);
     let verified = ltx::verify(data);
@@ -60,10 +75,14 @@ pub fn ltx_decode(data: &[u8]) {
             assert!(ltx::frame_payload(data, frame).is_ok());
         }
         // What the decoder accepts, the lazy-restore parser accepts too.
-        let staged = lazy::stage_file(&data[..HEADER_SIZE], data, data.len() as u64);
-        let staged = staged
-            .expect("staging a verified file")
-            .expect("whole tail");
+        let head = data
+            .get(..HEADER_SIZE)
+            .ok_or_else(|| "a verified file is shorter than its header".to_string())?;
+        let staged = ok(
+            "staging a verified file",
+            lazy::stage_file(head, data, data.len() as u64),
+        )?
+        .map_err(|n| format!("staging a whole file asked for a tail of {n} bytes"))?;
         assert_eq!(&staged.header, header);
         assert_eq!(staged.post_apply, trailer.post_apply);
     }
@@ -72,18 +91,19 @@ pub fn ltx_decode(data: &[u8]) {
     let (head, tail) = (input.u8() as usize, input.u8() as usize);
     let total = u64::from(input.u16()) * 64;
     let _ = lazy::stage_file(
-        &data[..head.min(data.len())],
-        &data[data.len().saturating_sub(tail * 4)..],
+        data.split_at(head.min(data.len())).0,
+        data.split_at(data.len().saturating_sub(tail * 4)).1,
         total,
     );
     let ps = 512 << (input.u8() % 8);
     let _ = lazy::decode_frame(input.0, u32::from(input.u8()), ps);
+    Ok(())
 }
 
 /// The lazy-restore plan over a chain of arbitrary files (a list of `u16`
 /// length and bytes): staging, applying, `ready` and the fetch of every page.
 /// A chain that `dbsum::apply` restores must give the same plan and bytes.
-pub fn lazy_plan(data: &[u8]) {
+pub fn lazy_plan(data: &[u8]) -> Result<(), Failure> {
     let mut input = Input(data);
     let mut files = Vec::new();
     while files.len() < 4 && !input.0.is_empty() {
@@ -95,7 +115,7 @@ pub fn lazy_plan(data: &[u8]) {
         .and_then(|f| Header::from_bytes(f).ok())
         .map(|h| h.page_size)
     else {
-        return;
+        return Ok(());
     };
     let reference = scratch("plan-ref.db");
     let (mut full, mut current) = (true, 0);
@@ -119,11 +139,11 @@ pub fn lazy_plan(data: &[u8]) {
         .ok()
         .filter(|plan| {
             files.iter().enumerate().all(|(i, file)| {
-                let head = &file[..HEADER_SIZE.min(file.len())];
+                let head = file.split_at(HEADER_SIZE.min(file.len())).0;
                 match lazy::stage_file(head, file, file.len() as u64) {
                     Ok(Ok(staged)) => {
-                        plan.stage(i as u32, staged);
-                        plan.apply(i as u32).is_ok()
+                        plan.stage(count(i), staged);
+                        plan.apply(count(i)).is_ok()
                     }
                     _ => false,
                 }
@@ -134,11 +154,11 @@ pub fn lazy_plan(data: &[u8]) {
         let mut fetched = true;
         'runs: while let Some(run) = plan.next_batch(1 << 16) {
             for &(pgno, rel, len) in &run.pages {
-                let start = (run.offset + u64::from(rel)) as usize;
-                let frame = &files[run.file as usize][start..start + len as usize];
+                let frame = frame_at(&files, run.file, run.offset + u64::from(rel), len)
+                    .ok_or_else(|| "a run points outside its file".to_string())?;
                 match lazy::decode_frame(frame, pgno, page_size) {
                     Ok(page) => {
-                        plan.install(pgno, &page).expect("a page of the plan");
+                        ok("a page of the plan", plan.install(pgno, &page))?;
                     }
                     Err(_) => {
                         fetched = false;
@@ -150,13 +170,14 @@ pub fn lazy_plan(data: &[u8]) {
         if full && fetched {
             assert!(plan.is_complete());
             assert_eq!(
-                std::fs::read(&path).expect("plan file"),
-                std::fs::read(&reference).expect("reference file")
+                ok("plan file", std::fs::read(&path))?,
+                ok("reference file", std::fs::read(&reference))?
             );
         }
     }
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&reference);
+    Ok(())
 }
 
 /// What the generator below decided to encode.
@@ -176,11 +197,11 @@ impl Plan {
         let flags = input.u8();
         let ps = 512usize << (flags % 3);
         let base: Vec<_> = (0..1 + input.u8() % 6).map(|_| page(input, ps)).collect();
-        let mut commit = base.len() as u32 + u32::from(input.u8() % 4);
+        let mut commit = count(base.len()) + u32::from(input.u8() % 4);
         if input.u8() % 2 == 1 && base.len() > 1 {
-            commit = base.len() as u32 - 1;
+            commit = count(base.len()) - 1;
         }
-        let (mask, grown) = (input.u16(), base.len() as u32);
+        let (mask, grown) = (input.u16(), count(base.len()));
         let delta = (1..=commit)
             .filter(|p| *p > grown || mask & (1 << (p % 16)) != 0)
             .map(|p| (p, page(input, ps)))
@@ -199,7 +220,9 @@ impl Plan {
         pages.truncate(self.commit as usize);
         pages.resize(self.commit as usize, Vec::new());
         for (p, data) in &self.delta {
-            pages[*p as usize - 1] = data.clone();
+            if let Some(slot) = pages.get_mut(*p as usize - 1) {
+                slot.clone_from(data);
+            }
         }
         pages
     }
@@ -223,7 +246,7 @@ fn page(input: &mut Input, ps: usize) -> Vec<u8> {
                     x ^= x << 13;
                     x ^= x >> 7;
                     x ^= x << 17;
-                    x as u8
+                    (x & 0xff) as u8
                 })
                 .collect()
         }
@@ -235,21 +258,21 @@ fn checksum_of(pages: &[Vec<u8>]) -> u64 {
         | pages
             .iter()
             .enumerate()
-            .fold(0, |a, (i, p)| a ^ page_crc(i as u32 + 1, p))
+            .fold(0, |a, (i, p)| a ^ page_crc(count(i) + 1, p))
 }
 
-fn encode(plan: &Plan, delta: bool, pre: u64, post: u64) -> Vec<u8> {
+fn encode(plan: &Plan, delta: bool, pre: u64, post: u64) -> Result<Vec<u8>, Failure> {
     let header = Header {
         flags: if plan.checksummed {
             0
         } else {
             HEADER_FLAG_NO_CHECKSUM
         },
-        page_size: plan.ps as u32,
+        page_size: count(plan.ps),
         commit: if delta {
             plan.commit
         } else {
-            plan.base.len() as u32
+            count(plan.base.len())
         },
         min_txid: if delta { 2 } else { 1 },
         max_txid: if delta { 2 } else { 1 },
@@ -258,77 +281,85 @@ fn encode(plan: &Plan, delta: bool, pre: u64, post: u64) -> Vec<u8> {
         post_apply: post,
         ..Default::default()
     };
-    let mut enc = Encoder::new(header).expect("valid header");
+    let mut enc = ok("a valid header", Encoder::new(header))?;
     if delta {
         for (p, data) in &plan.delta {
-            enc.add_page(*p, data).expect("ascending pages");
+            ok("ascending pages", enc.add_page(*p, data))?;
         }
     } else {
         for (i, data) in plan.base.iter().enumerate() {
-            enc.add_page(i as u32 + 1, data).expect("sequential pages");
+            ok("sequential pages", enc.add_page(count(i) + 1, data))?;
         }
     }
-    enc.finish().expect("post-apply checksum set")
+    ok("a post-apply checksum", enc.finish())
 }
 
 /// Encodes a snapshot and an increment that the input describes, then checks
 /// that decoding, applying and merging give back the pages.
-pub fn ltx_roundtrip(data: &[u8]) {
+pub fn ltx_roundtrip(data: &[u8]) -> Result<(), Failure> {
     let plan = Plan::new(&mut Input(data));
     let (pre, post) = (checksum_of(&plan.base), checksum_of(&plan.final_pages()));
-    let snapshot = encode(&plan, false, 0, pre);
-    let increment = encode(&plan, true, pre, post);
+    let snapshot = encode(&plan, false, 0, pre)?;
+    let increment = encode(&plan, true, pre, post)?;
 
-    let (header, pages, trailer) = ltx::decode_all(&increment).expect("own file decodes");
+    let (header, pages, trailer) = ok("own file decodes", ltx::decode_all(&increment))?;
     assert_eq!(header.commit, plan.commit);
     assert_eq!(trailer.post_apply, post);
     assert_eq!(pages, plan.delta);
 
     let path = scratch("roundtrip.db");
-    let _ = dbsum::apply(&path, &snapshot, 0, 0).expect("snapshot applies");
-    let applied = dbsum::apply(&path, &increment, pre, plan.ps as u32).expect("increment applies");
+    ok("snapshot applies", dbsum::apply(&path, &snapshot, 0, 0))?;
+    let applied = ok(
+        "increment applies",
+        dbsum::apply(&path, &increment, pre, count(plan.ps)),
+    )?;
     assert_eq!(applied.post_apply, post);
-    let chain = std::fs::read(&path).expect("database file");
+    let chain = ok("database file", std::fs::read(&path))?;
     assert_eq!(chain, plan.final_pages().concat());
-    assert_eq!(
-        fold(&dbsum::file_sums(&path, plan.ps as u32).unwrap()),
-        post
-    );
+    let sums = ok("sums", dbsum::file_sums(&path, count(plan.ps)))?;
+    assert_eq!(fold(&sums), post);
 
-    let merged = merge::merge(&[&snapshot, &increment]).expect("consecutive files merge");
-    let _ = dbsum::apply(&path, &merged, 0, 0).expect("merged file applies");
-    assert_eq!(std::fs::read(&path).expect("database file"), chain);
+    let merged = ok(
+        "consecutive files merge",
+        merge::merge(&[&snapshot, &increment]),
+    )?;
+    ok("merged file applies", dbsum::apply(&path, &merged, 0, 0))?;
+    assert_eq!(ok("database file", std::fs::read(&path))?, chain);
     let _ = std::fs::remove_file(&path);
+    Ok(())
 }
 
 /// Applies arbitrary bytes to a small database image.
-pub fn page_apply(data: &[u8]) {
+pub fn page_apply(data: &[u8]) -> Result<(), Failure> {
     let mut input = Input(data);
     let pages = usize::from(input.u8() % 6);
     let file = input.0;
     let current = match Header::from_bytes(file) {
-        Ok(h) if u64::from(h.commit) * u64::from(h.page_size) > MAX_DB_BYTES => return,
+        Ok(h) if u64::from(h.commit) * u64::from(h.page_size) > MAX_DB_BYTES => return Ok(()),
         Ok(h) => h.pre_apply,
         Err(_) => 0,
     };
     let path = scratch("apply.db");
-    let image: Vec<u8> = (0..pages * 512).map(|i| (i % 251) as u8).collect();
-    std::fs::write(&path, image).expect("scratch file");
+    let image: Vec<u8> = (0..pages * 512)
+        .map(|i| u8::try_from(i % 251).unwrap_or(0))
+        .collect();
+    ok("scratch file", std::fs::write(&path, image))?;
     if let Ok(applied) = dbsum::apply(&path, file, current, 0) {
         let ps = applied.header.page_size;
-        let len = std::fs::metadata(&path).expect("database file").len();
+        let len = ok("database file", std::fs::metadata(&path))?.len();
         assert_eq!(len, u64::from(applied.header.commit) * u64::from(ps));
         // An increment trusts the checksum the caller says the image has.
         if applied.header.is_snapshot() {
-            let sums = dbsum::file_sums(&path, ps).expect("sums of the result");
+            let sums = ok("sums of the result", dbsum::file_sums(&path, ps))?;
             assert_eq!(fold(&sums), applied.post_apply);
         }
     }
     let _ = std::fs::remove_file(&path);
+    Ok(())
 }
 
 /// Merges arbitrary files: input is a list of `u16` length and bytes.
-pub fn ltx_merge(data: &[u8]) {
+pub fn ltx_merge(data: &[u8]) -> Result<(), Failure> {
     let mut input = Input(data);
     let mut files = Vec::new();
     while files.len() < 4 && !input.0.is_empty() {
@@ -337,30 +368,32 @@ pub fn ltx_merge(data: &[u8]) {
     }
     let files: Vec<&[u8]> = files.iter().map(Vec::as_slice).collect();
     if let Ok(out) = merge::merge(&files) {
-        let (header, trailer) = dbsum::verify(&out).expect("a merged file verifies");
-        let first = ltx::peek(files[0]).expect("verified input").0;
+        let (header, trailer) = ok("a merged file verifies", dbsum::verify(&out))?;
+        let first = files
+            .first()
+            .ok_or_else(|| "a merge of no files succeeded".to_string())?;
+        let first = ok("verified input", ltx::peek(first))?.0;
         assert_eq!(header.min_txid, first.min_txid);
         assert_eq!(header.pre_apply, first.pre_apply);
         assert!(trailer.post_apply & CHECKSUM_FLAG != 0);
     }
+    Ok(())
 }
 
 /// Reads arbitrary bytes as a WAL file, as they are and with the checksum
 /// chain made valid so that the frames behind it are reached.
-pub fn wal_scan(data: &[u8]) {
-    scan_file(data);
+pub fn wal_scan(data: &[u8]) -> Result<(), Failure> {
+    scan_file(data)?;
     let mut fixed = data.to_vec();
     wal::repair(&mut fixed);
-    scan_file(&fixed);
+    scan_file(&fixed)
 }
 
-fn scan_file(bytes: &[u8]) {
+fn scan_file(bytes: &[u8]) -> Result<(), Failure> {
     let path = scratch("scan.wal");
-    std::fs::write(&path, bytes).expect("scratch file");
+    ok("scratch file", std::fs::write(&path, bytes))?;
     // The page size the header claims, so frames are actually read.
-    let claimed = bytes
-        .get(8..12)
-        .map_or(0, |b| u32::from_be_bytes(b.try_into().unwrap()));
+    let claimed = crate::bytes::u32_at(bytes, 8).unwrap_or(0);
     for ps in [claimed, 4096] {
         if !ltx::valid_page_size(ps) {
             continue;
@@ -379,14 +412,15 @@ fn scan_file(bytes: &[u8]) {
             assert_eq!((scan.pos.offset - wal::WAL_HEADER_SIZE) % frame, 0);
             // Nothing is left after the last commit, and a limit at it
             // changes nothing.
-            let again = wal::scan(&path, ps, Some(scan.pos), None).expect("resumes");
+            let again = ok("resumes", wal::scan(&path, ps, Some(scan.pos), None))?;
             assert!(again.commit.is_none());
             assert_eq!(again.pos, scan.pos);
-            let limited = wal::scan(&path, ps, None, Some(scan.pos)).expect("limits");
+            let limited = ok("limits", wal::scan(&path, ps, None, Some(scan.pos)))?;
             assert_eq!(limited.pages, scan.pages);
         }
     }
     let _ = std::fs::remove_file(&path);
+    Ok(())
 }
 
 /// Captures chained segments of the transactions the input describes, with an
@@ -394,7 +428,7 @@ fn scan_file(bytes: &[u8]) {
 /// checksums follow, applying in order gives the last database, and missing,
 /// repeated or swapped segments are refused. The torn tail must not change a
 /// byte of any segment.
-pub fn capture_chain(data: &[u8]) {
+pub fn capture_chain(data: &[u8]) -> Result<(), Failure> {
     let mut input = Input(data);
     let tail = usize::from(input.u16()) % 600;
     let tx = |input: &mut Input| Tx {
@@ -414,16 +448,17 @@ pub fn capture_chain(data: &[u8]) {
     let dir = scratch("chain");
     let (torn, clean) = (dir.join("torn"), dir.join("clean"));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&torn).expect("scratch directory");
-    std::fs::create_dir_all(&clean).expect("scratch directory");
-    let chain = Chain::build(&torn, &initial, &steps, tail);
-    chain.check_chain();
-    chain.check_misuse();
+    ok("scratch directory", std::fs::create_dir_all(&torn))?;
+    ok("scratch directory", std::fs::create_dir_all(&clean))?;
+    let chain = Chain::build(&torn, &initial, &steps, tail)?;
+    chain.check_chain()?;
+    chain.check_misuse()?;
     assert_eq!(
         chain.segments,
-        Chain::build(&clean, &initial, &steps, 0).segments
+        Chain::build(&clean, &initial, &steps, 0)?.segments
     );
     let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -438,7 +473,7 @@ mod tests {
                 x ^= x << 13;
                 x ^= x >> 7;
                 x ^= x << 17;
-                (x >> 24) as u8
+                ((x >> 24) & 0xff) as u8
             })
             .collect()
     }
@@ -448,17 +483,17 @@ mod tests {
         // Miri is slow: a few inputs are enough for it.
         let count = if cfg!(miri) { 4 } else { 24 };
         let inputs: Vec<Vec<u8>> = (0..count)
-            .map(|i| noise(i + 1, (i as usize * 37) % 700))
+            .map(|i| noise(i + 1, (usize::try_from(i).unwrap() * 37) % 700))
             .chain([vec![], vec![0], vec![0xff; 200]])
             .collect();
         for input in &inputs {
-            ltx_decode(input);
-            lazy_plan(input);
-            ltx_roundtrip(input);
-            page_apply(input);
-            ltx_merge(input);
-            wal_scan(input);
-            capture_chain(input);
+            ltx_decode(input).unwrap();
+            lazy_plan(input).unwrap();
+            ltx_roundtrip(input).unwrap();
+            page_apply(input).unwrap();
+            ltx_merge(input).unwrap();
+            wal_scan(input).unwrap();
+            capture_chain(input).unwrap();
         }
     }
 
@@ -483,8 +518,8 @@ mod tests {
         {
             let plan = Plan::new(&mut Input(&input));
             let (pre, post) = (checksum_of(&plan.base), checksum_of(&plan.final_pages()));
-            let snapshot = encode(&plan, false, 0, pre);
-            let increment = encode(&plan, true, pre, post);
+            let snapshot = encode(&plan, false, 0, pre).unwrap();
+            let increment = encode(&plan, true, pre, post).unwrap();
             put("ltx_roundtrip", &format!("noise-{i}"), &input);
             put("ltx_decode", &format!("snapshot-{i}"), &snapshot);
             put("ltx_decode", &format!("increment-{i}"), &increment);
@@ -496,11 +531,11 @@ mod tests {
             put(
                 "page_apply",
                 &format!("increment-{i}"),
-                &[&[plan.base.len() as u8], &increment[..]].concat(),
+                &[&[u8::try_from(plan.base.len()).unwrap()], &increment[..]].concat(),
             );
             let mut pair = Vec::new();
             for file in [&snapshot, &increment] {
-                pair.extend_from_slice(&(file.len() as u16).to_be_bytes());
+                pair.extend_from_slice(&u16::try_from(file.len()).unwrap().to_be_bytes());
                 pair.extend_from_slice(file);
             }
             put("ltx_merge", &format!("pair-{i}"), &pair);
@@ -511,7 +546,7 @@ mod tests {
             put(
                 "capture_chain",
                 &format!("noise-{i}"),
-                &noise(i * 11, 24 + 12 * i as usize),
+                &noise(i * 11, 24 + 12 * usize::try_from(i).unwrap()),
             );
         }
         // WAL files as the scan tests build them: both byte orders, a torn
@@ -532,7 +567,7 @@ mod tests {
     fn seed_corpus_replays() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fuzz/corpus");
         for (target, run) in [
-            ("ltx_decode", ltx_decode as fn(&[u8])),
+            ("ltx_decode", ltx_decode as fn(&[u8]) -> Result<(), Failure>),
             ("lazy_plan", lazy_plan),
             ("ltx_roundtrip", ltx_roundtrip),
             ("page_apply", page_apply),
@@ -541,7 +576,7 @@ mod tests {
             ("capture_chain", capture_chain),
         ] {
             for entry in std::fs::read_dir(root.join(target)).expect("seed directory") {
-                run(&std::fs::read(entry.unwrap().path()).unwrap());
+                run(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
             }
         }
     }
