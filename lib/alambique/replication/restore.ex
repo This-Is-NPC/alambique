@@ -59,6 +59,10 @@ defmodule Alambique.Replication.Restore do
           lazy: opts[:lazy],
           prefetched: :ets.new(:restore_prefetched, [:set, :public]),
           heads: :ets.new(:restore_heads, [:set, :public]),
+          # Page-hash sidecars read ahead (`start_sidecars/2`): by object key,
+          # and the keys that were asked for.
+          sidecar_bodies: :ets.new(:restore_sidecars, [:set, :public]),
+          sidecar_keys: MapSet.new(),
           # The read ahead process and the messages it and the walk exchange:
           # `{tag, :changed}` to the walk, `:room` and `:stop` to the read ahead.
           owner: self(),
@@ -76,6 +80,7 @@ defmodule Alambique.Replication.Restore do
         after
           :ets.delete(env.prefetched)
           :ets.delete(env.heads)
+          :ets.delete(env.sidecar_bodies)
         end
       end
 
@@ -137,18 +142,23 @@ defmodule Alambique.Replication.Restore do
 
   defp attempt(env, start) do
     File.rm(env.tmp)
+    {env, fetcher} = start_sidecars(env, start)
 
-    with {:ok, reader} <- prefetch(env, start) do
-      env = %{env | reader: reader}
+    try do
+      with {:ok, reader} <- prefetch(env, start) do
+        env = %{env | reader: reader}
 
-      try do
-        with {:ok, state} <- begin_chain(env, start),
-             {:ok, state} <- walk(env, state) do
-          check_target(env, state)
+        try do
+          with {:ok, state} <- begin_chain(env, start),
+               {:ok, state} <- walk(env, state) do
+            check_target(env, state)
+          end
+        after
+          stop_reader(env)
         end
-      after
-        stop_reader(env)
       end
+    after
+      stop_sidecars(env, fetcher)
     end
   end
 
@@ -434,7 +444,7 @@ defmodule Alambique.Replication.Restore do
 
     with true <- total > Map.get(env.lazy, :verify_bytes, 0) and MapSet.member?(env.sidecars, key),
          true <- room > 0 or sidecar_event(env, key, :budget),
-         {:ok, body, _meta} <- read_sidecar(env, key, room),
+         {:ok, body} <- read_sidecar(env, key, room),
          %{level: level, min: min, max: max} <- Keys.file_info(key) do
       grow(env, byte_size(body))
 
@@ -453,28 +463,108 @@ defmodule Alambique.Replication.Restore do
 
   # What the hashes of all files may take: a share of the budget of the
   # hydration that keeps its runs fitting, and never more than an object.
-  defp hash_room(env, state) do
-    min(env.ctx.max_object_bytes, div(env.ctx.max_inflight_bytes, 4)) - state.hash_bytes
-  end
+  defp hash_limit(env), do: min(env.ctx.max_object_bytes, div(env.ctx.max_inflight_bytes, 4))
+
+  defp hash_room(env, state), do: hash_limit(env) - state.hash_bytes
 
   defp read_sidecar(env, key, room) do
-    case Objects.fetch_optional(
-           %{env.ctx | max_object_bytes: room},
-           Keys.sidecar(key),
-           env.deadline
-         ) do
-      {:ok, _body, _meta} = found ->
-        found
-
-      :none ->
-        sidecar_event(env, key, :absent)
-
-      {:error, {:too_large, _, _}} ->
-        sidecar_event(env, key, :budget)
-
-      {:error, reason} ->
-        sidecar_event(env, key, :read_failed, reason)
+    case await_sidecar(env, key) do
+      {:ok, body} when byte_size(body) <= room -> {:ok, body}
+      {:ok, _body} -> sidecar_event(env, key, :budget)
+      :absent -> sidecar_event(env, key, :absent)
+      :budget -> sidecar_event(env, key, :budget)
+      {:read_failed, reason} -> sidecar_event(env, key, :read_failed, reason)
     end
+  end
+
+  # The sidecars of the files the restore will most likely need are read
+  # together, from the start, beside the edges: the walk finds them there
+  # instead of paying one round trip for each file before its first page. A
+  # file that was not guessed has its sidecar read when the walk needs it.
+  defp start_sidecars(%{lazy: nil} = env, _start), do: {env, nil}
+
+  defp start_sidecars(env, start) do
+    keys = for key <- guess(env, start), MapSet.member?(env.sidecars, key), do: key
+
+    if keys == [] do
+      {env, nil}
+    else
+      ctx = env.ctx
+      limit = hash_limit(env)
+      deadline = env.deadline
+      bodies = env.sidecar_bodies
+      owner = env.owner
+      tag = env.tag
+      concurrency = env.concurrency
+
+      fetcher =
+        spawn_link(fn ->
+          keys
+          |> Task.async_stream(&{&1, fetch_sidecar(ctx, &1, limit, deadline)},
+            max_concurrency: concurrency,
+            timeout: :infinity
+          )
+          |> Enum.reduce(0, fn {:ok, {key, result}}, total ->
+            {result, total} = within(result, total, limit)
+            :ets.insert(bodies, {key, result})
+            send(owner, {tag, :sidecar})
+            total
+          end)
+        end)
+
+      {%{env | sidecar_keys: MapSet.new(keys)}, fetcher}
+    end
+  end
+
+  # All the sidecars together stay within the limit: later ones are `:budget`.
+  defp within({:ok, body}, total, limit) do
+    if total + byte_size(body) <= limit,
+      do: {{:ok, body}, total + byte_size(body)},
+      else: {:budget, total}
+  end
+
+  defp within(result, total, _limit), do: {result, total}
+
+  defp fetch_sidecar(ctx, key, limit, deadline) do
+    case Objects.fetch_optional(%{ctx | max_object_bytes: limit}, Keys.sidecar(key), deadline) do
+      {:ok, body, _meta} -> {:ok, body}
+      :none -> :absent
+      {:error, {:too_large, _, _}} -> :budget
+      {:error, reason} -> {:read_failed, reason}
+    end
+  catch
+    kind, reason -> {:read_failed, {kind, reason}}
+  end
+
+  defp await_sidecar(env, key) do
+    if MapSet.member?(env.sidecar_keys, key),
+      do: wait_sidecar(env, key),
+      else: fetch_sidecar(env.ctx, key, hash_limit(env), env.deadline)
+  end
+
+  defp wait_sidecar(env, key) do
+    case :ets.take(env.sidecar_bodies, key) do
+      [{_, result}] ->
+        result
+
+      [] ->
+        receive do
+          {tag, :sidecar} when tag == env.tag -> wait_sidecar(env, key)
+        after
+          max(env.deadline - System.monotonic_time(:millisecond), 0) ->
+            {:read_failed, :timeout}
+        end
+    end
+  end
+
+  defp stop_sidecars(env, fetcher) do
+    if fetcher do
+      Process.unlink(fetcher)
+      Process.exit(fetcher, :kill)
+    end
+
+    :ets.delete_all_objects(env.sidecar_bodies)
+    flush({env.tag, :sidecar})
   end
 
   # Always false: the caller falls back to reading the file whole.
