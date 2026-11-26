@@ -29,6 +29,9 @@ static BASE: AtomicPtr<ffi::sqlite3_vfs> = AtomicPtr::new(ptr::null_mut());
 struct File {
     base: ffi::sqlite3_file,
     lazy: *const Lazy,
+    /// The name the file was opened with, for the faults of tests.
+    #[cfg(feature = "test-panic")]
+    name: *mut c_char,
 }
 
 const HEADER: usize = size_of::<File>().next_multiple_of(16);
@@ -90,12 +93,21 @@ unsafe extern "C" fn x_open(
     let rc = unsafe {
         (*f).base.pMethods = ptr::null();
         (*f).lazy = ptr::null();
+        #[cfg(feature = "test-panic")]
+        {
+            (*f).name = crate::test_panic::file_opened(name);
+        }
         match (*base).xOpen {
             Some(open) => open(base, name, real(file), flags, out_flags),
             None => ffi::SQLITE_CANTOPEN,
         }
     };
     if rc != ffi::SQLITE_OK {
+        #[cfg(feature = "test-panic")]
+        {
+            // SAFETY: the name was made above and is not used again.
+            unsafe { crate::test_panic::file_closed((*f).name) };
+        }
         return rc;
     }
     // `Err` is a panic: the file is closed again so that no descriptor leaks.
@@ -111,6 +123,8 @@ unsafe extern "C" fn x_open(
         unsafe {
             let real = real(file);
             ((*(*real).pMethods).xClose.expect("xClose"))(real);
+            #[cfg(feature = "test-panic")]
+            crate::test_panic::file_closed((*f).name);
         }
         return ffi::SQLITE_CANTOPEN;
     };
@@ -137,6 +151,8 @@ unsafe extern "C" fn x_close(file: *mut ffi::sqlite3_file) -> c_int {
                 (*f).lazy = ptr::null();
             }
             (*f).base.pMethods = ptr::null();
+            #[cfg(feature = "test-panic")]
+            crate::test_panic::file_closed((*f).name);
             rc
         };
         crate::stats::FILES_OPEN.fetch_sub(1, Ordering::Relaxed);
@@ -179,7 +195,15 @@ unsafe extern "C" fn x_write(
                     return ffi::SQLITE_IOERR_WRITE;
                 }
             }
-            (methods(file).xWrite.expect("xWrite"))(real(file), buf, amt, offset)
+            let rc = (methods(file).xWrite.expect("xWrite"))(real(file), buf, amt, offset);
+            #[cfg(feature = "test-panic")]
+            if rc == ffi::SQLITE_OK {
+                let name = (*(file as *mut File)).name;
+                if let Some(fault) = crate::test_panic::after_write(name, buf, amt, offset) {
+                    return fault;
+                }
+            }
+            rc
         }
     })
 }
@@ -212,7 +236,23 @@ macro_rules! passthrough {
     };
 }
 
-passthrough!(x_sync, xSync, ffi::SQLITE_IOERR_FSYNC, flags: c_int);
+unsafe extern "C" fn x_sync(file: *mut ffi::sqlite3_file, flags: c_int) -> c_int {
+    guard("x_sync", ffi::SQLITE_IOERR_FSYNC, || {
+        // SAFETY: `file` is an open file of this VFS and SQLite's arguments go
+        // to the default VFS as they came.
+        unsafe {
+            let rc = (methods(file).xSync.expect("xSync"))(real(file), flags);
+            #[cfg(feature = "test-panic")]
+            if rc == ffi::SQLITE_OK {
+                let name = (*(file as *mut File)).name;
+                if let Some(fault) = crate::test_panic::after_sync(name) {
+                    return fault;
+                }
+            }
+            rc
+        }
+    })
+}
 passthrough!(x_file_size, xFileSize, ffi::SQLITE_IOERR_FSTAT, size: *mut i64);
 passthrough!(x_lock, xLock, ffi::SQLITE_IOERR_LOCK, level: c_int);
 passthrough!(x_unlock, xUnlock, ffi::SQLITE_IOERR_UNLOCK, level: c_int);

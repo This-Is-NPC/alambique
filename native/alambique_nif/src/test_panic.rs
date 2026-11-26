@@ -2,9 +2,10 @@
 //! (design §2.1). Compiled only with the `test-panic` feature, which the test
 //! build enables.
 
-use std::ffi::{c_int, CString};
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use libsqlite3_sys as ffi;
 use rustler::{Atom, Env, Resource, ResourceArc, Term};
@@ -166,4 +167,179 @@ fn set_header_unreadable(conn: ResourceArc<sqlite::Conn>, on: bool) -> Atom {
 #[rustler::nif(schedule = "DirtyIo")]
 fn foreign_open<'a>(env: Env<'a>, path: String) -> Term<'a> {
     crate::held::bypassing(|| sqlite::open(env, path, false, None, false, 0, false))
+}
+
+mod fault_atoms {
+    rustler::atoms! {
+        commit_frame, frame, sync, ioerr_write, full, ioerr_fsync,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    /// The page write of a commit frame: the frame is on disk when it fails.
+    CommitFrame,
+    /// The page write of a frame that does not commit.
+    Frame,
+    /// Any `xSync` of the file.
+    Sync,
+}
+
+struct Fault {
+    path: Vec<u8>,
+    kind: Kind,
+    rc: c_int,
+    /// Selected writes (or syncs) to let pass before the fault.
+    skip: u64,
+    times: u64,
+    /// Offset of the page write that fails: the frame was selected by its header.
+    page_at: Option<i64>,
+}
+
+/// A process-global fault: the probe of `guard` is thread-local and does not
+/// reach the dirty scheduler thread that runs the statement.
+static FAULT: Mutex<Option<Fault>> = Mutex::new(None);
+/// One relaxed load when nothing is armed.
+static ARMED: AtomicBool = AtomicBool::new(false);
+static FIRED: AtomicU64 = AtomicU64::new(0);
+
+/// The file name SQLite gave `xOpen`, kept with the open file; freed by
+/// `file_closed`.
+pub(crate) fn file_opened(name: *const c_char) -> *mut c_char {
+    if name.is_null() {
+        return ptr::null_mut();
+    }
+    // SAFETY: SQLite passes a NUL-terminated name.
+    unsafe { CStr::from_ptr(name) }.to_owned().into_raw()
+}
+
+/// # Safety
+/// `name` came from `file_opened` and is not used again.
+pub(crate) unsafe fn file_closed(name: *mut c_char) {
+    if !name.is_null() {
+        // SAFETY: by the contract.
+        drop(unsafe { CString::from_raw(name) });
+    }
+}
+
+/// The armed fault when it is for the file `name` and for syncs (`sync`) or writes.
+fn matching(name: *const c_char, sync: bool) -> Option<MutexGuard<'static, Option<Fault>>> {
+    if !ARMED.load(Ordering::Relaxed) || name.is_null() {
+        return None;
+    }
+    let slot = FAULT.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: `name` is a NUL-terminated string from `file_opened`.
+    let path = unsafe { CStr::from_ptr(name) }.to_bytes();
+    match slot.as_ref() {
+        Some(f) if f.path == path && (f.kind == Kind::Sync) == sync => Some(slot),
+        _ => None,
+    }
+}
+
+fn fire(slot: &mut Option<Fault>) -> c_int {
+    let f = slot.as_mut().expect("armed");
+    let rc = f.rc;
+    f.page_at = None;
+    f.times -= 1;
+    FIRED.fetch_add(1, Ordering::SeqCst);
+    if f.times == 0 {
+        *slot = None;
+        ARMED.store(false, Ordering::SeqCst);
+    }
+    rc
+}
+
+/// Called by `xWrite` after the write reached the file: the error to return
+/// instead of success. A WAL frame is two writes, a 24-byte header and the
+/// page; the header says whether the frame commits (its second word is the
+/// database size) and the fault fires after the page write that follows.
+pub(crate) fn after_write(
+    name: *const c_char,
+    buf: *const c_void,
+    amt: c_int,
+    offset: i64,
+) -> Option<c_int> {
+    let mut slot = matching(name, false)?;
+    let f = slot.as_mut()?;
+    if f.page_at == Some(offset) {
+        return Some(fire(&mut slot));
+    }
+    if amt == 24 {
+        // SAFETY: SQLite passes `amt` readable bytes.
+        let header = unsafe { std::slice::from_raw_parts(buf as *const u8, 24) };
+        let commits = header[4..8] != [0; 4];
+        if commits == (f.kind == Kind::CommitFrame) {
+            if f.skip > 0 {
+                f.skip -= 1;
+            } else {
+                f.page_at = Some(offset + 24);
+            }
+        }
+    }
+    None
+}
+
+/// Called by `xSync`: the error to return instead of success.
+pub(crate) fn after_sync(name: *const c_char) -> Option<c_int> {
+    let mut slot = matching(name, true)?;
+    let f = slot.as_mut()?;
+    if f.skip > 0 {
+        f.skip -= 1;
+        return None;
+    }
+    Some(fire(&mut slot))
+}
+
+/// Arms a fault on the file `path` (the whole path, as SQLite opens it):
+/// `kind` is `:commit_frame`, `:frame` (a frame that does not commit) or
+/// `:sync`; the `skip` selected writes before it pass; `rc` is `:ioerr_write`,
+/// `:full` or `:ioerr_fsync`; it fires `times` times.
+#[rustler::nif]
+fn vfs_fault_arm(path: String, kind: Atom, skip: u64, rc: Atom, times: u64) -> Result<Atom, Atom> {
+    use fault_atoms as a;
+    let kind = if kind == a::commit_frame() {
+        Kind::CommitFrame
+    } else if kind == a::frame() {
+        Kind::Frame
+    } else if kind == a::sync() {
+        Kind::Sync
+    } else {
+        return Err(rustler::types::atom::error());
+    };
+    let rc = if rc == a::ioerr_write() {
+        ffi::SQLITE_IOERR_WRITE
+    } else if rc == a::full() {
+        ffi::SQLITE_FULL
+    } else if rc == a::ioerr_fsync() {
+        ffi::SQLITE_IOERR_FSYNC
+    } else {
+        return Err(rustler::types::atom::error());
+    };
+    let mut slot = FAULT.lock().unwrap_or_else(|e| e.into_inner());
+    FIRED.store(0, Ordering::SeqCst);
+    *slot = Some(Fault {
+        path: path.into_bytes(),
+        kind,
+        rc,
+        skip,
+        times: times.max(1),
+        page_at: None,
+    });
+    ARMED.store(true, Ordering::SeqCst);
+    Ok(rustler::types::atom::ok())
+}
+
+/// Disarms the fault.
+#[rustler::nif]
+fn vfs_fault_clear() -> Atom {
+    let mut slot = FAULT.lock().unwrap_or_else(|e| e.into_inner());
+    *slot = None;
+    ARMED.store(false, Ordering::SeqCst);
+    rustler::types::atom::ok()
+}
+
+/// How many times the fault fired since it was armed.
+#[rustler::nif]
+fn vfs_fault_hits() -> u64 {
+    FIRED.load(Ordering::SeqCst)
 }

@@ -45,6 +45,18 @@ defmodule Alambique.CellHelpers do
   def commit_behind_back, do: Process.put(@commit_behind_back, true)
 
   @doc """
+  Arms a fault of the VFS (`Native.vfs_fault_arm/5`) on `path`, disarmed when
+  the test ends. The fault is process-global: tests that use it are not async.
+  Options: `:skip` (selected writes or syncs that pass first, default 0) and
+  `:times` (default 1).
+  """
+  def vfs_fault(path, kind, rc, opts \\ []) do
+    native = Alambique.Replication.Native
+    :ok = native.vfs_fault_arm(path, kind, opts[:skip] || 0, rc, opts[:times] || 1)
+    on_exit(&native.vfs_fault_clear/0)
+  end
+
+  @doc """
   Runs `fun` with the state of the cell `pid` inside that process, which owns
   its connection (`Alambique.Sqlite`): the way a test uses it.
   """
