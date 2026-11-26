@@ -341,7 +341,7 @@ defmodule Alambique.Cell.Db do
   Runs a multi-statement script such as a migration. `opts` are those of
   `Alambique.Sqlite.execute/3`.
   """
-  @spec script(Sqlite.conn(), String.t(), keyword) :: :ok | {:error, term}
+  @spec script(Sqlite.conn(), iodata, keyword) :: :ok | {:error, term}
   def script(conn, sql, opts \\ []), do: Sqlite.execute(conn, sql, opts)
 
   @doc "Current `PRAGMA user_version`."

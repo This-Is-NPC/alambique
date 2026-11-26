@@ -46,6 +46,7 @@ defmodule Alambique.Replication do
       (design §16)
   """
   @type ctx :: %{
+          optional(:budget_cut) => boolean,
           store: {module, term},
           prefix: String.t(),
           node: String.t(),
