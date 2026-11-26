@@ -86,6 +86,10 @@ defmodule Alambique.Store.S3 do
   @credentials_margin_ms 300_000
   @credentials_ttl_ms 300_000
 
+  defguardp is_credential(access_key_id, secret_access_key, token)
+            when is_binary(access_key_id) and is_binary(secret_access_key) and
+                   (is_binary(token) or is_nil(token))
+
   @impl true
   def conceal(config) when is_map(config) do
     Enum.reduce(@credentials, config, fn key, acc ->
@@ -261,16 +265,18 @@ defmodule Alambique.Store.S3 do
   defp send_request(config, creds, method, key, opts) do
     case signed_request(config, creds, method, key, opts) do
       {:ok, %{status: status, body: body}} = resp when status in [400, 403] ->
-        if expired_token?(body) and is_function(config[:credentials], 0) do
-          with {:ok, renewed} <- renew(config, creds),
-               do: signed_request(config, renewed, method, key, opts)
-        else
-          resp
-        end
+        if expired_token?(body) and is_function(config[:credentials], 0),
+          do: renewed_request(config, creds, method, key, opts),
+          else: resp
 
       other ->
         other
     end
+  end
+
+  defp renewed_request(config, creds, method, key, opts) do
+    with {:ok, renewed} <- renew(config, creds),
+         do: signed_request(config, renewed, method, key, opts)
   end
 
   # Error bodies echo request details (token, canonical request): keep the
@@ -449,13 +455,11 @@ defmodule Alambique.Store.S3 do
   defp call_credentials(fun) do
     case fun.() do
       {access_key_id, secret_access_key, token}
-      when is_binary(access_key_id) and is_binary(secret_access_key) and
-             (is_binary(token) or is_nil(token)) ->
+      when is_credential(access_key_id, secret_access_key, token) ->
         {:ok, {access_key_id, secret_access_key, token}, nil}
 
       {access_key_id, secret_access_key, token, %DateTime{} = expires_at}
-      when is_binary(access_key_id) and is_binary(secret_access_key) and
-             (is_binary(token) or is_nil(token)) ->
+      when is_credential(access_key_id, secret_access_key, token) ->
         {:ok, {access_key_id, secret_access_key, token}, expires_at}
 
       {:error, reason} ->
