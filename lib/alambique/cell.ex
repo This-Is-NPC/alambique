@@ -549,10 +549,7 @@ defmodule Alambique.Cell do
   end
 
   defp pragma_fault(state, point) do
-    case Fault.point(point, %{cell: state.id}) do
-      {:error, _} = error -> error
-      _ -> :ok
-    end
+    Fault.check(point, %{cell: state.id})
   end
 
   # Timers that the changed options moved: each is cancelled and armed again
@@ -1407,10 +1404,7 @@ defmodule Alambique.Cell do
   end
 
   defp reopen_fault(state) do
-    case Fault.point(:cell_before_reopen, %{cell: state.id}) do
-      {:error, _} = error -> error
-      _ -> :ok
-    end
+    Fault.check(:cell_before_reopen, %{cell: state.id})
   end
 
   defp reopened(state) do

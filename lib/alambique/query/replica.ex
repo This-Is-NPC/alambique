@@ -256,7 +256,7 @@ defmodule Alambique.Query.Replica do
   defp publish(dir, cell, tmp, {txid, epoch, checksum}, target, source, segments) do
     final = Cache.path(dir, cell, txid, epoch, checksum)
 
-    with :ok <- Fault.point(:query_publish, %{cell: cell, path: tmp}),
+    with :ok <- Fault.check(:query_publish, %{cell: cell, path: tmp}),
          :ok <- Cache.sync(tmp),
          :ok <- File.rename(tmp, final),
          {:ok, %{size: bytes}} <- File.stat(final) do

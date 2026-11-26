@@ -85,7 +85,7 @@ defmodule Alambique.Cell.Local do
     dir = Path.dirname(db_path)
     temp = @file_name <> ".restore-"
 
-    with :ok <- Fault.point(:local_prepare, %{path: db_path}),
+    with :ok <- Fault.check(:local_prepare, %{path: db_path}),
          :ok <- private_dir(dir) do
       for name <- File.ls!(dir),
           String.starts_with?(name, temp),

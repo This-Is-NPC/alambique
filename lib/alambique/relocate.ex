@@ -89,7 +89,7 @@ defmodule Alambique.Relocate do
 
         with {:ok, lease, version} <- copy(config, cell, source, dest, lease, deadline),
              :ok <- Cleanup.record(config, source, cell, timeout),
-             _ = Fault.point(:relocate_before_mark, point),
+             Fault.point(:relocate_before_mark, point),
              :ok <- Lease.mark_moved(src_lease_ctx, lease, dest.id) do
           Fault.point(:relocate_after_mark, point)
           commit(config, cell, source, dest, version, point)
@@ -195,7 +195,7 @@ defmodule Alambique.Relocate do
          :ok <-
            empty_or_ours(config, dst, dest, cell, source.id, result.txid, deadline),
          :ok <- Lease.install(dst_lease, cell, lease.epoch + 1, source.id, @owner),
-         _ = Fault.point(:relocate_after_install, %{cell: cell, to: dest.id}),
+         Fault.point(:relocate_after_install, %{cell: cell, to: dest.id}),
          {:ok, version} <-
            fence_and_snapshot(
              cell,
@@ -208,7 +208,7 @@ defmodule Alambique.Relocate do
              config.relocate.fence_attempts,
              Db.script_timeout_ms(config)
            ),
-         _ = Fault.point(:relocate_after_snapshot, %{cell: cell, to: dest.id}),
+         Fault.point(:relocate_after_snapshot, %{cell: cell, to: dest.id}),
          # The destination lists the cell before it can be reached (design §17).
          :ok <- Schema.put(config, dest, cell, version, deadline),
          :ok <- carry_frozen(src, dst, cell, deadline),
