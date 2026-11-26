@@ -24,7 +24,8 @@ mod atoms {
     rustler::atoms! { ok, rows }
 }
 
-/// What the cell asked for, besides the statement.
+/// What the cell asked for, besides the statement: a map from Elixir.
+#[derive(rustler::NifMap)]
 struct Plan {
     /// Rows at most; `None`: all.
     bound: Option<u64>,
@@ -270,24 +271,16 @@ fn describe<'a>(env: Env<'a>, g: &Group) -> Term<'a> {
 /// :sender_gone}` when `pid` was gone, `{:error, :bad_table}` for a table name
 /// that is not UTF-8. Nothing is sent when no row was read.
 #[rustler::nif(schedule = "DirtyIo")]
-#[allow(clippy::too_many_arguments)]
 fn sqlite_feed_rows<'a>(
     env: Env<'a>,
     conn: ResourceArc<Conn>,
     sql: rustler::Binary,
     params: Term<'a>,
-    bound: Option<u64>,
-    resumed: Option<u64>,
-    room: Option<u64>,
+    plan: Plan,
     pid: LocalPid,
     token: Term<'a>,
 ) -> Term<'a> {
     let _t = crate::stats::SQLITE_CALLS.time_for(&conn);
-    let plan = Plan {
-        bound,
-        resumed,
-        room,
-    };
     let run = || -> Outcome<'a> {
         check_user(env, &conn)?;
         if sql.as_slice().contains(&0) {

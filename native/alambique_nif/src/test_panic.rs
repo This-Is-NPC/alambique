@@ -172,7 +172,21 @@ fn set_header_unreadable(conn: ResourceArc<sqlite::Conn>, on: bool) -> Atom {
 /// table of held files cannot see: `{:ok, conn, 0}` as `sqlite_open`.
 #[rustler::nif(schedule = "DirtyIo")]
 fn foreign_open<'a>(env: Env<'a>, path: String) -> Term<'a> {
-    crate::held::bypassing(|| sqlite::open(env, path, false, None, false, 0, false, false, None))
+    crate::held::bypassing(|| {
+        sqlite::open(
+            env,
+            path,
+            sqlite::OpenOpts {
+                readonly: false,
+                vfs: None,
+                attach: false,
+                timeout_ms: 0,
+                gated: false,
+                exclusive: false,
+                lookaside: None,
+            },
+        )
+    })
 }
 
 mod fault_atoms {

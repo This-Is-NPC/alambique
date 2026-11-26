@@ -101,27 +101,45 @@ pub(crate) fn output_term<'a>(env: Env<'a>, o: capture::Output) -> Term<'a> {
         .encode(env)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// What a capture takes besides the files and the sums: a map from Elixir.
+#[derive(rustler::NifMap)]
+pub(crate) struct CaptureOpts {
+    pub page_size: u32,
+    pub pos: PosTuple,
+    pub pre: u64,
+    pub txid: u64,
+    pub timestamp: i64,
+}
+
+impl CaptureOpts {
+    /// For a capture of the whole database, which starts at no position.
+    fn whole(page_size: u32, pre: u64, txid: u64, timestamp: i64) -> Self {
+        CaptureOpts {
+            page_size,
+            pos: (0, 0, 0, 0, 0),
+            pre,
+            txid,
+            timestamp,
+        }
+    }
+}
+
 pub(crate) fn mk_args<'a>(
     db: &'a str,
     wal: &'a str,
-    page_size: u32,
-    pos: PosTuple,
     sums: &'a Sums,
-    pre: u64,
-    txid: u64,
-    timestamp: i64,
+    o: &CaptureOpts,
     end: Option<WalPos>,
 ) -> capture::Args<'a> {
     capture::Args {
         db_path: Path::new(db),
         wal_path: Path::new(wal),
-        page_size,
-        pos: pos_from(pos),
+        page_size: o.page_size,
+        pos: pos_from(o.pos),
         sums,
-        pre,
-        txid,
-        timestamp,
+        pre: o.pre,
+        txid: o.txid,
+        timestamp: o.timestamp,
         end,
     }
 }
@@ -129,24 +147,17 @@ pub(crate) fn mk_args<'a>(
 /// Encodes the committed WAL frames after `pos` as the segment for `txid`.
 /// Returns `:none` when there are none.
 #[rustler::nif(schedule = "DirtyIo")]
-#[allow(clippy::too_many_arguments)]
 fn capture_incremental<'a>(
     env: Env<'a>,
     db: String,
     wal: String,
-    page_size: u32,
-    pos: PosTuple,
     sums: ResourceArc<SumsRes>,
-    pre: u64,
-    txid: u64,
-    timestamp: i64,
+    opts: CaptureOpts,
 ) -> Term<'a> {
     let _t = crate::stats::REPLICATION_CALLS.time();
     let run = || -> Result<Term<'a>, Error> {
         Ok(
-            match capture::incremental(&mk_args(
-                &db, &wal, page_size, pos, &sums.0, pre, txid, timestamp, None,
-            ))? {
+            match capture::incremental(&mk_args(&db, &wal, &sums.0, &opts, None))? {
                 Some(o) => output_term(env, o),
                 None => atoms::none().encode(env),
             },
@@ -157,25 +168,18 @@ fn capture_incremental<'a>(
 
 /// Encodes a segment without pages (the fence).
 #[rustler::nif(schedule = "DirtyIo")]
-#[allow(clippy::too_many_arguments)]
 fn capture_empty<'a>(
     env: Env<'a>,
     db: String,
     wal: String,
-    page_size: u32,
-    pos: PosTuple,
     sums: ResourceArc<SumsRes>,
-    pre: u64,
-    txid: u64,
-    timestamp: i64,
+    opts: CaptureOpts,
 ) -> Term<'a> {
     let _t = crate::stats::REPLICATION_CALLS.time();
     let run = || -> Result<Term<'a>, Error> {
         Ok(output_term(
             env,
-            capture::empty(&mk_args(
-                &db, &wal, page_size, pos, &sums.0, pre, txid, timestamp, None,
-            ))?,
+            capture::empty(&mk_args(&db, &wal, &sums.0, &opts, None))?,
         ))
     };
     run().unwrap_or_else(|e| error_term(env, e))
@@ -196,17 +200,8 @@ fn capture_full<'a>(
     let _t = crate::stats::REPLICATION_CALLS.time();
     let run = || -> Result<Term<'a>, Error> {
         let empty = Sums::default();
-        let a = mk_args(
-            &db,
-            &wal,
-            page_size,
-            (0, 0, 0, 0, 0),
-            &empty,
-            0,
-            txid,
-            timestamp,
-            None,
-        );
+        let o = CaptureOpts::whole(page_size, 0, txid, timestamp);
+        let a = mk_args(&db, &wal, &empty, &o, None);
         Ok(output_term(env, capture::full(&a, limit.map(pos_from))?))
     };
     run().unwrap_or_else(|e| error_term(env, e))
@@ -227,17 +222,8 @@ fn capture_replace<'a>(
     let _t = crate::stats::REPLICATION_CALLS.time();
     let run = || -> Result<Term<'a>, Error> {
         let empty = Sums::default();
-        let a = mk_args(
-            &db,
-            &wal,
-            page_size,
-            (0, 0, 0, 0, 0),
-            &empty,
-            pre,
-            txid,
-            timestamp,
-            None,
-        );
+        let o = CaptureOpts::whole(page_size, pre, txid, timestamp);
+        let a = mk_args(&db, &wal, &empty, &o, None);
         Ok(output_term(env, capture::replace(&a)?))
     };
     run().unwrap_or_else(|e| error_term(env, e))

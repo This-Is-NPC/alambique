@@ -1156,36 +1156,33 @@ fn main_filename(db: *mut ffi::sqlite3) -> Option<String> {
 /// (`nil` keeps SQLite's default); `{0, 0}` has none.
 /// Returns `{:ok, conn, secret}`, the secret 0 for a connection that is not gated.
 #[rustler::nif(schedule = "DirtyIo")]
-#[allow(clippy::too_many_arguments)]
-fn sqlite_open<'a>(
-    env: Env<'a>,
-    path: String,
-    readonly: bool,
-    vfs: Option<String>,
-    attach: bool,
-    timeout_ms: u64,
-    gated: bool,
-    exclusive: bool,
-    lookaside: Option<(u32, u32)>,
-) -> Term<'a> {
-    open(
-        env, path, readonly, vfs, attach, timeout_ms, gated, exclusive, lookaside,
-    )
+fn sqlite_open<'a>(env: Env<'a>, path: String, opts: OpenOpts) -> Term<'a> {
+    open(env, path, opts)
+}
+
+/// The options of `sqlite_open`, a map from Elixir.
+#[derive(rustler::NifMap)]
+pub(crate) struct OpenOpts {
+    pub readonly: bool,
+    pub vfs: Option<String>,
+    pub attach: bool,
+    pub timeout_ms: u64,
+    pub gated: bool,
+    pub exclusive: bool,
+    pub lookaside: Option<(u32, u32)>,
 }
 
 /// The body of `sqlite_open`, for the test NIF that opens as a foreign writer.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn open<'a>(
-    env: Env<'a>,
-    path: String,
-    readonly: bool,
-    vfs: Option<String>,
-    attach: bool,
-    timeout_ms: u64,
-    gated: bool,
-    exclusive: bool,
-    lookaside: Option<(u32, u32)>,
-) -> Term<'a> {
+pub(crate) fn open<'a>(env: Env<'a>, path: String, opts: OpenOpts) -> Term<'a> {
+    let OpenOpts {
+        readonly,
+        vfs,
+        attach,
+        timeout_ms,
+        gated,
+        exclusive,
+        lookaside,
+    } = opts;
     let _t = crate::stats::SQLITE_CALLS.time();
     // The region exists before the first page does: the schema and the first
     // pages are allocated inside `sqlite3_open_v2` and the statements after.
@@ -1988,19 +1985,25 @@ impl crate::capture::DbFile for LiveFile {
     }
 }
 
+/// What `sqlite_capture_full` takes besides the connection and the WAL: a map
+/// from Elixir.
+#[derive(rustler::NifMap)]
+struct FullOpts {
+    page_size: u32,
+    txid: u64,
+    timestamp: i64,
+    limit: Option<crate::PosTuple>,
+}
+
 /// `capture_full` of the database of `conn`, read through the connection's
 /// own file (`LiveFile`), the way a cell takes its first snapshot.
 #[rustler::nif(schedule = "DirtyIo")]
-#[allow(clippy::too_many_arguments)]
 fn sqlite_capture_full<'a>(
     env: Env<'a>,
     conn: ResourceArc<Conn>,
     key: u64,
     wal: String,
-    page_size: u32,
-    txid: u64,
-    timestamp: i64,
-    limit: Option<crate::PosTuple>,
+    opts: FullOpts,
 ) -> Term<'a> {
     let _t = crate::stats::REPLICATION_CALLS.time_for(&conn);
     if let Err(f) = check_user(env, &conn) {
@@ -2028,6 +2031,12 @@ fn sqlite_capture_full<'a>(
                     &mut file as *mut _ as *mut std::ffi::c_void,
                 )
             };
+            let FullOpts {
+                page_size,
+                txid,
+                timestamp,
+                limit,
+            } = opts;
             let out = if rc == ffi::SQLITE_OK && !file.is_null() {
                 let empty = crate::sums::Sums::default();
                 let args = crate::capture::Args {
@@ -2138,25 +2147,18 @@ fn with_wal_end<'a>(
 /// `capture_incremental` of the files of `conn`, reading the WAL up to the
 /// end its wal-index records.
 #[rustler::nif(schedule = "DirtyIo")]
-#[allow(clippy::too_many_arguments)]
 fn sqlite_capture_incremental<'a>(
     env: Env<'a>,
     conn: ResourceArc<Conn>,
     key: u64,
     db: String,
     wal: String,
-    page_size: u32,
-    pos: crate::PosTuple,
     sums: ResourceArc<crate::SumsRes>,
-    pre: u64,
-    txid: u64,
-    timestamp: i64,
+    opts: crate::CaptureOpts,
 ) -> Term<'a> {
     let _t = crate::stats::REPLICATION_CALLS.time_for(&conn);
     with_wal_end(env, &conn, key, |end| {
-        let args = crate::mk_args(
-            &db, &wal, page_size, pos, &sums.0, pre, txid, timestamp, end,
-        );
+        let args = crate::mk_args(&db, &wal, &sums.0, &opts, end);
         match crate::capture::incremental(&args) {
             Ok(Some(o)) => crate::output_term(env, o),
             Ok(None) => atoms::none().encode(env),
