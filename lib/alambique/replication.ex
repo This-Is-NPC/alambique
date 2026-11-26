@@ -47,6 +47,7 @@ defmodule Alambique.Replication do
   """
   @type ctx :: %{
           optional(:budget_cut) => boolean,
+          optional(:missing_final) => boolean,
           store: {module, term},
           prefix: String.t(),
           node: String.t(),
@@ -66,74 +67,69 @@ defmodule Alambique.Replication do
 
   @type target :: :latest | {:txid, non_neg_integer} | {:timestamp, integer}
 
+  @keys [
+    :store,
+    :prefix,
+    :node,
+    :clock,
+    :backoff_ms,
+    :max_backoff_ms,
+    :max_attempts,
+    :check_timeout_ms,
+    :timeout_ms,
+    :edge_bytes,
+    :fetch_concurrency,
+    :max_inflight_bytes,
+    :max_object_bytes,
+    :max_control_bytes,
+    :page_sidecar
+  ]
+
+  @positive [
+    :backoff_ms,
+    :max_backoff_ms,
+    :max_attempts,
+    :check_timeout_ms,
+    :timeout_ms,
+    :edge_bytes,
+    :fetch_concurrency,
+    :max_inflight_bytes,
+    :max_object_bytes,
+    :max_control_bytes
+  ]
+
   @doc "Builds and validates a context from the keys of `t:ctx/0`."
   @spec ctx(keyword | map) :: ctx
   def ctx(opts) do
-    ctx =
-      %{
-        clock: {Alambique.Clock.System, nil},
-        backoff_ms: 50,
-        max_backoff_ms: 1000,
-        max_attempts: 10,
-        check_timeout_ms: 1_000,
-        timeout_ms: 10_000,
-        edge_bytes: 65_536,
-        fetch_concurrency: 16,
-        max_inflight_bytes: 67_108_864,
-        max_object_bytes: Alambique.Store.max_object_bytes(),
-        max_control_bytes: Alambique.Store.max_control_bytes(),
-        page_sidecar: nil
-      }
-      |> Map.merge(Map.new(opts))
-      |> Map.take([
-        :store,
-        :prefix,
-        :node,
-        :clock,
-        :backoff_ms,
-        :max_backoff_ms,
-        :max_attempts,
-        :check_timeout_ms,
-        :timeout_ms,
-        :edge_bytes,
-        :fetch_concurrency,
-        :max_inflight_bytes,
-        :max_object_bytes,
-        :max_control_bytes,
-        :page_sidecar
-      ])
+    ctx = defaults() |> Map.merge(Map.new(opts)) |> Map.take(@keys)
 
-    valid? =
-      match?(
-        %{
-          store: {_, _},
-          clock: {_, _},
-          prefix: p,
-          node: n,
-          backoff_ms: b,
-          max_backoff_ms: m,
-          max_attempts: a,
-          check_timeout_ms: k,
-          timeout_ms: t,
-          edge_bytes: e,
-          fetch_concurrency: c,
-          max_inflight_bytes: pb,
-          max_object_bytes: ob,
-          max_control_bytes: cb,
-          page_sidecar: ps
-        }
-        when is_binary(p) and is_binary(n) and is_integer(b) and b > 0 and is_integer(m) and
-               m >= b and is_integer(a) and a > 0 and is_integer(k) and k > 0 and is_integer(t) and
-               t > 0 and is_integer(e) and
-               e > 0 and is_integer(c) and
-               c > 0 and
-               is_integer(pb) and pb > 0 and is_integer(ob) and ob > 0 and is_integer(cb) and
-               cb > 0 and (is_nil(ps) or (is_integer(ps) and ps >= 0)),
-        ctx
-      )
-
-    unless valid?, do: raise(ArgumentError, "invalid replication context: #{inspect(ctx)}")
+    unless valid?(ctx), do: raise(ArgumentError, "invalid replication context: #{inspect(ctx)}")
     ctx
+  end
+
+  defp defaults do
+    %{
+      clock: {Alambique.Clock.System, nil},
+      backoff_ms: 50,
+      max_backoff_ms: 1000,
+      max_attempts: 10,
+      check_timeout_ms: 1_000,
+      timeout_ms: 10_000,
+      edge_bytes: 65_536,
+      fetch_concurrency: 16,
+      max_inflight_bytes: 67_108_864,
+      max_object_bytes: Alambique.Store.max_object_bytes(),
+      max_control_bytes: Alambique.Store.max_control_bytes(),
+      page_sidecar: nil
+    }
+  end
+
+  defp valid?(ctx) do
+    match?(%{store: {_, _}, clock: {_, _}}, ctx) and
+      is_binary(ctx[:prefix]) and is_binary(ctx[:node]) and
+      Enum.all?(@positive, &(is_integer(ctx[&1]) and ctx[&1] > 0)) and
+      ctx.max_backoff_ms >= ctx.backoff_ms and
+      (is_nil(ctx.page_sidecar) or (is_integer(ctx.page_sidecar) and ctx.page_sidecar >= 0))
   end
 
   @doc """
