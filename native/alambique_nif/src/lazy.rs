@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use crate::bytes::Reader;
 use crate::dbsum::fold;
-use crate::error::{invalid, Result};
+use crate::error::{fit, invalid, Result};
 use crate::ltx::{
     get_uvarint, lock_pgno, page_crc, pages_added, trailer_post, valid_page_size, verify, Header,
     HEADER_SIZE, PAGE_FLAG_SIZE, PAGE_HEADER_SIZE, TRAILER_SIZE,
@@ -245,11 +245,25 @@ struct Inner {
     aborted: Option<String>,
 }
 
+/// Index of page `pgno` (1-based) in the per-page vectors.
+fn slot(pgno: u32) -> usize {
+    pgno.saturating_sub(1) as usize
+}
+
+/// `len` bytes at `start` of `data`, `None` when they are not all there.
+fn slice_of(data: &[u8], start: usize, len: usize) -> Option<&[u8]> {
+    data.get(start..start.checked_add(len)?)
+}
+
 impl Inner {
     fn is_local(&self, pgno: u32) -> bool {
+        let at = slot(pgno);
         pgno == 0
             || pgno > self.orig
-            || self.local[(pgno - 1) as usize / 64] >> ((pgno - 1) % 64) & 1 == 1
+            || self
+                .local
+                .get(at / 64)
+                .is_some_and(|word| word >> (at % 64) & 1 == 1)
     }
 
     /// Marks the page local; true when it was not.
@@ -257,12 +271,47 @@ impl Inner {
         if pgno == 0 || pgno > self.orig || self.is_local(pgno) {
             return false;
         }
-        self.local[(pgno - 1) as usize / 64] |= 1 << ((pgno - 1) % 64);
-        true
+        let at = slot(pgno);
+        match self.local.get_mut(at / 64) {
+            Some(word) => {
+                *word |= 1 << (at % 64);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Makes the page missing again.
+    fn unset_local(&mut self, pgno: u32) {
+        let at = slot(pgno);
+        if let Some(word) = self.local.get_mut(at / 64) {
+            *word &= !(1 << (at % 64));
+        }
+    }
+
+    fn entry(&self, pgno: u32) -> Entry {
+        self.map.get(slot(pgno)).copied().unwrap_or(EMPTY)
     }
 
     fn flag(&self, pgno: u32) -> u8 {
-        self.flags[pgno as usize - 1]
+        self.flags.get(slot(pgno)).copied().unwrap_or(0)
+    }
+
+    fn set_flags(&mut self, pgno: u32, bits: u8) {
+        if let Some(f) = self.flags.get_mut(slot(pgno)) {
+            *f |= bits;
+        }
+    }
+
+    fn clear_flags(&mut self, pgno: u32, bits: u8) {
+        if let Some(f) = self.flags.get_mut(slot(pgno)) {
+            *f &= !bits;
+        }
+    }
+
+    /// The position of the page in the fetch order.
+    fn rank_of(&self, pgno: u32) -> usize {
+        self.rank.get(slot(pgno)).map_or(0, |r| *r as usize)
     }
 }
 
@@ -451,8 +500,9 @@ impl Lazy {
             return Ok(false);
         };
         let right = frames.iter().all(|&(pgno, start, len)| {
-            decode_frame(&data[start..start + len], pgno, self.page_size)
-                .is_ok_and(|page| hashes.matches(pgno, &page))
+            slice_of(data, start, len)
+                .and_then(|frame| decode_frame(frame, pgno, self.page_size).ok())
+                .is_some_and(|page| hashes.matches(pgno, &page))
         });
         if !right {
             let mut g = self.inner();
@@ -482,7 +532,8 @@ impl Lazy {
         // requires: that keeps the map within what the file holds.
         let added = s.entries.iter().filter(|e| e.0 as usize > old_len).count() as u64;
         let lock = lock_pgno(self.page_size);
-        if added != pages_added(old_len as u32, s.header.commit, lock) {
+        let old_pages: u32 = fit(old_len, "page count")?;
+        if added != pages_added(old_pages, s.header.commit, lock) {
             return invalid("file lacks pages the database grows by");
         }
         if s.header.is_snapshot() {
@@ -492,7 +543,11 @@ impl Lazy {
         g.map.truncate(commit);
         g.map.resize(commit, EMPTY);
         for (pgno, offset, size) in s.entries {
-            g.map[pgno as usize - 1] = Entry {
+            let at = g
+                .map
+                .get_mut(slot(pgno))
+                .ok_or_else(|| crate::error::Error::Invalid("page outside the map".into()))?;
+            *at = Entry {
                 offset,
                 size,
                 file: idx,
@@ -505,12 +560,13 @@ impl Lazy {
     /// Sizes the file and builds the bitmap and the fetch order.
     pub fn ready(&self) -> Result<()> {
         let mut g = self.inner();
-        let n = g.map.len() as u32;
+        let n: u32 = fit(g.map.len(), "page count")?;
         let lock = lock_pgno(self.page_size);
-        if let Some(p) = (1..=n).find(|&p| p != lock && g.map[p as usize - 1].file == NO_FILE) {
+        if let Some(p) = (1..=n).find(|&p| p != lock && g.entry(p).file == NO_FILE) {
             return invalid(format!("no file holds page {p}"));
         }
-        self.file()?.set_len(n as u64 * self.page_size as u64)?;
+        self.file()?
+            .set_len(u64::from(n) * u64::from(self.page_size))?;
         g.orig = n;
         g.pages = n;
         g.local = vec![0; (n as usize).div_ceil(64)];
@@ -519,7 +575,7 @@ impl Lazy {
         g.keyed = vec![0; n as usize];
         g.unknown = n;
         if (1..=n).contains(&lock) {
-            g.flags[lock as usize - 1] = F_CRC | F_SUM;
+            g.set_flags(lock, F_CRC | F_SUM);
             g.set_local(lock);
             g.unknown -= 1;
         }
@@ -527,12 +583,15 @@ impl Lazy {
         // The newest files first: they hold the pages written last, which
         // the cell reads first.
         order.sort_unstable_by_key(|&p| {
-            let e = g.map[p as usize - 1];
+            let e = g.entry(p);
             (std::cmp::Reverse(e.file), e.offset)
         });
         let mut rank = vec![0u32; n as usize];
         for (i, &p) in order.iter().enumerate() {
-            rank[p as usize - 1] = i as u32;
+            let at = rank
+                .get_mut(slot(p))
+                .ok_or_else(|| crate::error::Error::Invalid("page outside the plan".into()))?;
+            *at = fit(i, "page rank")?;
         }
         g.order = order;
         g.rank = rank;
@@ -572,7 +631,7 @@ impl Lazy {
                     return Err(msg);
                 }
                 if g.requested.insert(p) {
-                    let e = g.map[p as usize - 1];
+                    let e = g.entry(p);
                     let notify = self
                         .notify
                         .lock()
@@ -607,10 +666,11 @@ impl Lazy {
     }
 
     fn page_range(&self, offset: u64, amt: u64) -> (u32, u32) {
-        let ps = self.page_size as u64;
+        let ps = u64::from(self.page_size);
+        let page_of = |at: u64| u32::try_from(at / ps).unwrap_or(u32::MAX).saturating_add(1);
         (
-            (offset / ps) as u32 + 1,
-            ((offset + amt.max(1) - 1) / ps) as u32 + 1,
+            page_of(offset),
+            page_of(offset.saturating_add(amt.max(1)).saturating_sub(1)),
         )
     }
 
@@ -645,9 +705,9 @@ impl Lazy {
         if self.is_complete() {
             return;
         }
-        let new_pages = size.div_ceil(self.page_size as u64) as u32;
+        let new_pages = u32::try_from(size.div_ceil(u64::from(self.page_size))).unwrap_or(u32::MAX);
         let mut g = self.inner();
-        for p in new_pages + 1..=g.orig {
+        for p in new_pages.saturating_add(1)..=g.orig {
             g.set_local(p);
         }
         g.pages = new_pages;
@@ -671,18 +731,22 @@ impl Lazy {
                 .and_then(|f| f.write_all_at(page, (pgno as u64 - 1) * self.page_size as u64))
             {
                 // Not installed: leave the page missing.
-                let i = (pgno - 1) as usize / 64;
-                g.local[i] &= !(1 << ((pgno - 1) % 64));
+                g.unset_local(pgno);
                 return Err(e.into());
             }
         }
-        let f = &mut g.flags[pgno as usize - 1];
-        *f &= !F_INFLIGHT;
-        if *f & F_CRC == 0 {
-            *f |= F_CRC;
-            g.crc[pgno as usize - 1] = crc;
-            g.keyed[pgno as usize - 1] = keyed;
-            g.unknown -= 1;
+        let had_crc = g.flag(pgno) & F_CRC != 0;
+        g.clear_flags(pgno, F_INFLIGHT);
+        if !had_crc {
+            g.set_flags(pgno, F_CRC);
+            let at = slot(pgno);
+            if let Some(c) = g.crc.get_mut(at) {
+                *c = crc;
+            }
+            if let Some(k) = g.keyed.get_mut(at) {
+                *k = keyed;
+            }
+            g.unknown = g.unknown.saturating_sub(1);
         }
         g.requested.remove(&pgno);
         g.failed.remove(&pgno);
@@ -717,9 +781,16 @@ impl Lazy {
         self.complete.store(true, Ordering::Release);
     }
 
-    fn build_run(&self, g: &Inner, from: usize, max_pages: usize, max_bytes: u64, bg: bool) -> Run {
-        let first = g.order[from];
-        let e0 = g.map[first as usize - 1];
+    fn build_run(
+        &self,
+        g: &Inner,
+        from: usize,
+        max_pages: usize,
+        max_bytes: u64,
+        bg: bool,
+    ) -> Option<Run> {
+        let first = *g.order.get(from)?;
+        let e0 = g.entry(first);
         let mut run = Run {
             file: e0.file,
             offset: e0.offset,
@@ -727,8 +798,8 @@ impl Lazy {
             pages: Vec::new(),
         };
         let mut next = e0.offset;
-        for &p in &g.order[from..] {
-            let e = g.map[p as usize - 1];
+        for &p in g.order.get(from..)? {
+            let e = g.entry(p);
             let f = g.flag(p);
             let fresh = f & F_CRC == 0 && !(bg && f & F_INFLIGHT != 0);
             // The frames in between belong to older versions of pages that
@@ -736,29 +807,33 @@ impl Lazy {
             if e.file != run.file || e.offset < next || e.offset - next > MAX_GAP || !fresh {
                 break;
             }
-            let end = e.offset + e.size as u64;
+            let end = e.offset.saturating_add(u64::from(e.size));
             if !run.pages.is_empty()
                 && (run.pages.len() >= max_pages || end - run.offset > max_bytes)
             {
                 break;
             }
-            run.pages.push((p, (e.offset - run.offset) as u32, e.size));
+            let Ok(rel) = u32::try_from(e.offset - run.offset) else {
+                break;
+            };
+            run.pages.push((p, rel, e.size));
             run.len = end - run.offset;
             next = end;
         }
         match g.sizes.get(&run.file) {
             Some(&size) if size <= self.whole_max.load(Ordering::Relaxed) => {
-                self.whole_run(g, from, size, bg)
+                self.whole_run(g, from, size, bg).or(Some(run))
             }
-            _ => run,
+            _ => Some(run),
         }
     }
 
     /// The whole object of the page at `from`, with every page of it that is
     /// still to fetch: its checksum can be checked before any page is served.
-    fn whole_run(&self, g: &Inner, from: usize, size: u64, bg: bool) -> Run {
-        let file = g.map[g.order[from] as usize - 1].file;
-        let in_file = |i: usize| g.map[g.order[i] as usize - 1].file == file;
+    /// `None` when a frame starts past what a run can say.
+    fn whole_run(&self, g: &Inner, from: usize, size: u64, bg: bool) -> Option<Run> {
+        let file = g.entry(*g.order.get(from)?).file;
+        let in_file = |i: usize| g.order.get(i).map(|&p| g.entry(p).file) == Some(file);
         let (mut lo, mut hi) = (from, from + 1);
         while lo > 0 && in_file(lo - 1) {
             lo -= 1;
@@ -766,23 +841,25 @@ impl Lazy {
         while hi < g.order.len() && in_file(hi) {
             hi += 1;
         }
-        let pages = g.order[lo..hi]
+        let pages = g
+            .order
+            .get(lo..hi)?
             .iter()
             .filter(|&&p| {
                 let f = g.flag(p);
                 f & F_CRC == 0 && !(bg && f & F_INFLIGHT != 0)
             })
             .map(|&p| {
-                let e = g.map[p as usize - 1];
-                (p, e.offset as u32, e.size)
+                let e = g.entry(p);
+                Some((p, u32::try_from(e.offset).ok()?, e.size))
             })
-            .collect();
-        Run {
+            .collect::<Option<Vec<_>>>()?;
+        Some(Run {
             file,
             offset: 0,
             len: size,
             pages,
-        }
+        })
     }
 
     /// The run a missed page belongs to: the page and the pages after it in
@@ -792,13 +869,7 @@ impl Lazy {
         if self.is_complete() || pgno == 0 || pgno > g.orig || g.flag(pgno) & F_CRC != 0 {
             return None;
         }
-        Some(self.build_run(
-            &g,
-            g.rank[pgno as usize - 1] as usize,
-            max_pages,
-            u64::MAX,
-            false,
-        ))
+        self.build_run(&g, g.rank_of(pgno), max_pages, u64::MAX, false)
     }
 
     /// The next run for the background fetch, at most `max_bytes` long, and
@@ -810,7 +881,7 @@ impl Lazy {
         }
         let from = loop {
             match g.retry.pop_front() {
-                Some(p) if g.flag(p) & F_CRC == 0 => break Some(g.rank[p as usize - 1] as usize),
+                Some(p) if g.flag(p) & F_CRC == 0 => break Some(g.rank_of(p)),
                 Some(_) => continue,
                 None => break None,
             }
@@ -818,9 +889,8 @@ impl Lazy {
         let from = match from {
             Some(f) => f,
             None => {
-                while g.cursor < g.order.len() {
-                    let f = g.flag(g.order[g.cursor]);
-                    if f & (F_CRC | F_INFLIGHT) == 0 {
+                while let Some(&p) = g.order.get(g.cursor) {
+                    if g.flag(p) & (F_CRC | F_INFLIGHT) == 0 {
                         break;
                     }
                     g.cursor += 1;
@@ -831,9 +901,9 @@ impl Lazy {
                 g.cursor
             }
         };
-        let run = self.build_run(&g, from, usize::MAX, max_bytes, true);
+        let run = self.build_run(&g, from, usize::MAX, max_bytes, true)?;
         for (p, _, _) in &run.pages {
-            g.flags[*p as usize - 1] |= F_INFLIGHT;
+            g.set_flags(*p, F_INFLIGHT);
         }
         Some(run)
     }
@@ -846,7 +916,7 @@ impl Lazy {
         }
         for &p in pages {
             if p >= 1 && p <= g.orig {
-                g.flags[p as usize - 1] &= !F_INFLIGHT;
+                g.clear_flags(p, F_INFLIGHT);
                 g.retry.push_back(p);
             }
         }
@@ -888,12 +958,16 @@ impl Lazy {
         }
         let mut compared = 0usize;
         for (pgno, start, len) in frames {
-            let i = pgno as usize - 1;
+            let i = slot(pgno);
             if g.owner.get(i) != Some(&file) {
                 continue;
             }
-            let page = decode_frame(&data[start..start + len], pgno, self.page_size)?;
-            if page_crc(pgno, &page) != g.crc[i] || self.keyed(pgno, &page) != g.keyed[i] {
+            let frame = slice_of(data, start, len)
+                .ok_or_else(|| crate::error::Error::Invalid("frame outside the object".into()))?;
+            let page = decode_frame(frame, pgno, self.page_size)?;
+            if Some(page_crc(pgno, &page)) != g.crc.get(i).copied()
+                || Some(self.keyed(pgno, &page)) != g.keyed.get(i).copied()
+            {
                 return invalid(format!(
                     "page {pgno} of file {file} differs from the one read"
                 ));
@@ -927,10 +1001,10 @@ impl Lazy {
                 continue;
             }
             let crc = (f & F_CRC != 0)
-                .then(|| g.crc.get(p as usize - 1).copied())
+                .then(|| g.crc.get(slot(p)).copied())
                 .flatten();
             match crc {
-                Some(crc) if sums.set(p as usize - 1, crc) => {}
+                Some(crc) if sums.set(slot(p), crc) => {}
                 _ => missing.push(p),
             }
         }
@@ -943,7 +1017,7 @@ impl Lazy {
         let mut g = self.inner();
         for &p in pages {
             if p >= 1 && p <= g.orig {
-                g.flags[p as usize - 1] |= F_SUM;
+                g.set_flags(p, F_SUM);
             }
         }
     }
@@ -952,10 +1026,10 @@ impl Lazy {
     pub fn finish_sums(&self, sums: &mut Sums) {
         let mut g = self.inner();
         for p in 1..=g.orig {
-            let i = p as usize - 1;
-            if g.flags[i] & F_SUM == 0 && g.flags[i] & F_CRC != 0 && i < sums.len() {
-                sums.set(i, g.crc[i]);
-                g.flags[i] |= F_SUM;
+            let f = g.flag(p);
+            let crc = g.crc.get(slot(p)).copied().unwrap_or(0);
+            if f & F_SUM == 0 && f & F_CRC != 0 && sums.set(slot(p), crc) {
+                g.set_flags(p, F_SUM);
             }
         }
     }
