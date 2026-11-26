@@ -586,6 +586,18 @@ owns the cell.
 | `{:ok, :asleep}` | Nobody owns the cell. It is not woken; it reads the options at its next wake. | Nothing. |
 | `{:error, {:cell_options, message}}` | The function raised, did not return in `cell_options_timeout_ms`, or returned an invalid override, or the page cache could not be set. The cell keeps the options it had. | Fix the function and repeat the call. |
 
+To refresh every cell awake on a node, for example after you changed the
+function, call it with `:all` on each node:
+
+```elixir
+{:ok, %{cells: 120, refreshed: 120, changed: 7, asleep: 0, failed: 0, failures: []}} =
+  Alambique.refresh_options(MyApp.Cells, :all, concurrency: 8)
+```
+
+At most `:concurrency` cells (default 8) are refreshed at a time. A cell that
+fails keeps its options and is listed in `failures` with its reason; `changed`
+counts the cells that got at least one new value.
+
 A refresh is not a call to the cell: it does not keep it awake, does not give
 back a shrunk cache and does not open a closed connection (the next request
 that runs SQL does, with the new options). `[:alambique, :cell, :options,
