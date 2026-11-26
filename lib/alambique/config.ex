@@ -88,6 +88,22 @@ defmodule Alambique.Config do
   @lookaside_default_count 16
   @lookaside_max_slot 65_528
   @lookaside_max_bytes 1_048_576
+  # The `:awake` options validated by themselves, with their defaults.
+  @awake_own [
+    max_bytes: nil,
+    max_wake_queue: nil,
+    idle_cache_after_ms: nil,
+    idle_close_after_ms: nil,
+    idle_cache_kib: @idle_cache_kib,
+    lookaside_bytes: @lookaside_default_bytes,
+    lookaside_count: @lookaside_default_count,
+    idle_gc: true,
+    track_bytes: true,
+    cache_kib: @awake_defaults[:cache_kib],
+    cell_cache_kib_max: nil,
+    cell_idle_timeout_ms_min: nil,
+    cell_idle_timeout_ms_max: nil
+  ]
   @relocate_defaults [fence_attempts: 5, timeout_ms: 60_000, poll_ms: 100]
   @rewind_defaults [fence_attempts: 5, timeout_ms: 60_000, poll_ms: 100, max_bytes: 268_435_456]
   @schema_defaults [check_page: 1_000, listing_timeout_ms: nil]
@@ -436,8 +452,50 @@ defmodule Alambique.Config do
     end
 
     opts = Keyword.merge(@defaults, opts)
-    name = fetch_atom!(opts, :name)
 
+    # Each section reads the options and what the sections before it built.
+    Enum.reduce(sections(), %{}, fn section, config ->
+      Map.merge(config, section.(opts, config))
+    end)
+  end
+
+  defp sections, do: basic_sections() ++ feature_sections()
+
+  defp basic_sections,
+    do: [&identity/2, &placement_section/2, &lease/2, &timeouts/2, &graces/2]
+
+  defp feature_sections do
+    [
+      &feed_section/2,
+      &lazy_and_query/2,
+      &migrations_section/2,
+      &cell_options_section/2,
+      &sql_and_awake/2,
+      &housekeeping/2,
+      &storage/2,
+      &protocol/2,
+      &cluster/2,
+      &names/2
+    ]
+  end
+
+  defp identity(opts, _config) do
+    %{
+      name: fetch_atom!(opts, :name),
+      node_id: node_id!(opts),
+      incarnation: Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false),
+      join: join!(opts),
+      check_store: bool!(opts, :check_store)
+    }
+  end
+
+  defp node_id!(opts) do
+    node_id = Keyword.get_lazy(opts, :node_id, fn -> Atom.to_string(node()) end)
+    unless is_binary(node_id) and node_id != "", do: bad!(":node_id must be a non-empty string")
+    node_id
+  end
+
+  defp placement_section(opts, _config) do
     placement = placement!(opts)
 
     unless match?({mod, _} when is_atom(mod), opts[:clock]),
@@ -446,6 +504,15 @@ defmodule Alambique.Config do
     data_dir = required!(opts, :data_dir)
     unless is_binary(data_dir), do: bad!(":data_dir must be a path string")
 
+    %{
+      placement: placement,
+      store_identity: store_identity(placement),
+      data_dir: data_dir,
+      clock: opts[:clock]
+    }
+  end
+
+  defp lease(opts, _config) do
     ttl = pos_int!(opts, :lease_ttl_ms)
     skew = opts[:skew_margin_ms]
 
@@ -454,123 +521,153 @@ defmodule Alambique.Config do
 
     unless ttl > 2 * skew, do: bad!(":lease_ttl_ms must be greater than twice :skew_margin_ms")
 
-    jitter = jitter!(opts)
+    %{ttl_ms: ttl, skew_margin_ms: skew, renew_jitter: jitter!(opts)}
+  end
 
-    node_id = Keyword.get_lazy(opts, :node_id, fn -> Atom.to_string(node()) end)
-    unless is_binary(node_id) and node_id != "", do: bad!(":node_id must be a non-empty string")
+  defp timeouts(opts, _config) do
+    %{
+      idle_timeout_ms: pos_int!(opts, :idle_timeout_ms),
+      op_timeout_ms: pos_int!(opts, :op_timeout_ms),
+      call_timeout_ms: pos_int!(opts, :call_timeout_ms),
+      hint_limit: pos_int!(opts, :hint_limit),
+      migration_window: pos_int!(opts, :migration_window)
+    }
+  end
 
+  defp graces(opts, _config) do
     after_ack = opts[:after_ack]
 
     unless after_ack == nil or is_function(after_ack, 2),
       do: bad!(":after_ack must be a function of (cell, txid)")
 
-    op_timeout = pos_int!(opts, :op_timeout_ms)
-    idle_timeout = pos_int!(opts, :idle_timeout_ms)
-    feed = feed!(opts[:feed], idle_timeout)
-    lazy_restore = lazy_restore!(opts[:lazy_restore])
-    query = query!(opts[:query])
+    %{
+      moved_grace_ms: moved_grace!(opts),
+      deletion_grace_ms: deletion_grace!(opts),
+      after_ack: after_ack,
+      pipeline_depth: pipeline_depth!(opts)
+    }
+  end
+
+  defp feed_section(opts, config) do
+    feed = feed!(opts[:feed], config.idle_timeout_ms)
+
+    %{
+      feed: feed,
+      feed_capture: opts[:feed] != false,
+      feed_host_prefixes: if(opts[:feed] == false, do: [], else: feed.internal_prefixes)
+    }
+  end
+
+  defp lazy_and_query(opts, _config),
+    do: %{lazy_restore: lazy_restore!(opts[:lazy_restore]), query: query!(opts[:query])}
+
+  defp migrations_section(opts, config) do
     migrations = migrations!(opts[:migrations])
+
+    %{
+      migrations: migrations,
+      schema_version: if(is_list(migrations), do: length(migrations)),
+      wake: wake!(opts[:wake], migrations, config.ttl_ms, config.renew_jitter),
+      schema: schema!(opts[:schema], config.op_timeout_ms)
+    }
+  end
+
+  defp cell_options_section(opts, config) do
     cell_options = cell_options!(opts[:cell_options])
 
-    cell_options_timeout =
+    timeout =
       callback_timeout!(
         :cell_options_timeout_ms,
         opts[:cell_options_timeout_ms],
         not is_nil(cell_options),
-        ttl,
-        jitter
+        config.ttl_ms,
+        config.renew_jitter
       )
 
-    cell_options_invalid = opts[:cell_options_invalid]
+    invalid = opts[:cell_options_invalid]
 
-    unless cell_options_invalid in [:fallback, :refuse],
+    unless invalid in [:fallback, :refuse],
       do: bad!(":cell_options_invalid must be :fallback or :refuse")
 
-    sql = sql(opts[:sql], op_timeout, feed, lazy_restore)
-    awake = awake!(opts[:awake], idle_timeout)
-    no_close_with_exclusive!(awake, sql)
+    %{cell_options: cell_options, cell_options_timeout_ms: timeout, cell_options_invalid: invalid}
+  end
 
+  defp sql_and_awake(opts, config) do
+    sql = sql(opts[:sql], config.op_timeout_ms, config.feed, config.lazy_restore)
+    awake = awake!(opts[:awake], config.idle_timeout_ms)
+    no_close_with_exclusive!(awake, sql)
+    %{sql: sql, awake: awake}
+  end
+
+  defp housekeeping(opts, _config) do
     %{
-      name: name,
-      node_id: node_id,
-      incarnation: Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false),
-      join: join!(opts),
-      check_store: bool!(opts, :check_store),
-      placement: placement,
-      data_dir: data_dir,
-      clock: opts[:clock],
-      ttl_ms: ttl,
-      renew_jitter: jitter,
-      skew_margin_ms: skew,
-      idle_timeout_ms: idle_timeout,
-      op_timeout_ms: op_timeout,
-      call_timeout_ms: pos_int!(opts, :call_timeout_ms),
-      hint_limit: pos_int!(opts, :hint_limit),
-      migrations: migrations,
-      schema_version: if(is_list(migrations), do: length(migrations)),
-      migration_window: pos_int!(opts, :migration_window),
-      moved_grace_ms: moved_grace!(opts),
-      deletion_grace_ms: deletion_grace!(opts),
       trash: trash!(opts[:trash]),
       scrub: scrub!(opts[:scrub]),
       sweeper: sweeper!(opts[:sweeper]),
       local_cache: local_cache!(opts[:local_cache]),
-      after_ack: after_ack,
-      pipeline_depth: pipeline_depth!(opts),
-      feed: feed,
-      feed_capture: opts[:feed] != false,
-      feed_host_prefixes: if(opts[:feed] == false, do: [], else: feed.internal_prefixes),
       compaction: compaction!(opts[:compaction]),
-      retention: retention!(opts[:retention]),
-      query: query,
-      sql: sql,
-      routing: options!(:routing, opts[:routing], @routing_defaults),
-      wake: wake!(opts[:wake], migrations, ttl, jitter),
+      retention: retention!(opts[:retention])
+    }
+  end
+
+  defp storage(opts, _config) do
+    %{
       wal: wal!(opts[:wal]),
-      awake: awake,
-      cell_options: cell_options,
-      cell_options_timeout_ms: cell_options_timeout,
-      cell_options_invalid: cell_options_invalid,
       relocate: options!(:relocate, opts[:relocate], @relocate_defaults),
       rewind: rewind!(opts[:rewind]),
-      schema: schema!(opts[:schema], op_timeout),
       restore: options!(:restore, opts[:restore], @restore_defaults),
       read_limits: options!(:read_limits, opts[:read_limits], @read_limits_defaults),
-      retry: retry!(opts[:retry], ttl, skew, jitter),
+      routing: options!(:routing, opts[:routing], @routing_defaults)
+    }
+  end
+
+  defp protocol(opts, config) do
+    %{
+      retry: retry!(opts[:retry], config.ttl_ms, config.skew_margin_ms, config.renew_jitter),
       upload: upload!(opts[:upload]),
       breaker: options!(:breaker, opts[:breaker], @breaker_defaults),
-      hydrator: options!(:hydrator, opts[:hydrator], @hydrator_defaults),
-      lazy_restore: lazy_restore,
+      hydrator: options!(:hydrator, opts[:hydrator], @hydrator_defaults)
+    }
+  end
+
+  defp cluster(opts, config) do
+    %{
       drain: drain!(opts[:drain]),
       quarantine: quarantine!(opts[:quarantine]),
       replicas: replicas!(opts[:replicas]),
-      nodes: registry!(opts[:registry], ttl, skew),
-      list_cells: list_cells!(opts[:list_cells], op_timeout),
-      supervisor: Module.concat(name, CellSupervisor),
-      registry: Module.concat(name, Registry),
-      live: Module.concat(name, Live),
-      scope: Module.concat(name, Scope),
-      store_identity: store_identity(placement),
-      hints: Module.concat(name, Hints),
-      breakers: Module.concat(name, Breakers),
-      drain_status: Module.concat(name, DrainStatus),
-      admission: Module.concat(name, Admission),
-      wakes: Module.concat(name, Wakes),
-      locations: Module.concat(name, Locations),
-      compactor: Module.concat(name, Compactor),
-      cleanups: Module.concat(name, Cleanups),
-      holds: Module.concat(name, Holds),
-      release_slots: Module.concat(name, ReleaseSlots),
-      query_supervisor: Module.concat(name, QuerySupervisor),
-      inflight: Module.concat(name, Inflight),
-      replica_registry: Module.concat(name, ReplicaRegistry),
-      replica_supervisor: Module.concat(name, ReplicaSupervisor),
-      replica_manager: Module.concat(name, Replicas),
-      replica_memo: Module.concat(name, ReplicaMemo),
-      node_registry: Module.concat(name, NodeRegistry),
-      peers: Module.concat(name, Peers)
+      nodes: registry!(opts[:registry], config.ttl_ms, config.skew_margin_ms),
+      list_cells: list_cells!(opts[:list_cells], config.op_timeout_ms)
     }
   end
+
+  # The names of the processes and tables of an instance.
+  @names [
+    supervisor: CellSupervisor,
+    registry: Registry,
+    live: Live,
+    scope: Scope,
+    hints: Hints,
+    breakers: Breakers,
+    drain_status: DrainStatus,
+    admission: Admission,
+    wakes: Wakes,
+    locations: Locations,
+    compactor: Compactor,
+    cleanups: Cleanups,
+    holds: Holds,
+    release_slots: ReleaseSlots,
+    query_supervisor: QuerySupervisor,
+    inflight: Inflight,
+    replica_registry: ReplicaRegistry,
+    replica_supervisor: ReplicaSupervisor,
+    replica_manager: Replicas,
+    replica_memo: ReplicaMemo,
+    node_registry: NodeRegistry,
+    peers: Peers
+  ]
+
+  defp names(_opts, %{name: name}),
+    do: Map.new(@names, fn {key, suffix} -> {key, Module.concat(name, suffix)} end)
 
   # Names where the data lives, not how it is reached: the sorted locations of
   # the placement with the location of their stores (design §8). Equal on every
@@ -619,9 +716,11 @@ defmodule Alambique.Config do
   end
 
   @doc false
+  @spec put(t) :: :ok
   def put(config), do: :persistent_term.put({__MODULE__, config.name}, config)
 
   @doc false
+  @spec delete(atom) :: boolean
   def delete(name), do: :persistent_term.erase({__MODULE__, name})
 
   # Every store call of the cell, the compactor and the router goes through a
@@ -751,73 +850,79 @@ defmodule Alambique.Config do
 
     given = feed
     feed = Keyword.merge(@feed_defaults, feed)
-    retention = feed[:retention_ms]
-
-    unless retention == nil or (is_integer(retention) and retention > 0),
-      do: bad!(":feed retention_ms must be nil or a positive integer")
-
-    if pos_int!(feed, :publish_retry_max_ms) < pos_int!(feed, :publish_retry_ms),
-      do: bad!(":feed publish_retry_max_ms must be at least publish_retry_ms")
-
-    if pos_int!(feed, :object_batches) > pos_int!(feed, :max_backlog_batches),
-      do: bad!(":feed object_batches must be at most max_backlog_batches")
-
-    linger = feed[:linger_ms]
-
-    unless is_integer(linger) and linger >= 0,
-      do: bad!(":feed linger_ms must be a non-negative integer")
-
-    stop_publish = feed[:stop_publish_ms]
-
-    unless is_integer(stop_publish) and stop_publish >= 0,
-      do: bad!(":feed stop_publish_ms must be a non-negative integer")
-
-    cleanup = feed[:cleanup]
-
-    unless cleanup in @feed_cleanups,
-      do: bad!(":feed cleanup must be one of #{inspect(@feed_cleanups)}")
-
-    rows = feed[:cleanup_rows]
-
-    unless rows == nil or (is_integer(rows) and rows > 0),
-      do: bad!(":feed cleanup_rows must be nil or a positive integer")
-
-    hand_over = feed[:hand_over_rows]
-
-    unless hand_over == nil or (is_integer(hand_over) and hand_over > 0),
-      do: bad!(":feed hand_over_rows must be nil or a positive integer")
+    check_feed_retry!(feed)
 
     hand_over_mode = feed[:hand_over]
 
     unless hand_over_mode in [:cell, :sender, :native],
       do: bad!(":feed hand_over must be :cell, :sender or :native")
 
-    reader_cache = reader_cache!(feed, hand_over_mode)
-    reader_close = reader_close!(feed, hand_over_mode)
+    feed_timing(feed, given, idle_timeout)
+    |> Map.merge(feed_cleanup(feed, hand_over_mode))
+    |> Map.merge(feed_capture(feed))
+  end
 
+  defp check_feed_retry!(feed) do
+    nil_or_pos_value!(feed[:retention_ms], ":feed retention_ms")
+
+    if pos_int!(feed, :publish_retry_max_ms) < pos_int!(feed, :publish_retry_ms),
+      do: bad!(":feed publish_retry_max_ms must be at least publish_retry_ms")
+
+    if pos_int!(feed, :object_batches) > pos_int!(feed, :max_backlog_batches),
+      do: bad!(":feed object_batches must be at most max_backlog_batches")
+  end
+
+  defp feed_timing(feed, given, idle_timeout) do
     %{
       window_ms: pos_int!(feed, :window_ms),
-      retention_ms: retention,
+      retention_ms: feed[:retention_ms],
       prune_interval_ms: pos_int!(feed, :prune_interval_ms),
       publish_retry_ms: pos_int!(feed, :publish_retry_ms),
       publish_retry_max_ms: pos_int!(feed, :publish_retry_max_ms),
       max_backlog_batches: pos_int!(feed, :max_backlog_batches),
       object_batches: feed[:object_batches],
-      linger_ms: linger,
-      stop_publish_ms: stop_publish,
+      linger_ms: nonneg_value!(feed[:linger_ms], ":feed linger_ms"),
+      stop_publish_ms: nonneg_value!(feed[:stop_publish_ms], ":feed stop_publish_ms"),
+      cleanup_after_ms: cleanup_after!(feed, given, idle_timeout)
+    }
+  end
+
+  defp feed_cleanup(feed, hand_over_mode) do
+    cleanup = feed[:cleanup]
+
+    unless cleanup in @feed_cleanups,
+      do: bad!(":feed cleanup must be one of #{inspect(@feed_cleanups)}")
+
+    %{
       cleanup: cleanup,
-      cleanup_after_ms: cleanup_after!(feed, given, idle_timeout),
-      cleanup_rows: rows,
-      hand_over_rows: hand_over,
+      cleanup_rows: nil_or_pos_value!(feed[:cleanup_rows], ":feed cleanup_rows"),
+      hand_over_rows: nil_or_pos_value!(feed[:hand_over_rows], ":feed hand_over_rows"),
       hand_over: hand_over_mode,
-      reader_cache_kib: reader_cache,
-      reader_close: reader_close,
+      reader_cache_kib: reader_cache!(feed, hand_over_mode),
+      reader_close: reader_close!(feed, hand_over_mode)
+    }
+  end
+
+  defp feed_capture(feed) do
+    %{
       shards: shards!(feed),
       internal_prefixes: internal_prefixes!(feed[:internal_prefixes]),
       tables: tables!(feed[:tables]),
       other_tables: other_tables!(feed[:other_tables]),
       max_object_bytes: pos_int!(feed, :max_object_bytes)
     }
+  end
+
+  defp nonneg_value!(value, label) do
+    unless is_integer(value) and value >= 0, do: bad!("#{label} must be a non-negative integer")
+    value
+  end
+
+  defp nil_or_pos_value!(value, label) do
+    unless value == nil or (is_integer(value) and value > 0),
+      do: bad!("#{label} must be nil or a positive integer")
+
+    value
   end
 
   # The sender's reader, its page cache and its lifetime exist only with
@@ -958,6 +1063,19 @@ defmodule Alambique.Config do
     opts = checked_keyword!(:compaction, opts, known)
     merged = Keyword.merge(@compaction_defaults ++ Compaction.defaults(), opts)
 
+    check_compaction_values!(merged)
+    check_compaction_counts!(merged)
+
+    on = merged[:release_on]
+
+    unless is_list(on) and on -- @release_reasons == [],
+      do: bad!(":compaction :release_on must be a list of #{inspect(@release_reasons)}")
+
+    check_compaction_chain!(merged)
+    Map.new(merged)
+  end
+
+  defp check_compaction_values!(merged) do
     unless is_boolean(merged[:delete_superseded]),
       do: bad!(":compaction :delete_superseded must be true or false")
 
@@ -970,38 +1088,35 @@ defmodule Alambique.Config do
 
     unless is_integer(keep) and keep >= 0,
       do: bad!(":compaction :snapshot_keep_ms must be a non-negative integer")
+  end
 
+  @compaction_non_positive [
+    :hold_bytes,
+    :hold_object_bytes,
+    :urgent_concurrency,
+    :release_deadline_ms,
+    :release_reserve_ms
+  ]
+
+  defp check_compaction_counts!(merged) do
     for {key, value} <- merged,
-        key not in [
-          :hold_bytes,
-          :hold_object_bytes,
-          :urgent_concurrency,
-          :release_deadline_ms,
-          :release_reserve_ms,
-          :delete_superseded,
-          :snapshot_ratio,
-          :snapshot_keep_ms,
-          :pitr_window_ms,
-          :release_on
-        ],
+        key not in (@compaction_non_positive ++
+                      [
+                        :delete_superseded,
+                        :snapshot_ratio,
+                        :snapshot_keep_ms,
+                        :pitr_window_ms,
+                        :release_on
+                      ]),
         not (is_integer(value) and value > 0),
         do: bad!(":compaction #{inspect(key)} must be a positive integer")
 
-    for key <- [
-          :hold_bytes,
-          :hold_object_bytes,
-          :urgent_concurrency,
-          :release_deadline_ms,
-          :release_reserve_ms
-        ],
+    for key <- @compaction_non_positive,
         not (is_integer(merged[key]) and merged[key] >= 0),
         do: bad!(":compaction #{inspect(key)} must be a non-negative integer")
+  end
 
-    on = merged[:release_on]
-
-    unless is_list(on) and on -- @release_reasons == [],
-      do: bad!(":compaction :release_on must be a list of #{inspect(@release_reasons)}")
-
+  defp check_compaction_chain!(merged) do
     if merged[:max_chain_segments] < merged[:fanout],
       do: bad!(":compaction :max_chain_segments must be at least :fanout")
 
@@ -1009,8 +1124,6 @@ defmodule Alambique.Config do
 
     if merged[:max_level] > 8,
       do: bad!(":compaction :max_level must be at most 8 (snapshots are kept at level 9)")
-
-    Map.new(merged)
   end
 
   defp moved_grace!(opts) do
@@ -1146,20 +1259,22 @@ defmodule Alambique.Config do
 
     unless is_map(merged[:meta]), do: bad!(":registry :meta must be a map")
 
-    for {key, value} <-
-          [ttl_ms: ttl, renew_ms: renew, refresh_ms: refresh] ++
-            Keyword.take(merged, [:page_size, :sweep_ms]),
+    times = [ttl_ms: ttl, renew_ms: renew, refresh_ms: refresh]
+    check_registry_times!(times ++ Keyword.take(merged, [:page_size, :sweep_ms]), skew)
+
+    merged |> Keyword.merge(times) |> Map.new()
+  end
+
+  defp check_registry_times!(values, skew) do
+    for {key, value} <- values,
         not (is_integer(value) and value > 0),
         do: bad!(":registry #{inspect(key)} must be a positive integer")
 
-    unless ttl > 2 * skew,
+    unless values[:ttl_ms] > 2 * skew,
       do: bad!(":registry :ttl_ms must be greater than twice :skew_margin_ms")
 
-    unless renew < ttl, do: bad!(":registry :renew_ms must be less than :ttl_ms")
-
-    merged
-    |> Keyword.merge(ttl_ms: ttl, renew_ms: renew, refresh_ms: refresh)
-    |> Map.new()
+    unless values[:renew_ms] < values[:ttl_ms],
+      do: bad!(":registry :renew_ms must be less than :ttl_ms")
   end
 
   defp replicas!(false), do: nil
@@ -1366,103 +1481,86 @@ defmodule Alambique.Config do
   # measures the memory of each cell for `Alambique.cells/2`; a budget measures
   # it whatever its value.
   defp awake!(opts, idle_timeout_ms) do
-    opts =
-      checked_keyword!(:awake, opts, [
-        :max_bytes,
-        :max_wake_queue,
-        :idle_cache_after_ms,
-        :idle_cache_kib,
-        :idle_close_after_ms,
-        :lookaside_bytes,
-        :lookaside_count,
-        :idle_gc,
-        :track_bytes,
-        :cell_cache_kib_max,
-        :cell_idle_timeout_ms_min,
-        :cell_idle_timeout_ms_max | Keyword.keys(@awake_defaults)
-      ])
+    own_keys = Keyword.keys(@awake_own)
+    opts = checked_keyword!(:awake, opts, Enum.uniq(own_keys ++ Keyword.keys(@awake_defaults)))
+    {given, rest} = Keyword.split(opts, own_keys)
+    own = Keyword.merge(@awake_own, given)
+    check_awake_own!(own)
 
-    {max_bytes, rest} = Keyword.pop(opts, :max_bytes)
-    {queue, rest} = Keyword.pop(rest, :max_wake_queue)
-    {idle_after, rest} = Keyword.pop(rest, :idle_cache_after_ms)
-    {close_after, rest} = Keyword.pop(rest, :idle_close_after_ms)
-    {idle_kib, rest} = Keyword.pop(rest, :idle_cache_kib, @idle_cache_kib)
+    awake =
+      options!(:awake, rest, Keyword.delete(@awake_defaults, :cache_kib))
+      |> Map.put(:cache_kib, own[:cache_kib])
 
-    {lookaside_bytes, rest} = Keyword.pop(rest, :lookaside_bytes, @lookaside_default_bytes)
-    {lookaside_count, rest} = Keyword.pop(rest, :lookaside_count, @lookaside_default_count)
-    lookaside!(lookaside_bytes, lookaside_count)
-
-    {idle_gc, rest} = Keyword.pop(rest, :idle_gc, true)
-    {track_bytes, rest} = Keyword.pop(rest, :track_bytes, true)
-    {cache_kib, rest} = Keyword.pop(rest, :cache_kib, @awake_defaults[:cache_kib])
-    {kib_max, rest} = Keyword.pop(rest, :cell_cache_kib_max)
-    {idle_min, rest} = Keyword.pop(rest, :cell_idle_timeout_ms_min)
-    {idle_max, rest} = Keyword.pop(rest, :cell_idle_timeout_ms_max)
-
-    check_cell_option!(:idle_cache_kib, idle_kib)
-    check_cell_option!(:idle_gc, idle_gc)
-    unless is_boolean(track_bytes), do: bad!(":awake :track_bytes must be true or false")
-
-    for {key, value} <- [max_bytes: max_bytes, max_wake_queue: queue],
-        not (is_nil(value) or (is_integer(value) and value > 0)),
-        do: bad!(":awake #{inspect(key)} must be nil or a positive integer")
-
-    check_cell_option!(:cache_kib, cache_kib)
-    awake = options!(:awake, rest, Keyword.delete(@awake_defaults, :cache_kib))
-    awake = Map.put(awake, :cache_kib, cache_kib)
+    idle_after = own[:idle_cache_after_ms]
+    close_after = own[:idle_close_after_ms]
     check_cell_option!(:idle_cache_after_ms, idle_after)
-    idle_cache!(awake, idle_after, idle_kib, idle_timeout_ms)
+    idle_cache!(awake, idle_after, own[:idle_cache_kib], idle_timeout_ms)
     check_cell_option!(:idle_close_after_ms, close_after)
     idle_close!(close_after, idle_after, idle_timeout_ms)
 
-    limits = [
-      cell_cache_kib_max: kib_max,
-      cell_idle_timeout_ms_min: idle_min,
-      cell_idle_timeout_ms_max: idle_max
-    ]
+    limits =
+      Keyword.take(own, [
+        :cell_cache_kib_max,
+        :cell_idle_timeout_ms_min,
+        :cell_idle_timeout_ms_max
+      ])
 
-    limits!(awake, limits, idle_timeout_ms, max_bytes)
+    limits!(awake, limits, idle_timeout_ms, own[:max_bytes])
 
     awake
-    |> Map.merge(Map.new(limits))
-    |> Map.put(:idle_cache_kib, idle_kib)
-    |> Map.put(:lookaside_bytes, lookaside_bytes)
-    |> Map.put(:lookaside_count, lookaside_count)
-    |> Map.put(:idle_gc, idle_gc)
-    |> Map.put(:track_bytes, track_bytes)
-    |> Map.put(:idle_cache_after_ms, idle_after)
-    |> Map.put(:idle_close_after_ms, close_after)
-    |> Map.put(:max_bytes, max_bytes)
-    |> Map.put(:max_wake_queue, queue || 4 * awake.max_wakes)
+    |> Map.merge(Map.new(own))
+    |> Map.put(:max_wake_queue, own[:max_wake_queue] || 4 * awake.max_wakes)
+  end
+
+  defp check_awake_own!(own) do
+    lookaside!(own[:lookaside_bytes], own[:lookaside_count])
+    check_cell_option!(:idle_cache_kib, own[:idle_cache_kib])
+    check_cell_option!(:idle_gc, own[:idle_gc])
+
+    unless is_boolean(own[:track_bytes]), do: bad!(":awake :track_bytes must be true or false")
+
+    nil_or_pos!(Keyword.take(own, [:max_bytes, :max_wake_queue]), ":awake")
+    check_cell_option!(:cache_kib, own[:cache_kib])
   end
 
   # The limits a cell's own options are clamped to (`nil`: none). The node's
   # own values must be inside them, so the fallback is always within limits,
   # and a cache limit must fit the memory budget.
   defp limits!(awake, limits, idle_timeout_ms, max_bytes) do
-    for {key, value} <- limits,
-        not (is_nil(value) or (is_integer(value) and value > 0)),
-        do: bad!(":awake #{inspect(key)} must be nil or a positive integer")
+    nil_or_pos!(limits, ":awake")
 
     kib_max = limits[:cell_cache_kib_max]
     idle_min = limits[:cell_idle_timeout_ms_min]
     idle_max = limits[:cell_idle_timeout_ms_max]
 
-    if kib_max && awake.cache_kib > kib_max,
+    if above?(awake.cache_kib, kib_max),
       do: bad!(":awake :cache_kib must not exceed :cell_cache_kib_max")
 
-    if kib_max && max_bytes && kib_max * 1024 > max_bytes,
+    if kib_max && above?(kib_max * 1024, max_bytes),
       do: bad!(":awake :cell_cache_kib_max must fit in :max_bytes")
 
-    if not is_nil(idle_min) and not is_nil(idle_max) and idle_min > idle_max,
+    if above?(idle_min, idle_max),
       do: bad!(":awake :cell_idle_timeout_ms_min must not exceed :cell_idle_timeout_ms_max")
 
-    if (not is_nil(idle_min) and idle_timeout_ms < idle_min) or
-         (not is_nil(idle_max) and idle_timeout_ms > idle_max),
-       do: bad!(":idle_timeout_ms must be within :awake :cell_idle_timeout_ms_min and _max")
+    if above?(idle_min, idle_timeout_ms) or above?(idle_timeout_ms, idle_max),
+      do: bad!(":idle_timeout_ms must be within :awake :cell_idle_timeout_ms_min and _max")
 
     :ok
   end
+
+  # Every value of the keyword list is `nil` or a positive integer.
+  defp nil_or_pos!(values, label) do
+    for {key, value} <- values,
+        not (is_nil(value) or (is_integer(value) and value > 0)),
+        do: bad!("#{label} #{inspect(key)} must be nil or a positive integer")
+
+    :ok
+  end
+
+  # `a > b` where `nil` is no bound.
+  defp above?(nil, _b), do: false
+  defp above?(_a, nil), do: false
+  defp above?(a, b), do: a > b
 
   # The default is 512 bytes by 16 slots. Both `nil` leave SQLite's own
   # lookaside memory (1200 bytes by 40 slots) on every connection. Otherwise both are set: `0` in either gives
@@ -1481,14 +1579,26 @@ defmodule Alambique.Config do
 
   def lookaside_error(bytes, count) do
     cond do
-      not (is_integer(bytes) and is_integer(count) and bytes >= 0 and count >= 0) ->
+      not lookaside_ints?(bytes, count) ->
         ":awake :lookaside_bytes and :lookaside_count must be set together, non-negative integers"
 
-      bytes > 0 and count > 0 and
-          not (bytes > 8 and rem(bytes, 8) == 0 and bytes <= @lookaside_max_slot) ->
+      bytes > 0 and count > 0 ->
+        lookaside_size_error(bytes, count)
+
+      true ->
+        nil
+    end
+  end
+
+  defp lookaside_ints?(bytes, count),
+    do: is_integer(bytes) and is_integer(count) and bytes >= 0 and count >= 0
+
+  defp lookaside_size_error(bytes, count) do
+    cond do
+      not (bytes > 8 and rem(bytes, 8) == 0 and bytes <= @lookaside_max_slot) ->
         ":awake :lookaside_bytes must be 0 or a multiple of 8 from 16 up to #{@lookaside_max_slot}"
 
-      bytes > 0 and count > 0 and bytes * count > @lookaside_max_bytes ->
+      bytes * count > @lookaside_max_bytes ->
         ":awake :lookaside_bytes times :lookaside_count must not exceed #{@lookaside_max_bytes}"
 
       true ->
@@ -1735,34 +1845,31 @@ defmodule Alambique.Config do
   """
   @spec validate_migrations(term) :: {:ok, [{pos_integer, term}]} | {:error, String.t()}
   def validate_migrations(list) when is_list(list) do
-    valid? =
-      Enum.all?(list, fn
-        {v, sql} when is_integer(v) and v > 0 and is_binary(sql) -> true
-        {v, fun} when is_integer(v) and v > 0 and is_function(fun, 1) -> true
-        _ -> false
-      end)
+    if Enum.all?(list, &migration?/1),
+      do: list |> Enum.sort_by(&elem(&1, 0)) |> check_versions(),
+      else: {:error, ":migrations must be {version, sql | fun/1} with positive integer versions"}
+  end
 
-    # An entry that is not a tuple has no version to read.
-    entries = if valid?, do: list, else: []
-    versions = Enum.map(entries, &elem(&1, 0))
-    sorted = Enum.sort_by(entries, &elem(&1, 0))
+  def validate_migrations(_), do: {:error, ":migrations must be a list"}
+
+  defp migration?({v, sql}) when is_integer(v) and v > 0 and is_binary(sql), do: true
+  defp migration?({v, fun}) when is_integer(v) and v > 0 and is_function(fun, 1), do: true
+  defp migration?(_), do: false
+
+  defp check_versions(sorted) do
+    versions = Enum.map(sorted, &elem(&1, 0))
 
     cond do
-      not valid? ->
-        {:error, ":migrations must be {version, sql | fun/1} with positive integer versions"}
-
       versions != Enum.uniq(versions) ->
         {:error, ":migrations has a duplicate version"}
 
-      Enum.map(sorted, &elem(&1, 0)) != Enum.to_list(1..length(sorted)//1) ->
+      versions != Enum.to_list(1..length(sorted)//1) ->
         {:error, ":migrations must have contiguous versions starting at 1"}
 
       true ->
         {:ok, sorted}
     end
   end
-
-  def validate_migrations(_), do: {:error, ":migrations must be a list"}
 
   @doc """
   The migrations of `cell`: the instance's list, or the result of
