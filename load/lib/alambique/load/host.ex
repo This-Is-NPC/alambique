@@ -85,8 +85,9 @@ defmodule Alambique.Load.Host do
   @doc "The state letter of /proc/<pid>/task/<tid>/stat text (the field after the command in parentheses)."
   @spec task_state(String.t()) :: String.t()
   def task_state(stat) do
-    [_, state] = Regex.run(~r/^.*\) (\S)/s, stat)
-    state
+    case Regex.run(~r/^.*\) (\S)/s, stat) do
+      [_, state] when is_binary(state) -> state
+    end
   end
 
   @doc "Whether a task in `state` counts in the load average."

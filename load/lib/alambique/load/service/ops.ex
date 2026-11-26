@@ -120,9 +120,15 @@ defmodule Alambique.Load.Service.Ops do
   @doc "Waits until no cell is awake, up to `timeout_ms`."
   def await_asleep(timeout_ms) do
     cond do
-      awake() == 0 -> :ok
-      timeout_ms <= 0 -> {:error, {:still_awake, awake()}}
-      true -> Process.sleep(100) && await_asleep(timeout_ms - 100)
+      awake() == 0 ->
+        :ok
+
+      timeout_ms <= 0 ->
+        {:error, {:still_awake, awake()}}
+
+      true ->
+        Process.sleep(100)
+        await_asleep(timeout_ms - 100)
     end
   end
 

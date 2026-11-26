@@ -88,9 +88,15 @@ defmodule Alambique.Load.OpenLoop do
 
   defp drain(ctx, deadline) do
     cond do
-      :counters.get(ctx.counters, 1) == 0 -> nil
-      now() > deadline -> nil
-      true -> Process.sleep(20) && drain(ctx, deadline)
+      :counters.get(ctx.counters, 1) == 0 ->
+        nil
+
+      now() > deadline ->
+        nil
+
+      true ->
+        Process.sleep(20)
+        drain(ctx, deadline)
     end
   end
 

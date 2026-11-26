@@ -689,9 +689,15 @@ defmodule Alambique.Load.Driver do
 
   defp connect(node, attempts \\ 240) do
     cond do
-      Node.connect(node) == true -> :ok
-      attempts == 0 -> raise "cannot connect to #{node}"
-      true -> Process.sleep(500) && connect(node, attempts - 1)
+      Node.connect(node) == true ->
+        :ok
+
+      attempts == 0 ->
+        raise "cannot connect to #{node}"
+
+      true ->
+        Process.sleep(500)
+        connect(node, attempts - 1)
     end
   end
 
