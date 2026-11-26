@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Known vulnerabilities and retired packages in the Mix dependencies.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$root"
+
+MIX_ENV=test mix deps.audit
+MIX_ENV=test mix hex.audit

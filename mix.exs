@@ -9,6 +9,7 @@ defmodule Alambique.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
+      dialyzer: dialyzer(),
       test_coverage: test_coverage(),
       description:
         "SQLite databases that wake on demand and replicate to S3-compatible storage, " <>
@@ -61,6 +62,17 @@ defmodule Alambique.MixProject do
     ]
   end
 
+  # PLTs live in _build, so they are cached with it. :mix is for the Mix tasks
+  # in lib/alambique/ops.
+  defp dialyzer do
+    [
+      plt_local_path: "_build/plts",
+      plt_core_path: "_build/plts",
+      plt_add_apps: [:mix],
+      flags: [:unmatched_returns, :error_handling, :extra_return, :missing_return]
+    ]
+  end
+
   def application do
     [extra_applications: [:logger | test_applications(Mix.env())]] ++ service(Mix.env())
   end
@@ -90,7 +102,10 @@ defmodule Alambique.MixProject do
       {:broadway, "~> 1.1", optional: true},
       {:stream_data, "~> 1.1", only: :test},
       {:recon, "~> 2.5", only: :test},
-      {:telemetry_poller, "~> 1.1", optional: true}
+      {:telemetry_poller, "~> 1.1", optional: true},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false}
     ]
   end
 end

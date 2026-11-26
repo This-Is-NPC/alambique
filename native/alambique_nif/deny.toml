@@ -1,0 +1,35 @@
+# cargo-deny, run by scripts/check-deny on the NIF crate and on its fuzz crate
+# (each has its own Cargo.lock).
+
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+unmaintained = "all"
+
+[licenses]
+# The licences of the dependency tree (the NIF and the fuzz crate).
+allow = [
+  "MIT",
+  "MIT-0",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "ISC",
+  "Unicode-3.0",
+  "NCSA",
+  "CC0-1.0",
+  "LGPL-2.1-or-later", # one arm of the "MIT OR Apache-2.0 OR LGPL-2.1-or-later" of a crate
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

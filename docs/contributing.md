@@ -141,12 +141,20 @@ order:
    warning), `mix format --check-formatted`, `cargo fmt --check` for
    `native/alambique_nif` and its `fuzz` crate, and the README marker check
    (`scripts/readme-check`)
-2. `cargo clippy --all-targets -- -D warnings` on the NIF
-3. the documentation link check (`mise run check:links`): relative links and
+2. `cargo clippy --all-targets -- -D warnings` on the NIF; the lints denied
+   beyond the defaults are in `[lints.clippy]` of its `Cargo.toml`, their
+   thresholds in `clippy.toml`
+3. the supply chain: `mise run check:deny` (cargo-deny on the NIF and fuzz
+   crates, `native/alambique_nif/deny.toml`) and `mise run check:audit` (`mix
+   deps.audit` and `mix hex.audit`)
+4. `mise run check:elixir`: `mix credo --strict` (`.credo.exs`), Dialyzer
+   (flags in `mix.exs`, PLTs in `_build/plts`) and `mix xref graph --format
+   cycles --label compile-connected --fail-above 0`
+5. the documentation link check (`mise run check:links`): relative links and
    `#anchors` in `README.md`, `CHANGELOG.md`, `AGENTS.md` and `docs/*.md`
-4. `mise run test`, the default suite
+6. `mise run test`, the default suite
 
-`mise run check:static` runs steps 1 to 3 only: it is the `gate` job, because
+`mise run check:static` runs steps 1 to 5 only: it is the `gate` job, because
 CI runs the suite in the coverage parts. Run `mise run check` by hand when you
 want the whole result on your machine; a loaded machine
 makes timing tests in the suite fail, so rerun the failing file before
