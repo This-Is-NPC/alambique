@@ -101,8 +101,10 @@ call.
 **Settings.** The load data (`Alambique.Replication.NativeOptions`) comes from
 the application environment when the NIF loads; the module loads the
 application first, so that its environment is readable then.
-`Native.stats/0` reports what the library loaded with, and a setting that did
-not reach the load keeps the defaults, with the arena on.
+`Native.stats/0` reports what the library loaded with. A release started with
+`bin/<app> start` loads the library before it reads `config/runtime.exs`, so
+the settings go in `config/config.exs` (the release's `sys.config`); a setting
+that did not reach the load keeps the defaults, with the arena on.
 
 **Lookaside.** `sqlite3_db_config(SQLITE_DBCONFIG_LOOKASIDE)` runs right after
 the open, before any statement, with the cell's `awake.lookaside_bytes` and

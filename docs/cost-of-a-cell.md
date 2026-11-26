@@ -194,8 +194,12 @@ process. With the arena, the page-cache blocks of each connection come from a
 range of address space that the library reserves at load, and a trim thread
 returns the pages of free blocks to the kernel (`madvise` with
 `MADV_DONTNEED`). The settings are read when the library loads, before any
-cell, and cannot change while the node runs; set them in `config/runtime.exs`
-or `config/config.exs`:
+cell, and cannot change while the node runs. Set them in `config/config.exs`,
+which a release carries in its `sys.config`. A release started with
+`bin/<app> start` loads the library before it reads `config/runtime.exs`, so
+the arena settings there are ignored: that was observed with a release whose
+`runtime.exs` set `enabled: false` and whose arena was on (`bin/<app> eval`
+and `mix run` read it earlier). For example:
 
 ```elixir
 config :alambique, :page_arena,
