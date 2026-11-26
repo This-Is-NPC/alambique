@@ -69,7 +69,7 @@ defmodule Alambique.ReplicationHelpers do
   def dump_file(path) do
     {:ok, conn} = Sqlite.open(path, readonly: true)
     result = dump(conn)
-    Sqlite.close(conn)
+    :ok = Sqlite.close(conn)
     result
   end
 

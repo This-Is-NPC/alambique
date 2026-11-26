@@ -466,12 +466,13 @@ defmodule AlambiqueTestkit.Cluster do
       {:ok, _} = Application.ensure_all_started(:alambique)
       :logger.set_primary_config(:level, :error)
 
-      :telemetry.attach_many(
-        {__MODULE__, name},
-        events,
-        &__MODULE__.relay/4,
-        {collector, name}
-      )
+      :ok =
+        :telemetry.attach_many(
+          {__MODULE__, name},
+          events,
+          &__MODULE__.relay/4,
+          {collector, name}
+        )
 
       parent = self()
 

@@ -42,8 +42,8 @@ defmodule Alambique.Load.Measures.Wakes do
          :ok <- fits(ctx, needed, shmem_mb),
          :ok <- populate(ctx, needed),
          :ok <- asleep(ctx) do
-      remember_cell_bytes()
-      if mode() == "cold", do: drop_local(ctx, needed)
+      :ok = remember_cell_bytes()
+      :ok = drop_local(ctx, needed, mode())
       {:ok, offsets}
     end
   end
@@ -56,7 +56,11 @@ defmodule Alambique.Load.Measures.Wakes do
   end
 
   defp fits(ctx, needed, shmem_mb) do
-    State.get(:data_base_mb) || State.put(:data_base_mb, shmem_mb)
+    case State.get(:data_base_mb) do
+      nil -> State.put(:data_base_mb, shmem_mb)
+      _base -> :ok
+    end
+
     fresh = max(needed - State.get({:populated, "w"}, 0), 0)
     per_cell = State.get(:cell_bytes, Config.workload("cell_bytes"))
     data_mb = Config.get(["data_mb"])
@@ -117,19 +121,27 @@ defmodule Alambique.Load.Measures.Wakes do
 
   # Bytes one asleep cell takes, from the data tmpfs now.
   defp remember_cell_bytes do
-    with {:ok, shmem_mb} <- data_used_mb() do
-      populated = State.get({:populated, "w"}, 0)
-      base_mb = State.get(:data_base_mb, 0)
-      State.put(:cell_bytes, Capacity.cell_bytes(shmem_mb, base_mb, populated, 0))
+    case data_used_mb() do
+      {:ok, shmem_mb} ->
+        populated = State.get({:populated, "w"}, 0)
+        base_mb = State.get(:data_base_mb, 0)
+        State.put(:cell_bytes, Capacity.cell_bytes(shmem_mb, base_mb, populated, 0))
+
+      {:invalid, _reason, _extra} ->
+        :ok
     end
   end
 
-  defp drop_local(ctx, needed) do
+  defp drop_local(ctx, needed, "cold") do
     cells = for i <- 1..needed, do: Measure.cell("w", i)
 
     for chunk <- Enum.chunk_every(cells, 1_000),
         do: :ok = Measure.call(ctx, :drop_local, [chunk])
+
+    :ok
   end
+
+  defp drop_local(_ctx, _needed, _mode), do: :ok
 
   def run(ctx, _level, offsets) do
     result =
