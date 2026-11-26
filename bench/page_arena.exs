@@ -11,8 +11,8 @@
 #   release    Share of the memory a shrink frees that leaves the process, for
 #              connections filled in turns (interleaved) or one at a time
 #              (sequential), when 50, 75 and 90% of them shrink to
-#              idle_cache_kib 64 and 0. Memory is the cgroup's memory.current,
-#              else the RSS of the VM.
+#              idle_cache_kib 64 and 0. Memory is the RSS of the VM (the cgroup's
+#              memory.current with ALAMBIQUE_BENCH_MEMORY=cgroup).
 #   hot        Latency of a hot connection's point reads (p50, p99, max) while
 #              other connections shrink and refill, against the same without.
 #   miss       Page cache misses and scan time of a database above and below
@@ -45,9 +45,12 @@ defmodule Bench do
 
   defp stats, do: NativeStats.read()
 
-  # The cgroup of the VM, else its RSS, in bytes.
+  # The resident memory of the VM in bytes: its RSS (anonymous and file pages
+  # it maps), or its cgroup's memory.current with ALAMBIQUE_BENCH_MEMORY=cgroup,
+  # which also counts the page cache and files on a RAM disk.
   def memory do
-    with {:ok, text} <- File.read("/proc/self/cgroup"),
+    with "cgroup" <- System.get_env("ALAMBIQUE_BENCH_MEMORY"),
+         {:ok, text} <- File.read("/proc/self/cgroup"),
          [_, path] <- Regex.run(~r/^0::(.*)$/m, text),
          {:ok, current} <- File.read("/sys/fs/cgroup#{path}/memory.current") do
       current |> String.trim() |> String.to_integer()
@@ -95,6 +98,8 @@ defmodule Bench do
   # a page cache that holds it all.
   def open_db(dir, name, kib, opts \\ []) do
     {:ok, conn} = Sqlite.open(Path.join(dir, name), opts)
+    # The databases are scratch: no fsync, so a disk does not set the pace.
+    :ok = Sqlite.execute(conn, "PRAGMA synchronous = OFF")
     :ok = Sqlite.execute(conn, "PRAGMA cache_size = -#{kib * 2}")
     :ok = Sqlite.execute(conn, "CREATE TABLE IF NOT EXISTS m (id INTEGER PRIMARY KEY, b BLOB)")
     conn
@@ -237,11 +242,14 @@ defmodule Bench do
     Enum.each(conns, &(:ok = Sqlite.assign(&1, self())))
   end
 
-  # Shrinks and refills the connections in turn until `stop`.
+  # Shrinks every connection to nothing, gives the trims a moment, and fills
+  # them again, until `stop`: the memory of a node whose cells go idle together.
   defp churn(conns, kib, stop) do
     if System.monotonic_time(:millisecond) < stop do
+      Enum.each(conns, &shrink(&1, 0))
+      Process.sleep(300)
+
       for c <- conns, System.monotonic_time(:millisecond) < stop do
-        shrink(c, 0)
         shrink(c, kib * 2)
         scan(c)
       end
@@ -443,6 +451,18 @@ defmodule Bench do
     end
   end
 
+  # A call refused for load (`:busy`, `:overloaded`) is tried again.
+  defp retry(fun, left \\ 200) do
+    case fun.() do
+      {:error, reason} when reason in [:busy, :overloaded] and left > 0 ->
+        Process.sleep(25)
+        retry(fun, left - 1)
+
+      other ->
+        other
+    end
+  end
+
   # Waits until each cell of `ids` has done what `idle` asks of an idle cell
   # (its connection closed, its cache shrunk), so the memory is measured after
   # it; a cell that never does fails the case.
@@ -478,14 +498,16 @@ defmodule Bench do
     |> Task.async_stream(
       fn id ->
         {:ok, _} =
-          Alambique.execute(
-            name,
-            id,
-            "WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 160) " <>
-              "INSERT INTO t SELECT i, zeroblob(3000) FROM s"
-          )
+          retry(fn ->
+            Alambique.execute(
+              name,
+              id,
+              "WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 160) " <>
+                "INSERT INTO t SELECT i, zeroblob(3000) FROM s"
+            )
+          end)
 
-        {:ok, _} = Alambique.query(name, id, "SELECT sum(length(v)) FROM t")
+        {:ok, _} = retry(fn -> Alambique.query(name, id, "SELECT sum(length(v)) FROM t") end)
       end,
       max_concurrency: 16,
       timeout: :infinity
