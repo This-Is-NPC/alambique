@@ -7,6 +7,9 @@ defmodule Alambique.NativeOptionsTest do
   alias Alambique.Replication.Native
 
   setup do
+    # The library loads, and reads the settings, at its first call: load it
+    # before a test changes them.
+    _ = Native.stats()
     saved = Application.get_env(:alambique, :page_arena)
 
     on_exit(fn ->
