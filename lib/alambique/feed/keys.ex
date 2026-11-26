@@ -5,6 +5,8 @@ defmodule Alambique.Feed.Keys do
   # flat, time-ordered prefix, so listing after a stored key reads only newer
   # objects and a cell always writes to the same shard.
 
+  alias Alambique.Replication.Keys, as: ReplicationKeys
+
   @default_shards 16
 
   @doc "Shards per location unless configured otherwise (design §19)."
@@ -25,7 +27,7 @@ defmodule Alambique.Feed.Keys do
   def object(prefix, shards, cell, time, txid),
     do:
       "#{prefix(prefix, shard(cell, shards))}#{time(time)}-" <>
-        "#{Alambique.Replication.Keys.hex(txid)}-#{cell}"
+        "#{ReplicationKeys.hex(txid)}-#{cell}"
 
   @doc "A key that sorts after every object of `time` in a shard and before every later one."
   @spec after_time(String.t(), non_neg_integer, integer) :: String.t()
