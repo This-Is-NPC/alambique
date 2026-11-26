@@ -1,28 +1,25 @@
 //! CRC-64/ISO as implemented by Go's `hash/crc64` with `crc64.ISO`.
 
+use std::sync::LazyLock;
+
 const POLY: u64 = 0xD800_0000_0000_0000;
 
-const fn make_table() -> [u64; 256] {
-    let mut table = [0u64; 256];
-    let mut i = 0;
-    while i < 256 {
-        let mut crc = i as u64;
-        let mut j = 0;
-        while j < 8 {
-            crc = if crc & 1 == 1 {
-                (crc >> 1) ^ POLY
-            } else {
-                crc >> 1
-            };
-            j += 1;
-        }
-        table[i] = crc;
-        i += 1;
+/// The table entry of byte `i`.
+const fn entry(i: u64) -> u64 {
+    let mut crc = i;
+    let mut j = 0;
+    while j < 8 {
+        crc = if crc & 1 == 1 {
+            (crc >> 1) ^ POLY
+        } else {
+            crc >> 1
+        };
+        j += 1;
     }
-    table
+    crc
 }
 
-static TABLE: [u64; 256] = make_table();
+static TABLE: LazyLock<[u64; 256]> = LazyLock::new(|| std::array::from_fn(|i| entry(i as u64)));
 
 /// Streaming CRC-64/ISO hasher.
 #[derive(Clone)]
@@ -38,9 +35,13 @@ impl Default for Crc64 {
 
 impl Crc64 {
     pub fn update(&mut self, data: &[u8]) {
+        let table = &*TABLE;
         let mut crc = self.state;
         for &b in data {
-            crc = TABLE[((crc as u8) ^ b) as usize] ^ (crc >> 8);
+            let low = (crc & 0xff) as u8 ^ b;
+            // The table has an entry for every byte.
+            let entry = table.get(usize::from(low)).copied().unwrap_or_default();
+            crc = entry ^ (crc >> 8);
         }
         self.state = crc;
     }
