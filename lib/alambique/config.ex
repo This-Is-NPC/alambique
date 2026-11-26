@@ -193,7 +193,8 @@ defmodule Alambique.Config do
     miss_pages: 16,
     verify_bytes: 1_048_576,
     verify_writes: true,
-    verify_reads: false
+    verify_reads: false,
+    mode: :ranged
   ]
 
   @query_defaults [
@@ -637,6 +638,16 @@ defmodule Alambique.Config do
       max_control_bytes: config.read_limits.max_control_bytes
     )
   end
+
+  @doc """
+  How the cell wakes from the store: `:ranged` (a lazy restore, the file is
+  served while pages arrive) or `:whole` (the whole chain is read before the
+  first statement). The one place that decides it; today it is the setting of
+  the instance.
+  """
+  @spec lazy_mode(t, String.t()) :: :ranged | :whole
+  def lazy_mode(%{lazy_restore: nil}, _cell), do: :whole
+  def lazy_mode(%{lazy_restore: %{mode: mode}}, _cell), do: mode
 
   @doc "Replication context for the cell data in `location`."
   @spec repl_ctx(t, Location.t()) :: Replication.ctx()
@@ -1153,7 +1164,7 @@ defmodule Alambique.Config do
     opts = checked_keyword!(:lazy_restore, opts, Keyword.keys(@lazy_defaults))
     merged = Keyword.merge(@lazy_defaults, opts)
 
-    for {key, value} <- Keyword.drop(merged, [:verify_writes, :verify_reads]),
+    for {key, value} <- Keyword.drop(merged, [:verify_writes, :verify_reads, :mode]),
         not (is_integer(value) and
                (value > 0 or (key in [:min_bytes, :verify_bytes] and value == 0))),
         do: bad!(":lazy_restore #{inspect(key)} must be a positive integer")
@@ -1161,6 +1172,9 @@ defmodule Alambique.Config do
     for key <- [:verify_writes, :verify_reads],
         not is_boolean(merged[key]),
         do: bad!(":lazy_restore #{inspect(key)} must be a boolean")
+
+    unless merged[:mode] in [:ranged, :whole],
+      do: bad!(":lazy_restore :mode must be :ranged or :whole")
 
     Map.new(merged)
   end

@@ -228,7 +228,10 @@ defmodule Alambique do
       `:op_timeout_ms` plus one second. `true` keeps reads off the schedulers
       on a node with one or two, and gives up the early reads of a lazy wake).
       Replica reads and `Alambique.Query` read their own downloaded files, so
-      the option does not apply to them.
+      the option does not apply to them. `:mode` is `:ranged` (default: the
+      lazy restore above) or `:whole`: the cell reads its whole chain before
+      its first statement, as with `false`, and the other options of the list
+      then do not apply to it.
     * `:drain` - how `drain/2` and the stop of the instance hibernate the cells
       (design §8): a keyword list with `:concurrency` (cells hibernating at
       once, default 64), `:timeout_ms` (per cell, default 15 000), `:deadline_ms`
