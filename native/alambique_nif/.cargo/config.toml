@@ -1,9 +1,10 @@
 # Build options of the bundled SQLite (libsqlite3-sys reads LIBSQLITE3_FLAGS).
 # No default foreign keys and no double-quoted string literals, so cell
 # databases behave the same whatever SQLite the host would link.
-# -USQLITE_ENABLE_MEMORY_MANAGEMENT gives each connection its own page cache
-# (the NIF refuses to load otherwise). `force` keeps a variable already set in
+# libsqlite3-sys does not define SQLITE_ENABLE_MEMORY_MANAGEMENT, so each
+# connection keeps its own page cache (the NIF refuses to load otherwise).
+# `force` keeps a variable already set in
 # the environment from replacing the flags. Cargo reads this file only for a
 # build started inside this directory: run every cargo command from here.
 [env]
-LIBSQLITE3_FLAGS = { value = "-USQLITE_DEFAULT_FOREIGN_KEYS -USQLITE_ENABLE_MEMORY_MANAGEMENT -DSQLITE_DQS=0 -DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_FTS4 -DSQLITE_ENABLE_GEOPOLY", force = true }
+LIBSQLITE3_FLAGS = { value = "-USQLITE_DEFAULT_FOREIGN_KEYS -DSQLITE_DQS=0 -DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_FTS4 -DSQLITE_ENABLE_GEOPOLY", force = true }
