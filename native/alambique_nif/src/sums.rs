@@ -99,7 +99,7 @@ impl Sums {
             .fold(0, |a, s| a ^ s)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fuzzing"))]
     pub fn to_vec(&self) -> Vec<u64> {
         self.chunks
             .iter()
