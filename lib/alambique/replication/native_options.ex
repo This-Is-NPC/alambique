@@ -13,6 +13,8 @@ defmodule Alambique.Replication.NativeOptions do
   #     (default 1024).
   #   * `keep_kib` - free memory a trim leaves alone (default 4096).
   #   * `max_trim_kib` - most a trim releases at once (default 4096).
+  #   * `max_regions` - connections that get extents of their own, at least 1
+  #     (default 65536); the others, and a value of 1, share one region.
 
   @defaults [
     enabled: false,
@@ -20,7 +22,8 @@ defmodule Alambique.Replication.NativeOptions do
     extent_kib: 64,
     trim_after_kib: 1024,
     keep_kib: 4096,
-    max_trim_kib: 4096
+    max_trim_kib: 4096,
+    max_regions: 65_536
   ]
 
   @spec load_data() :: map
@@ -56,6 +59,7 @@ defmodule Alambique.Replication.NativeOptions do
     for key <- [:trim_after_kib, :keep_kib],
         do: check!(opts, key, &(&1 >= 0), "a non-negative integer")
 
+    check!(opts, :max_regions, &(&1 >= 1), "a positive integer")
     check!(opts, :max_trim_kib, &(&1 > 0), "a positive integer")
   end
 

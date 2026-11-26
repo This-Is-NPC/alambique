@@ -28,7 +28,8 @@ defmodule Alambique.NativeOptionsTest do
              extent_kib: 64,
              trim_after_kib: 1024,
              keep_kib: 4096,
-             max_trim_kib: 4096
+             max_trim_kib: 4096,
+             max_regions: 65_536
            }
   end
 
@@ -45,6 +46,7 @@ defmodule Alambique.NativeOptionsTest do
           {[extent_kib: 2048], ":extent_kib must be a multiple of 4 up to 1024"},
           {[keep_kib: -1], ":keep_kib must be a non-negative integer"},
           {[max_trim_kib: 0], ":max_trim_kib must be a positive integer"},
+          {[max_regions: 0], ":max_regions must be a positive integer"},
           {[reserved: 1], "unknown :page_arena settings: [:reserved]"}
         ] do
       assert_raise ArgumentError, ~r/#{Regex.escape(message)}/, fn -> load(opts) end
