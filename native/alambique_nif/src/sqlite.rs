@@ -304,8 +304,10 @@ impl Drop for Conn {
                 unsafe { close(db) };
             }
             self.release_held();
-            // No `Timer` runs here: the region closes with the fields, and
-            // what the close freed is trimmed now.
+            // No `Timer` runs here. The region closes before the trim is
+            // woken: a trim that has released the memory of this connection
+            // finds its region gone too, as `shut` leaves it.
+            self.region.close();
             crate::alloc::poke_trim();
         });
     }
