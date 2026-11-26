@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Static analysis of the Elixir code: Credo (--strict, .credo.exs), Dialyzer
+# (flags in mix.exs, PLTs under _build/plts) and compile-connected dependency
+# cycles. Runs all three and fails if any failed.
+set -uo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$root"
+export MIX_ENV=test
+
+status=0
+step() { printf '\n==> %s\n' "$*"; }
+
+step "credo"
+mix credo --strict || status=1
+
+step "dialyzer"
+mix dialyzer || status=1
+
+step "xref cycles"
+mix xref graph --format cycles --label compile-connected --fail-above 0 || status=1
+
+exit "$status"

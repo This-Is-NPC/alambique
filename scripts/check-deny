@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# cargo-deny (advisories, licenses, bans, sources; native/alambique_nif/deny.toml)
+# on the NIF crate and on its fuzz crate, which has its own Cargo.lock.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$root/native/alambique_nif"
+
+cargo deny --manifest-path Cargo.toml check
+cargo deny --manifest-path fuzz/Cargo.toml check

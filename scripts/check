@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # The full gate behind `mise run check` and scripts/local-check. Runs, in
 # order: scripts/quick-check --force (forced warnings-as-errors compile, so a
-# stale _build cannot hide a warning, and format checks), clippy, the docs link
-# check and the default suite. Stops at the first failure.
+# stale _build cannot hide a warning, and format checks), clippy, cargo-deny and
+# the Mix audits, Credo, Dialyzer and the cycle check, the docs link check and
+# the default suite. Stops at the first failure.
 #
 #   ALAMBIQUE_CHECK_TESTS=0     skip the default suite: the static checks that
 #                               the `gate` job of CI runs (`mise run
@@ -24,6 +25,13 @@ step() { printf '\n==> %s\n' "$*"; }
 step "cargo clippy"
 # From the crate directory: its .cargo/config.toml sets the SQLite flags.
 (cd native/alambique_nif && cargo clippy --all-targets -- -D warnings)
+
+step "supply chain"
+"$root/scripts/check-deny"
+"$root/scripts/check-audit"
+
+step "elixir static analysis"
+"$root/scripts/check-elixir-static"
 
 step "docs links"
 "$root/scripts/link-check"

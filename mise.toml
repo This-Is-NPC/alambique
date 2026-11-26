@@ -5,6 +5,7 @@ rust = { version = "1.97.1", components = "rustfmt,clippy,llvm-tools" }
 java = "openjdk-17.0.2"
 "aqua:taiki-e/cargo-llvm-cov" = "0.9.1"
 "aqua:benbjohnson/litestream" = "0.5.18"
+"aqua:EmbarkStudios/cargo-deny" = "0.22.1"
 
 [env]
 # The nightly toolchain of the native hardening tasks (Miri, sanitizers and
@@ -40,6 +41,18 @@ run = "scripts/check"
 description = "Run the gate without the default suite, the static part the CI gate job runs: forced warnings-as-errors compile, format checks, clippy and docs links"
 env = { ALAMBIQUE_CHECK_TESTS = "0" }
 run = "scripts/check"
+
+[tasks."check:deny"]
+description = "Run cargo-deny (advisories, licenses, bans, sources) on the NIF and fuzz crates (native/alambique_nif/deny.toml)"
+run = "scripts/check-deny"
+
+[tasks."check:audit"]
+description = "Audit the Mix dependencies: mix deps.audit and mix hex.audit"
+run = "scripts/check-audit"
+
+[tasks."check:elixir"]
+description = "Run Credo --strict, Dialyzer and the compile-connected cycle check on the Elixir code"
+run = "scripts/check-elixir-static"
 
 [tasks."check:links"]
 description = "Check the relative links and anchors of README.md, CHANGELOG.md, AGENTS.md and docs/*.md"
