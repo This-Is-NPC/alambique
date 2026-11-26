@@ -1742,7 +1742,7 @@ fn finish_transaction<'a>(
     token: u64,
     commit: bool,
 ) -> Term<'a> {
-    let _t = crate::stats::SQLITE_CALLS.time_for(&conn);
+    let _t = crate::stats::SQLITE_CALLS.time_for(conn);
     let run = || -> Outcome<'a> {
         with_db(conn, |db| {
             let ctl = &conn.control;

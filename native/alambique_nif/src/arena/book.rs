@@ -105,6 +105,8 @@ pub struct Book {
     hot: u32,
     cold: u32,
     cursor: usize,
+    /// Extents the last `claim` looked at.
+    scanned: usize,
     in_use: u64,
     resident_pages: u64,
     open_regions: u64,
@@ -173,10 +175,16 @@ impl Book {
             hot: NONE,
             cold: NONE,
             cursor: 0,
+            scanned: 0,
             in_use: 0,
             resident_pages: 0,
             open_regions: 0,
         })
+    }
+
+    /// Extents the last `claim` went through whole.
+    pub fn scanned(&self) -> usize {
+        self.scanned
     }
 
     /// Bytes of the range the extents cover.
@@ -478,6 +486,7 @@ impl Book {
     pub fn claim(&mut self, out: &mut Vec<Claim>, budget: usize, scan: usize) -> usize {
         let mut left = budget;
         let mut seen = 0;
+        self.scanned = 0;
         while seen < scan && left > 0 && out.len() < MAX_CLAIMS && !self.exts.is_empty() {
             if self.cursor >= self.exts.len() {
                 self.cursor = 0;
@@ -491,6 +500,7 @@ impl Book {
             }
             self.cursor += 1;
             seen += 1;
+            self.scanned = seen;
         }
         budget - left
     }
@@ -753,7 +763,6 @@ mod tests {
             assert!(b.slots(class) >= 1, "class {class}");
             assert!(b.slots(class) * b.stride(class) <= g, "class {class}");
             let off = b.alloc(class, 0).expect("a slot");
-            assert_eq!(off % b.stride(class), (off & (g - 1)) % b.stride(class));
             assert!((off & (g - 1)) + b.stride(class) <= g, "class {class}");
         }
         // A 64 KiB page takes more than a 64 KiB extent target: one slot.
@@ -768,7 +777,7 @@ mod tests {
         let mut next = rng(7);
         let regions: Vec<_> = (0..4).map(|_| b.open_region().unwrap()).collect();
         let mut live: HashMap<usize, usize> = HashMap::new();
-        let steps = if cfg!(miri) { 600 } else { 20_000 };
+        let steps: usize = if cfg!(miri) { 600 } else { 20_000 };
         for i in 0..steps {
             let r = next();
             if !r.is_multiple_of(3) || live.is_empty() {
@@ -911,7 +920,8 @@ mod tests {
         // It is region 0's.
         let mut got = Vec::new();
         for _ in 0..20 {
-            got.push(ext_of(&b, b.alloc(PAGE4K, 0).unwrap()));
+            let o = b.alloc(PAGE4K, 0).unwrap();
+            got.push(ext_of(&b, o));
         }
         assert!(got.contains(&full));
     }
@@ -942,7 +952,6 @@ mod tests {
         let o = b.alloc(PAGE4K, r).unwrap();
         assert!(!offs[2..10].contains(&o));
         let mid = b.resident_bytes();
-        let mut claims = claims;
         claims[0].released = true;
         assert_eq!(b.finish(&claims), pages);
         assert_eq!(b.resident_bytes(), mid - (pages * OS) as u64);

@@ -668,11 +668,11 @@ mod tests {
     fn page_blocks_cost_no_call_to_the_heap_and_no_allocation() {
         let (_g, a) = hooks();
         let (heap_allocs, heap_frees) = (heap::ALLOCS.load(Relaxed), heap::FREES.load(Relaxed));
-        let mut blocks = Vec::with_capacity(8 * 40);
+        let mut blocks = Vec::with_capacity(arena::CLASSES * 40);
         let before = thread_allocs();
         let region = Region::open();
         let _in = RegionGuard::enter(region.slot());
-        for class in 0..CLASSES {
+        for class in 0..arena::CLASSES {
             for _ in 0..40 {
                 // SAFETY: SQLite's contract: a positive size.
                 let p = unsafe { x_malloc(page_block(class)) };
@@ -841,6 +841,7 @@ mod tests {
     // The crate's .cargo/config.toml sets the flag; a build started from
     // another directory would not read it.
     #[test]
+    #[cfg_attr(miri, ignore = "calls SQLite")]
     fn sqlite_is_built_without_memory_management() {
         // SAFETY: a NUL-terminated name.
         let used = unsafe { ffi::sqlite3_compileoption_used(c"ENABLE_MEMORY_MANAGEMENT".as_ptr()) };

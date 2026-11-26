@@ -47,7 +47,8 @@ pub struct Config {
 }
 
 pub struct Arena {
-    base: usize,
+    /// Start of the range, kept as a pointer so blocks derive from it.
+    base: *mut u8,
     range: usize,
     shift: u32,
     page: usize,
@@ -94,7 +95,7 @@ impl Arena {
         })
         .ok_or(io::ErrorKind::InvalidInput)?;
         let range = book.range_bytes();
-        let base = reserve(range)? as usize;
+        let base = reserve(range)?;
         Ok(Arena {
             base,
             range,
@@ -174,13 +175,13 @@ impl Arena {
 
     /// Whether `p` lies in the reserved range.
     pub fn contains(&self, p: *const u8) -> bool {
-        (p as usize).wrapping_sub(self.base) < self.range
+        (p as usize).wrapping_sub(self.base as usize) < self.range
     }
 
     /// The extent `p` lies in (tests).
     #[cfg(test)]
     pub fn extent_of(&self, p: *const u8) -> usize {
-        (p as usize - self.base) >> self.shift
+        (p as usize - self.base as usize) >> self.shift
     }
 
     /// A new region (one connection): its slot and its id, or `None` when
@@ -206,7 +207,7 @@ impl Arena {
         self.publish(&b);
         drop(b);
         match off {
-            Some(off) => (self.base + off) as *mut u8,
+            Some(off) => self.base.wrapping_add(off),
             None => {
                 self.fallbacks.fetch_add(1, Relaxed);
                 std::ptr::null_mut()
@@ -220,7 +221,7 @@ impl Arena {
     /// `p` came from `alloc` and is not used afterwards.
     pub unsafe fn free(&self, p: *mut u8) {
         let mut b = self.lock();
-        b.free(p as usize - self.base);
+        b.free(p as usize - self.base as usize);
         self.publish(&b);
     }
 
@@ -279,26 +280,27 @@ impl Arena {
         let (mut visited, mut freed) = (0, 0);
         while budget > 0 {
             claims.clear();
-            let (got, extents) = {
+            let (got, extents, seen) = {
                 let mut b = self.lock();
-                (b.claim(claims, budget.min(ROUND_PAGES), SCAN), b.extents())
+                let got = b.claim(claims, budget.min(ROUND_PAGES), SCAN);
+                (got, b.extents(), b.scanned())
             };
-            visited += SCAN;
+            visited += seen;
             if !claims.is_empty() {
                 for c in claims.iter_mut() {
-                    let at = self.base + ((c.ext as usize) << self.shift);
-                    let from = at + c.first_page as usize * self.page;
+                    let at = ((c.ext as usize) << self.shift) + c.first_page as usize * self.page;
+                    let from = self.base.wrapping_add(at);
                     let len = (c.end_page - c.first_page) as usize * self.page;
                     // SAFETY: whole OS pages inside slots that the claim took
                     // out of `alloc`'s reach; nothing uses them until `finish`.
-                    c.released = unsafe { sys::release(from as *mut u8, len) };
+                    c.released = unsafe { sys::release(from, len) };
                 }
                 let mut b = self.lock();
                 freed += b.finish(claims);
                 self.publish(&b);
             }
             budget -= got.min(budget);
-            if visited >= extents {
+            if visited >= extents || (got == 0 && seen == 0) {
                 break;
             }
         }
@@ -316,7 +318,7 @@ impl Arena {
 impl Drop for Arena {
     fn drop(&mut self) {
         // SAFETY: the range `new` reserved; tests do not use it afterwards.
-        unsafe { sys::unreserve(self.base as *mut u8, self.range) };
+        unsafe { sys::unreserve(self.base, self.range) };
     }
 }
 
@@ -366,7 +368,7 @@ mod tests {
     /// Resident bytes of the range as the kernel counts them.
     #[cfg(not(miri))]
     fn kernel_resident(a: &Arena) -> usize {
-        sys::resident(a.base as *mut u8, a.range)
+        sys::resident(a.base, a.range)
     }
 
     #[test]
@@ -440,7 +442,8 @@ mod tests {
         let (rb, _) = a.open_region().unwrap();
         let mut mine = Vec::new();
         let mut theirs = Vec::new();
-        for _ in 0..400 {
+        // Miri runs these byte by byte: fewer blocks, whole extents still.
+        for _ in 0..(if cfg!(miri) { 60 } else { 400 }) {
             mine.push(a.alloc(C4K, ra));
             theirs.push(a.alloc(C4K, rb));
         }
@@ -545,7 +548,9 @@ mod tests {
         c.max_trim = 64 * 4096;
         let a = arena(c);
         let (r, _) = a.open_region().unwrap();
-        let ps: Vec<_> = (0..14 * 40).map(|_| a.alloc(C4K, r)).collect();
+        let ps: Vec<_> = (0..14 * if cfg!(miri) { 10 } else { 40 })
+            .map(|_| a.alloc(C4K, r))
+            .collect();
         for &p in &ps {
             fill(p, strides()[C4K], 1);
             // SAFETY: from `alloc`, not used afterwards.
