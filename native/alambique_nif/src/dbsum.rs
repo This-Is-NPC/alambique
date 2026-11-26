@@ -9,7 +9,7 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 
 use crate::error::{fit, invalid, Error, Result};
-use crate::ltx::{self, lock_pgno, page_crc, Decoder, CHECKSUM_FLAG};
+use crate::ltx::{self, lock_pgno, page_crc, Decoder, Header, CHECKSUM_FLAG};
 
 /// Database checksum from per-page CRCs.
 pub fn fold(sums: &[u64]) -> u64 {
@@ -48,6 +48,40 @@ fn page_offset(pgno: u32, ps: u64) -> u64 {
 pub struct Applied {
     pub header: ltx::Header,
     pub post_apply: u64,
+}
+
+/// Writes the pages of `data` into `file`, then drops the pages past the new
+/// commit. Returns `acc` updated with the checksum change of every page.
+fn rewrite_pages(
+    file: &File,
+    data: &[u8],
+    header: &Header,
+    old_commit: u32,
+    mut acc: u64,
+) -> Result<u64> {
+    let ps = u64::from(header.page_size);
+    let lock = lock_pgno(header.page_size);
+    let mut dec = Decoder::new(data)?;
+    let psz: usize = fit(ps, "page size")?;
+    let mut buf = vec![0u8; psz];
+    let mut old = vec![0u8; psz];
+    while let Some(pgno) = dec.next_page(&mut buf)? {
+        if pgno <= old_commit {
+            file.read_exact_at(&mut old, page_offset(pgno, ps))?;
+            acc ^= page_crc(pgno, &old);
+        }
+        acc ^= page_crc(pgno, &buf);
+        file.write_all_at(&buf, page_offset(pgno, ps))?;
+    }
+    for pgno in header.commit.saturating_add(1)..=old_commit {
+        if pgno == lock {
+            continue;
+        }
+        file.read_exact_at(&mut old, page_offset(pgno, ps))?;
+        acc ^= page_crc(pgno, &old);
+    }
+    file.set_len(u64::from(header.commit) * ps)?;
+    Ok(acc)
 }
 
 /// Applies an LTX file to the database at `path`.
@@ -101,26 +135,7 @@ pub fn apply(path: &Path, data: &[u8], current: u64, page_size: u32) -> Result<A
         current & !CHECKSUM_FLAG
     };
 
-    let mut dec = Decoder::new(data)?;
-    let psz: usize = fit(ps, "page size")?;
-    let mut buf = vec![0u8; psz];
-    let mut old = vec![0u8; psz];
-    while let Some(pgno) = dec.next_page(&mut buf)? {
-        if pgno <= old_commit {
-            file.read_exact_at(&mut old, page_offset(pgno, ps))?;
-            acc ^= page_crc(pgno, &old);
-        }
-        acc ^= page_crc(pgno, &buf);
-        file.write_all_at(&buf, page_offset(pgno, ps))?;
-    }
-    for pgno in header.commit.saturating_add(1)..=old_commit {
-        if pgno == lock {
-            continue;
-        }
-        file.read_exact_at(&mut old, page_offset(pgno, ps))?;
-        acc ^= page_crc(pgno, &old);
-    }
-    file.set_len(u64::from(header.commit) * ps)?;
+    let acc = rewrite_pages(&file, data, &header, old_commit, acc)?;
 
     let post_apply = CHECKSUM_FLAG | acc;
     if post_apply != trailer.post_apply {
