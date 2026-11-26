@@ -381,8 +381,11 @@ defmodule Alambique.Feed.Publisher do
       # Jason raises on such a name, which ends the sender of the other modes:
       # the cell hands everything over again.
       {:error, :bad_table} ->
-        Logger.error("Alambique found a captured table name of #{state.id} that is not UTF-8")
-        {reset(state), true}
+        unless state.feed_refused,
+          do:
+            Logger.error("Alambique found a captured table name of #{state.id} that is not UTF-8")
+
+        {%{reset(state) | feed_refused: true}, true}
     end
   end
 
@@ -456,6 +459,7 @@ defmodule Alambique.Feed.Publisher do
     %{
       state
       | feed_part: part,
+        feed_refused: false,
         feed_sent: if(partial, do: state.feed_sent, else: txid),
         feed_backlog:
           state.feed_backlog + Enum.count(batches, fn {_, _, _, _, _, {first, _, _}} -> first end),
