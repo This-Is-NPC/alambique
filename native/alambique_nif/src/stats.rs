@@ -145,6 +145,12 @@ fn page_arena() -> Vec<(String, i64)> {
         let kib = |b: usize| (b >> 10) as i64;
         v.extend([
             ("page_arena_reserved_bytes".into(), a.range_bytes() as i64),
+            ("page_arena_reserved_mib".into(), (c.reserved >> 20) as i64),
+            ("page_arena_max_regions".into(), c.max_regions as i64),
+            (
+                "page_arena_trim_idle_ms".into(),
+                crate::alloc::trim_idle_ms() as i64,
+            ),
             ("page_arena_extent_kib".into(), kib(c.extent_bytes)),
             ("page_arena_trim_after_kib".into(), kib(c.threshold)),
             ("page_arena_keep_kib".into(), kib(c.keep)),
