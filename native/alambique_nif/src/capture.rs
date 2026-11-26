@@ -810,7 +810,8 @@ mod tests {
         b.frame(2, 2, &pg(9));
         b.write(&dir.path().join("db-wal"));
         let file = Mem([pg(4), pg(5)].concat());
-        let args = p.args(WalPos::default(), &Sums::default(), 1);
+        let empty = Sums::default();
+        let args = p.args(WalPos::default(), &empty, 1);
         let s = full_live(&args, None, &file).unwrap();
         assert_eq!(s.commit, 2);
         assert_eq!(
