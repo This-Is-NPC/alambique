@@ -134,7 +134,7 @@ defmodule Alambique.Replication.Replicator do
 
   @doc "TXID the next segment will take."
   @spec next_txid(t) :: pos_integer
-  def next_txid(%__MODULE__{txid: txid}), do: txid + 1
+  def next_txid(%__MODULE__{txid: txid}) when is_integer(txid), do: txid + 1
 
   @typedoc """
   What `encode/4` hands to `upload/3`: one segment and everything the put
@@ -201,8 +201,10 @@ defmodule Alambique.Replication.Replicator do
   records (`Alambique.Sqlite.capture_incremental/9`), so that a commit SQLite rolled back
   after its frame reached the file is not taken for a transaction.
   """
-  @spec encode(t, Alambique.Replication.ctx(), :batch | :fence, keyword) ::
+  @spec encode(t, Alambique.Replication.ctx(), :batch, keyword) ::
           {:ok, t, upload} | :none | {:error, term}
+  @spec encode(t, Alambique.Replication.ctx(), :fence, keyword) ::
+          {:ok, t, upload} | {:error, term}
   def encode(%__MODULE__{} = s, ctx, kind, opts) do
     started = System.monotonic_time()
     txid = s.txid + 1
@@ -210,44 +212,47 @@ defmodule Alambique.Replication.Replicator do
     ts = now(ctx)
 
     with {:ok, s, touched} <- prepare_sums(s, ctx, kind, opts) do
-      case capture(s, kind, ts, opts[:conn]) do
-        :none ->
-          :none
-
-        {:error, reason} ->
-          {:error, {:capture, reason}}
-
-        {:ok, segment, pos, sums, checksum, commit} ->
-          # A fence changes no data: it keeps the data TXID (design §6).
-          data = if kind == :fence, do: s.data, else: txid
-          Fault.point(:repl_after_encode, %{cell: s.cell, txid: txid})
-          if s.lazy, do: Native.lazy_mark_sums(s.lazy.handle, touched)
-
-          up = %{
-            cell: s.cell,
-            txid: txid,
-            key: Keys.segment(ctx.prefix, s.cell, 0, txid, txid),
-            segment: segment,
-            info: %{epoch: s.epoch, data: data, ts: ts},
-            floor_epoch: s.last_epoch,
-            kind: kind,
-            started: started,
-            owner_pid: self()
-          }
-
-          {:ok,
-           %{
-             s
-             | txid: txid,
-               last_epoch: s.epoch,
-               data: data,
-               wal_pos: pos,
-               sums: sums,
-               checksum: checksum,
-               commit: commit
-           }, up}
-      end
+      s
+      |> capture(kind, ts, opts[:conn])
+      |> encoded(s, ctx, kind, touched, {txid, ts, started})
     end
+  end
+
+  defp encoded(:none, _s, _ctx, _kind, _touched, _stamp), do: :none
+
+  defp encoded({:error, reason}, _s, _ctx, _kind, _touched, _stamp),
+    do: {:error, {:capture, reason}}
+
+  defp encoded({:ok, segment, pos, sums, checksum, commit}, s, ctx, kind, touched, stamp) do
+    {txid, ts, started} = stamp
+    # A fence changes no data: it keeps the data TXID (design §6).
+    data = if kind == :fence, do: s.data, else: txid
+    Fault.point(:repl_after_encode, %{cell: s.cell, txid: txid})
+    if s.lazy, do: Native.lazy_mark_sums(s.lazy.handle, touched)
+
+    up = %{
+      cell: s.cell,
+      txid: txid,
+      key: Keys.segment(ctx.prefix, s.cell, 0, txid, txid),
+      segment: segment,
+      info: %{epoch: s.epoch, data: data, ts: ts},
+      floor_epoch: s.last_epoch,
+      kind: kind,
+      started: started,
+      owner_pid: self()
+    }
+
+    {:ok,
+     %{
+       s
+       | txid: txid,
+         last_epoch: s.epoch,
+         data: data,
+         wal_pos: pos,
+         sums: sums,
+         checksum: checksum,
+         commit: commit
+     }, up}
   end
 
   @doc """
@@ -264,11 +269,8 @@ defmodule Alambique.Replication.Replicator do
   """
   @spec upload(upload, Alambique.Replication.ctx(), keyword) :: :ok | :taken | {:error, term}
   def upload(up, ctx, opts) do
-    {store, config} = ctx.store
     deadline = Keyword.get_lazy(opts, :deadline, fn -> Retry.deadline_in(ctx.timeout_ms) end)
-
-    result =
-      put(ctx, store, config, up.key, up.segment, up.info, deadline, {:floor, up.floor_epoch})
+    result = put(ctx, up.key, up.segment, up.info, deadline, {:floor, up.floor_epoch})
 
     meta = %{cell: up.cell, txid: up.txid, epoch: up.info.epoch, kind: up.kind}
     bytes = %{bytes: byte_size(up.segment)}
@@ -320,10 +322,12 @@ defmodule Alambique.Replication.Replicator do
   # The sidecar of an uploaded segment, as the caller of `sync/3` or `fence/3`
   # asked; `result` is what they return.
   defp sidecar(up, ctx, opts, result) do
-    case Keyword.get(opts, :sidecar, :inline) do
-      :async -> spawn(fn -> write_sidecar(up, ctx) end)
-      :inline -> write_sidecar(up, ctx, Keyword.take(opts, [:deadline]))
-    end
+    # A failed sidecar is reported by `Sidecar.write/7` and never fails the caller.
+    _ =
+      case Keyword.get(opts, :sidecar, :inline) do
+        :async -> spawn(fn -> write_sidecar(up, ctx) end)
+        :inline -> write_sidecar(up, ctx, Keyword.take(opts, [:deadline]))
+      end
 
     result
   end
@@ -360,9 +364,6 @@ defmodule Alambique.Replication.Replicator do
           :ok -> known_sums(%{s | sums: sums}, lazy, missing, deadline)
           {:error, reason} -> {:error, {:hydrate, reason}}
         end
-
-      {:error, reason} ->
-        {:error, {:capture, reason}}
     end
   end
 
@@ -451,32 +452,33 @@ defmodule Alambique.Replication.Replicator do
   def snapshot(%__MODULE__{lazy: lazy}, _ctx, _opts) when lazy != nil, do: {:error, :hydrating}
 
   def snapshot(%__MODULE__{} = s, ctx, opts) do
-    {store, config} = ctx.store
     key = Keys.snapshot(ctx.prefix, s.cell, s.txid)
     deadline = Keyword.get_lazy(opts, :deadline, fn -> Retry.deadline_in(ctx.timeout_ms) end)
-
     ts = now(ctx)
 
     case Native.capture_full(s.db_path, wal_path(s), s.page_size, s.txid, ts, s.wal_pos) do
       {:ok, segment, _pos, _sums, checksum, _commit} when checksum == s.checksum ->
         info = %{epoch: s.last_epoch, data: s.data, ts: ts, created: ts}
-
-        case put(ctx, store, config, key, segment, info, deadline, :exists_ok) do
-          {:error, _} = error ->
-            error
-
-          written ->
-            # An existing snapshot may be another writer's.
-            owner = if written == :ok, do: :ours, else: :verify
-            Sidecar.write(ctx, key, Keys.snapshot_level(), segment, info, deadline, owner)
-            {:ok, key}
-        end
+        put_snapshot(ctx, key, segment, info, deadline)
 
       {:ok, _, _, _, _, _} ->
         {:error, :snapshot_checksum_mismatch}
 
       {:error, reason} ->
         {:error, {:capture, reason}}
+    end
+  end
+
+  defp put_snapshot(ctx, key, segment, info, deadline) do
+    case put(ctx, key, segment, info, deadline, :exists_ok) do
+      {:error, _} = error ->
+        error
+
+      written ->
+        # An existing snapshot may be another writer's.
+        owner = if written == :ok, do: :ours, else: :verify
+        _ = Sidecar.write(ctx, key, Keys.snapshot_level(), segment, info, deadline, owner)
+        {:ok, key}
     end
   end
 
@@ -493,23 +495,16 @@ defmodule Alambique.Replication.Replicator do
   Options: `:pages` (required), the page count the file must have: a file
   that is empty, truncated or not the reconciled one is refused with
   `{:error, {:capture, {:page_count, found, expected}}}` before anything is
-  sent. `:deadline`.
+  sent; `:page_size` and `:epoch` (required), those of the file and of the
+  owner; `:deadline`.
   """
-  @spec replace(
-          Alambique.Replication.ctx(),
-          String.t(),
-          Path.t(),
-          pos_integer,
-          map,
-          pos_integer,
-          keyword
-        ) ::
+  @spec replace(Alambique.Replication.ctx(), String.t(), Path.t(), map, keyword) ::
           {:ok, pos_integer} | {:error, term}
-  def replace(ctx, cell, db_path, page_size, head, epoch, opts) do
+  def replace(ctx, cell, db_path, head, opts) do
     started = System.monotonic_time()
     txid = head.txid + 1
     ts = now(ctx)
-    deadline = Keyword.get_lazy(opts, :deadline, fn -> Retry.deadline_in(ctx.timeout_ms) end)
+    page_size = Keyword.fetch!(opts, :page_size)
     pages = Keyword.fetch!(opts, :pages)
 
     case Native.capture_replace(db_path, db_path <> "-wal", page_size, head.checksum, txid, ts) do
@@ -517,41 +512,47 @@ defmodule Alambique.Replication.Replicator do
         {:error, {:capture, {:page_count, commit, pages}}}
 
       {:ok, segment, _pos, _sums, _checksum, _commit} ->
-        {store, config} = ctx.store
-        key = Keys.segment(ctx.prefix, cell, 0, txid, txid)
-
-        info = %{epoch: epoch, data: txid, ts: ts}
-
-        result =
-          case put(ctx, store, config, key, segment, info, deadline, {:floor, head.epoch}) do
-            :ok ->
-              Sidecar.write(ctx, key, 0, segment, info, deadline, :ours)
-              {:ok, txid}
-
-            :taken ->
-              {:error, :txid_taken}
-
-            {:error, _} = error ->
-              error
-          end
-
-        meta = %{cell: cell, txid: txid, epoch: epoch, kind: :replace}
-
-        meta =
-          case result do
-            {:ok, _} -> Map.put(meta, :result, :ok)
-            {:error, :txid_taken} -> Map.put(meta, :result, :fenced)
-            {:error, reason} -> Map.merge(meta, %{result: :error, reason: reason})
-          end
-
-        Telemetry.span_stop([:replication, :sync], started, %{bytes: byte_size(segment)}, meta)
-
-        result
+        info = %{epoch: Keyword.fetch!(opts, :epoch), data: txid, ts: ts}
+        deadline = Keyword.get_lazy(opts, :deadline, fn -> Retry.deadline_in(ctx.timeout_ms) end)
+        put_replacement(ctx, cell, head, segment, info, {started, deadline})
 
       {:error, reason} ->
         {:error, {:capture, reason}}
     end
   end
+
+  defp put_replacement(ctx, cell, head, segment, info, {started, deadline}) do
+    txid = head.txid + 1
+    key = Keys.segment(ctx.prefix, cell, 0, txid, txid)
+
+    result =
+      case put(ctx, key, segment, info, deadline, {:floor, head.epoch}) do
+        :ok ->
+          _ = Sidecar.write(ctx, key, 0, segment, info, deadline, :ours)
+          {:ok, txid}
+
+        :taken ->
+          {:error, :txid_taken}
+
+        {:error, _} = error ->
+          error
+      end
+
+    meta = %{cell: cell, txid: txid, epoch: info.epoch, kind: :replace}
+
+    Telemetry.span_stop(
+      [:replication, :sync],
+      started,
+      %{bytes: byte_size(segment)},
+      replaced(meta, result)
+    )
+
+    result
+  end
+
+  defp replaced(meta, {:ok, _}), do: Map.put(meta, :result, :ok)
+  defp replaced(meta, {:error, :txid_taken}), do: Map.put(meta, :result, :fenced)
+  defp replaced(meta, {:error, reason}), do: Map.merge(meta, %{result: :error, reason: reason})
 
   @doc """
   Checkpoints the database with `Alambique.Sqlite.checkpoint/1` through the
@@ -612,13 +613,14 @@ defmodule Alambique.Replication.Replicator do
   #   * anything else belongs to a newer or equal epoch: `:taken`.
   #
   # `:exists_ok` (snapshots) takes any existing object as done.
-  defp put(ctx, _store, _config, key, body, _info, _deadline, _mode)
+  defp put(ctx, key, body, _info, _deadline, _mode)
        when byte_size(body) > ctx.max_object_bytes do
     Alambique.Store.too_large(key, byte_size(body), ctx.max_object_bytes)
     {:error, {:too_large, byte_size(body), ctx.max_object_bytes}}
   end
 
-  defp put(ctx, store, config, key, body, info, deadline, mode) do
+  defp put(ctx, key, body, info, deadline, mode) do
+    {store, config} = ctx.store
     meta = Objects.meta(ctx, info)
 
     Retry.run(ctx, deadline, fn ->
@@ -630,7 +632,7 @@ defmodule Alambique.Replication.Replicator do
           :taken
 
         {:error, :precondition_failed} ->
-          collide(ctx, store, config, key, body, meta, meta["epoch"], mode)
+          collide(ctx, key, body, meta, mode)
 
         {:error, reason} ->
           {:retry, reason}
@@ -638,14 +640,16 @@ defmodule Alambique.Replication.Replicator do
     end)
   end
 
-  defp collide(ctx, store, config, key, body, meta, epoch, {:floor, floor}) do
-    case Alambique.Store.get_capped({store, config}, key, ctx.max_object_bytes) do
+  defp collide(ctx, key, body, meta, {:floor, floor}) do
+    epoch = meta["epoch"]
+
+    case Alambique.Store.get_capped(ctx.store, key, ctx.max_object_bytes) do
       {:ok, ^body, _etag, %{"epoch" => ^epoch}} ->
         :ok
 
       {:ok, _body, etag, found} ->
         if Objects.epoch_of(found) < floor,
-          do: overwrite(store, config, key, body, meta, etag),
+          do: overwrite(ctx, key, body, meta, etag),
           else: :taken
 
       {:error, {:too_large, _, _}} = error ->
@@ -656,7 +660,7 @@ defmodule Alambique.Replication.Replicator do
     end
   end
 
-  defp overwrite(store, config, key, body, meta, etag) do
+  defp overwrite(%{store: {store, config}}, key, body, meta, etag) do
     case store.put(config, key, body, {:if_match, etag}, meta) do
       {:ok, _etag} -> :ok
       {:error, reason} -> {:retry, reason}
