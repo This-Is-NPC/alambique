@@ -31,7 +31,7 @@ defmodule Alambique.Replication.Replicator do
   """
 
   alias Alambique.Fault
-  alias Alambique.Replication.{Keys, Lazy, Native, Objects, Retry}
+  alias Alambique.Replication.{Keys, Lazy, Native, Objects, Retry, Sidecar}
   alias Alambique.Telemetry
 
   @flag Bitwise.bsl(1, 63)
@@ -273,6 +273,7 @@ defmodule Alambique.Replication.Replicator do
     case result do
       :ok ->
         Fault.point(:repl_after_put, %{cell: up.cell, txid: up.txid, owner_pid: up.owner_pid})
+        Sidecar.write(ctx, up.key, 0, up.segment, up.info, deadline, :ours)
         if landed = opts[:landed], do: landed.(up)
         Telemetry.span_stop([:replication, :sync], up.started, bytes, Map.put(meta, :result, :ok))
         :ok
@@ -448,8 +449,14 @@ defmodule Alambique.Replication.Replicator do
         info = %{epoch: s.last_epoch, data: s.data, ts: ts, created: ts}
 
         case put(ctx, store, config, key, segment, info, deadline, :exists_ok) do
-          {:error, _} = error -> error
-          _ok_or_exists -> {:ok, key}
+          {:error, _} = error ->
+            error
+
+          written ->
+            # An existing snapshot may be another writer's.
+            owner = if written == :ok, do: :ours, else: :verify
+            Sidecar.write(ctx, key, Keys.snapshot_level(), segment, info, deadline, owner)
+            {:ok, key}
         end
 
       {:ok, _, _, _, _, _} ->
@@ -504,9 +511,15 @@ defmodule Alambique.Replication.Replicator do
 
         result =
           case put(ctx, store, config, key, segment, info, deadline, {:floor, head.epoch}) do
-            :ok -> {:ok, txid}
-            :taken -> {:error, :txid_taken}
-            {:error, _} = error -> error
+            :ok ->
+              Sidecar.write(ctx, key, 0, segment, info, deadline, :ours)
+              {:ok, txid}
+
+            :taken ->
+              {:error, :txid_taken}
+
+            {:error, _} = error ->
+              error
           end
 
         meta = %{cell: cell, txid: txid, epoch: epoch, kind: :replace}

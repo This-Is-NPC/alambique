@@ -41,6 +41,9 @@ defmodule Alambique.Replication do
       `{:too_large, size, max}` before it is read
     * `:max_control_bytes` - the same for the small objects: leases, node
       entries, markers, manifests and crash counters (default 16 777 216)
+    * `:page_sidecar` - `nil` (default) writes no page-hash sidecar; a size
+      writes one beside every segment and snapshot larger than that many bytes
+      (design §16)
   """
   @type ctx :: %{
           store: {module, term},
@@ -56,7 +59,8 @@ defmodule Alambique.Replication do
           fetch_concurrency: pos_integer,
           max_inflight_bytes: pos_integer,
           max_object_bytes: pos_integer,
-          max_control_bytes: pos_integer
+          max_control_bytes: pos_integer,
+          page_sidecar: non_neg_integer | nil
         }
 
   @type target :: :latest | {:txid, non_neg_integer} | {:timestamp, integer}
@@ -76,7 +80,8 @@ defmodule Alambique.Replication do
         fetch_concurrency: 16,
         max_inflight_bytes: 67_108_864,
         max_object_bytes: Alambique.Store.max_object_bytes(),
-        max_control_bytes: Alambique.Store.max_control_bytes()
+        max_control_bytes: Alambique.Store.max_control_bytes(),
+        page_sidecar: nil
       }
       |> Map.merge(Map.new(opts))
       |> Map.take([
@@ -93,7 +98,8 @@ defmodule Alambique.Replication do
         :fetch_concurrency,
         :max_inflight_bytes,
         :max_object_bytes,
-        :max_control_bytes
+        :max_control_bytes,
+        :page_sidecar
       ])
 
     valid? =
@@ -112,7 +118,8 @@ defmodule Alambique.Replication do
           fetch_concurrency: c,
           max_inflight_bytes: pb,
           max_object_bytes: ob,
-          max_control_bytes: cb
+          max_control_bytes: cb,
+          page_sidecar: ps
         }
         when is_binary(p) and is_binary(n) and is_integer(b) and b > 0 and is_integer(m) and
                m >= b and is_integer(a) and a > 0 and is_integer(k) and k > 0 and is_integer(t) and
@@ -120,7 +127,7 @@ defmodule Alambique.Replication do
                e > 0 and is_integer(c) and
                c > 0 and
                is_integer(pb) and pb > 0 and is_integer(ob) and ob > 0 and is_integer(cb) and
-               cb > 0,
+               cb > 0 and (is_nil(ps) or (is_integer(ps) and ps >= 0)),
         ctx
       )
 
