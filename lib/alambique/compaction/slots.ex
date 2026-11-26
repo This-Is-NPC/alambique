@@ -16,7 +16,7 @@ defmodule Alambique.Compaction.Slots do
   @doc "Creates the table of an instance."
   @spec create(Alambique.Config.t()) :: :ok
   def create(config) do
-    :ets.new(config.release_slots, [:named_table, :public, :ordered_set])
+    _ = :ets.new(config.release_slots, [:named_table, :public, :ordered_set])
     :ok
   end
 

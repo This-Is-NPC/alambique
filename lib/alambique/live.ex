@@ -17,7 +17,7 @@ defmodule Alambique.Live do
 
   @impl true
   def init(table) do
-    :ets.new(table, [:named_table, :protected, :ordered_set, read_concurrency: true])
+    _ = :ets.new(table, [:named_table, :protected, :ordered_set, read_concurrency: true])
     {:ok, %{table: table, monitors: %{}}}
   end
 

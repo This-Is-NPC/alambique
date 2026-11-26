@@ -137,12 +137,12 @@ defmodule Alambique.Replication.Restore do
         {:error, _} = error -> attempt_all(env, rest, first_error || error)
       end
     after
-      File.rm(env.tmp)
+      _ = File.rm(env.tmp)
     end
   end
 
   defp attempt(env, start) do
-    File.rm(env.tmp)
+    _ = File.rm(env.tmp)
     {env, fetcher} = start_sidecars(env, start)
 
     try do
@@ -345,7 +345,7 @@ defmodule Alambique.Replication.Restore do
   # restored in full instead.
   defp finish(%{lazy: lazy} = env, %{lazy: handle} = state) when lazy != nil and handle != nil do
     if state.bytes < lazy.min_bytes do
-      File.rm(env.dest)
+      _ = File.rm(env.dest)
       :small
     else
       case Native.lazy_ready(handle) do
@@ -381,7 +381,7 @@ defmodule Alambique.Replication.Restore do
   defp sync_file(path) do
     with {:ok, io} <- :file.open(path, [:read, :write, :raw, :binary]),
          :ok <- :file.sync(io) do
-      :file.close(io)
+      _ = :file.close(io)
     end
   end
 
@@ -679,8 +679,8 @@ defmodule Alambique.Replication.Restore do
 
   defp ensure_lazy(env, state, <<_::binary-size(8), page_size::32, _::binary>>) do
     with {:ok, handle} <- Native.lazy_new(env.dest, page_size, env.lazy.wait_ms) do
-      File.rm(env.dest <> "-wal")
-      File.rm(env.dest <> "-shm")
+      _ = File.rm(env.dest <> "-wal")
+      _ = File.rm(env.dest <> "-shm")
       {:ok, %{state | lazy: handle}}
     end
   end

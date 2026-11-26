@@ -53,7 +53,7 @@ defmodule Alambique.NodeRegistry do
   @impl true
   def init(config) do
     Process.flag(:trap_exit, true)
-    :ets.new(config.peers, [:named_table, :protected, :set, read_concurrency: true])
+    _ = :ets.new(config.peers, [:named_table, :protected, :set, read_concurrency: true])
     :ets.insert(config.peers, {:peers, []})
     send(self(), :renew)
     send(self(), :refresh)

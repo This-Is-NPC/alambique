@@ -20,7 +20,7 @@ defmodule Alambique.Admission do
   @doc "Creates the table; called by the process that owns it."
   @spec init(Config.t()) :: :ok
   def init(config) do
-    :ets.new(config.admission, [:named_table, :public, :set, write_concurrency: true])
+    _ = :ets.new(config.admission, [:named_table, :public, :set, write_concurrency: true])
     :ets.insert(config.admission, [{:bytes, 0}, {:owner, self()}])
     :ok
   end

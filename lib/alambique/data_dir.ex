@@ -54,9 +54,9 @@ defmodule Alambique.DataDir do
 
     case File.open(path, [:write, :exclusive]) do
       {:ok, io} ->
-        File.close(io)
+        _ = File.close(io)
         found = exists?.(Path.join(dir, String.upcase(name)))
-        File.rm(path)
+        _ = File.rm(path)
         found
 
       {:error, _} ->

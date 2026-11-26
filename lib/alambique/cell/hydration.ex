@@ -65,7 +65,7 @@ defmodule Alambique.Cell.Hydration do
 
   def release(result, %Lazy{} = lazy) do
     Native.lazy_release(lazy.handle)
-    for suffix <- ["", "-wal", "-shm"], do: File.rm(result.path <> suffix)
+    Enum.each(["", "-wal", "-shm"], &File.rm(result.path <> &1))
     :ok
   end
 
@@ -144,7 +144,7 @@ defmodule Alambique.Cell.Hydration do
     Hydrator.stop(pid)
     if repl && repl.lazy, do: Native.lazy_release(repl.lazy.handle)
     close_marker(state)
-    for suffix <- ["", "-wal", "-shm"], do: File.rm(path <> suffix)
+    Enum.each(["", "-wal", "-shm"], &File.rm(path <> &1))
     %{state | hydrator: nil, hydrator_marker: nil}
   end
 
