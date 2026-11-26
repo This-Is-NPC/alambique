@@ -35,6 +35,8 @@
 #                              interleaving (1 mixes pages finest)  (default "10")
 #   ALAMBIQUE_BENCH_SECONDS    seconds of each hot window         (default "5")
 #   ALAMBIQUE_BENCH_MAX_CELLS  cells capacity stops at            (default "5000")
+#   ALAMBIQUE_BENCH_IDLE       idle variants of capacity, none,shrink,close
+#                              (default: all)
 #   ALAMBIQUE_BENCH_DATA_DIR   where the cells of capacity keep their files
 #                              (default: under TMPDIR)
 
@@ -410,7 +412,12 @@ defmodule Bench do
   def capacity do
     limit = env_int("ALAMBIQUE_BENCH_LIMIT_MIB", 1024) * 1_048_576
 
-    for idle <- [:none, :shrink, :close] do
+    variants =
+      System.get_env("ALAMBIQUE_BENCH_IDLE", "none,shrink,close")
+      |> String.split(",")
+      |> Enum.map(&String.to_existing_atom/1)
+
+    for idle <- variants do
       # The cells of one pass are a gigabyte or more: ALAMBIQUE_BENCH_DATA_DIR
       # puts them on a disk (removed after the pass) and not on a RAM disk.
       dir =
