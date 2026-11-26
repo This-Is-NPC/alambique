@@ -18,6 +18,8 @@ defmodule Alambique.Replication.Head do
           commit: non_neg_integer
         }
 
+  @spec run(Alambique.Replication.ctx(), String.t(), keyword) ::
+          {:ok, t | nil} | {:error, term}
   def run(ctx, cell, opts) do
     deadline = Retry.deadline_in(Keyword.get(opts, :timeout_ms, ctx.timeout_ms))
 

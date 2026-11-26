@@ -13,6 +13,7 @@ defmodule Alambique.Replica.Manager do
 
   alias Alambique.Replica
 
+  @spec start_link(Alambique.Config.t()) :: GenServer.on_start()
   def start_link(config),
     do: GenServer.start_link(__MODULE__, config, name: config.replica_manager)
 

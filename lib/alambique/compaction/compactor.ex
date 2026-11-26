@@ -32,6 +32,7 @@ defmodule Alambique.Compaction.Compactor do
   # Cleanup jobs a tick takes, per unit of `concurrency`.
   @cleanup_batch 4
 
+  @spec start_link(Alambique.Config.t()) :: GenServer.on_start()
   def start_link(config), do: GenServer.start_link(__MODULE__, config)
 
   @doc "Records that `cell` committed `txid`. Cheap: one ETS update, no message."
