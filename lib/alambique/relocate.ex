@@ -119,13 +119,21 @@ defmodule Alambique.Relocate do
     case Placement.commit_move(config, cell, source, dest) do
       :ok ->
         Placement.invalidate(config, cell)
-        if version, do: Schema.drop(config, source, cell, version, deadline_for(config))
+        drop_source_entry(config, cell, source, version)
         Fault.point(:relocate_after_commit, point)
         {{:ok, dest}, cleanup(config, cell, source)}
 
       {:error, _} = error ->
         {error, :none}
     end
+  end
+
+  # A failure leaves the entry to the sweeper: the move is done.
+  defp drop_source_entry(_config, _cell, _source, nil), do: :ok
+
+  defp drop_source_entry(config, cell, source, version) do
+    _ = Schema.drop(config, source, cell, version, deadline_for(config))
+    :ok
   end
 
   # The last step. Whatever it cannot finish now is queued for the compactor:
@@ -153,68 +161,45 @@ defmodule Alambique.Relocate do
 
   # Steps 2: the destination gets its lease and a snapshot of the fenced state.
   defp copy(config, cell, source, dest, lease, deadline) do
-    src = Config.repl_ctx(config, source)
-    dst = Config.repl_ctx(config, dest)
-    dst_lease = Config.lease_ctx(config, dest)
     dir = Local.work_dir(config, :relocate)
-    path = Path.join(dir, "cell.db")
+
+    mv = %{
+      config: config,
+      cell: cell,
+      source: source,
+      dest: dest,
+      lease: lease,
+      src: Config.repl_ctx(config, source),
+      dst: Config.repl_ctx(config, dest),
+      dst_lease: Config.lease_ctx(config, dest),
+      path: Path.join(dir, "cell.db"),
+      deadline: deadline
+    }
 
     try do
-      Inflight.run(config, cell, :relocate, fn ->
-        restore_and_snapshot(
-          config,
-          cell,
-          source,
-          dest,
-          lease,
-          src,
-          dst,
-          dst_lease,
-          path,
-          deadline
-        )
-      end)
+      Inflight.run(config, cell, :relocate, fn -> restore_and_snapshot(mv) end)
     after
       File.rm_rf(dir)
     end
   end
 
-  defp restore_and_snapshot(
-         config,
-         cell,
-         source,
-         dest,
-         lease,
-         src,
-         dst,
-         dst_lease,
-         path,
-         deadline
-       ) do
-    with {:ok, result} <- restore(src, cell, path, deadline),
-         :ok <-
-           empty_or_ours(config, dst, dest, cell, source.id, result.txid, deadline),
-         :ok <- Lease.install(dst_lease, cell, lease.epoch + 1, source.id, @owner),
+  defp restore_and_snapshot(%{config: config, cell: cell, dest: dest, lease: lease} = mv) do
+    with {:ok, result} <- restore(mv.src, cell, mv.path, mv.deadline),
+         :ok <- empty_or_ours(mv, result.txid),
+         :ok <- Lease.install(mv.dst_lease, cell, lease.epoch + 1, mv.source.id, @owner),
          Fault.point(:relocate_after_install, %{cell: cell, to: dest.id}),
-         {:ok, version} <-
-           fence_and_snapshot(
-             cell,
-             src,
-             dst,
-             path,
-             result,
-             lease.epoch,
-             deadline,
-             config.relocate.fence_attempts,
-             Db.script_timeout_ms(config)
-           ),
+         {:ok, version} <- fence_and_snapshot(mv, result, config.relocate.fence_attempts),
          Fault.point(:relocate_after_snapshot, %{cell: cell, to: dest.id}),
-         # The destination lists the cell before it can be reached (design §17).
-         :ok <- Schema.put(config, dest, cell, version, deadline),
-         :ok <- carry_frozen(src, dst, cell, deadline),
-         {:ok, lease} <- Lease.renew(Config.lease_ctx(config, source), lease) do
+         {:ok, lease} <- publish(mv, version) do
       {:ok, lease, version}
     end
+  end
+
+  defp publish(%{config: config, cell: cell, dest: dest, lease: lease} = mv, version) do
+    # The destination lists the cell before it can be reached (design §17).
+    with :ok <- Schema.put(config, dest, cell, version, mv.deadline),
+         :ok <- carry_frozen(mv.src, mv.dst, cell, mv.deadline),
+         do: Lease.renew(Config.lease_ctx(config, mv.source), lease)
   end
 
   # The destination holds nothing of this cell, or only what an earlier
@@ -223,20 +208,22 @@ defmodule Alambique.Relocate do
   # `cleaned_at_ms` says that every data object there was marked for deletion;
   # objects a compaction wrote meanwhile are below the restored TXID too. The
   # check only lists the cell's prefix, never the trash prefix.
-  defp empty_or_ours(config, dst, dest, cell, from, txid, deadline) do
+  defp empty_or_ours(%{config: config, dest: dest, cell: cell} = mv, txid) do
+    from = mv.source.id
+
     case Lease.read(Config.lease_ctx(config, dest), cell) do
       {:ok, %{moved_from: ^from, moved_to: nil}} ->
-        destination_files(dst, cell, txid, deadline, :bounded)
+        destination_files(mv, txid, :bounded)
 
       {:ok, %{moved_to: to} = lease} when to != nil ->
         with :ok <- cleaned?(config, lease, cell, dest),
-             do: destination_files(dst, cell, txid, deadline, :bounded)
+             do: destination_files(mv, txid, :bounded)
 
       {:ok, _} ->
         {:error, :destination_not_empty}
 
       :none ->
-        destination_files(dst, cell, txid, deadline, :empty)
+        destination_files(mv, txid, :empty)
 
       {:error, _} = error ->
         error
@@ -263,7 +250,7 @@ defmodule Alambique.Relocate do
   # the incoming snapshot covers it, and restore picks the newest snapshot, so
   # an old file can never be returned as the latest state. A file beyond it
   # means a write this move does not know about; refuse instead of colliding.
-  defp destination_files(dst, cell, txid, deadline, mode) do
+  defp destination_files(%{dst: dst, cell: cell, deadline: deadline}, txid, mode) do
     with {:ok, {segments, snapshots}} <- Objects.list_cell(dst, cell, deadline) do
       max =
         Enum.max([0] ++ Enum.map(segments, & &1.max) ++ Enum.map(snapshots, & &1.txid))
@@ -282,43 +269,36 @@ defmodule Alambique.Relocate do
     Replication.restore(src, cell, path, :latest, timeout_ms: timeout)
   end
 
-  defp fence_and_snapshot(cell, src, dst, path, result, epoch, deadline, attempts, timeout_ms) do
-    with {:ok, repl} <- continue(result, epoch),
-         {:ok, conn} <- Db.open(path, timeout_ms: timeout_ms) do
-      try do
-        case Replicator.fence(repl, src, deadline: deadline) do
-          {:ok, repl} ->
-            with {:ok, _key} <- Replicator.snapshot(repl, dst, deadline: deadline),
-                 do: Db.user_version(conn)
-
-          {:error, :txid_taken} when attempts > 1 ->
-            :retry
-
-          {:error, reason} ->
-            {:error, {:fence, reason}}
+  defp fence_and_snapshot(mv, result, attempts) do
+    with {:ok, repl} <- continue(result, mv.lease.epoch),
+         {:ok, conn} <- Db.open(mv.path, timeout_ms: Db.script_timeout_ms(mv.config)) do
+      outcome =
+        try do
+          fence_once(mv, repl, conn, attempts)
+        after
+          Db.close(conn)
         end
-      after
-        Db.close(conn)
-      end
-      |> case do
-        :retry ->
-          with {:ok, result} <- restore(src, cell, path, deadline) do
-            fence_and_snapshot(
-              cell,
-              src,
-              dst,
-              path,
-              result,
-              epoch,
-              deadline,
-              attempts - 1,
-              timeout_ms
-            )
-          end
 
-        other ->
-          other
-      end
+      if outcome == :retry, do: refence(mv, attempts - 1), else: outcome
+    end
+  end
+
+  defp refence(mv, attempts) do
+    with {:ok, result} <- restore(mv.src, mv.cell, mv.path, mv.deadline),
+         do: fence_and_snapshot(mv, result, attempts)
+  end
+
+  defp fence_once(mv, repl, conn, attempts) do
+    case Replicator.fence(repl, mv.src, deadline: mv.deadline) do
+      {:ok, repl} ->
+        with {:ok, _key} <- Replicator.snapshot(repl, mv.dst, deadline: mv.deadline),
+             do: Db.user_version(conn)
+
+      {:error, :txid_taken} when attempts > 1 ->
+        :retry
+
+      {:error, reason} ->
+        {:error, {:fence, reason}}
     end
   end
 

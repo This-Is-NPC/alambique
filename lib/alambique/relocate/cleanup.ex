@@ -36,11 +36,11 @@ defmodule Alambique.Relocate.Cleanup do
 
   @doc "Time budget of one cleanup."
   @spec budget(Config.t()) :: pos_integer
-  def budget(config), do: 6 * config.op_timeout_ms
+  def budget(%{op_timeout_ms: ms}) when is_integer(ms), do: 6 * ms
 
   @doc "How old the `cleaned_at_ms` stamp must be before a cell may move back."
   @spec gap(Config.t()) :: pos_integer
-  def gap(config), do: 8 * config.op_timeout_ms
+  def gap(%{op_timeout_ms: ms}) when is_integer(ms), do: 8 * ms
 
   @doc """
   Records, at the location a cell is about to leave, that its cleanup is
@@ -77,25 +77,28 @@ defmodule Alambique.Relocate.Cleanup do
   """
   @spec drop_stray(Config.t(), String.t(), String.t()) :: :ok | :young | {:error, term}
   def drop_stray(config, cell, location_id) do
-    with {:ok, source} <- Placement.location(config, location_id) do
-      ctx = Config.repl_ctx(config, source)
-      key = Keys.moved(ctx.prefix, cell)
-      deadline = Retry.deadline_in(config.op_timeout_ms)
+    with {:ok, source} <- Placement.location(config, location_id),
+         do: drop_marker(config, cell, source)
+  end
 
-      case Objects.fetch_optional(ctx, key, deadline, :control) do
-        {:ok, body, _meta} ->
-          due = with {ms, ""} <- Integer.parse(body), do: ms + config.skew_margin_ms
+  defp drop_marker(config, cell, source) do
+    ctx = Config.repl_ctx(config, source)
+    key = Keys.moved(ctx.prefix, cell)
+    deadline = Retry.deadline_in(config.op_timeout_ms)
 
-          if not is_integer(due) or now_ms(config) >= due,
-            do: Objects.delete(ctx, key, deadline),
-            else: :young
+    case Objects.fetch_optional(ctx, key, deadline, :control) do
+      {:ok, body, _meta} ->
+        due = with {ms, ""} <- Integer.parse(body), do: ms + config.skew_margin_ms
 
-        :none ->
-          :ok
+        if not is_integer(due) or now_ms(config) >= due,
+          do: Objects.delete(ctx, key, deadline),
+          else: :young
 
-        {:error, _} = error ->
-          error
-      end
+      :none ->
+        :ok
+
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -224,11 +227,15 @@ defmodule Alambique.Relocate.Cleanup do
   defp drop_index(config, source, cell, deadline) do
     with {:ok, versions} <- Schema.versions(config, source, deadline) do
       Enum.reduce_while(versions, :ok, fn version, :ok ->
-        case Schema.drop(config, source, cell, version, deadline) do
-          :ok -> {:cont, :ok}
-          {:error, _} = error -> {:halt, error}
-        end
+        drop_version(config, source, cell, version, deadline)
       end)
+    end
+  end
+
+  defp drop_version(config, source, cell, version, deadline) do
+    case Schema.drop(config, source, cell, version, deadline) do
+      :ok -> {:cont, :ok}
+      {:error, _} = error -> {:halt, error}
     end
   end
 
