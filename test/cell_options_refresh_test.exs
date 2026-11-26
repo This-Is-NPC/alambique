@@ -12,6 +12,8 @@ defmodule Alambique.CellOptionsRefreshTest do
   alias Alambique.Cell.Facts
   alias AlambiqueTestkit.{CrashPoints, MemoryStore}
 
+  require Facts
+
   @moduletag :capture_log
 
   defmodule Callbacks do
