@@ -127,6 +127,10 @@ run = "mix test --only litestream test/litestream_interop_test.exs"
 description = "Run the failover properties on a cluster of peer nodes (slow); arguments go to mix test (CI: --partitions M with MIX_TEST_PARTITION)"
 run = "scripts/test-cluster"
 
+[tasks."bench:page-arena"]
+description = "Measure what the page arena and the per-connection page caches give back and cost: share of freed bytes that leave, hot latency during trims, misses, regrowth, lookaside, capacity (arguments: cases; ALAMBIQUE_BENCH_MODES, _RUNS, _TIMEOUT, _CGROUP_MIB, _CELLS, _KIB, _LIMIT_MIB, _SECONDS)"
+run = "scripts/bench-page-arena"
+
 [tasks."bench:cells"]
 description = "Wake thousands of cells on one node and report resource use (argument: number of cells)"
 run = "scripts/bench-cells"
