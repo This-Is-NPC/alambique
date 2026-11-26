@@ -29,7 +29,18 @@ defmodule Alambique.CellOptionsTest do
   end
 
   defp start(ctx, opts \\ []) do
-    start_instance(ctx, [cell_options: {Callbacks, :options}] ++ opts)
+    start_instance(ctx, Keyword.put_new(opts, :cell_options, {Callbacks, :options}))
+  end
+
+  defp misbehave(:hang), do: Process.sleep(:infinity)
+  defp misbehave(:raise), do: raise("boom")
+  defp misbehave(:exit), do: exit(:gone)
+  defp misbehave(:throw), do: throw(:nope)
+  defp misbehave(:wrong_shape), do: {:ok, [awake: [cache_kib: 128]]}
+
+  defp misbehave(:late) do
+    Process.sleep(400)
+    [awake: [cache_kib: 128]]
   end
 
   defp pid(inst, cell), do: Cell.whereis(Config.fetch!(inst), cell)
@@ -104,7 +115,8 @@ defmodule Alambique.CellOptionsTest do
 
     test "sets the idle timeout of its cell", ctx do
       inst = start(ctx, idle_timeout_ms: 60_000)
-      Callbacks.set(fn _ -> [idle_timeout_ms: 50] end)
+      # Above feed.cleanup_after_ms (1_000), or the repair would drop it.
+      Callbacks.set(fn _ -> [idle_timeout_ms: 1_200] end)
       assert {:ok, _} = wake(inst, "short")
       eventually(fn -> pid(inst, "short") == nil end)
     end
@@ -423,26 +435,7 @@ defmodule Alambique.CellOptionsTest do
         Callbacks.set(fn _ ->
           send(test, {:runner, self()})
 
-          case kind do
-            :hang ->
-              Process.sleep(:infinity)
-
-            :raise ->
-              raise "boom"
-
-            :exit ->
-              exit(:gone)
-
-            :throw ->
-              throw(:nope)
-
-            :wrong_shape ->
-              {:ok, [awake: [cache_kib: 128]]}
-
-            :late ->
-              Process.sleep(400)
-              [awake: [cache_kib: 128]]
-          end
+          misbehave(kind)
         end)
 
         assert {:ok, _} = wake(inst, "slow")
