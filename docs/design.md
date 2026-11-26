@@ -928,7 +928,32 @@ a crash before it, or a failure, leaves the object without a sidecar and
 `[:alambique, :replication, :sidecar]` reports it. Per restore: one `GET` of
 `80 + 20 × pages` bytes for each covered file before the first query, one
 decode and one hash per page delivered, and one more decode to install it.
-These costs are not measured.
+
+Measured with `mise run bench:sidecar` and `bench:lazy` (4 schedulers, the
+in-memory store, and a local SeaweedFS in a container; 4 KiB pages of random
+rows, so the objects do not compress):
+
+- Size: 381 140 bytes for a 66 MB object, 5 062 580 bytes for 861 MB of
+  objects (one 861 MB snapshot file): 0.57 to 0.59 % of the object, 20 bytes
+  per page.
+- Per commit, 300 commits of one row with a 1 000 byte value: the
+  acknowledgment takes 63 µs (p50, p99 137 µs) without a sidecar and 65 µs
+  (p99 115 µs) with one written after it; with the put of the store at 20 ms,
+  21.4 ms and 20.8 ms. The sidecar written before the acknowledgment (what
+  `Replicator.sync/3` does by default) takes 87 µs and 41.8 ms: one more
+  `PUT` of latency. The store sees two puts per commit instead of one.
+- Per wake, 861 MB, memory store: the plan takes 14 ms without a sidecar and
+  17 ms with one (the `GET` of 5 MB), the first query 869 and 689 ms, and the
+  complete file 6.76 s and 1.89 s, because the 861 MB are not read again. With
+  20 ms added to every request: 7.55 s and 2.91 s. On the local SeaweedFS the
+  plan took 301 to 558 ms without and 836 to 917 ms with, in four runs: the
+  `GET` is serial, one per covered file, before the first query. Its complete
+  file ranged from 9.8 to 22.7 s without and 3.6 to 18.4 s with: that store
+  varied more from run to run (its full restore, 7.7 to 25.4 s) than the
+  sidecar changes it, so no figure is claimed for it.
+- Not isolated: the CPU of the hash. With the sidecar on, the 861 MB file
+  was fetched, decoded, hashed and installed in 1.89 s of hydration in the
+  memory store, an upper bound of the CPU of those steps on four schedulers.
 
 **Deleting.** Trash, retention, compaction and the cleanup of a moved cell
 delete a sidecar with its object: `Keys.data_keys/3` returns the sidecars among
