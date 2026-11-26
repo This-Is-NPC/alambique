@@ -311,6 +311,8 @@ defmodule Alambique.CellOptionsRefreshTest do
       assert now.cell_opts == before.cell_opts
       assert now.idle_cache == before.idle_cache
       assert now.idle_timer == before.idle_timer
+      assert timer_alive?(inst, "c", before.idle_timer)
+      assert timer_alive?(inst, "c", before.idle_cache)
       assert now.refresh == nil
       assert cache_size(inst, "c") == -128
       assert {:ok, _} = wake(inst, "c")
