@@ -1027,4 +1027,13 @@ defmodule Alambique.ConfigOptionsTest do
       end
     end
   end
+
+  describe "an instance without the node registry" do
+    test "starts without a registry process", ctx do
+      assert Alambique.Config.build(base(ctx)).nodes == nil
+      name = Alambique.CellHelpers.start_instance(ctx, [])
+
+      assert Process.whereis(Alambique.Config.fetch!(name).node_registry) == nil
+    end
+  end
 end
