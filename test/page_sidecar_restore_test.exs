@@ -135,6 +135,26 @@ defmodule Alambique.PageSidecarRestoreTest do
     assert Enum.all?(edges, &(&1 < first_end))
   end
 
+  test "a failed attempt leaves no fetcher, table or message behind", %{env: env} do
+    # The newest snapshot is garbage and its sidecar slow: the restore fails
+    # that attempt while the sidecar is still being read, and goes on from
+    # scratch.
+    snapshot = Keys.snapshot(env.ctx.prefix, cell(), 4)
+    {:ok, _} = env.mod.put(env.cfg, snapshot, :binary.copy(<<0>>, 200), :none, %{"ts" => "1000"})
+    {:ok, _} = env.mod.put(env.cfg, Keys.sidecar(snapshot), <<1, 2, 3>>, :none, %{})
+    MemoryStore.inject(env.cfg, kind: :latency, ms: 1_500, ops: [:get], key: ~r/0009.*\.pages$/)
+
+    {:links, links} = Process.info(self(), :links)
+    {_result, lazy} = lazy_restore(env)
+    assert Native.lazy_covered(lazy.handle) == Enum.to_list(0..(@files - 1))
+
+    {:links, after_links} = Process.info(self(), :links)
+    {:messages, messages} = Process.info(self(), :messages)
+    assert after_links -- links == [], "a fetcher is still linked to the restore"
+    refute Enum.any?(messages, &match?({ref, :sidecar} when is_reference(ref), &1))
+    refute Enum.any?(:ets.all(), &(:ets.info(&1, :name) == :restore_sidecars))
+  end
+
   describe "a bad sidecar falls back to the whole object" do
     for {name, damage} <- [
           {"with a flipped byte", {:flip, 70}},
