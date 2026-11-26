@@ -50,8 +50,24 @@ about it, and where the evidence is.
   database checksum. Reads before the end can see wrong content; with
   `lazy_restore: [verify_reads: true]` they wait for the end, and writes
   always do ([design.md](design.md), section 16). The end of the hydration
-  reads every object of the chain whole. A store whose ranged reads give no
+  reads whole every object of the chain that no sidecar covers. A file has
+  a sidecar only if a writer with `page_sidecar: true` wrote it and no other
+  sidecar write of that cell was under way; a crash or a failed write leaves
+  it without one. A store whose ranged reads give no
   ETag is not pinned to the object that was staged.
+- `awake: [idle_close_after_ms:]` frees the memory SQLite and the Erlang
+  allocator hold for the connection, but the resident memory of the node
+  falls by a fraction of it: the allocator keeps the free carriers. A cell
+  called about every `idle_close_after_ms` pays a reopen and a close on each
+  call and gains nothing ([cost-of-a-cell.md](cost-of-a-cell.md)).
+- Options chosen with `cell_options` that an awake cell cannot take live:
+  `sql: [locking_mode:]` applies at the next wake (a refresh that changes it
+  is refused), and `lazy_restore: [mode:]` is read at the next restore
+  ([how-to-operate-a-cell.md](how-to-operate-a-cell.md), step 13).
+- A node of a version without page-hash sidecars does not know the `.pages`
+  objects: its retention and the cleanup of a moved cell leave them in place
+  until a version with sidecars sweeps them
+  ([segment-format.md](segment-format.md)).
 
 ## Load measurements
 
