@@ -15,7 +15,13 @@ defmodule Alambique.Cell.Options do
 
   alias Alambique.{BoundedCall, Config, Telemetry}
 
-  @awake_keys [:cache_kib, :idle_cache_after_ms, :idle_cache_kib, :idle_gc]
+  @awake_keys [
+    :cache_kib,
+    :idle_cache_after_ms,
+    :idle_cache_kib,
+    :idle_close_after_ms,
+    :idle_gc
+  ]
 
   @type info :: %{
           source: :node | :override | :fallback,
@@ -131,7 +137,10 @@ defmodule Alambique.Cell.Options do
   #
   # 1. `idle_timeout_ms` not above `feed.cleanup_after_ms`: the node's value.
   # 2. `idle_cache_after_ms` not below `idle_timeout_ms`: the shrink is off.
-  # 3. `idle_cache_kib` not below `cache_kib`: the node's `idle_cache_kib`,
+  # 3. `idle_close_after_ms` not below `idle_timeout_ms`: the close is off.
+  # 4. `idle_cache_after_ms` not below `idle_close_after_ms`: the shrink is
+  #    off, as the close comes first and frees the cache.
+  # 5. `idle_cache_kib` not below `cache_kib`: the node's `idle_cache_kib`,
   #    or the shrink off when that is not below either.
   # 4. `locking_mode: :exclusive` where the node's feed hands over to the
   #    sender or a lazy restore is on: the node's value (the build refuses
@@ -144,6 +153,21 @@ defmodule Alambique.Cell.Options do
        fn o ->
          with after_ms when not is_nil(after_ms) <- value(config, o, :idle_cache_after_ms),
               true <- after_ms >= value(config, o, :idle_timeout_ms),
+              do: {:put, nil},
+              else: (_ -> nil)
+       end},
+      {:idle_close_after_ms,
+       fn o ->
+         with after_ms when not is_nil(after_ms) <- value(config, o, :idle_close_after_ms),
+              true <- after_ms >= value(config, o, :idle_timeout_ms),
+              do: {:put, nil},
+              else: (_ -> nil)
+       end},
+      {:idle_cache_after_ms,
+       fn o ->
+         with close when not is_nil(close) <- value(config, o, :idle_close_after_ms),
+              after_ms when not is_nil(after_ms) <- value(config, o, :idle_cache_after_ms),
+              true <- after_ms >= close,
               do: {:put, nil},
               else: (_ -> nil)
        end},
