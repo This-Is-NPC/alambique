@@ -245,6 +245,25 @@ defmodule Alambique.ConfigOptionsTest do
              600
   end
 
+  test "each per-cell option has one rule, the one awake and the instance use" do
+    check = &Alambique.Config.check_cell_option/2
+
+    for {key, good, bad} <- [
+          {:cache_kib, 64, 0},
+          {:idle_cache_after_ms, nil, 0},
+          {:idle_cache_kib, 0, -1},
+          {:idle_gc, false, 1},
+          {:idle_timeout_ms, 5, 0}
+        ] do
+      assert check.(key, good) == :ok
+      assert {:error, message} = check.(key, bad)
+      assert message =~ Atom.to_string(key)
+    end
+
+    assert Enum.sort(Alambique.Config.cell_option_keys()) ==
+             [:cache_kib, :idle_cache_after_ms, :idle_cache_kib, :idle_gc, :idle_timeout_ms]
+  end
+
   test "the statement limit is the dirty IO schedulers minus two, at least two slots" do
     # 1 thread: statements queue anyway; 2 to 4: reads use both threads.
     limits = for dio <- 1..10, do: Alambique.Config.default_statement_slots(dio)
