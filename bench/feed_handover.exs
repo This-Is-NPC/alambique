@@ -292,7 +292,11 @@ defmodule Bench do
                     :timer.tc(fn ->
                       {:ok, _} =
                         retry(fn ->
-                          Alambique.execute(inst, "c", "INSERT INTO t (v) VALUES ('x')")
+                          Alambique.execute(
+                            inst,
+                            "c",
+                            "INSERT INTO t (id, v) VALUES (-#{System.unique_integer([:positive])}, 'x')"
+                          )
                         end)
                     end)
 
