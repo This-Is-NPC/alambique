@@ -88,7 +88,7 @@ defmodule Alambique.Sqlite do
       timeout_ms: Keyword.get(opts, :timeout_ms, 0),
       gated: Keyword.get(opts, :gated, false),
       exclusive: Keyword.get(opts, :locking, :normal) == :exclusive,
-      lookaside: Keyword.get(opts, :lookaside)
+      lookaside: lookaside!(Keyword.get(opts, :lookaside))
     })
     |> case do
       {:ok, ref, 0} -> {:ok, ref}
@@ -96,6 +96,15 @@ defmodule Alambique.Sqlite do
       error -> error
     end
   end
+
+  defp lookaside!(nil), do: nil
+
+  defp lookaside!({bytes, slots} = pair)
+       when is_integer(bytes) and bytes >= 0 and is_integer(slots) and slots >= 0,
+       do: pair
+
+  defp lookaside!(other),
+    do: raise(ArgumentError, ":lookaside must be nil or {bytes, slots}, got: #{inspect(other)}")
 
   @doc false
   @spec ref(conn) :: reference
