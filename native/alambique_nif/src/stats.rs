@@ -131,6 +131,47 @@ pub fn add(counter: &AtomicU64, n: usize) {
     counter.fetch_add(n as u64, Relaxed);
 }
 
+/// The page arena: its state and applied settings, and, when it is on, its
+/// gauges and counters. The settings are what the library loaded with, which
+/// the application environment may not have reached (`NativeOptions`).
+fn page_arena() -> Vec<(String, i64)> {
+    use crate::alloc::{arena, arena_state, page_hdrsz};
+    let mut v = vec![
+        ("page_arena_state".into(), arena_state() as i64),
+        ("page_arena_page_hdrsz".into(), page_hdrsz() as i64),
+    ];
+    if let Some(a) = arena() {
+        let c = a.config();
+        let kib = |b: usize| (b >> 10) as i64;
+        v.extend([
+            ("page_arena_reserved_bytes".into(), a.range_bytes() as i64),
+            ("page_arena_extent_kib".into(), kib(c.extent_bytes)),
+            ("page_arena_trim_after_kib".into(), kib(c.threshold)),
+            ("page_arena_keep_kib".into(), kib(c.keep)),
+            ("page_arena_max_trim_kib".into(), kib(c.max_trim)),
+            ("page_arena_in_use_bytes".into(), a.in_use_bytes() as i64),
+            ("page_arena_mapped_bytes".into(), a.mapped_bytes() as i64),
+            (
+                "page_arena_resident_bytes".into(),
+                a.resident_bytes() as i64,
+            ),
+            (
+                "page_arena_unreleasable_bytes".into(),
+                a.residue_bytes() as i64,
+            ),
+            ("page_arena_regions".into(), a.open_regions() as i64),
+            (
+                "page_arena_released_bytes".into(),
+                a.released_bytes() as i64,
+            ),
+            ("page_arena_trims".into(), a.trims() as i64),
+            ("page_arena_trim_ns_max".into(), a.trim_ns_max() as i64),
+            ("page_arena_fallbacks".into(), a.fallbacks() as i64),
+        ]);
+    }
+    v
+}
+
 /// Every counter and gauge as `%{atom => integer}`. `sqlite_memory_highwater`
 /// is reset by the read, so it is the peak since the previous read.
 #[rustler::nif]
@@ -166,6 +207,7 @@ fn stats(env: Env) -> Term {
         ("ltx_bytes_decoded".into(), get(&LTX_BYTES_DECODED)),
         ("sqlite_memory_calls".into(), get(&SQLITE_MEMORY_CALLS)),
     ];
+    pairs.extend(page_arena());
     pairs.extend(calls("sqlite", &SQLITE_CALLS));
     pairs.extend(calls("replication", &REPLICATION_CALLS));
     pairs.extend(calls("lazy", &LAZY_CALLS));
