@@ -147,9 +147,25 @@ pub fn page_hdrsz() -> usize {
 /// Wakes the trim thread when the arena has memory to release. Called where a
 /// NIF call ends and where a connection closes, never inside a hook.
 pub fn poke_trim() {
+    #[cfg(test)]
+    POKED_WITH_REGIONS.with(|c| c.set(ARENA.get().map(Arena::open_regions)));
     if let Some(a) = ARENA.get() {
         a.poke();
     }
+}
+
+/// Where a connection's memory is settled: its region closes, and then the
+/// trim is woken. The other way round, a trim that has released the memory
+/// can run while the region still counts the connection.
+pub fn region_closed(region: &Region) {
+    region.close();
+    poke_trim();
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Regions open when the trim was last woken on this thread (tests).
+    static POKED_WITH_REGIONS: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
 thread_local! {
@@ -804,6 +820,15 @@ mod tests {
             // SAFETY: from `x_malloc`, not used again.
             unsafe { x_free(p) };
         }
+    }
+
+    #[test]
+    fn the_trim_is_woken_after_the_region_closes() {
+        let (_g, a) = hooks();
+        let region = Region::open();
+        let open = a.open_regions();
+        region_closed(&region);
+        assert_eq!(POKED_WITH_REGIONS.with(Cell::get), Some(open - 1));
     }
 
     #[test]
