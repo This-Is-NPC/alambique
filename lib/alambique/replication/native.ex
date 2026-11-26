@@ -246,6 +246,12 @@ defmodule Alambique.Replication.Native do
     def set_foreign_commit(_conn, _path, _sql), do: nif_error()
     @doc false
     def set_header_unreadable(_conn, _on), do: nif_error()
+    @doc false
+    def vfs_fault_arm(_path, _kind, _skip, _rc, _times), do: nif_error()
+    @doc false
+    def vfs_fault_clear, do: nif_error()
+    @doc false
+    def vfs_fault_hits, do: nif_error()
   end
 
   defp nif_error, do: :erlang.nif_error(:nif_not_loaded)
