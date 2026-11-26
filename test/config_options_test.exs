@@ -245,6 +245,118 @@ defmodule Alambique.ConfigOptionsTest do
              600
   end
 
+  defmodule Options do
+    @moduledoc false
+    def options(_cell), do: []
+    def options(_cell, _extra), do: []
+  end
+
+  describe "cell options" do
+    test "the callback has one internal form and defaults", ctx do
+      config = Alambique.Config.build(base(ctx))
+
+      assert {config.cell_options, config.cell_options_timeout_ms, config.cell_options_invalid} ==
+               {nil, 1_000, :fallback}
+
+      assert Alambique.Config.build(base(ctx, cell_options: {Options, :options})).cell_options ==
+               {Options, :options, []}
+
+      assert Alambique.Config.build(base(ctx, cell_options: {Options, :options, [:x]})).cell_options ==
+               {Options, :options, [:x]}
+    end
+
+    test "the callback must be exported with the arity of its extra arguments", ctx do
+      for bad <- [{Options, :missing}, {Options, :options, [1, 2]}, {NoSuchModule, :options}] do
+        assert_raise ArgumentError, ~r/:cell_options .*must be exported/, fn ->
+          Alambique.Config.build(base(ctx, cell_options: bad))
+        end
+      end
+
+      for bad <- [:options, "x", {Options}, {Options, :options, :no}] do
+        assert_raise ArgumentError, ~r/:cell_options must be nil/, fn ->
+          Alambique.Config.build(base(ctx, cell_options: bad))
+        end
+      end
+    end
+
+    test "the timeout is a positive integer below the renewal interval", ctx do
+      # ttl 3_000: renewals come every 1_000 ms, less 10 % of jitter.
+      on = [cell_options: {Options, :options}]
+
+      assert Alambique.Config.build(base(ctx, on ++ [cell_options_timeout_ms: 899]))
+             |> Map.fetch!(:cell_options_timeout_ms) == 899
+
+      for bad <- [0, -1, 1.5] do
+        assert_raise ArgumentError, ~r/cell_options_timeout_ms/, fn ->
+          Alambique.Config.build(base(ctx, on ++ [cell_options_timeout_ms: bad]))
+        end
+      end
+
+      for ms <- [900, 1_000, 5_000] do
+        assert_raise ArgumentError, ~r/less than the lease renewal interval/, fn ->
+          Alambique.Config.build(base(ctx, on ++ [cell_options_timeout_ms: ms]))
+        end
+      end
+
+      # Without a callback nothing waits.
+      assert Alambique.Config.build(base(ctx, cell_options_timeout_ms: 5_000))
+    end
+
+    test "cell_options_invalid is :fallback or :refuse", ctx do
+      assert Alambique.Config.build(base(ctx, cell_options_invalid: :refuse)).cell_options_invalid ==
+               :refuse
+
+      assert_raise ArgumentError, ~r/cell_options_invalid must be :fallback or :refuse/, fn ->
+        Alambique.Config.build(base(ctx, cell_options_invalid: :ignore))
+      end
+    end
+
+    test "the node limits are nil or positive integers", ctx do
+      for key <- [:cell_cache_kib_max, :cell_idle_timeout_ms_min, :cell_idle_timeout_ms_max],
+          bad <- [0, -1, 1.5, :big] do
+        assert_raise ArgumentError, ~r/#{key} must be nil or a positive integer/, fn ->
+          Alambique.Config.build(base(ctx, awake: [{key, bad}]))
+        end
+      end
+    end
+
+    test "node values outside the limits fail the build", ctx do
+      cases = [
+        {[cell_cache_kib_max: 256], ~r/:cache_kib must not exceed :cell_cache_kib_max/},
+        {[cell_idle_timeout_ms_min: 60_001], ~r/:idle_timeout_ms must be within/},
+        {[cell_idle_timeout_ms_max: 59_999], ~r/:idle_timeout_ms must be within/},
+        {[cell_idle_timeout_ms_min: 70_000, cell_idle_timeout_ms_max: 65_000],
+         ~r/_min must not exceed/},
+        {[cell_cache_kib_max: 1_024, max_bytes: 1_048_575], ~r/must fit in :max_bytes/}
+      ]
+
+      for {awake, message} <- cases do
+        assert_raise ArgumentError, message, fn ->
+          Alambique.Config.build(base(ctx, awake: awake))
+        end
+      end
+    end
+
+    test "limits that hold the node values are kept", ctx do
+      awake = [
+        cell_cache_kib_max: 1_024,
+        cell_idle_timeout_ms_min: 1_000,
+        cell_idle_timeout_ms_max: 60_000,
+        max_bytes: 1_048_576
+      ]
+
+      assert %{cell_cache_kib_max: 1_024, cell_idle_timeout_ms_min: 1_000} =
+               Alambique.Config.build(base(ctx, awake: awake)).awake
+    end
+
+    test "a node that does not know cell_options rejects it with a clear error", ctx do
+      # What an older node says about the option: the boot error names it.
+      assert_raise ArgumentError, ~r/unknown options \[:cell_options_nope\]/, fn ->
+        Alambique.Config.build(base(ctx, cell_options_nope: 1))
+      end
+    end
+  end
+
   test "each per-cell option has one rule, the one awake and the instance use" do
     check = &Alambique.Config.check_cell_option/2
 
@@ -302,7 +414,10 @@ defmodule Alambique.ConfigOptionsTest do
              track_bytes: true,
              wake_queue_ms: 500,
              max_wake_queue: 1_024,
-             max_bytes: nil
+             max_bytes: nil,
+             cell_cache_kib_max: nil,
+             cell_idle_timeout_ms_min: nil,
+             cell_idle_timeout_ms_max: nil
            }
 
     assert config.relocate == %{fence_attempts: 5, timeout_ms: 60_000, poll_ms: 100}
@@ -469,7 +584,10 @@ defmodule Alambique.ConfigOptionsTest do
              track_bytes: true,
              wake_queue_ms: 40,
              max_wake_queue: 5,
-             max_bytes: 5_000_000
+             max_bytes: 5_000_000,
+             cell_cache_kib_max: nil,
+             cell_idle_timeout_ms_min: nil,
+             cell_idle_timeout_ms_max: nil
            }
 
     assert config.relocate == %{fence_attempts: 2, timeout_ms: 30_000, poll_ms: 5}

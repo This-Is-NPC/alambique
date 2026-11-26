@@ -36,6 +36,9 @@ defmodule Alambique.Config do
     wake: [],
     wal: [],
     awake: [],
+    cell_options: nil,
+    cell_options_timeout_ms: 1_000,
+    cell_options_invalid: :fallback,
     relocate: [],
     rewind: [],
     schema: [],
@@ -243,6 +246,9 @@ defmodule Alambique.Config do
           migrations:
             [{pos_integer, String.t() | (Alambique.Tx.t() -> any)}] | {module, atom, list},
           schema_version: non_neg_integer | nil,
+          cell_options: {module, atom, list} | nil,
+          cell_options_timeout_ms: pos_integer,
+          cell_options_invalid: :fallback | :refuse,
           migration_window: pos_integer,
           moved_grace_ms: non_neg_integer,
           deletion_grace_ms: non_neg_integer,
@@ -348,7 +354,10 @@ defmodule Alambique.Config do
             track_bytes: boolean,
             wake_queue_ms: pos_integer,
             max_wake_queue: pos_integer,
-            max_bytes: pos_integer | nil
+            max_bytes: pos_integer | nil,
+            cell_cache_kib_max: pos_integer | nil,
+            cell_idle_timeout_ms_min: pos_integer | nil,
+            cell_idle_timeout_ms_max: pos_integer | nil
           },
           relocate: %{fence_attempts: pos_integer, timeout_ms: pos_integer, poll_ms: pos_integer},
           rewind: %{
@@ -437,6 +446,15 @@ defmodule Alambique.Config do
     feed = feed!(opts[:feed], idle_timeout)
     query = query!(opts[:query])
     migrations = migrations!(opts[:migrations])
+    cell_options = cell_options!(opts[:cell_options])
+    cell_options_timeout = pos_int!(opts, :cell_options_timeout_ms)
+    cell_options_invalid = opts[:cell_options_invalid]
+
+    unless cell_options_invalid in [:fallback, :refuse],
+      do: bad!(":cell_options_invalid must be :fallback or :refuse")
+
+    unless is_nil(cell_options) or cell_options_timeout < renew_floor(ttl, jitter),
+      do: bad!(":cell_options_timeout_ms must be less than the lease renewal interval")
 
     %{
       name: name,
@@ -476,6 +494,9 @@ defmodule Alambique.Config do
       wake: wake!(opts[:wake]),
       wal: wal!(opts[:wal]),
       awake: awake!(opts[:awake], idle_timeout),
+      cell_options: cell_options,
+      cell_options_timeout_ms: cell_options_timeout,
+      cell_options_invalid: cell_options_invalid,
       relocate: options!(:relocate, opts[:relocate], @relocate_defaults),
       rewind: rewind!(opts[:rewind]),
       schema: schema!(opts[:schema], op_timeout),
@@ -1231,7 +1252,10 @@ defmodule Alambique.Config do
         :idle_cache_after_ms,
         :idle_cache_kib,
         :idle_gc,
-        :track_bytes | Keyword.keys(@awake_defaults)
+        :track_bytes,
+        :cell_cache_kib_max,
+        :cell_idle_timeout_ms_min,
+        :cell_idle_timeout_ms_max | Keyword.keys(@awake_defaults)
       ])
 
     {max_bytes, rest} = Keyword.pop(opts, :max_bytes)
@@ -1241,6 +1265,9 @@ defmodule Alambique.Config do
     {idle_gc, rest} = Keyword.pop(rest, :idle_gc, true)
     {track_bytes, rest} = Keyword.pop(rest, :track_bytes, true)
     {cache_kib, rest} = Keyword.pop(rest, :cache_kib, @awake_defaults[:cache_kib])
+    {kib_max, rest} = Keyword.pop(rest, :cell_cache_kib_max)
+    {idle_min, rest} = Keyword.pop(rest, :cell_idle_timeout_ms_min)
+    {idle_max, rest} = Keyword.pop(rest, :cell_idle_timeout_ms_max)
 
     check_cell_option!(:idle_cache_kib, idle_kib)
     check_cell_option!(:idle_gc, idle_gc)
@@ -1256,13 +1283,76 @@ defmodule Alambique.Config do
     check_cell_option!(:idle_cache_after_ms, idle_after)
     idle_cache!(awake, idle_after, idle_kib, idle_timeout_ms)
 
+    limits = [
+      cell_cache_kib_max: kib_max,
+      cell_idle_timeout_ms_min: idle_min,
+      cell_idle_timeout_ms_max: idle_max
+    ]
+
+    limits!(awake, limits, idle_timeout_ms, max_bytes)
+
     awake
+    |> Map.merge(Map.new(limits))
     |> Map.put(:idle_cache_kib, idle_kib)
     |> Map.put(:idle_gc, idle_gc)
     |> Map.put(:track_bytes, track_bytes)
     |> Map.put(:idle_cache_after_ms, idle_after)
     |> Map.put(:max_bytes, max_bytes)
     |> Map.put(:max_wake_queue, queue || 4 * awake.max_wakes)
+  end
+
+  # The limits a cell's own options are clamped to (`nil`: none). The node's
+  # own values must be inside them, so the fallback is always within limits,
+  # and a cache limit must fit the memory budget.
+  defp limits!(awake, limits, idle_timeout_ms, max_bytes) do
+    for {key, value} <- limits,
+        not (is_nil(value) or (is_integer(value) and value > 0)),
+        do: bad!(":awake #{inspect(key)} must be nil or a positive integer")
+
+    kib_max = limits[:cell_cache_kib_max]
+    idle_min = limits[:cell_idle_timeout_ms_min]
+    idle_max = limits[:cell_idle_timeout_ms_max]
+
+    if kib_max && awake.cache_kib > kib_max,
+      do: bad!(":awake :cache_kib must not exceed :cell_cache_kib_max")
+
+    if kib_max && max_bytes && kib_max * 1024 > max_bytes,
+      do: bad!(":awake :cell_cache_kib_max must fit in :max_bytes")
+
+    if idle_min && idle_max && idle_min > idle_max,
+      do: bad!(":awake :cell_idle_timeout_ms_min must not exceed :cell_idle_timeout_ms_max")
+
+    if (idle_min && idle_timeout_ms < idle_min) or (idle_max && idle_timeout_ms > idle_max),
+      do: bad!(":idle_timeout_ms must be within :awake :cell_idle_timeout_ms_min and _max")
+
+    :ok
+  end
+
+  # `:cell_options` has one internal form, `{module, function, extra_args}`;
+  # the function receives the cell id first.
+  defp cell_options!(nil), do: nil
+
+  defp cell_options!({module, function}) when is_atom(module) and is_atom(function),
+    do: cell_options!({module, function, []})
+
+  defp cell_options!({module, function, args} = mfa)
+       when is_atom(module) and is_atom(function) and is_list(args) do
+    arity = 1 + length(args)
+
+    unless Code.ensure_loaded?(module) and function_exported?(module, function, arity),
+      do: bad!(":cell_options #{inspect(module)}.#{function}/#{arity} must be exported")
+
+    mfa
+  end
+
+  defp cell_options!(_),
+    do: bad!(":cell_options must be nil, {module, function} or {module, function, extra_args}")
+
+  # The shortest interval `Cell.renew_interval/1` can give: a callback that
+  # the cell waits for must end before it.
+  defp renew_floor(ttl, jitter) do
+    base = div(ttl, 3)
+    base - trunc(base * jitter)
   end
 
   # The options a cell may set for itself (`:cell_options`), with the rule of
