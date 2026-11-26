@@ -362,6 +362,7 @@ defmodule Alambique.Router do
   defp free({config, cell, :position, _, _, _}, _seen), do: {nil, stored_position(config, cell)}
   defp free({_, _, {:migrate, false}, _, _, _}, _seen), do: {nil, {:ok, :asleep}}
   defp free({_, _, {:checkpoint, _}, _, _, _}, _seen), do: {nil, :asleep}
+  defp free({_, _, :refresh_options, _, _, _}, _seen), do: {nil, {:ok, :asleep}}
 
   defp free({config, cell, _, _, hops, _} = args, seen) do
     preferred = Membership.preferred(config, cell)
@@ -545,6 +546,30 @@ defmodule Alambique.Router do
     end
   end
 
+  @doc false
+  # Refreshes the options of the cell if this node holds it, without waking
+  # it and without routing elsewhere. The call is counted like a routed one:
+  # the cell gives the place back when it takes the request.
+  @spec refresh_local(Config.t(), String.t(), timeout) :: term
+  def refresh_local(config, cell, timeout) do
+    case Cell.find(config, cell) do
+      nil ->
+        {:ok, :asleep}
+
+      {pid, load} ->
+        with :ok <- admit(config, load, :refresh_options) do
+          call_cell(pid, :refresh_options, timeout)
+        else
+          :busy -> {:error, :busy}
+        end
+    end
+  catch
+    :exit, {reason, {GenServer, :call, _}} when reason in [:noproc, :normal] -> {:ok, :asleep}
+    :exit, {:timeout, {GenServer, :call, _}} -> {:error, :timeout}
+    :exit, {{:shutdown, why}, {GenServer, :call, _}} -> {:error, why}
+    :exit, other -> {:error, {:cell_down, other}}
+  end
+
   defp hibernate_pid(pid, kind, timeout) do
     call_cell(pid, {kind, nil}, timeout)
   catch
@@ -668,7 +693,7 @@ defmodule Alambique.Router do
   defp repeatable?({:checkpoint, _deadline}), do: true
   defp repeatable?({kind, _release_ms}) when kind in [:hibernate, :hibernate_if_idle], do: true
   defp repeatable?({kind, _, _, _}), do: kind in [:query, :checked_query]
-  defp repeatable?(request), do: request == :touch
+  defp repeatable?(request), do: request in [:touch, :refresh_options]
 
   defp clock_ms(%{clock: {clock, clock_config}}), do: clock.now_ms(clock_config)
 end

@@ -44,6 +44,22 @@ defmodule Alambique.ClusterFuns do
 
   defp blob, do: :crypto.strong_rand_bytes(3_000)
 
+  @doc "The `cell_options` function of the refresh tests: what `put_options/1` stored on this node."
+  def cell_options(_cell), do: :persistent_term.get({__MODULE__, :options}, nil)
+
+  @doc "Sets what `cell_options/1` returns on this node."
+  def put_options(options), do: :persistent_term.put({__MODULE__, :options}, options)
+
+  @doc "The page cache limit of the connection of an awake cell on this node, in the unit of `PRAGMA cache_size`."
+  def cache_size(instance, cell) do
+    pid = Alambique.Cell.whereis(Alambique.Config.fetch!(instance), cell)
+
+    Alambique.CellHelpers.in_cell(pid, fn state ->
+      {:ok, %{rows: [[size]]}} = Alambique.Sqlite.run(state.conn, "PRAGMA cache_size", [])
+      size
+    end)
+  end
+
   @doc "A crash-point action that sends {:hydrating, self()} and waits for :go."
   def hold(name) do
     fn _, _ ->

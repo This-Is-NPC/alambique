@@ -96,21 +96,22 @@ defmodule Alambique do
       most `:cell_options_timeout_ms`. Nothing is stored: every wake asks again,
       on whichever node wakes the cell, so a cell that moves or restarts gets
       the same options from the same function. A change applies at the next
-      wake. Set it only when every node runs a version that knows it: an older
+      wake, or at once with `refresh_options/3`. Set it only when every node runs a version that knows it: an older
       node stops at boot with `unknown options [:cell_options]`. The
       `awake` limits `:cell_cache_kib_max`, `:cell_idle_timeout_ms_min` and
       `:cell_idle_timeout_ms_max` clamp what a cell may choose.
-    * `:cell_options_timeout_ms` - how long a wake waits for `:cell_options`
+    * `:cell_options_timeout_ms` - how long a wake or a refresh waits for `:cell_options`
       (default 1 000, or one less than the lease renewal interval when that is
       shorter; with a function set, a given value must be below that interval,
       which is a third of `:lease_ttl_ms` less `:lease_renew_jitter`). A call
       that does not return in time is killed.
-    * `:cell_options_invalid` - what a cell does when its override is invalid,
-      raises, exits, returns another shape or times out: `:fallback` (default)
+    * `:cell_options_invalid` - what a cell does at a wake when its override is
+      invalid, raises, exits, returns another shape or times out: `:fallback` (default)
       serves with the node's options, `:refuse` fails the wake with
       `{:error, {:cell_options, message}}` and writes no lease. Both emit
       `[:alambique, :cell, :options, :invalid]`; the warning in the log is
-      limited to one line every `:breaker` `:log_interval_ms`.
+      limited to one line every `:breaker` `:log_interval_ms`. A refresh
+      (`refresh_options/3`) of an invalid override changes nothing, with either.
     * `:op_timeout_ms` - time budget of one store operation such as an upload or
       a restore, capped by the lease (default 10 000). Every attempt of a store
       call runs under this deadline and is killed when it passes, so a store
@@ -1113,6 +1114,50 @@ defmodule Alambique do
         raise ArgumentError,
               ":release_deadline_ms must be a non-negative integer, got: #{inspect(other)}"
     end
+  end
+
+  @doc """
+  Reads the options of an awake cell again, by calling `:cell_options` now
+  instead of waiting for the next wake. Every per-cell key applies live: the
+  page cache, the idle shrink, the idle close and the idle timeout, each from
+  the time of the cell's last call (a timer that is already past fires at
+  once). It never wakes a cell: a cell nobody owns answers `{:ok, :asleep}`
+  and reads its options at its next wake. The call is routed to the owner like
+  any other.
+
+  Returns `{:ok, source, changed: keys}`: `source` is `:override` or `:node`
+  (the function returned `nil` or `[]`, or there is none: the node's options),
+  `keys` the options whose value changed. A refresh is not a call: it does not
+  count as activity, does not restore a shrunk cache and does not wait for a
+  hydration. A cell with its connection closed (`awake: [idle_close_after_ms:]`)
+  stays closed and opens with the new options at its next SQL.
+
+  The function runs in a process of its own, bounded by
+  `:cell_options_timeout_ms`, and the cell keeps serving and renewing its lease
+  meanwhile. One runs at a time per cell: a refresh asked while another runs
+  waits for it and is served by the next one, so the last request is the last
+  applied.
+
+  An override that is invalid, a function that raises, exits, returns another
+  shape or times out, or a page cache the cell cannot set, changes nothing:
+  the cell keeps the options it has (also with `cell_options_invalid:
+  :refuse`) and the answer is `{:error, {:cell_options, message}}`. The same
+  limits and repairs as at a wake apply. `:track_bytes` and the feed options
+  are not per cell: the sender's reader keeps `:feed` `:reader_cache_kib`.
+
+  Emits `[:alambique, :cell, :options, :refresh]`. Option `:timeout`
+  (milliseconds, default the longer of `:call_timeout_ms` and twice
+  `:cell_options_timeout_ms` plus `:routing` `:slack_ms`, as a refresh may wait
+  for the one before it).
+  """
+  @spec refresh_options(instance, cell, keyword) ::
+          {:ok, :node | :override, changed: [atom]} | {:ok, :asleep} | {:error, term}
+  def refresh_options(instance, cell, opts \\ []) do
+    [timeout: timeout] = opts |> Keyword.validate!(timeout: nil) |> Enum.sort()
+    config = Config.fetch!(instance)
+    callback = config.cell_options_timeout_ms || 0
+    timeout = timeout || max(config.call_timeout_ms, 2 * callback + config.routing.slack_ms)
+    Router.call(instance, cell, :refresh_options, timeout)
   end
 
   @doc """
