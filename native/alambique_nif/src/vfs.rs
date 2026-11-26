@@ -52,18 +52,40 @@ unsafe fn real(f: *mut ffi::sqlite3_file) -> *mut ffi::sqlite3_file {
 /// # Safety
 /// `f` points to a file that `x_open` initialized.
 unsafe fn lazy_of<'a>(f: *mut ffi::sqlite3_file) -> Option<&'a Lazy> {
+    // SAFETY: `f` is a `File` by the contract.
+    let lazy = unsafe { (*(f as *mut File)).lazy };
     // SAFETY: `lazy` is null or an `Arc` raw pointer that `x_close` releases
     // only after SQLite's last call on the file.
-    unsafe { (*(f as *mut File)).lazy.as_ref() }
+    unsafe { lazy.as_ref() }
 }
 
-/// The default VFS's method table of an open file.
+/// The default VFS's method table of an open file, `None` when it has none.
 ///
 /// # Safety
 /// `f` points to a file whose default-VFS part `x_open` opened.
-unsafe fn methods(f: *mut ffi::sqlite3_file) -> &'static ffi::sqlite3_io_methods {
+unsafe fn methods(f: *mut ffi::sqlite3_file) -> Option<&'static ffi::sqlite3_io_methods> {
+    // SAFETY: by the contract.
+    let inner = unsafe { real(f) };
+    // SAFETY: `inner` is the default VFS's file.
+    let file = unsafe { inner.as_ref() }?;
     // SAFETY: the default VFS's `xOpen` set `pMethods` to a static table.
-    unsafe { &*(*real(f)).pMethods }
+    unsafe { file.pMethods.as_ref() }
+}
+
+/// Calls the method `$method` of the default VFS on the open file `$file`
+/// with SQLite's own arguments; `$missing` when the default VFS has none.
+macro_rules! delegate {
+    ($file:expr, $method:ident, $missing:expr $(, $arg:expr)*) => {{
+        // SAFETY: `$file` is an open file of this VFS.
+        let method = unsafe { methods($file) }.and_then(|m| m.$method);
+        // SAFETY: as above.
+        let inner = unsafe { real($file) };
+        match method {
+            // SAFETY: the arguments are SQLite's, passed as they came.
+            Some(call) => unsafe { call(inner $(, $arg)*) },
+            None => $missing,
+        }
+    }};
 }
 
 unsafe extern "C" fn x_open(
@@ -91,26 +113,34 @@ unsafe extern "C" fn x_open(
             return ffi::SQLITE_CANTOPEN;
         }
     }
-    // SAFETY: SQLite passes `szOsFile` writable bytes (`register`); `base` is
-    // the default VFS found there and `real(file)` is the room for its file.
-    let rc = unsafe {
-        (*f).base.pMethods = ptr::null();
-        (*f).lazy = ptr::null();
-        #[cfg(feature = "test-panic")]
-        {
-            (*f).name = crate::test_panic::file_opened(name);
-        }
-        (*f).path = ptr::null_mut();
-        match (*base).xOpen {
-            Some(open) => open(base, name, real(file), flags, out_flags),
-            None => ffi::SQLITE_CANTOPEN,
-        }
+    // SAFETY: SQLite passes `szOsFile` writable bytes (`register`), so the
+    // fields of `File` can be set.
+    unsafe { (*f).base.pMethods = ptr::null() };
+    // SAFETY: as above.
+    unsafe { (*f).lazy = ptr::null() };
+    #[cfg(feature = "test-panic")]
+    // SAFETY: as above.
+    unsafe {
+        (*f).name = crate::test_panic::file_opened(name)
+    };
+    // SAFETY: as above.
+    unsafe { (*f).path = ptr::null_mut() };
+    // SAFETY: `base` is the default VFS found in `register`.
+    let open = unsafe { (*base).xOpen };
+    // SAFETY: `real(file)` is the room for the default VFS's file.
+    let inner = unsafe { real(file) };
+    let rc = match open {
+        // SAFETY: SQLite's arguments go to the default VFS as they came.
+        Some(open) => unsafe { open(base, name, inner, flags, out_flags) },
+        None => ffi::SQLITE_CANTOPEN,
     };
     if rc != ffi::SQLITE_OK {
         #[cfg(feature = "test-panic")]
         {
+            // SAFETY: as above.
+            let made = unsafe { (*f).name };
             // SAFETY: the name was made above and is not used again.
-            unsafe { crate::test_panic::file_closed((*f).name) };
+            unsafe { crate::test_panic::file_closed(made) };
         }
         return rc;
     }
@@ -123,26 +153,28 @@ unsafe extern "C" fn x_open(
         Ok(path.map(|p| (lazy::key(Path::new(p)), lazy::lookup(Path::new(p)))))
     });
     let Ok(lazy) = lazy else {
-        // SAFETY: `real(file)` was opened above and has its method table.
-        unsafe {
-            let real = real(file);
-            ((*(*real).pMethods).xClose.expect("xClose"))(real);
-            #[cfg(feature = "test-panic")]
-            crate::test_panic::file_closed((*f).name);
+        // The file was opened above.
+        delegate!(file, xClose, ffi::SQLITE_IOERR_CLOSE);
+        #[cfg(feature = "test-panic")]
+        {
+            // SAFETY: as above.
+            let made = unsafe { (*f).name };
+            // SAFETY: the name was made above and is not used again.
+            unsafe { crate::test_panic::file_closed(made) };
         }
         return ffi::SQLITE_CANTOPEN;
     };
-    // SAFETY: `file` is writable (see above); `IO_METHODS` is static.
-    unsafe {
-        if let Some((key, lazy)) = lazy {
-            lazy::opened(&key);
-            (*f).path = Box::into_raw(Box::new(key));
-            if let Some(lazy) = lazy {
-                (*f).lazy = Arc::into_raw(lazy);
-            }
+    if let Some((key, lazy)) = lazy {
+        lazy::opened(&key);
+        // SAFETY: `file` is writable (see above).
+        unsafe { (*f).path = Box::into_raw(Box::new(key)) };
+        if let Some(lazy) = lazy {
+            // SAFETY: as above.
+            unsafe { (*f).lazy = Arc::into_raw(lazy) };
         }
-        (*f).base.pMethods = &IO_METHODS;
     }
+    // SAFETY: as above; `IO_METHODS` is static.
+    unsafe { (*f).base.pMethods = &IO_METHODS };
     crate::stats::FILES_OPEN.fetch_add(1, Ordering::Relaxed);
     ffi::SQLITE_OK
 }
@@ -150,24 +182,33 @@ unsafe extern "C" fn x_open(
 unsafe extern "C" fn x_close(file: *mut ffi::sqlite3_file) -> c_int {
     guard("x_close", ffi::SQLITE_IOERR_CLOSE, || {
         let f = file as *mut File;
-        // SAFETY: `file` is open (SQLite calls `xClose` once, on an open
-        // file); `lazy` came from `Arc::into_raw` in `x_open`.
-        let rc = unsafe {
-            let rc = (methods(file).xClose.expect("xClose"))(real(file));
-            if !(*f).lazy.is_null() {
-                drop(Arc::from_raw((*f).lazy));
-                (*f).lazy = ptr::null();
-            }
-            (*f).base.pMethods = ptr::null();
-            #[cfg(feature = "test-panic")]
-            crate::test_panic::file_closed((*f).name);
-            // After the close: SQLite has released its locks by now.
-            if !(*f).path.is_null() {
-                lazy::closed(&Box::from_raw((*f).path));
-                (*f).path = ptr::null_mut();
-            }
-            rc
-        };
+        let rc = delegate!(file, xClose, ffi::SQLITE_IOERR_CLOSE);
+        // SAFETY: `file` is open (SQLite calls `xClose` once, on an open file).
+        let lazy = unsafe { (*f).lazy };
+        if !lazy.is_null() {
+            // SAFETY: `lazy` came from `Arc::into_raw` in `x_open`.
+            drop(unsafe { Arc::from_raw(lazy) });
+            // SAFETY: as above.
+            unsafe { (*f).lazy = ptr::null() };
+        }
+        // SAFETY: as above.
+        unsafe { (*f).base.pMethods = ptr::null() };
+        #[cfg(feature = "test-panic")]
+        {
+            // SAFETY: as above.
+            let made = unsafe { (*f).name };
+            // SAFETY: the name came from `file_opened` and is not used again.
+            unsafe { crate::test_panic::file_closed(made) };
+        }
+        // After the close: SQLite has released its locks by now.
+        // SAFETY: as above.
+        let path = unsafe { (*f).path };
+        if !path.is_null() {
+            // SAFETY: `path` came from `Box::into_raw` in `x_open`.
+            lazy::closed(&unsafe { Box::from_raw(path) });
+            // SAFETY: as above.
+            unsafe { (*f).path = ptr::null_mut() };
+        }
         crate::stats::FILES_OPEN.fetch_sub(1, Ordering::Relaxed);
         rc
     })
@@ -180,16 +221,16 @@ unsafe extern "C" fn x_read(
     offset: i64,
 ) -> c_int {
     guard("x_read", ffi::SQLITE_IOERR_READ, || {
-        // SAFETY: `file` is an open file of this VFS; SQLite's arguments go to
-        // the default VFS as they came.
-        unsafe {
-            if let Some(lazy) = lazy_of(file) {
-                if !lazy.is_complete() && lazy.before_read(offset as u64, amt as u64).is_err() {
-                    return ffi::SQLITE_IOERR_READ;
-                }
+        // SAFETY: `file` is an open file of this VFS.
+        if let Some(lazy) = unsafe { lazy_of(file) } {
+            let (Ok(at), Ok(len)) = (u64::try_from(offset), u64::try_from(amt)) else {
+                return ffi::SQLITE_IOERR_READ;
+            };
+            if !lazy.is_complete() && lazy.before_read(at, len).is_err() {
+                return ffi::SQLITE_IOERR_READ;
             }
-            (methods(file).xRead.expect("xRead"))(real(file), buf, amt, offset)
         }
+        delegate!(file, xRead, ffi::SQLITE_IOERR_READ, buf, amt, offset)
     })
 }
 
@@ -200,50 +241,48 @@ unsafe extern "C" fn x_write(
     offset: i64,
 ) -> c_int {
     guard("x_write", ffi::SQLITE_IOERR_WRITE, || {
-        // SAFETY: `file` is an open file of this VFS; SQLite's arguments go to
-        // the default VFS as they came.
-        unsafe {
-            if let Some(lazy) = lazy_of(file) {
-                if !lazy.is_complete() && lazy.before_write(offset as u64, amt as u64).is_err() {
-                    return ffi::SQLITE_IOERR_WRITE;
-                }
+        // SAFETY: `file` is an open file of this VFS.
+        if let Some(lazy) = unsafe { lazy_of(file) } {
+            let (Ok(at), Ok(len)) = (u64::try_from(offset), u64::try_from(amt)) else {
+                return ffi::SQLITE_IOERR_WRITE;
+            };
+            if !lazy.is_complete() && lazy.before_write(at, len).is_err() {
+                return ffi::SQLITE_IOERR_WRITE;
             }
-            let rc = (methods(file).xWrite.expect("xWrite"))(real(file), buf, amt, offset);
-            #[cfg(feature = "test-panic")]
-            if rc == ffi::SQLITE_OK {
-                let name = (*(file as *mut File)).name;
-                if let Some(fault) = crate::test_panic::after_write(name, buf, amt, offset) {
-                    return fault;
-                }
-            }
-            rc
         }
+        let rc = delegate!(file, xWrite, ffi::SQLITE_IOERR_WRITE, buf, amt, offset);
+        #[cfg(feature = "test-panic")]
+        if rc == ffi::SQLITE_OK {
+            // SAFETY: `file` is an open file of this VFS.
+            let name = unsafe { (*(file as *mut File)).name };
+            if let Some(fault) = crate::test_panic::after_write(name, buf, amt, offset) {
+                return fault;
+            }
+        }
+        rc
     })
 }
 
 unsafe extern "C" fn x_truncate(file: *mut ffi::sqlite3_file, size: i64) -> c_int {
     guard("x_truncate", ffi::SQLITE_IOERR_TRUNCATE, || {
         // SAFETY: `file` is an open file of this VFS.
-        unsafe {
-            if let Some(lazy) = lazy_of(file) {
-                lazy.on_truncate(size as u64);
-            }
-            (methods(file).xTruncate.expect("xTruncate"))(real(file), size)
+        if let Some(lazy) = unsafe { lazy_of(file) } {
+            let Ok(len) = u64::try_from(size) else {
+                return ffi::SQLITE_IOERR_TRUNCATE;
+            };
+            lazy.on_truncate(len);
         }
+        delegate!(file, xTruncate, ffi::SQLITE_IOERR_TRUNCATE, size)
     })
 }
 
 /// Defines a callback that hands the call to the default VFS's method of the
-/// same name, with `$fallback` as the answer when it panics.
+/// same name, with `$fallback` as the answer when it panics or has none.
 macro_rules! passthrough {
     ($name:ident, $method:ident, $fallback:expr $(, $arg:ident: $ty:ty)*) => {
         unsafe extern "C" fn $name(file: *mut ffi::sqlite3_file $(, $arg: $ty)*) -> c_int {
             guard(stringify!($name), $fallback, || {
-                // SAFETY: `file` is an open file of this VFS and SQLite's
-                // arguments go to the default VFS as they came.
-                unsafe {
-                    (methods(file).$method.expect(stringify!($method)))(real(file) $(, $arg)*)
-                }
+                delegate!(file, $method, $fallback $(, $arg)*)
             })
         }
     };
@@ -251,19 +290,16 @@ macro_rules! passthrough {
 
 unsafe extern "C" fn x_sync(file: *mut ffi::sqlite3_file, flags: c_int) -> c_int {
     guard("x_sync", ffi::SQLITE_IOERR_FSYNC, || {
-        // SAFETY: `file` is an open file of this VFS and SQLite's arguments go
-        // to the default VFS as they came.
-        unsafe {
-            let rc = (methods(file).xSync.expect("xSync"))(real(file), flags);
-            #[cfg(feature = "test-panic")]
-            if rc == ffi::SQLITE_OK {
-                let name = (*(file as *mut File)).name;
-                if let Some(fault) = crate::test_panic::after_sync(name) {
-                    return fault;
-                }
+        let rc = delegate!(file, xSync, ffi::SQLITE_IOERR_FSYNC, flags);
+        #[cfg(feature = "test-panic")]
+        if rc == ffi::SQLITE_OK {
+            // SAFETY: `file` is an open file of this VFS.
+            let name = unsafe { (*(file as *mut File)).name };
+            if let Some(fault) = crate::test_panic::after_sync(name) {
+                return fault;
             }
-            rc
         }
+        rc
     })
 }
 passthrough!(x_file_size, xFileSize, ffi::SQLITE_IOERR_FSTAT, size: *mut i64);
@@ -299,10 +335,7 @@ passthrough!(
 passthrough!(x_shm_unmap, xShmUnmap, ffi::SQLITE_IOERR, delete: c_int);
 
 unsafe extern "C" fn x_shm_barrier(file: *mut ffi::sqlite3_file) {
-    guard("x_shm_barrier", (), || {
-        // SAFETY: `file` is an open file of this VFS.
-        unsafe { (methods(file).xShmBarrier.expect("xShmBarrier"))(real(file)) }
-    })
+    guard("x_shm_barrier", (), || delegate!(file, xShmBarrier, ()))
 }
 
 // No memory mapping: reads always go through `x_read`.
@@ -348,28 +381,32 @@ pub fn register() -> Result<(), String> {
     static ONCE: Once = Once::new();
     let mut result = Ok(());
     ONCE.call_once(|| {
-        // SAFETY: `sqlite3_vfs_find` returns the registered default VFS, which
-        // lives for the whole process; the copy is leaked on purpose because
-        // SQLite keeps the pointer.
-        unsafe {
-            let base = ffi::sqlite3_vfs_find(ptr::null());
-            if base.is_null() {
-                result = Err("no default VFS".to_string());
-                return;
-            }
-            BASE.store(base, Ordering::Release);
-            // Same methods as the default VFS, except `xOpen` and the size of
-            // the file structure; `pAppData` stays the default VFS's own.
-            let mut vfs = *base;
-            vfs.pNext = ptr::null_mut();
-            vfs.zName = NAME.as_ptr() as *const c_char;
-            vfs.szOsFile = (HEADER as c_int) + (*base).szOsFile;
-            vfs.xOpen = Some(x_open);
-            let vfs = Box::leak(Box::new(vfs));
-            let rc = ffi::sqlite3_vfs_register(vfs, 0);
-            if rc != ffi::SQLITE_OK {
-                result = Err(format!("sqlite3_vfs_register failed: {rc}"));
-            }
+        // SAFETY: returns the registered default VFS, which lives for the
+        // whole process.
+        let base = unsafe { ffi::sqlite3_vfs_find(ptr::null()) };
+        if base.is_null() {
+            result = Err("no default VFS".to_string());
+            return;
+        }
+        BASE.store(base, Ordering::Release);
+        // SAFETY: `base` is not null.
+        let mut vfs = unsafe { *base };
+        let Ok(header) = c_int::try_from(HEADER) else {
+            result = Err("the file header is too large".to_string());
+            return;
+        };
+        // Same methods as the default VFS, except `xOpen` and the size of the
+        // file structure; `pAppData` stays the default VFS's own.
+        vfs.pNext = ptr::null_mut();
+        vfs.zName = NAME.as_ptr() as *const c_char;
+        vfs.szOsFile = header.saturating_add(vfs.szOsFile);
+        vfs.xOpen = Some(x_open);
+        // The copy is leaked on purpose because SQLite keeps the pointer.
+        let vfs = Box::leak(Box::new(vfs));
+        // SAFETY: `vfs` lives for the whole process.
+        let rc = unsafe { ffi::sqlite3_vfs_register(vfs, 0) };
+        if rc != ffi::SQLITE_OK {
+            result = Err(format!("sqlite3_vfs_register failed: {rc}"));
         }
     });
     result
