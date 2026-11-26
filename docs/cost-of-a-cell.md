@@ -110,18 +110,38 @@ not one cell. To count one cell, list its prefix in the bucket.
 
 ## 5. What changes the cost
 
-**`feed: [hand_over: :sender, reader_cache_kib: ...]`.** Off by default
-(`hand_over: :cell`: the cell reads the rows of an acknowledged batch itself).
-With `:sender` the cell hands over only the range of TXIDs and the feed sender
-reads the rows through a second, read-only connection to the cell's file. The
-connection is opened when a range is handed over and closed when the sender
-has read everything handed over, so a cell that publishes in bursts opens one
-connection per burst, not one per write; a read is one statement and holds no
-lock between statements. The cost per operation is one read-only open per burst
-of handed-over ranges. While it is open the reader holds a page cache of
-`reader_cache_kib` (default 64) plus its schema and statements, which count
-in `awake.max_bytes` with the cell's own connection, and two more open files
-(the database and its WAL).
+**`feed: [hand_over: ...]`.** Who reads the captured rows of an acknowledged
+batch. The default is `:cell`: the cell reads them in its own process. A
+batch of 4,500 rows costs the cell about 3.7 ms (values of 20 bytes) to 4.4 ms
+(100 bytes) to step the query and build the rows, about 0.3 ms to shape them
+and 0.25 to 0.33 ms to copy them to the sender: 0.8 to 1.0 microseconds per row
+for the read and 0.13 to 0.15 for the rest, and about 10.5 reductions per row
+on the cell. A call that arrives right after such a batch waits for it: the
+first one-row write took 5.6 ms on average.
+
+With `hand_over: :sender` the cell hands over only the range of TXIDs and the
+feed sender reads the rows through a second, read-only connection to the cell's
+file. The cost on the cell is about 0.4 reductions per row and no wait: the
+first one-row write after the batch took 0.87 ms on average, as it does 2 s
+later. The connection is opened for each range (`reader_close: :after_read`,
+the default; `:after_burst` shares it between ranges that follow each other)
+and a read is one statement that holds no lock between statements. The open of
+a range costs about 65 microseconds, under 2% of the read of the 4,500-row
+batch. While it is open the reader holds a page cache of `reader_cache_kib`
+(default 64) plus its schema and statements, which count in `awake.max_bytes`
+with the cell's own connection, and two more open files (the database and its
+WAL). With 300 cells publishing at once the files open at the peak were
+0.17 per cell and the memory 114 to 121 KB per cell, and none stayed open
+after.
+
+With `hand_over: :native` the cell calls the library on its own connection:
+the query and the text of the records cost about 1.6 ms for 4,500 rows
+(0.35 to 0.38 microseconds per row), 0.3 reductions per row and no copy on the
+heap. The cell still waits for it: the first one-row write after the batch
+took 2.3 ms on average (1.1 ms after 2 s). It needs no second connection, so
+it costs no file and no page cache. With 300 cells publishing 500 rows each,
+the dirty IO schedulers were busy 28.5 % of the window for `:native`, 38.7 to
+45.3 % for `:sender` and 39.2 % for `:cell`.
 
 **`awake: [cache_kib: ...]`.** The page cache of each awake cell's connection,
 in KiB, set with `PRAGMA cache_size` when the cell wakes. The default is 512.

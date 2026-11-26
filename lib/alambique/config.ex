@@ -791,7 +791,7 @@ defmodule Alambique.Config do
     do: if(feed[:reader_cache_kib] == nil, do: 64, else: pos_int!(feed, :reader_cache_kib))
 
   # Default of `reader_close`; one place to flip it.
-  @reader_close_default :after_burst
+  @reader_close_default :after_read
 
   defp reader_close!(feed, :sender) do
     case feed[:reader_close] || @reader_close_default do
