@@ -219,10 +219,11 @@ load slots stay, and `cache` reads `:closed`. The check runs in `info/2`,
 inside the busy marker (§10), from the time of the last call, and the cell
 closes only when nothing can need the connection: no caller waiting, no batch
 in flight or pending, no parked write, no hydration, no unsent commit, a lease
-that is valid, and the feed settled (`Publisher.settled?/1`: nothing handed
-over and not published, no piece or retry scheduled, no published row waiting
-for a cleanup). A cleanup that is due runs first, as for the shrink, and the
-checks run again after it. Then the cell closes the sender's reader, checkpoints
+that is valid, and the feed delivered (`Publisher.delivered?/1`: nothing handed
+over and not published, no piece or retry scheduled). A cleanup that is due
+runs first, as for the shrink, and the checks, now including that no published
+row waits for a cleanup, run again after it: the cleanup batch is in flight
+then, so the cell waits for the next check. Then the cell closes the sender's reader, checkpoints
 (which refuses frames no batch carries; the cell stays open then) and closes the
 connection with `Sqlite.close_keep/1`.
 
