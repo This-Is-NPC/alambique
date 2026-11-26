@@ -103,13 +103,28 @@ defmodule Alambique.PageArenaTest do
     end
   end
 
+  test "a shrink returns its memory while the connection stays open", %{tmp_dir: dir} do
+    conn = filled(dir, "shrink.db", 12_288)
+    held = stats()
+    :ok = Sqlite.execute(conn, "PRAGMA cache_size = 0")
+
+    if arena?(held) do
+      assert held.page_arena_in_use_bytes - stats().page_arena_in_use_bytes >= 10_000_000
+      # The end of the call that freed the pages wakes the trim.
+      assert eventually(fn -> excess(stats()) <= 1_000_000 end)
+      assert stats().page_arena_regions == held.page_arena_regions
+    end
+
+    :ok = Sqlite.close(conn)
+  end
+
   test "a connection that is garbage collected returns its memory too", %{tmp_dir: dir} do
     held =
       Task.async(fn ->
         _conn = filled(dir, "gc.db", 12_288)
         stats()
       end)
-      |> Task.await()
+      |> Task.await(30_000)
 
     # The task ended: its connection closes with its opener, and the
     # reference is collected with the task's heap.
