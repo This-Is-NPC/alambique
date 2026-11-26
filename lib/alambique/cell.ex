@@ -329,7 +329,7 @@ defmodule Alambique.Cell do
     Facts.put(state.load, :awake_since_mono, state.last_active)
     # Last: a reader that finds it set finds every fact above.
     :atomics.put(state.load, Facts.slot(:last_used), state.last_active)
-    arm_idle_cache(state)
+    state |> arm_idle_cache() |> arm_idle_close()
   end
 
   # The shrink timer carries its ref, so a message that was already queued
@@ -343,6 +343,17 @@ defmodule Alambique.Cell do
 
   defp arm_idle_cache(state, ms),
     do: %{state | idle_cache: :erlang.start_timer(ms, self(), :idle_cache)}
+
+  # The close timer carries its ref like the shrink timer does.
+  defp arm_idle_close(state) do
+    case State.cell_opt(state, :idle_close_after_ms) do
+      nil -> state
+      ms -> arm_idle_close(state, ms)
+    end
+  end
+
+  defp arm_idle_close(state, ms),
+    do: %{state | idle_close: :erlang.start_timer(ms, self(), :idle_close)}
 
   # The first call after a shrink gives the cache its full limit back. If the
   # pragma fails the cache is still small: the cell stays `:shrunk`, so the
@@ -493,19 +504,38 @@ defmodule Alambique.Cell do
   # The messages after which the memory is measured: the idle cache shrink and
   # the end of the hydration.
   defp measures?({:timeout, _ref, :idle_cache}), do: true
+  defp measures?({:timeout, _ref, :idle_close}), do: true
   defp measures?({:hydrated, _pid}), do: true
   defp measures?(_message), do: false
 
   defp call(request, from, state) do
-    state = restore_cache(%{state | last_active: System.monotonic_time(:millisecond)})
+    state = %{state | last_active: System.monotonic_time(:millisecond)}
     :atomics.put(state.load, Facts.slot(:last_used), state.last_active)
 
     if State.lease_valid?(state) do
-      serve_call(request, from, state)
+      case reopen_for(request, state) do
+        {:ok, state} -> serve_call(request, from, restore_cache(state))
+        {:stop, reason, state} -> stop_serving(state, reason, {:error, reason})
+      end
     else
       stop_serving(state, :lease_expired, {:error, :lease_expired})
     end
   end
+
+  # Only a request that runs SQL opens a closed database again.
+  defp reopen_for(request, %State{conn: nil} = state) do
+    if sql?(request), do: reopen(state), else: {:ok, state}
+  end
+
+  defp reopen_for(_request, state), do: {:ok, state}
+
+  defp sql?({:query, _sql, _params, _ms}), do: true
+  defp sql?({:checked_query, _sql, _params, _ms}), do: true
+  defp sql?({:transaction, _fun, _ms}), do: true
+  defp sql?({:execute, _sql, _params, _ms}), do: true
+  defp sql?({:isolated, _request}), do: true
+  defp sql?({:migrate, _wake}), do: true
+  defp sql?(_request), do: false
 
   # A read that may see unacknowledged writes is answered after the newest
   # batch that carries one is durable, which implies every earlier batch is, so
@@ -571,6 +601,10 @@ defmodule Alambique.Cell do
   # Like `hibernate/2` and the checkpoint of a big WAL: every upload is
   # acknowledged before the WAL is truncated, but the cell stays awake. A queue
   # that does not empty within the deadline leaves the WAL for later.
+  # A closed database has checkpointed: nothing is left in the WAL.
+  defp serve_call({:checkpoint, _deadline_ms}, _from, %State{conn: nil} = state),
+    do: {:reply, :ok, state}
+
   defp serve_call({:checkpoint, deadline_ms}, _from, state) do
     case drain_within(state, deadline_ms) do
       {:ok, state} -> requested_checkpoint(state)
@@ -867,6 +901,29 @@ defmodule Alambique.Cell do
     end
   end
 
+  # Closes the connection of a cell that stayed idle (`idle_close_after_ms`).
+  # The published feed rows go first, as for the shrink. The cleanup may have
+  # sent a batch, so the checks run again after it.
+  defp info({:timeout, ref, :idle_close}, %State{mode: :serving, idle_close: ref} = state) do
+    state = %{state | idle_close: nil}
+    after_ms = State.cell_opt(state, :idle_close_after_ms)
+    elapsed = System.monotonic_time(:millisecond) - state.last_active
+
+    cond do
+      elapsed < after_ms ->
+        {:noreply, arm_idle_close(state, after_ms - elapsed)}
+
+      not closable?(state) ->
+        {:noreply, arm_idle_close(state)}
+
+      true ->
+        case cleanup_if_due(state) do
+          {:ok, state} -> if closable?(state), do: close_idle(state), else: rearmed(state)
+          {:stop, reason, state} -> stop_serving(state, reason)
+        end
+    end
+  end
+
   # The lazy phase of the file (design §16) ended.
   defp info({:hydrated, pid}, %State{hydrator: pid} = state) do
     case Hydration.done(state) do
@@ -968,6 +1025,151 @@ defmodule Alambique.Cell do
   end
 
   defp arm_cleanup(state, _ms), do: state
+
+  defp rearmed(state), do: {:noreply, arm_idle_close(state)}
+
+  # Nothing in flight, parked or waiting for the feed, so no message or call
+  # that is already queued needs the connection: the feed sender, whose
+  # exit would read it, has nothing left to publish (`Publisher.settled?/1`).
+  defp closable?(%State{conn: conn} = state) do
+    conn != nil and idle?(state) and :atomics.get(state.load, Facts.slot(:admitted)) == 0 and
+      state.parked == [] and state.hydrator == nil and not state.unsent and
+      Publisher.settled?(state) and State.lease_valid?(state)
+  end
+
+  # Idle close (`idle_close_after_ms`): checkpoint, close the connection and
+  # keep the hold on the file. The cell stays the owner: lease, renewals,
+  # timers and facts go on, and the next request that needs SQLite opens the
+  # database again (`reopen/1`). A checkpoint that cannot finish leaves the
+  # connection open.
+  defp close_idle(state) do
+    started = System.monotonic_time()
+    bytes = wal_size(state)
+    # The reader never outlives the connection it reads next to.
+    state = Publisher.close_reader(state)
+    floor = Facts.closed_floor(state)
+
+    case Replicator.checkpoint(state.repl, state.conn) do
+      {:ok, repl} -> close_kept(%{state | repl: repl}, started, bytes, floor)
+      {:error, reason} -> not_closed(state, started, bytes, close_failure(reason))
+    end
+  end
+
+  defp close_kept(state, started, bytes, floor) do
+    case Sqlite.close_keep(state.conn) do
+      {:ok, kept} ->
+        state = %{state | conn: nil, kept: kept, idle_cache: nil, reopen_floor: floor}
+        wal_size(state)
+        idle_closed(state, started, bytes, :ok)
+        # The page cache and the statements are gone: so is their garbage.
+        if State.cell_opt(state, :idle_gc), do: :erlang.garbage_collect()
+        {:noreply, state}
+
+      # The file is not the one the connection held: it is closed already.
+      {:error, :changed} ->
+        idle_closed(state, started, bytes, :changed)
+        stop_serving(%{state | conn: nil}, :orphan_frames)
+
+      {:error, reason} ->
+        not_closed(state, started, bytes, close_failure(reason))
+    end
+  end
+
+  defp not_closed(state, started, bytes, result) do
+    idle_closed(state, started, bytes, result)
+    wal_size(state)
+    rearmed(state)
+  end
+
+  defp close_failure(:unreplicated_frames), do: :unreplicated
+  defp close_failure(:checkpoint_busy), do: :checkpoint_error
+  defp close_failure({:checkpoint, _}), do: :checkpoint_error
+  defp close_failure({:wal, _}), do: :checkpoint_error
+  defp close_failure(_reason), do: :close_error
+
+  defp idle_closed(state, started, bytes, result) do
+    Telemetry.span_stop([:cell, :idle_close], started, %{bytes: bytes}, %{
+      cell: state.id,
+      result: result
+    })
+  end
+
+  # Opens the database again after an idle close. What a foreign writer did
+  # while it was closed is judged before the new connection takes the WAL as
+  # its baseline (`closed_verdict/1`). A failed open or a lost file stops the
+  # cell like a failed wake.
+  defp reopen(%State{conn: nil} = state) do
+    started = System.monotonic_time()
+    verdict = closed_verdict(state)
+
+    outcome =
+      case verdict do
+        :lost -> {:stop, :orphan_frames, state}
+        _ -> open_again(state, verdict)
+      end
+
+    Telemetry.span_stop([:cell, :reopen], started, %{}, %{
+      cell: state.id,
+      wal_dirty?: verdict == :frames,
+      result: if(match?({:ok, _}, outcome), do: :ok, else: :error)
+    })
+
+    with {:ok, state} <- outcome do
+      Facts.publish(state, true)
+      {:ok, state}
+    end
+  end
+
+  defp open_again(state, verdict) do
+    with :ok <- reopen_fault(state),
+         {:ok, conn} <- reopened(state) do
+      state = %{state | conn: conn, kept: nil, reopen_floor: 0}
+      state = state |> arm_idle_cache() |> arm_idle_close()
+      if verdict == :frames, do: closed_frames(state), else: {:ok, state}
+    else
+      {:error, reason} -> {:stop, {:reopen, reason}, state}
+    end
+  end
+
+  defp reopen_fault(state) do
+    case Fault.point(:cell_before_reopen, %{cell: state.id}) do
+      {:error, _} = error -> error
+      _ -> :ok
+    end
+  end
+
+  defp reopened(state) do
+    case Wake.open(state) do
+      {:ok, conn} -> {:ok, conn}
+      {:error, {:open, reason}, _state} -> {:error, reason}
+    end
+  end
+
+  # What the files of the closed cell say: `:clean` (as the close left them),
+  # `:frames` (committed frames in the WAL that no batch carried) or `:lost`
+  # (the database file is not the one that was closed, or a rollback journal
+  # exists), which no batch can repair.
+  defp closed_verdict(%State{path: path, kept: kept} = state) do
+    cond do
+      File.exists?(path <> "-journal") -> :lost
+      Sqlite.kept_state(kept, path) != :same -> :lost
+      wal_size(state) == 0 -> :clean
+      Replicator.unreplicated?(state.repl) -> :frames
+      true -> :clean
+    end
+  end
+
+  # Frames were committed in the WAL while the cell was closed: the new
+  # connection has taken them as its baseline, so they are judged as any
+  # other frames no write carries (`sql: [orphan_frames:]`).
+  defp closed_frames(state) do
+    log_orphans(state)
+
+    case state.config.sql.orphan_frames do
+      :stop -> {:stop, :orphan_frames, state}
+      :replicate -> replicate_orphans(state)
+    end
+  end
 
   defp shrink_or_wait(state) do
     if Publisher.cleanup_due?(state) do
@@ -1543,6 +1745,7 @@ defmodule Alambique.Cell do
     started = System.monotonic_time()
 
     with {:ok, state} <- drain(state),
+         {:ok, state} <- reopen_if_dirty(state),
          state = Publisher.flush(state),
          # Never answer a release with `:ok` while frames are unreplicated,
          # whatever the option says.
@@ -1562,6 +1765,14 @@ defmodule Alambique.Cell do
       {:ok, state, released}
     end
   end
+
+  # A closed database whose files are as the close left them has nothing to
+  # hibernate; any other state is judged with the connection open.
+  defp reopen_if_dirty(%State{conn: nil} = state) do
+    if closed_verdict(state) == :clean, do: {:ok, state}, else: reopen(state)
+  end
+
+  defp reopen_if_dirty(state), do: {:ok, state}
 
   # A release compacts a long level-0 tail before it gives the lease away, so
   # the next node wakes on a short chain (design §9), when its reason is in
@@ -1656,6 +1867,17 @@ defmodule Alambique.Cell do
   # The checkpoint follows the last upload, so the file holds every
   # replicated frame before the marker says so. Closing never checkpoints
   # (design §6).
+  defp finish_local(%State{conn: nil, kept: kept, pending: [], pipe: %{queue: []}} = state)
+       when kept != nil do
+    %{repl: repl, path: path} = state
+
+    # The idle close checkpointed; closing left the emptied WAL and its index.
+    for suffix <- ["-wal", "-shm"], do: File.rm(path <> suffix)
+    Local.mark(path, repl.txid, repl.checksum, repl.page_size)
+    Sqlite.release(kept)
+    %{state | kept: nil}
+  end
+
   defp finish_local(%State{pending: [], pipe: %{queue: []}} = state) do
     # A reader would keep the checkpoint from finishing and the file open.
     state = Publisher.close_reader(state)
@@ -1725,7 +1947,7 @@ defmodule Alambique.Cell do
          else: state
 
     if reason not in [:fenced, :lease_lost], do: abandon(state), else: close(state)
-    state = %{state | mode: :stopped, conn: nil, feed_reader: nil}
+    state = %{state | mode: :stopped, conn: nil, kept: nil, feed_reader: nil}
 
     if reply,
       do: {:stop, {:shutdown, reason}, reply, state},
@@ -1740,8 +1962,9 @@ defmodule Alambique.Cell do
   end
 
   # The reader first: it never outlives the connection it reads next to.
-  defp close(%State{conn: conn} = state) do
+  defp close(%State{conn: conn, kept: kept} = state) do
     Publisher.close_reader(state)
+    if kept, do: Sqlite.release(kept)
     if conn, do: Db.close(conn), else: :ok
   end
 
