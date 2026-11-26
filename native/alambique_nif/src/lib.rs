@@ -396,6 +396,7 @@ fn arena_request(info: Term) -> alloc::ArenaRequest {
             max_trim: int("max_trim_kib", 4096) << 10,
             max_regions: int("max_regions", 65_536),
         },
+        trim_idle: std::time::Duration::from_millis(int("trim_idle_ms", 30_000) as u64),
     }
 }
 

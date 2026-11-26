@@ -18,7 +18,8 @@ if config_env() == :test do
              enabled: System.get_env("ALAMBIQUE_PAGE_ARENA") != "0",
              reserved_mib: 1024,
              keep_kib: 256,
-             trim_after_kib: 64
+             trim_after_kib: 64,
+             trim_idle_ms: 600_000
            ],
            extra
          )
