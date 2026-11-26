@@ -5,17 +5,211 @@
 //! their carriers. The counters in `stats` say which side allocated.
 
 use std::alloc::{GlobalAlloc, Layout};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::os::raw::c_int;
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering::Relaxed};
+use std::sync::OnceLock;
 
 use libsqlite3_sys as ffi;
-use rustler::sys::{enif_alloc, enif_free, enif_realloc};
 use rustler::EnifAllocator;
 
+use crate::arena::{self, Arena};
 use crate::guard::guard;
 use crate::stats::shard;
+
+/// The BEAM's allocator, which unit tests (outside the BEAM) replace by a
+/// counting one.
+#[cfg(not(test))]
+mod heap {
+    use std::ffi::c_void;
+
+    /// # Safety
+    /// As `enif_alloc`.
+    pub unsafe fn alloc(n: usize) -> *mut c_void {
+        // SAFETY: `enif_alloc` may be called from any thread.
+        unsafe { rustler::sys::enif_alloc(n) }
+    }
+
+    /// # Safety
+    /// As `enif_free`: `p` came from `alloc` or `realloc`.
+    pub unsafe fn free(p: *mut c_void) {
+        // SAFETY: by the contract above.
+        unsafe { rustler::sys::enif_free(p) }
+    }
+
+    /// # Safety
+    /// As `enif_realloc`.
+    pub unsafe fn realloc(p: *mut c_void, n: usize) -> *mut c_void {
+        // SAFETY: by the contract above.
+        unsafe { rustler::sys::enif_realloc(p, n) }
+    }
+}
+
+#[cfg(test)]
+mod heap {
+    //! Counts the calls the hooks make where they would call ERTS.
+
+    use std::alloc::Layout;
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+
+    pub static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+    pub static FREES: AtomicUsize = AtomicUsize::new(0);
+    /// Room before the pointer for its size.
+    const PREFIX: usize = 16;
+
+    fn layout(n: usize) -> Layout {
+        Layout::from_size_align(n + PREFIX, 16).unwrap()
+    }
+
+    /// # Safety
+    /// None needed beyond a positive size.
+    pub unsafe fn alloc(n: usize) -> *mut c_void {
+        ALLOCS.fetch_add(1, Relaxed);
+        // SAFETY: the layout has a positive size.
+        let p = unsafe { std::alloc::alloc(layout(n)) };
+        // SAFETY: `p` has room for the prefix.
+        unsafe {
+            *(p as *mut usize) = n;
+            p.add(PREFIX) as *mut c_void
+        }
+    }
+
+    /// # Safety
+    /// `p` came from `alloc`.
+    pub unsafe fn free(p: *mut c_void) {
+        FREES.fetch_add(1, Relaxed);
+        // SAFETY: by the contract above.
+        unsafe {
+            let q = (p as *mut u8).sub(PREFIX);
+            std::alloc::dealloc(q, layout(*(q as *mut usize)));
+        }
+    }
+
+    /// # Safety
+    /// `p` came from `alloc`.
+    pub unsafe fn realloc(p: *mut c_void, n: usize) -> *mut c_void {
+        // SAFETY: by the contract above.
+        unsafe {
+            let q = alloc(n);
+            let old = *((p as *mut u8).sub(PREFIX) as *mut usize);
+            std::ptr::copy_nonoverlapping(p as *const u8, q as *mut u8, old.min(n));
+            free(p);
+            q
+        }
+    }
+}
+
+/// The page arena, set at load when it is on.
+static ARENA: OnceLock<Arena> = OnceLock::new();
+/// Bytes SQLite adds to the page size in a page-cache block (`PCACHE_HDRSZ`).
+static PAGE_HDRSZ: AtomicUsize = AtomicUsize::new(0);
+static ARENA_STATE: AtomicU8 = AtomicU8::new(ArenaState::Off as u8);
+
+/// Why the arena is on or off, reported in the stats.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum ArenaState {
+    /// Not asked for.
+    Off = 0,
+    On = 1,
+    /// Asked for, but the address range could not be reserved.
+    ReserveFailed = 2,
+    /// Asked for, but the settings or the platform do not allow it.
+    Unsupported = 3,
+}
+
+pub fn arena_state() -> ArenaState {
+    match ARENA_STATE.load(Relaxed) {
+        1 => ArenaState::On,
+        2 => ArenaState::ReserveFailed,
+        3 => ArenaState::Unsupported,
+        _ => ArenaState::Off,
+    }
+}
+
+pub fn arena() -> Option<&'static Arena> {
+    ARENA.get()
+}
+
+/// Bytes SQLite adds to the page size in a page-cache block.
+pub fn page_hdrsz() -> usize {
+    PAGE_HDRSZ.load(Relaxed)
+}
+
+/// Wakes the trim thread when the arena has memory to release. Called where a
+/// NIF call ends and where a connection closes, never inside a hook.
+pub fn poke_trim() {
+    if let Some(a) = ARENA.get() {
+        a.poke();
+    }
+}
+
+thread_local! {
+    /// The region (connection) whose NIF call the thread is running; 0 for
+    /// none. Page-cache blocks allocated meanwhile go to its extents.
+    static REGION: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Makes `slot` the region of the thread's allocations until dropped, then
+/// restores the previous one.
+pub struct RegionGuard(u32);
+
+impl RegionGuard {
+    pub fn enter(slot: u32) -> RegionGuard {
+        RegionGuard(REGION.try_with(|r| r.replace(slot)).unwrap_or(0))
+    }
+}
+
+impl Drop for RegionGuard {
+    fn drop(&mut self) {
+        let _ = REGION.try_with(|r| r.set(self.0));
+    }
+}
+
+/// The region of one connection in the arena, closed when it drops. Region 0
+/// (no arena, or the table full) is shared and never closes.
+pub struct Region {
+    slot: u32,
+    id: u64,
+}
+
+impl Region {
+    pub fn open() -> Region {
+        match ARENA.get().and_then(Arena::open_region) {
+            Some((slot, id)) => Region { slot, id },
+            None => Region { slot: 0, id: 0 },
+        }
+    }
+
+    pub fn slot(&self) -> u32 {
+        self.slot
+    }
+
+    /// Closes the region; again does nothing.
+    pub fn close(&self) {
+        if let Some(a) = ARENA.get().filter(|_| self.slot != 0) {
+            a.close_region(self.slot, self.id);
+        }
+    }
+}
+
+impl Drop for Region {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// The class of a request for `n` bytes: a page-cache block is a power-of-two
+/// page and SQLite's headers.
+fn arena_class(n: usize) -> Option<usize> {
+    let page = n.checked_sub(PAGE_HDRSZ.load(Relaxed))?;
+    (512..=65536)
+        .contains(&page)
+        .then(|| page.trailing_zeros() as usize - 9)
+        .filter(|_| page.is_power_of_two())
+}
 
 /// The global allocator of the NIF library (not in unit tests, which run
 /// outside the BEAM).
@@ -104,7 +298,7 @@ impl Cache {
                 }
                 // SAFETY: `pop` returned a live `enif_alloc` block that
                 // nothing else holds.
-                unsafe { enif_free(block as *mut c_void) };
+                unsafe { heap::free(block as *mut c_void) };
             }
         }
     }
@@ -137,13 +331,24 @@ fn class_of(n: usize) -> usize {
 
 /// A new block of `size` bytes from ERTS, or null.
 fn enif_block(size: usize) -> *mut usize {
-    // SAFETY: `enif_alloc` may be called from any thread.
-    unsafe { enif_alloc(size) as *mut usize }
+    // SAFETY: the BEAM's allocator may be called from any thread.
+    unsafe { heap::alloc(size) as *mut usize }
 }
 
 /// A block with room for `n` bytes. Small blocks have the size of their
 /// class, so any block of a class can serve any request of it.
 fn raw_alloc(n: usize) -> *mut usize {
+    if let Some(a) = ARENA.get() {
+        if let Some(class) = arena_class(n) {
+            let region = REGION.try_with(Cell::get).unwrap_or(0);
+            let block = a.alloc(class, region) as *mut usize;
+            if !block.is_null() {
+                return block;
+            }
+            // Range exhausted (counted): the BEAM serves it, and `x_free`
+            // tells it apart by address.
+        }
+    }
     if n > CACHE_MAX {
         return enif_block(n + HEADER);
     }
@@ -172,7 +377,7 @@ unsafe fn raw_free(block: *mut usize, n: usize) {
         }
     }
     // SAFETY: `block` came from `enif_alloc` and is not cached.
-    unsafe { enif_free(block as *mut c_void) };
+    unsafe { heap::free(block as *mut c_void) };
 }
 
 // Every SQLite hook runs through `guard`: a panic returns the failure value
@@ -205,7 +410,10 @@ unsafe extern "C" fn x_free(p: *mut c_void) {
             let block = (p as *mut usize).sub(1);
             let n = *block;
             shard().sqlite_free.fetch_add(n as u64, Relaxed);
-            raw_free(block, n);
+            match ARENA.get() {
+                Some(a) if a.contains(block as *const u8) => a.free(block as *mut u8),
+                _ => raw_free(block, n),
+            }
         }
     })
 }
@@ -222,9 +430,12 @@ unsafe extern "C" fn x_realloc(p: *mut c_void, n: c_int) -> *mut c_void {
             let old = (p as *mut usize).sub(1);
             let old_size = *old;
             let n = n as usize;
-            if old_size <= CACHE_MAX || n <= CACHE_MAX {
-                // A cached size class is involved: move to a block of the
-                // new size.
+            let in_arena = ARENA
+                .get()
+                .is_some_and(|a| a.contains(old as *const u8) || arena_class(n).is_some());
+            if old_size <= CACHE_MAX || n <= CACHE_MAX || in_arena {
+                // A cached size class or the arena is involved: move to a
+                // block of the new size.
                 let q = x_malloc(n as c_int);
                 if !q.is_null() {
                     std::ptr::copy_nonoverlapping(p as *const u8, q as *mut u8, old_size.min(n));
@@ -232,7 +443,7 @@ unsafe extern "C" fn x_realloc(p: *mut c_void, n: c_int) -> *mut c_void {
                 }
                 return q;
             }
-            let block = enif_realloc(old as *mut c_void, n + HEADER) as *mut usize;
+            let block = heap::realloc(old as *mut c_void, n + HEADER) as *mut usize;
             if block.is_null() {
                 return block as *mut c_void;
             }
@@ -276,10 +487,50 @@ fn refuse_pooled_caches(memory_management: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// What the load data asks of the arena.
+pub struct ArenaRequest {
+    pub enabled: bool,
+    pub config: arena::Config,
+}
+
+/// The slot bytes of each class: the page, SQLite's headers and ours.
+fn strides(hdrsz: usize) -> [usize; arena::CLASSES] {
+    std::array::from_fn(|i| (512 << i) + hdrsz + HEADER)
+}
+
+/// Sets up the arena if asked; on failure the library runs without it and
+/// `arena_state` says why.
+fn start_arena(req: &ArenaRequest, hdrsz: usize) {
+    let state = if !req.enabled {
+        ArenaState::Off
+    } else if hdrsz == 0 || hdrsz % 8 != 0 || !cfg!(target_os = "linux") {
+        ArenaState::Unsupported
+    } else {
+        match Arena::new(req.config, strides(hdrsz)) {
+            Ok(a) => {
+                let _ = ARENA.set(a);
+                match ARENA
+                    .get()
+                    .map(|a| a.start_trimmer(std::time::Duration::from_secs(1)))
+                {
+                    Some(Ok(())) => ArenaState::On,
+                    _ => ArenaState::Unsupported,
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => ArenaState::Unsupported,
+            Err(e) => {
+                eprintln!("alambique_nif: page arena off, could not reserve the range: {e}");
+                ArenaState::ReserveFailed
+            }
+        }
+    };
+    ARENA_STATE.store(state as u8, Relaxed);
+}
+
 /// Makes SQLite allocate through the BEAM, with a page cache of its own for
-/// each connection. Must run before SQLite initializes; SQLite copies the
-/// table.
-pub fn install_sqlite() -> Result<(), String> {
+/// each connection and, when asked, the page-cache blocks in the arena. Must
+/// run before SQLite initializes; SQLite copies the table.
+pub fn install_sqlite(req: &ArenaRequest) -> Result<(), String> {
     // SAFETY: a NUL-terminated name; the function only reads it.
     let pooled = unsafe { ffi::sqlite3_compileoption_used(c"ENABLE_MEMORY_MANAGEMENT".as_ptr()) };
     refuse_pooled_caches(pooled != 0)?;
@@ -293,14 +544,18 @@ pub fn install_sqlite() -> Result<(), String> {
         xShutdown: Some(x_shutdown),
         pAppData: std::ptr::null_mut(),
     };
+    let mut hdrsz: c_int = 0;
     // SAFETY: SQLite copies the table; `sqlite3_config` runs before
-    // initialization (`on_load`). `PAGECACHE` with no buffer keeps SQLite from
-    // carving pages out of bulk blocks, which a shrink could not free.
+    // initialization (`on_load`). `PCACHE_HDRSZ` writes one int. `PAGECACHE`
+    // with no buffer keeps SQLite from carving pages out of bulk blocks,
+    // which a shrink could not free.
     let ok = unsafe {
         ffi::sqlite3_config(
             ffi::SQLITE_CONFIG_MALLOC,
             &methods as *const ffi::sqlite3_mem_methods,
         ) == ffi::SQLITE_OK
+            && ffi::sqlite3_config(ffi::SQLITE_CONFIG_PCACHE_HDRSZ, &mut hdrsz as *mut c_int)
+                == ffi::SQLITE_OK
             && ffi::sqlite3_config(
                 ffi::SQLITE_CONFIG_PAGECACHE,
                 std::ptr::null_mut::<c_void>(),
@@ -308,17 +563,230 @@ pub fn install_sqlite() -> Result<(), String> {
                 0 as c_int,
             ) == ffi::SQLITE_OK
     };
-    if ok {
-        Ok(())
-    } else {
-        Err("sqlite3_config failed".into())
+    if !ok {
+        return Err("sqlite3_config failed".into());
     }
+    PAGE_HDRSZ.store(hdrsz.max(0) as usize, Relaxed);
+    start_arena(req, hdrsz.max(0) as usize);
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::guard::probe;
+    use std::sync::{Mutex, MutexGuard, Once};
+
+    /// Counts the allocations of the calling thread, so a test can tell that
+    /// a stretch of code allocates nothing.
+    struct Counting;
+
+    thread_local! {
+        static ALLOCS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    // SAFETY: forwards to the system allocator with the caller's arguments.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
+            // SAFETY: the caller upholds the `GlobalAlloc::alloc` contract.
+            unsafe { std::alloc::System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: the caller upholds the `GlobalAlloc::dealloc` contract.
+            unsafe { std::alloc::System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
+            // SAFETY: the caller upholds the `GlobalAlloc::realloc` contract.
+            unsafe { std::alloc::System.realloc(ptr, layout, size) }
+        }
+    }
+
+    #[global_allocator]
+    static COUNTING: Counting = Counting;
+
+    fn thread_allocs() -> usize {
+        ALLOCS.with(Cell::get)
+    }
+
+    const HDRSZ: usize = 272;
+
+    /// The hooks use one arena and the counters of `heap`: one test at a time.
+    static HOOKS: Mutex<()> = Mutex::new(());
+
+    fn hooks() -> (MutexGuard<'static, ()>, &'static Arena) {
+        let guard = HOOKS.lock().unwrap_or_else(|e| e.into_inner());
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            PAGE_HDRSZ.store(HDRSZ, Relaxed);
+            let config = arena::Config {
+                reserved: 256 << 20,
+                extent_bytes: 64 << 10,
+                keep: 0,
+                threshold: 0,
+                max_trim: usize::MAX / 2,
+                max_regions: 64,
+            };
+            let arena = Arena::new(config, strides(HDRSZ)).unwrap();
+            assert!(ARENA.set(arena).is_ok());
+        });
+        (guard, ARENA.get().unwrap())
+    }
+
+    /// SQLite asks for the page and its headers.
+    fn page_block(class: usize) -> c_int {
+        ((512 << class) + HDRSZ) as c_int
+    }
+
+    fn current() -> u32 {
+        REGION.with(Cell::get)
+    }
+
+    #[test]
+    fn page_blocks_cost_no_call_to_the_heap_and_no_allocation() {
+        let (_g, a) = hooks();
+        let (heap_allocs, heap_frees) = (heap::ALLOCS.load(Relaxed), heap::FREES.load(Relaxed));
+        let mut blocks = Vec::with_capacity(8 * 40);
+        let before = thread_allocs();
+        let region = Region::open();
+        let _in = RegionGuard::enter(region.slot());
+        for class in 0..CLASSES {
+            for _ in 0..40 {
+                // SAFETY: SQLite's contract: a positive size.
+                let p = unsafe { x_malloc(page_block(class)) };
+                assert!(!p.is_null() && a.contains(p as *const u8), "class {class}");
+                // SAFETY: `p` is a live block of that size.
+                assert_eq!(unsafe { x_size(p) }, page_block(class));
+                blocks.push(p);
+            }
+        }
+        for p in blocks {
+            // SAFETY: from `x_malloc`, not used again.
+            unsafe { x_free(p) };
+        }
+        drop(_in);
+        drop(region);
+        assert_eq!(thread_allocs(), before, "a hook allocated");
+        assert_eq!(heap::ALLOCS.load(Relaxed), heap_allocs);
+        assert_eq!(heap::FREES.load(Relaxed), heap_frees);
+    }
+
+    #[test]
+    fn blocks_that_are_not_pages_go_to_the_heap_and_come_back_by_address() {
+        let (_g, a) = hooks();
+        let (allocs, frees) = (heap::ALLOCS.load(Relaxed), heap::FREES.load(Relaxed));
+        // Not a page size plus the headers.
+        // SAFETY: SQLite's contract: a positive size.
+        let p = unsafe { x_malloc(5000) };
+        assert!(!p.is_null() && !a.contains(p as *const u8));
+        assert_eq!(heap::ALLOCS.load(Relaxed), allocs + 1);
+        // SAFETY: from `x_malloc`, not used again.
+        unsafe { x_free(p) };
+        assert_eq!(heap::FREES.load(Relaxed), frees + 1);
+    }
+
+    #[test]
+    fn realloc_moves_a_block_between_the_arena_and_the_heap() {
+        let (_g, a) = hooks();
+        // SAFETY: SQLite's contract for each hook: live blocks of these
+        // hooks, positive sizes; the copies stay inside the blocks.
+        unsafe {
+            let p = x_malloc(page_block(3)) as *mut u8;
+            assert!(a.contains(p));
+            std::ptr::write_bytes(p, 0xAB, page_block(3) as usize);
+            let q = x_realloc(p as *mut c_void, 6000) as *mut u8;
+            assert!(!q.is_null() && !a.contains(q));
+            assert_eq!(x_size(q as *mut c_void), 6000);
+            assert!(std::slice::from_raw_parts(q, page_block(3) as usize)
+                .iter()
+                .all(|&b| b == 0xAB));
+            let r = x_realloc(q as *mut c_void, page_block(3)) as *mut u8;
+            assert!(a.contains(r));
+            assert!(std::slice::from_raw_parts(r, page_block(3) as usize)
+                .iter()
+                .all(|&b| b == 0xAB));
+            x_free(r as *mut c_void);
+        }
+    }
+
+    #[test]
+    fn a_full_range_falls_back_to_the_heap_and_frees_by_address() {
+        let (_g, a) = hooks();
+        let before = a.fallbacks();
+        let mut blocks = Vec::new();
+        let mut spilled = None;
+        // 64 KiB pages take one extent each: the range is soon used up.
+        for _ in 0..4096 {
+            // SAFETY: SQLite's contract: a positive size.
+            let p = unsafe { x_malloc(page_block(7)) };
+            assert!(!p.is_null(), "the heap serves what the arena cannot");
+            if !a.contains(p as *const u8) {
+                spilled = Some(p);
+                break;
+            }
+            blocks.push(p);
+        }
+        assert!(spilled.is_some(), "the range was never used up");
+        assert!(a.fallbacks() > before);
+        for p in blocks.into_iter().chain(spilled) {
+            // SAFETY: from `x_malloc`, not used again.
+            unsafe { x_free(p) };
+        }
+    }
+
+    #[test]
+    fn the_region_guard_nests_and_restores() {
+        assert_eq!(current(), 0);
+        {
+            let _a = RegionGuard::enter(3);
+            assert_eq!(current(), 3);
+            {
+                let _b = RegionGuard::enter(5);
+                assert_eq!(current(), 5);
+            }
+            assert_eq!(current(), 3);
+        }
+        assert_eq!(current(), 0);
+    }
+
+    #[test]
+    fn blocks_come_from_the_extents_of_the_connection_that_asks() {
+        let (_g, a) = hooks();
+        let (ra, rb) = (Region::open(), Region::open());
+        assert_ne!(ra.slot(), rb.slot());
+        let (mut ea, mut eb) = (Vec::new(), Vec::new());
+        let mut blocks = Vec::new();
+        for _ in 0..60 {
+            for (region, extents) in [(&ra, &mut ea), (&rb, &mut eb)] {
+                let _in = RegionGuard::enter(region.slot());
+                // SAFETY: SQLite's contract: a positive size.
+                let p = unsafe { x_malloc(page_block(3)) };
+                extents.push(a.extent_of(p as *const u8));
+                blocks.push(p);
+            }
+        }
+        assert!(ea.iter().all(|e| !eb.contains(e)));
+        for p in blocks {
+            // SAFETY: from `x_malloc`, not used again.
+            unsafe { x_free(p) };
+        }
+    }
+
+    #[test]
+    fn a_region_closes_once_and_frees_its_slot() {
+        let (_g, a) = hooks();
+        let open = a.open_regions();
+        let region = Region::open();
+        assert_eq!(a.open_regions(), open + 1);
+        region.close();
+        region.close();
+        assert_eq!(a.open_regions(), open);
+        drop(region);
+        assert_eq!(a.open_regions(), open);
+    }
 
     // The hooks need ERTS to allocate, so these only prove what a panic does.
     #[test]

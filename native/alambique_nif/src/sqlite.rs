@@ -217,9 +217,16 @@ pub struct Conn {
     /// The file this connection holds in the table of `held`, until closed.
     held: Option<held::FileId>,
     released: AtomicBool,
+    /// Where the connection's page-cache blocks live (`alloc`).
+    region: crate::alloc::Region,
 }
 
 impl Conn {
+    /// The slot of the connection's region, which its calls allocate in.
+    pub(crate) fn region_slot(&self) -> u32 {
+        self.region.slot()
+    }
+
     /// Stops the running statement and closes the connection; once only.
     fn shut(&self) {
         // Closing ends everything: stop the running statement first, because
@@ -231,6 +238,8 @@ impl Conn {
             unsafe { close(db) };
         }
         self.release_held();
+        self.region.close();
+        crate::alloc::poke_trim();
     }
 
     /// Closes the connection like `shut`, but leaves the file in the table of
@@ -293,6 +302,9 @@ impl Drop for Conn {
                 unsafe { close(db) };
             }
             self.release_held();
+            // No `Timer` runs here: the region closes with the fields, and
+            // what the close freed is trimmed now.
+            crate::alloc::poke_trim();
         });
     }
 }
@@ -1170,6 +1182,10 @@ pub(crate) fn open<'a>(
     exclusive: bool,
 ) -> Term<'a> {
     let _t = crate::stats::SQLITE_CALLS.time();
+    // The region exists before the first page does: the schema and the first
+    // pages are allocated inside `sqlite3_open_v2` and the statements after.
+    let region = crate::alloc::Region::open();
+    let _in_region = crate::alloc::RegionGuard::enter(region.slot());
     let run = || -> Outcome<'a> {
         let path = CString::new(path).map_err(|_| Failure::Message("invalid file name".into()))?;
         let vfs = vfs
@@ -1309,6 +1325,7 @@ pub(crate) fn open<'a>(
             user: Mutex::new(opener),
             held,
             released: AtomicBool::new(false),
+            region,
         });
         let ctx = &*conn.control as *const Control as *mut std::ffi::c_void;
         // SAFETY: `db` is live and not shared yet; `ctx` outlives it (see
@@ -1330,7 +1347,7 @@ pub(crate) fn open<'a>(
 /// `{:error, :not_authorized}`.
 #[rustler::nif(schedule = "DirtyIo")]
 fn sqlite_close<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64) -> Term<'a> {
-    let _t = crate::stats::SQLITE_CALLS.time();
+    let _t = crate::stats::SQLITE_CALLS.time_for(&conn);
     let run = || -> Outcome<'a> {
         check_opener(env, &conn)?;
         let ctl = &conn.control;
@@ -1459,7 +1476,7 @@ fn sqlite_execute<'a>(
     no_txn_control: bool,
     key: u64,
 ) -> Term<'a> {
-    let _t = crate::stats::SQLITE_CALLS.time();
+    let _t = crate::stats::SQLITE_CALLS.time_for(&conn);
     let run = || -> Outcome<'a> {
         check_user(env, &conn)?;
         let sql = CString::new(sql.as_slice()).map_err(|_| Failure::NulInStatement)?;
@@ -1506,7 +1523,7 @@ fn sqlite_run<'a>(
     params: Term<'a>,
     limits: (bool, u64, u64, u64, u64, bool, u64),
 ) -> Term<'a> {
-    let _t = crate::stats::SQLITE_CALLS.time();
+    let _t = crate::stats::SQLITE_CALLS.time_for(&conn);
     let max_concurrent = limits.4;
     let limits = Limits {
         read_only: limits.0,
@@ -1548,7 +1565,7 @@ fn sqlite_run<'a>(
 /// control is refused as in a call with `no_txn_control`.
 #[rustler::nif(schedule = "DirtyIo")]
 fn sqlite_script<'a>(env: Env<'a>, conn: ResourceArc<Conn>, sql: Binary) -> Term<'a> {
-    let _t = crate::stats::SQLITE_CALLS.time();
+    let _t = crate::stats::SQLITE_CALLS.time_for(&conn);
     let run = || -> Outcome<'a> {
         check_user(env, &conn)?;
         let sql = sql.as_slice();
@@ -1611,7 +1628,7 @@ fn step_to_end(
 /// transaction of the library is already open.
 #[rustler::nif(schedule = "DirtyIo")]
 fn sqlite_begin_transaction<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64) -> Term<'a> {
-    let _t = crate::stats::SQLITE_CALLS.time();
+    let _t = crate::stats::SQLITE_CALLS.time_for(&conn);
     let run = || -> Outcome<'a> {
         check_user(env, &conn)?;
         with_db(&conn, |db| {
@@ -1694,7 +1711,7 @@ fn finish_transaction<'a>(
     token: u64,
     commit: bool,
 ) -> Term<'a> {
-    let _t = crate::stats::SQLITE_CALLS.time();
+    let _t = crate::stats::SQLITE_CALLS.time_for(&conn);
     let run = || -> Outcome<'a> {
         with_db(conn, |db| {
             let ctl = &conn.control;
@@ -1785,7 +1802,7 @@ fn interrupt(conn: &Conn) {
 /// of the library is open: its frames must reach a batch from the WAL.
 #[rustler::nif(schedule = "DirtyIo")]
 fn sqlite_checkpoint<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64) -> Term<'a> {
-    let _t = crate::stats::SQLITE_CALLS.time();
+    let _t = crate::stats::SQLITE_CALLS.time_for(&conn);
     if let Err(f) = check_user(env, &conn) {
         return f.term(env);
     }
@@ -1836,7 +1853,7 @@ fn sqlite_checkpoint<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64) -> Ter
 /// frames are replicated; 2 takes the header as it is as the baseline.
 #[rustler::nif(schedule = "DirtyIo")]
 fn sqlite_foreign_write<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64, mode: u8) -> Term<'a> {
-    let _t = crate::stats::SQLITE_CALLS.time();
+    let _t = crate::stats::SQLITE_CALLS.time_for(&conn);
     if let Err(f) = check_user(env, &conn) {
         return f.term(env);
     }
