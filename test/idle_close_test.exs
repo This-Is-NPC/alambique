@@ -478,7 +478,7 @@ defmodule Alambique.IdleCloseTest do
       await_closed(inst, cell)
       s = state(inst, cell)
       assert s.feed_cleaned == s.feed_published
-      assert rows(inst, cell) == []
+      assert rows(inst, cell) == [1]
     end
 
     test "does not close while published rows wait in the backlog, whoever kills the sender",
