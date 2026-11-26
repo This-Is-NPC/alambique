@@ -1,27 +1,32 @@
 defmodule Alambique.GateStore do
   @moduledoc """
   Wraps a store and holds every `get` of a key that matches a pattern until
-  the test opens the gate. `started/1` says how many were held so far, so a
-  test can wait for the requests it expects to be under way together, then
-  `open/1` them.
+  the test opens the gate. `started/1` says how many different keys were held
+  so far (a request that is retried counts once), so a test can wait for the
+  requests it expects to be under way together, then `open/1` them.
   """
   @behaviour Alambique.Store
 
   @doc "Wraps `{module, config}`; a `get` of a key that matches `pattern` waits for `open/1`."
   def wrap({_module, _config} = inner, %Regex{} = pattern) do
     {__MODULE__,
-     %{inner: inner, pattern: pattern, started: :atomics.new(1, []), open: :atomics.new(1, [])}}
+     %{
+       inner: inner,
+       pattern: pattern,
+       started: :ets.new(:gate_started, [:set, :public]),
+       open: :atomics.new(1, [])
+     }}
   end
 
-  @doc "How many held `get`s have started."
-  def started(%{started: started}), do: :atomics.get(started, 1)
+  @doc "How many different keys have a held `get`."
+  def started(%{started: started}), do: :ets.info(started, :size)
 
   @doc "Lets the held `get`s, and the later ones, go."
   def open(%{open: open}), do: :atomics.put(open, 1, 1)
 
   defp hold(%{pattern: pattern, started: started, open: open}, key) do
     if Regex.match?(pattern, key) do
-      :atomics.add(started, 1, 1)
+      :ets.insert(started, {key})
       wait(open)
     end
   end
