@@ -15,6 +15,8 @@ defmodule Alambique.Replication.NativeOptions do
   #   * `max_trim_kib` - most a trim releases at once (default 4096).
   #   * `max_regions` - connections that get extents of their own, at least 1
   #     (default 65536); the others, and a value of 1, share one region.
+  #   * `trim_idle_ms` - how long the trim thread waits for a wake-up before it
+  #     looks anyway (default 30000); the tests set it high to see the wake-ups.
 
   @defaults [
     enabled: false,
@@ -23,7 +25,8 @@ defmodule Alambique.Replication.NativeOptions do
     trim_after_kib: 1024,
     keep_kib: 4096,
     max_trim_kib: 4096,
-    max_regions: 65_536
+    max_regions: 65_536,
+    trim_idle_ms: 30_000
   ]
 
   @spec load_data() :: map
@@ -59,6 +62,7 @@ defmodule Alambique.Replication.NativeOptions do
     for key <- [:trim_after_kib, :keep_kib],
         do: check!(opts, key, &(&1 >= 0), "a non-negative integer")
 
+    check!(opts, :trim_idle_ms, &(&1 > 0), "a positive integer")
     check!(opts, :max_regions, &(&1 >= 1), "a positive integer")
     check!(opts, :max_trim_kib, &(&1 > 0), "a positive integer")
   end

@@ -494,15 +494,14 @@ fn refuse_pooled_caches(memory_management: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// How long the trim thread waits for a poke before it looks anyway. Pokes
-/// come with every free that leaves memory to release, so this only covers a
-/// missed wake-up.
-const TRIM_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
-
 /// What the load data asks of the arena.
 pub struct ArenaRequest {
     pub enabled: bool,
     pub config: arena::Config,
+    /// How long the trim thread waits for a poke before it looks anyway. Pokes
+    /// come with every free that leaves memory to release, so this only covers
+    /// a missed wake-up.
+    pub trim_idle: std::time::Duration,
 }
 
 /// The slot bytes of each class: the page, SQLite's headers and ours.
@@ -531,7 +530,7 @@ fn start_arena(req: &ArenaRequest, hdrsz: usize) {
         match Arena::new(req.config, strides(hdrsz)) {
             Ok(a) => {
                 let _ = ARENA.set(a);
-                match ARENA.get().map(|a| a.start_trimmer(TRIM_IDLE)) {
+                match ARENA.get().map(|a| a.start_trimmer(req.trim_idle)) {
                     Some(Ok(())) => ArenaState::On,
                     _ => ArenaState::Unsupported,
                 }
