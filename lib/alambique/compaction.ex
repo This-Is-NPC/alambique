@@ -628,9 +628,9 @@ defmodule Alambique.Compaction do
 
   # The sidecar of an output (design §16), after the object. A key that
   # existed holds the same file only if its checksum says so.
-  # `Sidecar.write/7` reports its own failures and never fails the caller.
+  # `Sidecar.write/6` reports its own failures and never fails the caller.
   defp sidecar(state, key, level, merged, info, owner) do
-    _ = Sidecar.write(state.ctx, key, level, merged, info, state.deadline, owner)
+    _ = Sidecar.write(state.ctx, {key, level}, merged, info, state.deadline, owner)
     :ok
   end
 

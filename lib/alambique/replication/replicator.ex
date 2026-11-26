@@ -316,13 +316,13 @@ defmodule Alambique.Replication.Replicator do
           :ok | :skipped | {:error, term}
   def write_sidecar(up, ctx, opts \\ []) do
     deadline = Keyword.get_lazy(opts, :deadline, fn -> Retry.deadline_in(ctx.timeout_ms) end)
-    Sidecar.write(ctx, up.key, 0, up.segment, up.info, deadline, :ours)
+    Sidecar.write(ctx, {up.key, 0}, up.segment, up.info, deadline, :ours)
   end
 
   # The sidecar of an uploaded segment, as the caller of `sync/3` or `fence/3`
   # asked; `result` is what they return.
   defp sidecar(up, ctx, opts, result) do
-    # A failed sidecar is reported by `Sidecar.write/7` and never fails the caller.
+    # A failed sidecar is reported by `Sidecar.write/6` and never fails the caller.
     _ =
       case Keyword.get(opts, :sidecar, :inline) do
         :async -> spawn(fn -> write_sidecar(up, ctx) end)
@@ -477,7 +477,7 @@ defmodule Alambique.Replication.Replicator do
       written ->
         # An existing snapshot may be another writer's.
         owner = if written == :ok, do: :ours, else: :verify
-        _ = Sidecar.write(ctx, key, Keys.snapshot_level(), segment, info, deadline, owner)
+        _ = Sidecar.write(ctx, {key, Keys.snapshot_level()}, segment, info, deadline, owner)
         {:ok, key}
     end
   end
@@ -528,7 +528,7 @@ defmodule Alambique.Replication.Replicator do
     result =
       case put(ctx, key, segment, info, deadline, {:floor, head.epoch}) do
         :ok ->
-          _ = Sidecar.write(ctx, key, 0, segment, info, deadline, :ours)
+          _ = Sidecar.write(ctx, {key, 0}, segment, info, deadline, :ours)
           {:ok, txid}
 
         :taken ->

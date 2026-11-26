@@ -82,6 +82,7 @@ defmodule Alambique.Scrub do
   def defaults, do: @defaults
 
   @doc false
+  @spec children(Alambique.Config.t()) :: [Supervisor.child_spec()]
   def children(config) do
     # The cursors live in a table owned by the instance, so they go with it.
     cursors = %{
@@ -321,6 +322,7 @@ defmodule Alambique.Scrub do
   end
 
   @doc false
+  @spec verify(Path.t(), map, atom, timeout) :: {:ok, non_neg_integer} | {:error, term}
   def verify(path, result, check, timeout_ms) do
     with :ok <- file_checksum(path, result),
          :ok <- integrity(path, check, timeout_ms) do

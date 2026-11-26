@@ -30,6 +30,7 @@ defmodule Alambique.Replica do
 
   @type reply :: {:ok, map} | {:error, term}
 
+  @spec start_link({Alambique.Config.t(), String.t(), map}) :: GenServer.on_start()
   def start_link({config, cell, location}) do
     GenServer.start_link(__MODULE__, {config, cell, location},
       name: {:via, Registry, {config.replica_registry, {location.id, cell}}}
