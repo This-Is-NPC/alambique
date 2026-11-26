@@ -143,7 +143,9 @@ order:
    (`scripts/readme-check`)
 2. `cargo clippy --all-targets -- -D warnings` on the NIF; the lints denied
    beyond the defaults are in `[lints.clippy]` of its `Cargo.toml`, their
-   thresholds in `clippy.toml`
+   thresholds in `clippy.toml`; the same run with `--features fuzzing` and with
+   `--features test-panic` (the NIFs that panic on purpose, so `clippy::panic`
+   is allowed in that run only)
 3. the supply chain: `mise run check:deny` (cargo-deny on the NIF and fuzz
    crates, `native/alambique_nif/deny.toml`) and `mise run check:audit` (`mix
    deps.audit` and `mix hex.audit`)

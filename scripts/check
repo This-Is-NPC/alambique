@@ -25,6 +25,11 @@ step() { printf '\n==> %s\n' "$*"; }
 step "cargo clippy"
 # From the crate directory: its .cargo/config.toml sets the SQLite flags.
 (cd native/alambique_nif && cargo clippy --all-targets -- -D warnings)
+# The fuzz entry points, and the build with the NIFs that panic on purpose
+# (`test-panic`): there clippy::panic is allowed, since the panics are the
+# feature; every other lint stays denied.
+(cd native/alambique_nif && cargo clippy --all-targets --features fuzzing -- -D warnings)
+(cd native/alambique_nif && cargo clippy --all-targets --features test-panic -- -D warnings -A clippy::panic)
 
 step "supply chain"
 "$root/scripts/check-deny"
