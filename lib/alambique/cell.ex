@@ -1487,12 +1487,17 @@ defmodule Alambique.Cell do
   # (the database file is not the one that was closed, or a rollback journal
   # exists), which no batch can repair.
   defp closed_verdict(%State{path: path, kept: kept} = state) do
-    cond do
-      File.exists?(path <> "-journal") -> :lost
-      Sqlite.kept_state(kept, path) != :same -> :lost
-      wal_size(state) == 0 -> :clean
-      Replicator.unreplicated?(state.repl) -> :frames
-      true -> :clean
+    if journal?(path) or not same_file?(kept, path), do: :lost, else: wal_verdict(state)
+  end
+
+  defp journal?(path), do: File.exists?(path <> "-journal")
+
+  defp same_file?(kept, path), do: Sqlite.kept_state(kept, path) == :same
+
+  defp wal_verdict(state) do
+    case wal_size(state) do
+      0 -> :clean
+      _ -> if Replicator.unreplicated?(state.repl), do: :frames, else: :clean
     end
   end
 
