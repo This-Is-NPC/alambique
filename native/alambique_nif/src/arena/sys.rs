@@ -114,9 +114,11 @@ pub unsafe fn unreserve(ptr: *mut u8, len: usize) {
 /// As the real one.
 #[cfg(miri)]
 pub unsafe fn unreserve(ptr: *mut u8, len: usize) {
-    let layout = std::alloc::Layout::from_size_align(len, 4096).unwrap();
-    // SAFETY: the block `reserve` allocated with this layout.
-    unsafe { std::alloc::dealloc(ptr, layout) };
+    // `reserve` allocated the block with this layout, so it is valid.
+    if let Ok(layout) = std::alloc::Layout::from_size_align(len, 4096) {
+        // SAFETY: the block `reserve` allocated with this layout.
+        unsafe { std::alloc::dealloc(ptr, layout) };
+    }
 }
 
 /// # Safety
