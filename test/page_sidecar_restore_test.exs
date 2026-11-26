@@ -23,12 +23,19 @@ defmodule Alambique.PageSidecarRestoreTest do
 
     # Four segments, each with a sidecar.
     writer = %{env | ctx: Map.put(env.ctx, :page_sidecar, 0)}
-    history(writer, new_owner(writer, "owner.db"), @files)
+    owner = history(writer, new_owner(writer, "owner.db"), @files)
 
     hostile = HostileStore.config(env.cfg)
     counted = CountingStore.wrap({HostileStore, hostile})
     {_, counter} = counted
-    %{env: %{env | ctx: %{env.ctx | store: counted}}, hostile: hostile, counter: counter}
+
+    %{
+      env: %{env | ctx: %{env.ctx | store: counted}},
+      writer: writer,
+      owner: owner,
+      hostile: hostile,
+      counter: counter
+    }
   end
 
   defp key(env, txid), do: Keys.segment(env.ctx.prefix, cell(), 0, txid, txid)
@@ -133,6 +140,42 @@ defmodule Alambique.PageSidecarRestoreTest do
     edges = for {:get_range, _key, _from, to} <- TracingStore.trace(traced), do: to
     first_end = sidecars |> Enum.map(&elem(&1, 3)) |> Enum.min()
     assert Enum.all?(edges, &(&1 < first_end))
+  end
+
+  test "no more sidecar requests run at once than the budget of the restore holds", %{
+    env: env,
+    writer: writer,
+    owner: owner
+  } do
+    # Eight files: each request is reserved at the most a sidecar may be, a
+    # quarter of the budget, so four at a time.
+    history(writer, owner, @files)
+    MemoryStore.inject(env.cfg, kind: :latency, ms: 300, ops: [:get], key: ~r/\.pages$/)
+    {_, traced} = store = TracingStore.wrap(env.ctx.store)
+    {_result, _lazy} = lazy_restore(env, ctx: %{env.ctx | store: store})
+
+    sidecars =
+      for {:get, key, _from, _to} = request <- TracingStore.trace(traced),
+          String.ends_with?(key, ".pages"),
+          do: request
+
+    assert length(sidecars) == 2 * @files
+    at_once = for a <- sidecars, do: Enum.count(sidecars, &TracingStore.overlap?(a, &1))
+    assert Enum.max(at_once) in 2..4
+  end
+
+  test "a message of a failed attempt is dropped with it", %{env: env} do
+    # The sidecar of the garbage snapshot is read at once; its edges are slow,
+    # so the attempt fails after the fetcher reported.
+    snapshot = Keys.snapshot(env.ctx.prefix, cell(), 4)
+    {:ok, _} = env.mod.put(env.cfg, snapshot, :binary.copy(<<0>>, 200), :none, %{"ts" => "1000"})
+    {:ok, _} = env.mod.put(env.cfg, Keys.sidecar(snapshot), <<1, 2, 3>>, :none, %{})
+    MemoryStore.inject(env.cfg, kind: :latency, ms: 300, ops: [:get_range], key: ~r/0009/)
+
+    {_result, _lazy} = lazy_restore(env)
+
+    {:messages, messages} = Process.info(self(), :messages)
+    refute Enum.any?(messages, &match?({ref, :sidecar} when is_reference(ref), &1))
   end
 
   test "a failed attempt leaves no fetcher, table or message behind", %{env: env} do
