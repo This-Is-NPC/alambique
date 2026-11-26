@@ -1225,8 +1225,8 @@ defmodule Alambique do
 
   # A refresh may wait for the one before it, so it can take two callbacks.
   defp refresh_timeout(config, timeout) do
-    callback = config.cell_options_timeout_ms || 0
-    timeout || max(config.call_timeout_ms, 2 * callback + config.routing.slack_ms)
+    timeout ||
+      max(config.call_timeout_ms, 2 * config.cell_options_timeout_ms + config.routing.slack_ms)
   end
 
   defp refreshed_summary,
