@@ -47,7 +47,7 @@ defmodule Alambique.Schema do
 
   @doc "The oldest version that code whose schema version is `n` accepts in a deploy."
   @spec oldest_readable(Config.t(), non_neg_integer) :: pos_integer
-  def oldest_readable(%{migration_window: w}, n), do: max(n - w, 1)
+  def oldest_readable(%{migration_window: w}, n) when is_integer(w), do: max(n - w, 1)
 
   # Keys
 
@@ -215,17 +215,20 @@ defmodule Alambique.Schema do
       {:ok, from} ->
         ctx = Config.repl_ctx(config, location)
 
+        ask = %{prefix: prefix, from: from, limit: limit + 1}
+
         with {:ok, versions} <- versions(config, location, deadline),
              {:ok, lists} <-
-               map_ok(
-                 versions,
-                 &version_cells(ctx, location, &1, prefix, from, limit + 1, deadline)
-               ) do
-          merged = lists |> Enum.concat() |> Enum.sort() |> Enum.dedup()
-          page = Enum.take(merged, limit)
-          {:ok, page, if(length(merged) > limit, do: List.last(page))}
+               map_ok(versions, &version_cells(ctx, location, &1, ask, deadline)) do
+          merged_page(lists, limit)
         end
     end
+  end
+
+  defp merged_page(lists, limit) do
+    merged = lists |> Enum.concat() |> Enum.sort() |> Enum.dedup()
+    page = Enum.take(merged, limit)
+    {:ok, page, if(length(merged) > limit, do: List.last(page))}
   end
 
   # Where the listing of ids starting with `prefix` resumes: from the start
@@ -241,10 +244,11 @@ defmodule Alambique.Schema do
     end
   end
 
-  defp version_cells(ctx, location, version, prefix, from, limit, deadline) do
+  defp version_cells(ctx, location, version, ask, deadline) do
     base = key(location.prefix, version, "")
+    from = ask.from && base <> ask.from
 
-    with {:ok, keys, _next} <- list(ctx, base <> prefix, from && base <> from, limit, deadline) do
+    with {:ok, keys, _next} <- list(ctx, base <> ask.prefix, from, ask.limit, deadline) do
       {:ok, Enum.map(keys, &String.replace_prefix(&1, base, ""))}
     end
   end
@@ -337,17 +341,20 @@ defmodule Alambique.Schema do
          ) do
       {:ok, cells, next} ->
         with {:ok, old} <- map_ok(cells, &cell_too_old(config, version, &1)) do
-          acc = [Enum.reject(old, &is_nil/1) | acc]
-
-          if next,
-            do: version_too_old(config, location, version, next, timeout, acc),
-            else: {:ok, acc}
+          next_page(
+            next,
+            [Enum.reject(old, &is_nil/1) | acc],
+            &version_too_old(config, location, version, &1, timeout, &2)
+          )
         end
 
       {:error, reason} ->
         {:error, {:location, location.id, reason}}
     end
   end
+
+  defp next_page(nil, acc, _again), do: {:ok, acc}
+  defp next_page(next, acc, again), do: again.(next, acc)
 
   defp cell_too_old(config, version, cell) do
     case Config.migrations_for(config, cell) do

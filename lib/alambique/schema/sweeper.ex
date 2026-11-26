@@ -45,17 +45,7 @@ defmodule Alambique.Schema.Sweeper do
 
     result =
       with {:ok, locations} <- Placement.locations(config) do
-        {summary, failures} =
-          Enum.reduce(locations, {@empty, []}, fn location, {acc, failures} ->
-            case sweep_location(config, settings, location, acc) do
-              {:ok, acc} -> {acc, failures}
-              {:error, reason, acc} -> {acc, [{location.id, reason} | failures]}
-            end
-          end)
-
-        if failures == [],
-          do: {:ok, summary},
-          else: {:error, {:listing, Enum.reverse(failures), summary}}
+        sweep_locations(config, settings, locations)
       end
 
     summary =
@@ -71,6 +61,20 @@ defmodule Alambique.Schema.Sweeper do
     })
 
     result
+  end
+
+  defp sweep_locations(config, settings, locations) do
+    {summary, failures} =
+      Enum.reduce(locations, {@empty, []}, fn location, {acc, failures} ->
+        case sweep_location(config, settings, location, acc) do
+          {:ok, acc} -> {acc, failures}
+          {:error, reason, acc} -> {acc, [{location.id, reason} | failures]}
+        end
+      end)
+
+    if failures == [],
+      do: {:ok, summary},
+      else: {:error, {:listing, Enum.reverse(failures), summary}}
   end
 
   defp settings(config, opts) do
