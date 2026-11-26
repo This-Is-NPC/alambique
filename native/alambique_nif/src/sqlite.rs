@@ -238,8 +238,7 @@ impl Conn {
             unsafe { close(db) };
         }
         self.release_held();
-        self.region.close();
-        crate::alloc::poke_trim();
+        crate::alloc::region_closed(&self.region);
     }
 
     /// Closes the connection like `shut`, but leaves the file in the table of
@@ -254,8 +253,7 @@ impl Conn {
         // SAFETY: the write lock waited for every user; the pointer is out of
         // the slot, so nothing can use it again.
         unsafe { close(db) };
-        self.region.close();
-        crate::alloc::poke_trim();
+        crate::alloc::region_closed(&self.region);
         // The table entry is the caller's now: `Conn` must not release it.
         self.released.store(true, Relaxed);
         name.map(|name| (id, name))
@@ -304,9 +302,10 @@ impl Drop for Conn {
                 unsafe { close(db) };
             }
             self.release_held();
-            // No `Timer` runs here: the region closes with the fields, and
-            // what the close freed is trimmed now.
-            crate::alloc::poke_trim();
+            // No `Timer` runs here. The region closes before the trim is
+            // woken: a trim that has released the memory of this connection
+            // finds its region gone too, as `shut` leaves it.
+            crate::alloc::region_closed(&self.region);
         });
     }
 }

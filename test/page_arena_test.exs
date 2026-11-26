@@ -22,7 +22,7 @@ defmodule Alambique.PageArenaTest do
   setup do
     base = native_quiet()
     on_exit(fn -> eventually(fn -> native_counts() == base end) end)
-    :ok
+    %{base: base}
   end
 
   defp stats, do: NativeStats.read()
@@ -130,7 +130,10 @@ defmodule Alambique.PageArenaTest do
     :ok = Sqlite.close(conn)
   end
 
-  test "a connection that is garbage collected returns its memory too", %{tmp_dir: dir} do
+  test "a connection that is garbage collected returns its memory too", %{
+    tmp_dir: dir,
+    base: base
+  } do
     held =
       Task.async(fn ->
         _conn = filled(dir, "gc.db", 12_288)
@@ -142,10 +145,12 @@ defmodule Alambique.PageArenaTest do
     # reference is collected with the task's heap.
     if arena?(held) do
       assert eventually(fn -> excess(stats()) <= 1_000_000 end)
+      # The region closes before the trim that released the memory.
+      assert native_counts() == base
     end
   end
 
-  test "an abandoned connection is trimmed by its destructor", %{tmp_dir: dir} do
+  test "an abandoned connection is trimmed by its destructor", %{tmp_dir: dir, base: base} do
     # Opened here and dropped here: no process dies, so only the destructor of
     # the resource runs when the reference is collected.
     held =
@@ -158,6 +163,8 @@ defmodule Alambique.PageArenaTest do
 
     if arena?(held) do
       assert eventually(fn -> excess(stats()) <= 1_000_000 end)
+      # The region closes before the trim that released the memory.
+      assert native_counts() == base
     end
   end
 
