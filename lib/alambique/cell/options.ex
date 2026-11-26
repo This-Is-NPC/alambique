@@ -1,7 +1,7 @@
 defmodule Alambique.Cell.Options do
   @moduledoc false
-  # The options of one cell, resolved once per wake from `:cell_options`
-  # (design §7). The result is a map with only the keys the override set; a key
+  # The options of one cell, resolved once per wake and again at each refresh
+  # (`Alambique.refresh_options/3`) from `:cell_options` (design §7). The result is a map with only the keys the override set; a key
   # that is present, even with `nil`, replaces the node's value, and a key
   # that is absent leaves it. `State.cell_opt/2` reads it.
   #
@@ -9,7 +9,8 @@ defmodule Alambique.Cell.Options do
   # `Config.check_cell_option/2` -> each value clamped to the node limits ->
   # the cross-field rules repair what the merge breaks. An override that is
   # invalid as a whole falls back to the node's options, or refuses the wake
-  # (`:cell_options_invalid`).
+  # (`:cell_options_invalid`). At a refresh an invalid override changes
+  # nothing: the cell keeps the options it has and the caller gets the reason.
 
   require Logger
 
@@ -24,16 +25,18 @@ defmodule Alambique.Cell.Options do
   ]
 
   @type info :: %{
-          source: :node | :override | :fallback,
+          source: :node | :override | :fallback | :kept,
           clamped: [atom],
           repaired: [atom],
           time: integer
         }
 
-  @spec resolve(Alambique.Cell.State.t()) :: {:ok, map, info} | {:error, String.t(), info}
-  def resolve(%{config: %{cell_options: nil}}), do: {:ok, %{}, info(:node, [], [], 0)}
+  @spec resolve(%{config: Config.t(), id: String.t()}, :wake | :refresh) ::
+          {:ok, map, info} | {:error, String.t(), info}
+  def resolve(cell, phase \\ :wake)
+  def resolve(%{config: %{cell_options: nil}}, _phase), do: {:ok, %{}, info(:node, [], [], 0)}
 
-  def resolve(%{config: config, id: id}) do
+  def resolve(%{config: config, id: id}, phase) do
     started = System.monotonic_time()
     called = call(config, id)
     time = System.monotonic_time() - started
@@ -48,9 +51,13 @@ defmodule Alambique.Cell.Options do
         {:ok, override, info(:override, clamped, repaired, time)}
 
       {:error, message} ->
-        invalid(config, id, message, time)
+        invalid(config, id, message, time, phase)
     end
   end
+
+  @doc "The answer of a refresh whose resolution failed outside the callback."
+  @spec failed(String.t()) :: {:error, String.t(), info}
+  def failed(message), do: {:error, message, info(:kept, [], [], 0)}
 
   defp info(source, clamped, repaired, time),
     do: %{source: source, clamped: clamped, repaired: repaired, time: time}
@@ -241,14 +248,22 @@ defmodule Alambique.Cell.Options do
   def node_value(config, :lazy_restore_mode), do: Config.lazy_mode(config, nil)
   def node_value(config, key), do: Map.fetch!(config.awake, key)
 
-  defp invalid(config, id, message, time) do
-    action = config.cell_options_invalid
-    Telemetry.emit([:cell, :options, :invalid], %{}, %{cell: id, reason: message, action: action})
+  defp invalid(config, id, message, time, phase) do
+    action = if phase == :refresh, do: :keep, else: config.cell_options_invalid
+
+    Telemetry.emit([:cell, :options, :invalid], %{}, %{
+      cell: id,
+      reason: message,
+      action: action,
+      phase: phase
+    })
+
     warn(config, id, message, action)
 
     case action do
       :fallback -> {:ok, %{}, info(:fallback, [], [], time)}
       :refuse -> {:error, message, info(:fallback, [], [], time)}
+      :keep -> {:error, message, info(:kept, [], [], time)}
     end
   end
 
@@ -268,7 +283,11 @@ defmodule Alambique.Cell.Options do
 
       Logger.warning(
         "Alambique cell_options for #{id} is invalid (#{message}); " <>
-          "#{if action == :refuse, do: "the wake is refused", else: "serving with the node options"}"
+          case action do
+            :refuse -> "the wake is refused"
+            :fallback -> "serving with the node options"
+            :keep -> "keeping the options it has"
+          end
       )
     end
 

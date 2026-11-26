@@ -378,6 +378,221 @@ defmodule Alambique.Cell do
 
   defp restore_cache(state), do: state
 
+  # Refresh of the options (`Alambique.refresh_options/3`)
+
+  # Resolves the options again with the one resolver the wake uses, in a
+  # process of its own: the cell keeps serving and renewing its lease while the
+  # callback runs. One resolve runs at a time; a caller that asks meanwhile is
+  # queued and served by the next one, which starts after the first ends, so
+  # the newest request is always applied last.
+  defp refresh_options(%State{refresh: nil, config: %{cell_options: nil}} = state, from) do
+    # No callback: the options are the node's and resolving takes no time.
+    refresh = %{started: System.monotonic_time(), waiting: [from]}
+    {reply, state} = apply_refresh(state, refresh, Options.resolve(state, :refresh))
+    tracked({:reply, reply, state}, true)
+  end
+
+  defp refresh_options(%State{refresh: nil} = state, from),
+    do: {:noreply, start_refresh(state, [from], [])}
+
+  defp refresh_options(%State{refresh: refresh} = state, from),
+    do: {:noreply, %{state | refresh: %{refresh | queued: [from | refresh.queued]}}}
+
+  defp start_refresh(state, waiting, queued) do
+    cell = self()
+    gen = make_ref()
+    resolver = %{config: state.config, id: state.id}
+
+    {pid, mon} =
+      spawn_monitor(fn ->
+        send(cell, {:options_resolved, gen, Options.resolve(resolver, :refresh)})
+      end)
+
+    refresh = %{
+      gen: gen,
+      pid: pid,
+      mon: mon,
+      started: System.monotonic_time(),
+      waiting: waiting,
+      queued: queued
+    }
+
+    %{state | refresh: refresh}
+  end
+
+  defp options_resolved(%State{refresh: refresh} = state, result) do
+    Process.demonitor(refresh.mon, [:flush])
+    {reply, state} = apply_refresh(%{state | refresh: nil}, refresh, result)
+    for from <- refresh.waiting, do: GenServer.reply(from, reply)
+
+    state =
+      if refresh.queued == [],
+        do: state,
+        else: start_refresh(state, Enum.reverse(refresh.queued), [])
+
+    {:noreply, state}
+  end
+
+  # The pragma goes first: when it fails nothing else changes, so the cell
+  # never holds a part of the new options.
+  defp apply_refresh(state, refresh, {:ok, override, info}) do
+    case apply_options(state, override) do
+      {:ok, state, changed, rearmed} ->
+        refresh_done(
+          state,
+          refresh,
+          :ok,
+          %{
+            options_time: info.time,
+            timers_rearmed: rearmed
+          },
+          %{
+            options: info.source,
+            changed: changed,
+            clamped: info.clamped,
+            repaired: info.repaired
+          }
+        )
+
+        {{:ok, info.source, changed: changed}, state}
+
+      {:error, reason} ->
+        message = "cache_size failed: " <> inspect(reason)
+
+        refresh_done(state, refresh, :error, %{options_time: info.time, timers_rearmed: 0}, %{
+          options: :kept,
+          reason: message
+        })
+
+        {{:error, {:cell_options, message}}, state}
+    end
+  end
+
+  defp apply_refresh(state, refresh, {:error, message, info}) do
+    refresh_done(state, refresh, :error, %{options_time: info.time, timers_rearmed: 0}, %{
+      options: :kept,
+      reason: message
+    })
+
+    {{:error, {:cell_options, message}}, state}
+  end
+
+  defp refresh_done(state, refresh, result, measurements, meta) do
+    Telemetry.span_stop(
+      [:cell, :options, :refresh],
+      refresh.started,
+      measurements,
+      Map.merge(meta, %{cell: state.id, result: result, callers: length(refresh.waiting)})
+    )
+  end
+
+  @option_keys Config.cell_option_keys()
+
+  defp apply_options(state, override) do
+    next = %{state | cell_opts: override}
+
+    changed =
+      for key <- @option_keys, State.cell_opt(state, key) != State.cell_opt(next, key), do: key
+
+    with :ok <- refresh_cache(state, next, changed) do
+      {next, rearmed} = rearm(state, next, changed)
+      {:ok, next, changed, rearmed}
+    end
+  end
+
+  # The cache limit the new options ask for, if the connection holds another.
+  # A cell that is shrunk keeps the idle limit, and gets its full one back at
+  # the next call (`restore_cache/1`) unless the shrink is now off. A closed
+  # connection takes the options when it opens again; a refresh never opens it.
+  defp refresh_cache(%State{conn: nil}, _next, _changed), do: :ok
+
+  defp refresh_cache(%State{idle_cache: :shrunk} = state, next, changed) do
+    cond do
+      State.cell_opt(next, :idle_cache_after_ms) == nil ->
+        set_cache(state, State.cell_opt(next, :cache_kib))
+
+      :idle_cache_kib in changed ->
+        set_cache(state, State.cell_opt(next, :idle_cache_kib))
+
+      true ->
+        :ok
+    end
+  end
+
+  defp refresh_cache(state, next, changed) do
+    if :cache_kib in changed, do: set_cache(state, State.cell_opt(next, :cache_kib)), else: :ok
+  end
+
+  # Only the pragma runs native code, so only it holds the marker.
+  defp set_cache(state, kib) do
+    Inflight.busy(state.inflight, fn ->
+      with :ok <- refresh_fault(state) do
+        Sqlite.execute(state.conn, "PRAGMA cache_size = -#{kib}", write: true)
+      end
+    end)
+  end
+
+  defp refresh_fault(state) do
+    case Fault.point(:cell_before_refresh_pragma, %{cell: state.id}) do
+      {:error, _} = error -> error
+      _ -> :ok
+    end
+  end
+
+  # Timers that the changed options moved: each is cancelled and armed again
+  # for what is left of the new time since the last call. A message of a
+  # cancelled timer that was queued carries a ref nobody holds any more.
+  defp rearm(state, next, changed) do
+    elapsed = System.monotonic_time(:millisecond) - state.last_active
+    left = fn key -> max(State.cell_opt(next, key) - elapsed, 0) end
+
+    {next, rearmed} =
+      if :idle_timeout_ms in changed do
+        cancel_timer(state.idle_timer)
+        {arm_idle(next, left.(:idle_timeout_ms)), 1}
+      else
+        {next, 0}
+      end
+
+    {next, rearmed} =
+      cond do
+        :idle_cache_after_ms not in changed or state.conn == nil ->
+          {next, rearmed}
+
+        state.idle_cache == :shrunk ->
+          # Stays shrunk; the shrink off means the pragma above gave the cache back.
+          if State.cell_opt(next, :idle_cache_after_ms) == nil,
+            do: {%{next | idle_cache: nil}, rearmed},
+            else: {next, rearmed}
+
+        true ->
+          cancel_timer(state.idle_cache)
+          next = %{next | idle_cache: nil}
+
+          case State.cell_opt(next, :idle_cache_after_ms) do
+            nil -> {next, rearmed + 1}
+            _ -> {arm_idle_cache(next, left.(:idle_cache_after_ms)), rearmed + 1}
+          end
+      end
+
+    if :idle_close_after_ms in changed and state.conn != nil do
+      cancel_timer(state.idle_close)
+      next = %{next | idle_close: nil}
+
+      case State.cell_opt(next, :idle_close_after_ms) do
+        nil -> {next, rearmed + 1}
+        _ -> {arm_idle_close(next, left.(:idle_close_after_ms)), rearmed + 1}
+      end
+    else
+      {next, rearmed}
+    end
+  end
+
+  defp cancel_timer(ref) when is_reference(ref),
+    do: :erlang.cancel_timer(ref, async: true, info: false)
+
+  defp cancel_timer(_ref), do: :ok
+
   @doc false
   # A third of the TTL, spread by `lease_renew_jitter` so that cells woken
   # together do not renew together.
@@ -411,6 +626,16 @@ defmodule Alambique.Cell do
       :atomics.sub(state.load, Facts.slot(:admitted), 1)
       {:noreply, state}
     end
+  end
+
+  # A refresh of the options is no activity and no write: it leaves the idle
+  # clock, the cache and the marker alone, and does not wait for a hydration.
+  # The answer comes from `info({:options_resolved, ...})`.
+  def handle_call(:refresh_options, from, %State{mode: :serving} = state) do
+    # The router counted the call (`admit/2`); taken back at once, as the
+    # call is answered later without being parked.
+    :atomics.sub(state.load, Facts.slot(:admitted), 1)
+    refresh_options(state, from)
   end
 
   def handle_call(request, from, %State{mode: :serving} = state) do
@@ -764,6 +989,16 @@ defmodule Alambique.Cell do
   # Timers and messages
 
   @impl true
+  # The refresh of the options does its own marking: only the pragma runs
+  # native code, and the marker must not stay busy while the cell waits.
+  def handle_info({:options_resolved, gen, result}, %State{refresh: %{gen: gen}} = state),
+    do: state |> options_resolved(result) |> tracked(true)
+
+  def handle_info({:DOWN, mon, :process, _pid, reason}, %State{refresh: %{mon: mon}} = state) do
+    failed = Options.failed("failed: " <> Exception.format_exit(reason))
+    state |> options_resolved(failed) |> tracked(true)
+  end
+
   def handle_info(message, state) do
     state.inflight |> Inflight.busy(fn -> info(message, state) end) |> tracked(measures?(message))
   end
@@ -1188,13 +1423,20 @@ defmodule Alambique.Cell do
     if Publisher.cleanup_due?(state) do
       {:noreply, arm_idle_cache(state)}
     else
-      Sqlite.execute(state.conn, "PRAGMA cache_size = -#{State.cell_opt(state, :idle_cache_kib)}",
-        write: true
-      )
+      # A pragma that fails leaves the cache as it was: not shrunk, tried again.
+      case Sqlite.execute(
+             state.conn,
+             "PRAGMA cache_size = -#{State.cell_opt(state, :idle_cache_kib)}",
+             write: true
+           ) do
+        :ok ->
+          # The garbage of the last calls would stay for as long as the cell is idle.
+          if State.cell_opt(state, :idle_gc), do: :erlang.garbage_collect()
+          {:noreply, %{state | idle_cache: :shrunk}}
 
-      # The garbage of the last calls would stay for as long as the cell is idle.
-      if State.cell_opt(state, :idle_gc), do: :erlang.garbage_collect()
-      {:noreply, %{state | idle_cache: :shrunk}}
+        {:error, _reason} ->
+          {:noreply, arm_idle_cache(state)}
+      end
     end
   end
 

@@ -56,6 +56,11 @@ defmodule Alambique.Cell.State do
     # The options this cell set for itself (`Cell.Options`): only the keys it
     # changed. Read through `cell_opt/2`.
     cell_opts: %{},
+    # The refresh of the options in progress (`Alambique.refresh_options/3`):
+    # `%{gen, pid, mon, started, waiting, queued}`, or `nil`. One resolve runs
+    # at a time, in a process of its own; the callers that asked meanwhile
+    # (`queued`) are served by the next one.
+    refresh: nil,
     # The memory admission counts for the cell while its connection is closed.
     reopen_floor: 0,
     mode: :waking,
