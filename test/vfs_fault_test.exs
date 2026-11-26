@@ -63,11 +63,11 @@ defmodule Alambique.VfsFaultTest do
 
   test "skip lets selected frames pass", env do
     c = boot(env)
+    # A write is two commits, the rows and the stamp of the feed: the first
+    # passes, the second fails.
     vfs_fault(wal(c), :commit_frame, :ioerr_write, skip: 1)
 
-    assert {:ok, _} = insert(c, 1)
-    assert Native.vfs_fault_hits() == 0
-    assert {:error, _} = insert(c, 2)
+    assert {:error, {:stamp_failed, _}} = insert(c, 1)
     assert Native.vfs_fault_hits() == 1
   end
 
