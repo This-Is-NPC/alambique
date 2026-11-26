@@ -412,8 +412,8 @@ other feed options are not per cell. The feed
 reader of the sender keeps `feed.reader_cache_kib`: the cell issues no pragma
 on it, and `cache_kib` applies to the cell's own connection only.
 
-The page caches of the connections share one pool, so a per-cell `cache_kib` is
-a share of the node's pool, not an isolated cap.
+Each connection has a page cache of its own (§2.2), so a per-cell `cache_kib`
+is a hard cap of that connection and takes memory from no other cell.
 
 A per-cell `migrations` function is bounded the same way: it runs in a
 monitored process and is waited for at most `wake.migrations_timeout_ms`

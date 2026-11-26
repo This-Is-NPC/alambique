@@ -163,7 +163,13 @@ Each connection has a page cache of its own, so `cache_kib` is a hard limit: a
 cell whose working set is above it reads pages again from the file, and a cell
 with a smaller database holds less. The figures are with 512 and with 256
 (sections 1 to 3). A cache shared by all connections, where a busy cell
-borrows what idle ones do not use, is not available.
+borrows what idle ones do not use, is not available, and that is the price of
+the per-connection cache: a cell that needs more than `cache_kib` for a while
+cannot take it from idle cells. Raise `cache_kib` for it (per cell with
+`:cell_options`, up to `awake.cell_cache_kib_max`) instead. A scan of a 16 MiB
+file through a 4 MiB cache misses every page on every pass (3,910 misses a
+scan, 3.1 to 3.7 ms at 0.8 to 0.9 µs a miss without the arena); through a
+32 MiB cache, the second scan misses none (1.4 to 1.7 ms).
 
 **`awake: [idle_cache_after_ms: ..., idle_cache_kib: ...]`.** Off by default
 (`idle_cache_after_ms: nil`). When set, an awake cell with no call for
@@ -207,7 +213,11 @@ settings): check it after a deploy, because a setting that did not reach the
 load keeps the default. What the arena changes:
 
 - The bytes of the page caches are in `page_arena_in_use_bytes`, not in
-  `:erlang.memory/0` or `recon_alloc`. `sqlite_memory_used` still counts them.
+  `:erlang.memory/0`, `recon_alloc` or the `driver_alloc` allocator, which
+  held them before; the pages the arena keeps resident are in
+  `page_arena_resident_bytes`. Add it to the memory you track.
+  `sqlite_memory_used` still counts them, and the `page_arena_*` entries of
+  the native stats say what was loaded (state, extent size, trim settings).
 - A connection takes its blocks from extents it owns, each `extent_kib` of
   blocks of one page size (at least one block), so the pages of an idle cell
   sit together and whole OS pages are free to release. A page that shares an
@@ -216,6 +226,11 @@ load keeps the default. What the arena changes:
   runs when more than `trim_after_kib` above it is free, releasing at most
   `max_trim_kib` at once. Trims run on their own thread, so a scheduler never
   waits for the kernel.
+- The arena is VM-wide: `config :alambique, :page_arena` is read once, when the
+  library loads, and applies to every instance and cell of the node; a cell
+  cannot set it. The lookaside is per instance (`awake: [lookaside_bytes:,
+  lookaside_count:]`) and per cell through `:cell_options`, read when the cell
+  opens its connection (a wake or a reopen after an idle close).
 - The arena attributes a block to the connection whose call allocates it. With
   a shared cache (`cache=shared` in a URI) a block can land in the extents of
   another connection, and with `PRAGMA threads` the helper threads allocate
@@ -241,8 +256,10 @@ page cache, two runs each:
 | First scan of a 16 MiB file after the cache was released (32 MiB cache, 3,900 pages) | 5.0 ms | 9.2 ms |
 | Memory growth over 20 shrinks and refills of one connection | none | none |
 
-A page miss costs the arena's lock and the region's bookkeeping, about 0.1 to
-0.25 µs; the first scan after a release also pays one page fault per OS page,
+The default extent is 64 KiB. All sizes release the same share, so the size
+is chosen by what a page miss costs: 16 KiB costs about 25% more per miss than
+64 KiB, and 256 KiB costs the same within the runs' spread. A page miss costs
+the arena's lock and the region's bookkeeping, about 0.1 to 0.25 µs; the first scan after a release also pays one page fault per OS page,
 about 0.5 µs a page. Extents of 16 KiB cost about 1.1 to 1.5 µs a miss, with
 no gain in what leaves; extents of 256 KiB differ from 64 KiB by less than
 the runs vary. At 350 awake cells with 512 KiB of page cache filled each, the
