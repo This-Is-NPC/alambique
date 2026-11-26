@@ -26,6 +26,8 @@ defmodule Alambique.Cell.State do
     # The process that writes the page-hash sidecar of the last landed batch.
     :sidecar,
     :last_active,
+    # The ref of the `:idle` timer; a message with another ref is stale.
+    :idle_timer,
     # Idle cache shrink: `nil` (off), the ref of the `:idle_cache` timer, or
     # `:shrunk` while the page cache holds the smaller limit.
     :idle_cache,

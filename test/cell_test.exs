@@ -41,6 +41,32 @@ defmodule Alambique.CellTest do
 
   defp numbers(inst, cell), do: Alambique.query(inst, cell, "SELECT n FROM t ORDER BY n")
 
+  describe "the idle timer" do
+    test "ignores a message of a timer that was replaced", ctx do
+      inst = start_instance(ctx, migrations: @schema, idle_timeout_ms: 60_000)
+      cell = unique_cell()
+      assert {:ok, _} = put(inst, cell, 1)
+      pid = Alambique.Cell.whereis(Alambique.Config.fetch!(inst), cell)
+
+      %{idle_timer: old} = :sys.get_state(pid)
+      assert is_reference(old)
+
+      # Replace the timer the way a re-arm does, then deliver the old message.
+      :sys.replace_state(pid, fn state ->
+        :erlang.cancel_timer(state.idle_timer)
+        %{state | idle_timer: :erlang.start_timer(60_000, self(), :idle)}
+      end)
+
+      %{idle_timer: current} = :sys.get_state(pid)
+      refute current == old
+      send(pid, {:timeout, old, :idle})
+
+      # The stale message neither hibernates the cell nor arms a second timer.
+      assert %{idle_timer: ^current, mode: :serving} = :sys.get_state(pid)
+      refute_received {:telemetry, [:alambique, :cell, :hibernate], _, %{cell: ^cell}}
+    end
+  end
+
   describe "read-only queries" do
     test "query refuses every statement that would write, and the cell still writes", ctx do
       inst = start_instance(ctx, migrations: @schema)
