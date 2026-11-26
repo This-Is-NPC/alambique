@@ -212,6 +212,41 @@ with `:overloaded`, and a call gets `:busy`.
 pending, checkpoints, removes its `-wal` and `-shm`, writes a hibernation marker
 and releases the lease.
 
+**Options of a cell.** `cell_options` names a function that returns the
+per-cell options of one cell (`idle_timeout_ms`, `awake.cache_kib`,
+`idle_cache_after_ms`, `idle_cache_kib`, `idle_gc`). The cell calls it once per
+wake, after it holds a wake slot and before the lease, in a monitored process
+that it waits for at most `cell_options_timeout_ms`; the wait is outside the
+busy marker (§10), because it runs no native code. The result is merged over
+the node's values, each value is clamped to the node limits
+(`awake.cell_cache_kib_max`, `cell_idle_timeout_ms_min`, `_max`), and the
+cross-field rules are repaired with a fixed result (an idle timeout not above
+`feed.cleanup_after_ms` returns to the node's value; an idle shrink not below
+the idle timeout is turned off; an `idle_cache_kib` not below `cache_kib`
+returns to the node's value, or the shrink is turned off). The cell keeps only
+the keys it changed, in `State.cell_opts`, and reads every one through
+`State.cell_opt/2`: a key that is present with `nil` is off, a key that is
+absent is the node's value. The wake resolves once; the fence's retry after
+`:txid_taken` does not call the function again. Nothing is stored, so a cell
+that moves gets its options from the function on the node that wakes it.
+
+An override that is invalid as a whole, a function that raises, exits, returns
+another shape or does not return in time, serves with the node's options
+(`cell_options_invalid: :fallback`) or fails the wake with
+`{:cell_options, message}` before the lease is taken (`:refuse`); the refusal
+is remembered for `wake.failure_backoff_ms` like any failure a retry repeats.
+The node's own values are checked against the limits at build, so the fallback
+is always inside them. These options touch no step of the wake order, the lease
+or the fence, and are outside the TLA+ model (`how-to-check-the-pipeline-model.md`).
+
+Until the page caches are per connection, a per-cell `cache_kib` is a share of
+the node's pool, not an isolated cap.
+
+A per-cell `migrations` function is bounded the same way: it runs in a
+monitored process and is waited for at most `wake.migrations_timeout_ms`
+(below the renewal interval). A timeout is `{:bad_migrations, message}`, so a
+serving cell that asks again keeps serving.
+
 ### 7.1 Local cache
 
 A hibernated cell's files stay under `data_dir` for the next wake. A periodic

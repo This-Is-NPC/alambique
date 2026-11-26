@@ -12,6 +12,10 @@ model of the protocol, not of the code: it shows that the rules are safe
 together, and it does not run the Elixir modules. The table in "Where each action
 lives" links each action to the code that implements it.
 
+The per-cell options (`cell_options`) and the timeouts of the callbacks that
+choose them or the migrations change no variable or action of the model; they
+are outside it.
+
 ## Prerequisites
 
 - `mise` installed. `mise install` provides Java (`openjdk-17.0.2`).

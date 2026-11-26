@@ -151,7 +151,27 @@ with no measurable cost on the next call. It does nothing while
 `idle_cache_after_ms` is `nil`; with `idle_gc: false` the cell shrinks its cache
 and keeps the garbage.
 
-**`awake: [track_bytes: ...]`.** On by default. Every awake cell measures the
+**`cell_options: {module, function}`.** Off by default. With it, each wake
+calls the function with the cell id, in a process of its own, and the cell
+waits for it. The cost per wake is one spawned process and the call itself,
+and the wake holds its slot of `awake.max_wakes` for that time, at most
+`cell_options_timeout_ms` (default 1 000); a function that reads a store or a
+database makes every wake that slow. The cell keeps only the keys the function
+returned, in a map of a few words, not a copy of the configuration. A function
+that does not return, raises or returns an invalid override costs one
+timeout (or less) and one telemetry event per wake of that cell, and the cell
+then serves with the node's options (or refuses the wake, with
+`cell_options_invalid: :refuse`). Until page caches are per connection, a
+cell's own `cache_kib` is a share of the node's pool, not an isolated cap, so
+raising it for one cell does not make the node hold more than the pool
+allows. `awake.cell_cache_kib_max` bounds what a cell may ask for.
+
+A per-cell `migrations` function costs the same per wake, bounded by
+`wake.migrations_timeout_ms`. The sweeper calls it once per listed cell, so a
+round costs at most the listed cells times that timeout when the function does
+not return.
+
+**`awake: [track_bytes: ...]`. On by default. Every awake cell measures the
 bytes SQLite holds for its connections and the memory of its process, which
 `Alambique.cells/2` and `Alambique.facts/2` report. A measurement is about
 3.6 µs of the cell, at the end of its wake, after each call, after an idle
