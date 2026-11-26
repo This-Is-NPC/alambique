@@ -10,6 +10,8 @@
 #                                 e16 e64 e256  arena with regions, extents of 16, 64, 256 KiB
 #   ALAMBIQUE_BENCH_RUNS        runs per mode and case          (default 2)
 #   ALAMBIQUE_BENCH_TIMEOUT     seconds each run may take       (default 1800)
+#   TMPDIR                      where the databases go; a RAM disk (/tmp on some hosts)
+#                               counts as memory and spoils the measurement
 #   ALAMBIQUE_BENCH_CGROUP_MIB  run each VM in a systemd user scope with this
 #                               memory limit (default: none)
 #
@@ -49,7 +51,8 @@ for mode in $modes; do
     for c in "${cases[@]}"; do
       echo "== mode=$mode run=$run case=$c"
       ALAMBIQUE_PAGE_ARENA=$arena ALAMBIQUE_PAGE_ARENA_OPTS=$opts MIX_ENV=test \
-        timeout "$limit" "${wrap[@]}" mix run bench/page_arena.exs "$c"
+        timeout "$limit" "${wrap[@]}" mix run bench/page_arena.exs "$c" ||
+        echo "FAILED mode=$mode run=$run case=$c"
     done
   done
 done

@@ -134,14 +134,17 @@ defmodule Bench do
 
   def tmp, do: Alambique.TestDirs.new("bench-arena")
 
+  # Removes what a case wrote (the files of the others are removed by the case).
+  def clean, do: Alambique.TestDirs.clean()
+
   # Cases
 
   def release do
     n = env_int("ALAMBIQUE_BENCH_CELLS", 250)
     kib = env_int("ALAMBIQUE_BENCH_KIB", 1024)
-    dir = tmp()
 
     for layout <- [:interleaved, :sequential], idle_kib <- [64, 0], share <- [50, 75, 90] do
+      dir = tmp()
       conns = for i <- 1..n, do: open_db(dir, "r#{layout}-#{idle_kib}-#{share}-#{i}.db", kib)
       fill(conns, kib, layout)
       settle()
@@ -164,6 +167,7 @@ defmodule Bench do
       )
 
       close_all(conns)
+      File.rm_rf(dir)
       settle()
     end
   end
