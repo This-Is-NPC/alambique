@@ -296,7 +296,7 @@ pub fn scan(
 /// frames instead of stopping at the first checksum.
 #[cfg(any(test, feature = "fuzzing"))]
 pub fn repair(b: &mut [u8]) {
-    if b.len() < WAL_HEADER_SIZE as usize {
+    if b.len() < WAL_HEADER_LEN {
         return;
     }
     let big_endian = b[0] & 1 == 1;
@@ -312,7 +312,7 @@ pub fn repair(b: &mut [u8]) {
     b[28..32].copy_from_slice(&c1.to_be_bytes());
     let (mut s0, mut s1) = (c0, c1);
     let frame = FRAME_HEADER_SIZE + page_size as usize;
-    let mut at = WAL_HEADER_SIZE as usize;
+    let mut at = WAL_HEADER_LEN;
     while at + frame <= b.len() {
         b.copy_within(16..24, at + 8);
         let (x0, x1) = checksum(big_endian, &b[at..at + 8], s0, s1);
@@ -360,16 +360,18 @@ pub mod testing {
 
         /// Appends a frame; `commit` is the db size in pages for a commit frame.
         pub fn frame(&mut self, pgno: u32, commit: u32, data: &[u8]) -> &mut Self {
-            let mut h = Vec::new();
-            h.extend_from_slice(&pgno.to_be_bytes());
-            h.extend_from_slice(&commit.to_be_bytes());
-            h.extend_from_slice(&self.salt.0.to_be_bytes());
-            h.extend_from_slice(&self.salt.1.to_be_bytes());
-            let s = checksum(self.big_endian, &h[..8], self.s.0, self.s.1);
+            let front: Vec<u8> = pgno
+                .to_be_bytes()
+                .into_iter()
+                .chain(commit.to_be_bytes())
+                .collect();
+            let s = checksum(self.big_endian, &front, self.s.0, self.s.1);
             self.s = checksum(self.big_endian, data, s.0, s.1);
-            h.extend_from_slice(&self.s.0.to_be_bytes());
-            h.extend_from_slice(&self.s.1.to_be_bytes());
-            self.bytes.extend_from_slice(&h);
+            self.bytes.extend_from_slice(&front);
+            self.bytes.extend_from_slice(&self.salt.0.to_be_bytes());
+            self.bytes.extend_from_slice(&self.salt.1.to_be_bytes());
+            self.bytes.extend_from_slice(&self.s.0.to_be_bytes());
+            self.bytes.extend_from_slice(&self.s.1.to_be_bytes());
             self.bytes.extend_from_slice(data);
             self
         }
@@ -385,25 +387,29 @@ pub mod testing {
             size: u32,
             writes: &[(u32, u8)],
         ) -> &mut Self {
-            let size = size.max(1) as usize;
-            let old = pages.len();
-            pages.resize(size, vec![0; self.page_size]);
+            let size = size.max(1);
+            let old = u32::try_from(pages.len()).unwrap_or(u32::MAX);
+            pages.resize(size as usize, vec![0; self.page_size]);
             let mut touched = std::collections::BTreeMap::new();
-            for pgno in old + 1..=size {
+            for pgno in old.saturating_add(1)..=size {
                 touched.insert(pgno, 0);
             }
             for &(pgno, fill) in writes {
-                touched.insert(pgno as usize % size + 1, fill);
+                touched.insert(pgno % size + 1, fill);
             }
             if touched.is_empty() {
                 // A commit needs a frame: log page 1 again, unchanged.
-                touched.insert(1, pages[0][0]);
+                let first = pages.first().and_then(|p| p.first()).copied();
+                touched.insert(1, first.unwrap_or(0));
             }
-            let last = *touched.keys().next_back().expect("not empty");
+            let last = touched.keys().next_back().copied().unwrap_or(1);
             for (&pgno, &fill) in &touched {
-                pages[pgno - 1] = vec![fill; self.page_size];
-                let commit = if pgno == last { size as u32 } else { 0 };
-                self.frame(pgno as u32, commit, &pages[pgno - 1].clone());
+                let page = vec![fill; self.page_size];
+                if let Some(slot) = pages.get_mut(pgno as usize - 1) {
+                    slot.clone_from(&page);
+                }
+                let commit = if pgno == last { size } else { 0 };
+                self.frame(pgno, commit, &page);
             }
             self
         }
@@ -411,20 +417,22 @@ pub mod testing {
         /// Writes the file followed by the first `tail` bytes of a frame that
         /// has no commit, like a write SQLite has not finished. The builder
         /// does not keep the frame.
-        pub fn write_with_tail(&mut self, path: &Path, tail: usize) {
+        pub fn write_with_tail(&mut self, path: &Path, tail: usize) -> std::io::Result<()> {
             let (len, s) = (self.bytes.len(), self.s);
             self.frame(1, 0, &vec![0xee; self.page_size]);
             let end = len + tail.min(self.bytes.len() - len);
-            File::create(path)
-                .and_then(|mut f| f.write_all(&self.bytes[..end]))
-                .unwrap();
+            let written = self
+                .bytes
+                .get(..end)
+                .ok_or_else(|| std::io::Error::other("tail past the frame"))
+                .and_then(|bytes| File::create(path).and_then(|mut f| f.write_all(bytes)));
             self.bytes.truncate(len);
             self.s = s;
+            written
         }
 
-        pub fn write(&self, path: &Path) {
-            let mut f = File::create(path).unwrap();
-            f.write_all(&self.bytes).unwrap();
+        pub fn write(&self, path: &Path) -> std::io::Result<()> {
+            File::create(path)?.write_all(&self.bytes)
         }
     }
 }
@@ -442,7 +450,7 @@ mod tests {
 
     fn wal(dir: &tempfile::TempDir, b: &WalBuilder) -> std::path::PathBuf {
         let p = dir.path().join("db-wal");
-        b.write(&p);
+        b.write(&p).unwrap();
         p
     }
 
@@ -530,7 +538,7 @@ mod tests {
         let p = wal(&dir, &b);
         let first = scan(&p, PS, None, None).unwrap();
         b.frame(2, 2, &pg(2));
-        b.write(&p);
+        b.write(&p).unwrap();
         let second = scan(&p, PS, Some(first.pos), None).unwrap();
         assert_eq!(second.first_offset, first.pos.offset);
         assert_eq!(second.pages.keys().copied().collect::<Vec<_>>(), vec![2]);
@@ -538,7 +546,7 @@ mod tests {
 
         let mut restarted = WalBuilder::new(PS, (2, 77), false);
         restarted.frame(1, 2, &pg(5));
-        restarted.write(&p);
+        restarted.write(&p).unwrap();
         let third = scan(&p, PS, Some(second.pos), None).unwrap();
         assert_eq!(third.first_offset, 32);
         assert_eq!(third.pages[&1], pg(5));
@@ -650,29 +658,29 @@ mod props {
             let mut at_split = None;
             for (i, (size, writes)) in txs.iter().enumerate() {
                 if i == k {
-                    b.write(&path);
+                    b.write(&path).unwrap();
                     at_split = Some(scan(&path, PS, None, None).unwrap());
                 }
                 b.transaction(&mut db, *size, writes);
             }
             if k == txs.len() {
-                b.write(&path);
+                b.write(&path).unwrap();
                 at_split = Some(scan(&path, PS, None, None).unwrap());
             }
             let committed_end = b.bytes.len() as u64;
             for (pgno, fill) in &uncommitted {
                 b.frame(*pgno, 0, &vec![*fill; PS as usize]);
             }
-            b.write_with_tail(&path, tail);
+            b.write_with_tail(&path, tail).unwrap();
 
             let full = scan(&path, PS, None, None).unwrap();
             let expected: BTreeMap<u32, Vec<u8>> = db
                 .iter()
                 .enumerate()
-                .map(|(i, p)| (i as u32 + 1, p.clone()))
+                .map(|(i, p)| (u32::try_from(i).unwrap() + 1, p.clone()))
                 .collect();
             prop_assert_eq!(&full.pages, &expected);
-            prop_assert_eq!(full.commit, Some(db.len() as u32));
+            prop_assert_eq!(full.commit, Some(u32::try_from(db.len()).unwrap()));
             prop_assert_eq!(full.pos.offset, committed_end);
 
             let first = at_split.unwrap();
