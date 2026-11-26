@@ -331,6 +331,16 @@ defmodule Alambique.Sqlite do
     do: Native.sqlite_wal_pending(ref(conn), key(conn), wal, page_size, pos)
 
   @doc """
+  `Alambique.Replication.Native.capture_full/6` of the database of `conn`, read
+  through the file the connection holds: no other descriptor of the file is
+  opened and closed, which would drop the locks SQLite holds on it.
+  """
+  @spec capture_full(conn, Path.t(), pos_integer, pos_integer, integer, term) ::
+          Alambique.Replication.Native.captured() | Alambique.Replication.Native.error()
+  def capture_full(conn, wal, page_size, txid, timestamp, limit),
+    do: Native.sqlite_capture_full(ref(conn), key(conn), wal, page_size, txid, timestamp, limit)
+
+  @doc """
   Takes the header that the latest `foreign_write/1` saw as accounted for,
   once the frames it found are replicated.
   """

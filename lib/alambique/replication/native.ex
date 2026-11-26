@@ -225,6 +225,10 @@ defmodule Alambique.Replication.Native do
   @doc false
   def sqlite_wal_pending(_conn, _key, _wal, _page_size, _pos), do: nif_error()
   @doc false
+  def sqlite_capture_full(_conn, _key, _wal, _page_size, _txid, _timestamp, _limit),
+    do: nif_error()
+
+  @doc false
   def sqlite_script(_conn, _sql), do: nif_error()
   @doc false
   def sqlite_starts_ddl(_sql), do: nif_error()

@@ -10,6 +10,23 @@ use crate::ltx::{lock_pgno, page_crc, Encoder, Header, CHECKSUM_FLAG, HEADER_FLA
 use crate::sums::Sums;
 use crate::wal::{self, WalPos};
 
+/// A database file that can be read at an offset: a file opened by path, or
+/// the main file of an open SQLite connection (`sqlite::LiveFile`).
+pub trait DbFile {
+    fn len(&self) -> std::io::Result<u64>;
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()>;
+}
+
+impl DbFile for File {
+    fn len(&self) -> std::io::Result<u64> {
+        Ok(self.metadata()?.len())
+    }
+
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        FileExt::read_exact_at(self, buf, offset)
+    }
+}
+
 pub struct Output {
     pub segment: Vec<u8>,
     /// WAL position after the captured frames.
@@ -133,7 +150,7 @@ pub fn empty(args: &Args) -> Result<Output> {
 /// Page `pgno` of a snapshot: the WAL version, or the database file's.
 fn snapshot_page<'a>(
     scan: &'a wal::Scan,
-    db: Option<&File>,
+    db: Option<&dyn DbFile>,
     db_pages: u32,
     pgno: u32,
     buf: &'a mut [u8],
@@ -157,7 +174,15 @@ fn snapshot_page<'a>(
 /// committed WAL frames before the position `wal_limit` (all of them when
 /// `None`). `args.pos` and `args.sums` are ignored.
 pub fn full(args: &Args, wal_limit: Option<WalPos>) -> Result<Output> {
-    whole(args, wal_limit, 1)
+    whole(args, wal_limit, 1, None)
+}
+
+/// `full` of a database that a connection has open, read through the file
+/// the connection holds. Closing any other descriptor of the file would drop
+/// the locks SQLite holds on it (POSIX locks belong to the process), so the
+/// file is never opened by path.
+pub fn full_live(args: &Args, wal_limit: Option<WalPos>, db: &dyn DbFile) -> Result<Output> {
+    whole(args, wal_limit, 1, Some(db))
 }
 
 /// The whole database as the segment for `args.txid`, which replaces the state
@@ -168,21 +193,33 @@ pub fn replace(args: &Args) -> Result<Output> {
     if args.txid < 2 {
         return invalid("a replacing segment starts at txid 2; use a full segment for txid 1");
     }
-    whole(args, None, args.txid)
+    whole(args, None, args.txid, None)
 }
 
-fn whole(args: &Args, wal_limit: Option<WalPos>, min_txid: u64) -> Result<Output> {
+fn whole(
+    args: &Args,
+    wal_limit: Option<WalPos>,
+    min_txid: u64,
+    live: Option<&dyn DbFile>,
+) -> Result<Output> {
     let scan = wal::scan(args.wal_path, args.page_size, None, wal_limit)?;
     let ps = args.page_size as u64;
-    let db = match File::open(args.db_path) {
-        Ok(f) => Some(f),
-        // A snapshot of a cell with no file yet is empty; a replacing segment
-        // of a file that is gone must not turn into an empty database.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && min_txid == 1 => None,
-        Err(e) => return Err(e.into()),
+    let opened;
+    let db: Option<&dyn DbFile> = match live {
+        Some(f) => Some(f),
+        None => match File::open(args.db_path) {
+            Ok(f) => {
+                opened = f;
+                Some(&opened)
+            }
+            // A snapshot of a cell with no file yet is empty; a replacing segment
+            // of a file that is gone must not turn into an empty database.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && min_txid == 1 => None,
+            Err(e) => return Err(e.into()),
+        },
     };
-    let db_pages = match &db {
-        Some(f) => (f.metadata()?.len() / ps) as u32,
+    let db_pages = match db {
+        Some(f) => (f.len()? / ps) as u32,
         None => 0,
     };
     let commit = scan.commit.unwrap_or(db_pages);
@@ -196,10 +233,7 @@ fn whole(args: &Args, wal_limit: Option<WalPos>, min_txid: u64) -> Result<Output
         sums.push(if pgno == lock {
             0
         } else {
-            page_crc(
-                pgno,
-                snapshot_page(&scan, db.as_ref(), db_pages, pgno, &mut buf)?,
-            )
+            page_crc(pgno, snapshot_page(&scan, db, db_pages, pgno, &mut buf)?)
         });
     }
     let checksum = fold(&sums);
@@ -218,10 +252,7 @@ fn whole(args: &Args, wal_limit: Option<WalPos>, min_txid: u64) -> Result<Output
     };
     let mut enc = Encoder::new(header)?;
     for pgno in (1..=commit).filter(|&p| p != lock) {
-        enc.add_page(
-            pgno,
-            snapshot_page(&scan, db.as_ref(), db_pages, pgno, &mut buf)?,
-        )?;
+        enc.add_page(pgno, snapshot_page(&scan, db, db_pages, pgno, &mut buf)?)?;
     }
     let segment = enc.finish()?;
     Ok(Output {
@@ -753,6 +784,39 @@ mod tests {
         assert!(incremental(&args).unwrap().is_some());
         args.end = Some(end);
         assert!(incremental(&args).unwrap().is_none());
+    }
+
+    /// A database file that is not on disk by any path the capture may open.
+    struct Mem(Vec<u8>);
+
+    impl DbFile for Mem {
+        fn len(&self) -> std::io::Result<u64> {
+            Ok(self.0.len() as u64)
+        }
+
+        fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+            let at = offset as usize;
+            buf.copy_from_slice(&self.0[at..at + buf.len()]);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_live_snapshot_reads_the_given_file_not_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Paths::new(dir.path());
+        // `p.db` does not exist: a read by path would fail or be empty.
+        let mut b = WalBuilder::new(PS, (1, 2), false);
+        b.frame(2, 2, &pg(9));
+        b.write(&dir.path().join("db-wal"));
+        let file = Mem([pg(4), pg(5)].concat());
+        let args = p.args(WalPos::default(), &Sums::default(), 1);
+        let s = full_live(&args, None, &file).unwrap();
+        assert_eq!(s.commit, 2);
+        assert_eq!(
+            s.checksum,
+            fold(&[page_crc(1, &pg(4)), page_crc(2, &pg(9))])
+        );
     }
 
     #[test]

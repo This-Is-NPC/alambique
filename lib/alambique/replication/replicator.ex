@@ -374,8 +374,12 @@ defmodule Alambique.Replication.Replicator do
 
   # TXID 1 is always the whole database, because LTX files that start at
   # TXID 1 are snapshots.
-  defp capture(%{txid: 0} = s, _kind, ts, _conn),
+  defp capture(%{txid: 0} = s, _kind, ts, nil),
     do: Native.capture_full(s.db_path, wal_path(s), s.page_size, 1, ts, nil)
+
+  # The file of an open connection is read through the connection.
+  defp capture(%{txid: 0} = s, _kind, ts, conn),
+    do: Alambique.Sqlite.capture_full(conn, wal_path(s), s.page_size, 1, ts, nil)
 
   defp capture(s, :batch, ts, nil) do
     Native.capture_incremental(

@@ -1724,6 +1724,111 @@ fn sqlite_foreign_write<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64, mod
     )
 }
 
+/// The main database file of an open connection, read through the file SQLite
+/// holds (`SQLITE_FCNTL_FILE_POINTER`): no descriptor is opened or closed, so
+/// no lock of the process on the file is dropped. Valid only while the
+/// database mutex is held and the connection open.
+struct LiveFile(*mut ffi::sqlite3_file);
+
+impl crate::capture::DbFile for LiveFile {
+    fn len(&self) -> std::io::Result<u64> {
+        let mut size: i64 = 0;
+        // SAFETY: by the contract of `LiveFile` the file is open and its
+        // methods are those of the VFS.
+        let rc = unsafe {
+            let methods = &*(*self.0).pMethods;
+            (methods.xFileSize.expect("xFileSize"))(self.0, &mut size)
+        };
+        if rc == ffi::SQLITE_OK {
+            Ok(size as u64)
+        } else {
+            Err(std::io::Error::other(format!("xFileSize failed: {rc}")))
+        }
+    }
+
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        // SAFETY: as above; `buf` is writable for its length.
+        let rc = unsafe {
+            let methods = &*(*self.0).pMethods;
+            (methods.xRead.expect("xRead"))(
+                self.0,
+                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                buf.len() as c_int,
+                offset as i64,
+            )
+        };
+        match rc {
+            ffi::SQLITE_OK => Ok(()),
+            ffi::SQLITE_IOERR_SHORT_READ => Err(std::io::ErrorKind::UnexpectedEof.into()),
+            _ => Err(std::io::Error::other(format!("xRead failed: {rc}"))),
+        }
+    }
+}
+
+/// `capture_full` of the database of `conn`, read through the connection's
+/// own file (`LiveFile`), the way a cell takes its first snapshot.
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(clippy::too_many_arguments)]
+fn sqlite_capture_full<'a>(
+    env: Env<'a>,
+    conn: ResourceArc<Conn>,
+    key: u64,
+    wal: String,
+    page_size: u32,
+    txid: u64,
+    timestamp: i64,
+    limit: Option<crate::PosTuple>,
+) -> Term<'a> {
+    let _t = crate::stats::REPLICATION_CALLS.time();
+    if let Err(f) = check_user(env, &conn) {
+        return f.term(env);
+    }
+    reply(
+        env,
+        with_db(&conn, |db| {
+            if !conn.control.key_ok(key) || conn.control.expect_txn.load(Relaxed) != 0 {
+                return Err(Failure::Denied);
+            }
+            let mut file: *mut ffi::sqlite3_file = ptr::null_mut();
+            // SAFETY: `db` is live (`with_db`); the mutex keeps another thread
+            // from using the connection's file while it is read.
+            let mutex = unsafe { ffi::sqlite3_db_mutex(db) };
+            unsafe { ffi::sqlite3_mutex_enter(mutex) };
+            let rc = unsafe {
+                ffi::sqlite3_file_control(
+                    db,
+                    c"main".as_ptr(),
+                    ffi::SQLITE_FCNTL_FILE_POINTER,
+                    &mut file as *mut _ as *mut std::ffi::c_void,
+                )
+            };
+            let out = if rc == ffi::SQLITE_OK && !file.is_null() {
+                let empty = crate::sums::Sums::default();
+                let args = crate::capture::Args {
+                    db_path: std::path::Path::new(""),
+                    wal_path: std::path::Path::new(&wal),
+                    page_size,
+                    pos: crate::wal::WalPos::default(),
+                    sums: &empty,
+                    pre: 0,
+                    txid,
+                    timestamp,
+                    end: None,
+                };
+                crate::capture::full_live(&args, limit.map(crate::pos_from), &LiveFile(file))
+            } else {
+                Err(crate::error::Error::Io("the main file is not open".into()))
+            };
+            // SAFETY: entered above.
+            unsafe { ffi::sqlite3_mutex_leave(mutex) };
+            Ok(match out {
+                Ok(o) => crate::output_term(env, o),
+                Err(e) => crate::error_term(env, e),
+            })
+        }),
+    )
+}
+
 /// The end of the committed log by the wal-index of a cell's own connection:
 /// the position past the frame `mxFrame` names, so that a scan of the WAL by
 /// path stops there. SQLite writes the header after the frames of a commit,
