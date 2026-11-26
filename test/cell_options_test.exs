@@ -5,7 +5,7 @@ defmodule Alambique.CellOptionsTest do
   import Alambique.CellHelpers
 
   alias Alambique.{Cell, Config, Sqlite}
-  alias AlambiqueTestkit.MemoryStore
+  alias AlambiqueTestkit.{CrashPoints, MemoryStore}
 
   @moduletag :capture_log
 
@@ -20,8 +20,11 @@ defmodule Alambique.CellOptionsTest do
     def options(cell, extra), do: :persistent_term.get(@key).({cell, extra})
   end
 
+  @schema [{1, "CREATE TABLE t (n INTEGER PRIMARY KEY)"}]
+
   setup do
     on_exit(&Callbacks.clear/0)
+    on_exit(&CrashPoints.reset/0)
     setup_store()
   end
 
@@ -137,6 +140,66 @@ defmodule Alambique.CellOptionsTest do
       inst = start_instance(ctx)
       assert {:ok, _} = wake(inst, "plain")
       assert cell_opts(inst, "plain") == %{}
+    end
+  end
+
+  describe "the page cache" do
+    test "opens with the cell's cache_kib, and the node's where it sets none", ctx do
+      inst = start(ctx, awake: [cache_kib: 512])
+
+      Callbacks.set(fn
+        "own" -> [awake: [cache_kib: 128]]
+        _ -> []
+      end)
+
+      assert {:ok, _} = wake(inst, "own")
+      assert {:ok, _} = wake(inst, "node")
+      assert cache_size(inst, "own") == -128
+      assert cache_size(inst, "node") == -512
+    end
+
+    test "keeps the cell's cache_kib when the wake retries after :txid_taken", ctx do
+      seeder = start_instance(ctx, migrations: @schema, prefix: "taken", name: :seeder)
+      assert {:ok, _} = Alambique.execute(seeder, "taken-cell", "INSERT INTO t VALUES (1)")
+      :ok = Alambique.hibernate(seeder, "taken-cell")
+      stop_supervised!(seeder)
+
+      calls = :counters.new(1, [])
+
+      Callbacks.set(fn _ ->
+        :counters.add(calls, 1, 1)
+        [awake: [cache_kib: 128]]
+      end)
+
+      inst = start(ctx, migrations: @schema, prefix: "taken", name: :taken)
+      repl = repl_ctx(inst, "taken-cell")
+      fences = :counters.new(1, [])
+
+      CrashPoints.arm(
+        :repl_after_encode,
+        fn _, %{cell: cell} ->
+          :counters.add(fences, 1, 1)
+
+          # A stale owner takes the TXID of the first fence.
+          if :counters.get(fences, 1) == 1 do
+            dir = Alambique.TestDirs.new("taken")
+
+            {:ok, result} =
+              Alambique.Replication.restore(repl, cell, Path.join(dir, "r"), :latest)
+
+            stale = Alambique.Replication.Replicator.from_restore(result, result.epoch + 1)
+            {:ok, _} = Alambique.Replication.Replicator.fence(stale, repl)
+          end
+        end,
+        times: :infinity,
+        when: &match?(%{cell: "taken-cell"}, &1)
+      )
+
+      assert {:ok, _} = wake(inst, "taken-cell")
+      # The fence ran twice, the callback once, and the retry kept the options.
+      assert :counters.get(fences, 1) >= 2
+      assert :counters.get(calls, 1) == 1
+      assert cache_size(inst, "taken-cell") == -128
     end
   end
 
