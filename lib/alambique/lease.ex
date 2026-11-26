@@ -122,9 +122,10 @@ defmodule Alambique.Lease do
   """
   @spec acquire(ctx, String.t(), String.t(), keyword) :: {:ok, t} | error
   def acquire(ctx, cell, owner, opts \\ []) do
-    traced(:acquire, %{cell: cell, owner: owner}, fn ->
-      do_acquire(ctx, cell, owner, opts[:seen])
-    end)
+    started = System.monotonic_time()
+    result = do_acquire(ctx, cell, owner, opts[:seen])
+    span_stop(:acquire, %{cell: cell, owner: owner}, started, result)
+    result
   end
 
   @doc """
@@ -174,19 +175,10 @@ defmodule Alambique.Lease do
     # lose its lease after the store recovered (design §3).
     ctx = %{ctx | store: Alambique.Store.Breaker.bypass(ctx.store)}
 
-    traced(:renew, lease, fn ->
-      next = %{lease | seq: lease.seq + 1, expires_at_ms: now(ctx) + ctx.ttl_ms}
-      Fault.point(:lease_before_put, point_context(:renew, next))
-
-      case put(ctx, next, {:if_match, lease.etag}) do
-        {:ok, etag} ->
-          Fault.point(:lease_after_put, point_context(:renew, next))
-          {:ok, %{next | etag: etag}}
-
-        {:error, reason} ->
-          reconcile_renew(ctx, lease, reason)
-      end
-    end)
+    started = System.monotonic_time()
+    result = renew_put(ctx, lease)
+    span_stop(:renew, lease, started, result)
+    result
   end
 
   @doc """
@@ -195,7 +187,10 @@ defmodule Alambique.Lease do
   """
   @spec release(ctx, t) :: :ok | error
   def release(ctx, %__MODULE__{} = lease) do
-    traced(:release, lease, fn -> do_release(ctx, lease, true) end)
+    started = System.monotonic_time()
+    result = do_release(ctx, lease, true)
+    span_stop(:release, lease, started, result)
+    result
   end
 
   @doc """
@@ -621,17 +616,26 @@ defmodule Alambique.Lease do
 
   defp point_context(op, lease), do: %{op: op, cell: lease.cell, epoch: lease.epoch}
 
-  defp traced(op, %{cell: cell} = subject, fun) do
-    started = System.monotonic_time()
-    result = fun.()
-
+  defp span_stop(op, %{cell: cell} = subject, started, result) do
     Telemetry.span_stop(
       [:lease, op],
       started,
       Map.merge(%{cell: cell, owner: subject.owner}, outcome(result))
     )
+  end
 
-    result
+  defp renew_put(ctx, lease) do
+    next = %{lease | seq: lease.seq + 1, expires_at_ms: now(ctx) + ctx.ttl_ms}
+    Fault.point(:lease_before_put, point_context(:renew, next))
+
+    case put(ctx, next, {:if_match, lease.etag}) do
+      {:ok, etag} ->
+        Fault.point(:lease_after_put, point_context(:renew, next))
+        {:ok, %{next | etag: etag}}
+
+      {:error, reason} ->
+        reconcile_renew(ctx, lease, reason)
+    end
   end
 
   defp outcome({:ok, lease}), do: %{result: :ok, epoch: lease.epoch}
