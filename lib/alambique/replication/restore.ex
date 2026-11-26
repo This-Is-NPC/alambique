@@ -30,59 +30,23 @@ defmodule Alambique.Replication.Restore do
           optional(:hash_bytes) => non_neg_integer
         }
 
+  @spec run(
+          Alambique.Replication.ctx(),
+          String.t(),
+          Path.t(),
+          Alambique.Replication.target(),
+          keyword
+        ) ::
+          {:ok, result} | {:error, term}
   def run(ctx, cell, dest, target, opts) do
     started = System.monotonic_time()
     deadline = Retry.deadline_in(Keyword.get(opts, :timeout_ms, ctx.timeout_ms))
     limits = limits(target)
 
     result =
-      with {:ok, {segments, snapshots}, sidecars} <-
-             Objects.list_cell_sidecars(ctx, cell, deadline) do
-        env = %{
-          ctx: ctx,
-          cell: cell,
-          deadline: deadline,
-          limits: limits,
-          segments: segments,
-          by_min: Enum.group_by(segments, & &1.min),
-          snapshots: snapshots,
-          # Files whose page-hash sidecar is listed (design §16).
-          sidecars: sidecars,
-          dest: dest,
-          tmp: "#{dest}.restore-#{System.unique_integer([:positive])}",
-          edge_bytes: ctx.edge_bytes,
-          window: min(ctx.edge_bytes, ctx.max_inflight_bytes),
-          concurrency: ctx.fetch_concurrency,
-          budget: Budget.new(ctx.max_inflight_bytes),
-          # Weight of the file the walk is working on, held until its next read.
-          current: :atomics.new(1, []),
-          lazy: opts[:lazy],
-          prefetched: :ets.new(:restore_prefetched, [:set, :public]),
-          heads: :ets.new(:restore_heads, [:set, :public]),
-          # Page-hash sidecars read ahead (`start_sidecars/2`): by object key,
-          # and the keys that were asked for.
-          sidecar_bodies: :ets.new(:restore_sidecars, [:set, :public]),
-          sidecar_keys: MapSet.new(),
-          sidecar_tag: nil,
-          # The read ahead process and the messages it and the walk exchange:
-          # `{tag, :changed}` to the walk, `:room` and `:stop` to the read ahead.
-          owner: self(),
-          tag: make_ref(),
-          reader: nil
-        }
-
-        try do
-          case attempt_all(env, starts(env), nil) do
-            # Too little to be worth a lazy restore: read everything, from the
-            # same listing and the heads already read.
-            :small -> attempt_all(%{reset(env) | lazy: nil}, starts(env), nil)
-            result -> result
-          end
-        after
-          :ets.delete(env.prefetched)
-          :ets.delete(env.heads)
-          :ets.delete(env.sidecar_bodies)
-        end
+      with {:ok, listing, sidecars} <- Objects.list_cell_sidecars(ctx, cell, deadline) do
+        env = new_env(ctx, cell, dest, opts, {deadline, limits}, {listing, sidecars})
+        restore_env(env)
       end
 
     Telemetry.span_stop(
@@ -92,6 +56,54 @@ defmodule Alambique.Replication.Restore do
     )
 
     result
+  end
+
+  defp new_env(ctx, cell, dest, opts, {deadline, limits}, {{segments, snapshots}, sidecars}) do
+    %{
+      ctx: ctx,
+      cell: cell,
+      deadline: deadline,
+      limits: limits,
+      segments: segments,
+      by_min: Enum.group_by(segments, & &1.min),
+      snapshots: snapshots,
+      # Files whose page-hash sidecar is listed (design §16).
+      sidecars: sidecars,
+      dest: dest,
+      tmp: "#{dest}.restore-#{System.unique_integer([:positive])}",
+      edge_bytes: ctx.edge_bytes,
+      window: min(ctx.edge_bytes, ctx.max_inflight_bytes),
+      concurrency: ctx.fetch_concurrency,
+      budget: Budget.new(ctx.max_inflight_bytes),
+      # Weight of the file the walk is working on, held until its next read.
+      current: :atomics.new(1, []),
+      lazy: opts[:lazy],
+      prefetched: :ets.new(:restore_prefetched, [:set, :public]),
+      heads: :ets.new(:restore_heads, [:set, :public]),
+      # Page-hash sidecars read ahead (`start_sidecars/2`): by object key,
+      # and the keys that were asked for.
+      sidecar_bodies: :ets.new(:restore_sidecars, [:set, :public]),
+      sidecar_keys: MapSet.new(),
+      sidecar_tag: nil,
+      # The read ahead process and the messages it and the walk exchange:
+      # `{tag, :changed}` to the walk, `:room` and `:stop` to the read ahead.
+      owner: self(),
+      tag: make_ref(),
+      reader: nil
+    }
+  end
+
+  defp restore_env(env) do
+    case attempt_all(env, starts(env), nil) do
+      # Too little to be worth a lazy restore: read everything, from the
+      # same listing and the heads already read.
+      :small -> attempt_all(%{reset(env) | lazy: nil}, starts(env), nil)
+      result -> result
+    end
+  after
+    :ets.delete(env.prefetched)
+    :ets.delete(env.heads)
+    :ets.delete(env.sidecar_bodies)
   end
 
   defp telemetry_meta(cell, target, {:ok, r}),
@@ -128,17 +140,15 @@ defmodule Alambique.Replication.Restore do
   defp attempt_all(_env, [], first_error), do: first_error || {:error, :no_chain}
 
   defp attempt_all(env, [start | rest], first_error) do
-    try do
-      case attempt(env, start) do
-        :small -> :small
-        {:ok, state} -> finish(env, state)
-        # Never fall back to another chain around an epoch regression.
-        {:error, {:epoch_regression, _, _, _}} = error -> error
-        {:error, _} = error -> attempt_all(env, rest, first_error || error)
-      end
-    after
-      _ = File.rm(env.tmp)
+    case attempt(env, start) do
+      :small -> :small
+      {:ok, state} -> finish(env, state)
+      # Never fall back to another chain around an epoch regression.
+      {:error, {:epoch_regression, _, _, _}} = error -> error
+      {:error, _} = error -> attempt_all(env, rest, first_error || error)
     end
+  after
+    _ = File.rm(env.tmp)
   end
 
   defp attempt(env, start) do
@@ -284,24 +294,12 @@ defmodule Alambique.Replication.Restore do
   end
 
   defp try_candidates(env, state, [seg | rest], skipped, error) do
-    with {:ok, state1, file, meta} <- load(env, state, seg.key),
-         epoch = Objects.epoch_of(meta),
-         {:epoch, true} <- {:epoch, epoch >= state.epoch} |> or_skip(skipped, seg, epoch),
-         {:ok, state1, file, {min, max, ts, _, _, _}, _} <-
-           inspect_file(env, state1, file, :segment, seg.key),
-         {:range, true} <- {:range, min == seg.min and max == seg.max},
-         {:ts, true} <- {:ts, ts_ok?(env, ts)} do
-      case apply_file(env, state1, file, seg.key, state.checksum, state.page_size || 0) do
-        {:ok, state1, header, post} ->
-          {:ok, advance(state1, header, post, meta)}
+    case check_candidate(env, state, seg, skipped) do
+      {:ok, state1, file, meta} ->
+        env
+        |> apply_candidate(state, {state1, file, meta}, seg)
+        |> after_apply(env, state, {rest, skipped, error})
 
-        {:error, {:pre_apply_mismatch, _, _}} = mismatch ->
-          try_candidates(env, state, rest, skipped, error || wrap(mismatch, :segment, seg.key))
-
-        other ->
-          wrap(other, :segment, seg.key)
-      end
-    else
       {:skip, skipped} ->
         try_candidates(env, state, rest, skipped, error)
 
@@ -313,6 +311,36 @@ defmodule Alambique.Replication.Restore do
 
       {:error, _} = e ->
         e
+    end
+  end
+
+  defp after_apply({:mismatch, mismatch}, env, state, {rest, skipped, error}),
+    do: try_candidates(env, state, rest, skipped, error || mismatch)
+
+  defp after_apply(result, _env, _state, _rest), do: result
+
+  defp check_candidate(env, state, seg, skipped) do
+    with {:ok, state1, file, meta} <- load(env, state, seg.key),
+         epoch = Objects.epoch_of(meta),
+         {:epoch, true} <- {:epoch, epoch >= state.epoch} |> or_skip(skipped, seg, epoch),
+         {:ok, state1, file, {min, max, ts, _, _, _}, _} <-
+           inspect_file(env, state1, file, :segment, seg.key),
+         {:range, true} <- {:range, min == seg.min and max == seg.max},
+         {:ts, true} <- {:ts, ts_ok?(env, ts)} do
+      {:ok, state1, file, meta}
+    end
+  end
+
+  defp apply_candidate(env, state, {state1, file, meta}, seg) do
+    case apply_file(env, state1, file, seg.key, state.checksum, state.page_size || 0) do
+      {:ok, state1, header, post} ->
+        {:ok, advance(state1, header, post, meta)}
+
+      {:error, {:pre_apply_mismatch, _, _}} = mismatch ->
+        {:mismatch, wrap(mismatch, :segment, seg.key)}
+
+      other ->
+        wrap(other, :segment, seg.key)
     end
   end
 
@@ -406,32 +434,39 @@ defmodule Alambique.Replication.Restore do
   end
 
   defp inspect_file(env, state, {:edges, head, tail, total, pin}, kind, key) do
-    with {:ok, state} <- ensure_lazy(env, state, head) do
-      idx = length(state.files)
-
-      case Native.lazy_stage(state.lazy, idx, head, tail, total) do
-        {:ok, header, post} ->
-          hashed = stage_sidecar(env, state, idx, key, total)
-          {:ok, state, {:staged, header, post, total, pin, hashed}, header, post}
-
-        {:need_tail, n} ->
-          # A page index larger than the edge is read whole, past the memory
-          # budget if it must be, but not past `max_object_bytes`: the file
-          # says how large its index is, and it may lie.
-          if n > env.ctx.max_object_bytes do
-            {:error, {kind, key, too_large(key, n, env.ctx.max_object_bytes)}}
-          else
-            grow(env, n)
-
-            with {:ok, tail, _total, _meta} <- range(env, key, max(total - n, 0), n),
-                 do: inspect_file(env, state, {:edges, head, tail, total, pin}, kind, key)
-          end
-
-        {:error, reason} ->
-          {:error, {kind, key, reason}}
-      end
-    else
+    case ensure_lazy(env, state, head) do
+      {:ok, state} -> stage(env, state, {head, tail, total, pin}, kind, key)
       {:error, reason} -> {:error, {kind, key, reason}}
+    end
+  end
+
+  defp stage(env, state, {head, tail, total, pin} = edges, kind, key) do
+    idx = length(state.files)
+
+    case Native.lazy_stage(state.lazy, idx, head, tail, total) do
+      {:ok, header, post} ->
+        hashed = stage_sidecar(env, state, idx, key, total)
+        {:ok, state, {:staged, header, post, total, pin, hashed}, header, post}
+
+      {:need_tail, n} ->
+        more_tail(env, state, edges, n, {kind, key})
+
+      {:error, reason} ->
+        {:error, {kind, key, reason}}
+    end
+  end
+
+  # A page index larger than the edge is read whole, past the memory budget if
+  # it must be, but not past `max_object_bytes`: the file says how large its
+  # index is, and it may lie.
+  defp more_tail(env, state, {head, _tail, total, pin}, n, {kind, key}) do
+    if n > env.ctx.max_object_bytes do
+      {:error, {kind, key, too_large(key, n, env.ctx.max_object_bytes)}}
+    else
+      grow(env, n)
+
+      with {:ok, tail, _total, _meta} <- range(env, key, max(total - n, 0), n),
+           do: inspect_file(env, state, {:edges, head, tail, total, pin}, kind, key)
     end
   end
 
@@ -485,39 +520,36 @@ defmodule Alambique.Replication.Restore do
   defp start_sidecars(%{lazy: nil} = env, _start), do: {env, nil}
 
   defp start_sidecars(env, start) do
-    keys = for key <- guess(env, start), MapSet.member?(env.sidecars, key), do: key
+    case for(key <- guess(env, start), MapSet.member?(env.sidecars, key), do: key) do
+      [] ->
+        {env, nil}
 
-    if keys == [] do
-      {env, nil}
-    else
-      ctx = env.ctx
-      limit = hash_limit(env)
-      deadline = env.deadline
-      bodies = env.sidecar_bodies
-      owner = env.owner
-      # One tag for each attempt: what a failed one left is never taken for
-      # the next one's.
-      tag = make_ref()
-      concurrency = env.concurrency
-      budget = env.budget
-
-      fetcher =
-        spawn_link(fn ->
-          keys
-          |> Task.async_stream(&{&1, reserved_sidecar(budget, bodies, ctx, &1, limit, deadline)},
-            max_concurrency: concurrency,
-            timeout: :infinity
-          )
-          |> Enum.reduce(0, fn {:ok, {key, result}}, total ->
-            {result, total} = within(result, total, limit)
-            :ets.insert(bodies, {key, result})
-            send(owner, {tag, :sidecar})
-            total
-          end)
-        end)
-
-      {%{env | sidecar_keys: MapSet.new(keys), sidecar_tag: tag}, fetcher}
+      keys ->
+        # One tag for each attempt: what a failed one left is never taken for
+        # the next one's.
+        tag = make_ref()
+        {%{env | sidecar_keys: MapSet.new(keys), sidecar_tag: tag}, spawn_fetcher(env, keys, tag)}
     end
+  end
+
+  defp spawn_fetcher(env, keys, tag) do
+    %{ctx: ctx, deadline: deadline, sidecar_bodies: bodies, owner: owner} = env
+    %{concurrency: concurrency, budget: budget} = env
+    limit = hash_limit(env)
+
+    spawn_link(fn ->
+      keys
+      |> Task.async_stream(&{&1, reserved_sidecar(budget, bodies, ctx, &1, limit, deadline)},
+        max_concurrency: concurrency,
+        timeout: :infinity
+      )
+      |> Enum.reduce(0, fn {:ok, {key, result}}, total ->
+        {result, total} = within(result, total, limit)
+        :ets.insert(bodies, {key, result})
+        send(owner, {tag, :sidecar})
+        total
+      end)
+    end)
   end
 
   # All the sidecars together stay within the limit: later ones are `:budget`.
@@ -542,7 +574,13 @@ defmodule Alambique.Replication.Restore do
       :ok ->
         :ets.insert(bodies, {{:held, key}, weight})
         result = fetch_sidecar(ctx, key, limit, deadline)
-        held = with {:ok, body} <- result, do: min(byte_size(body), weight), else: (_ -> 0)
+
+        held =
+          case result do
+            {:ok, body} -> min(byte_size(body), weight)
+            _ -> 0
+          end
+
         :ets.insert(bodies, {{:held, key}, held})
         Budget.release(budget, weight - held)
         result
@@ -748,7 +786,11 @@ defmodule Alambique.Replication.Restore do
         :scratch -> []
       end
 
-    txid = with {:snapshot, snap} <- start, do: snap.txid, else: (_ -> 0)
+    txid =
+      case start do
+        {:snapshot, snap} -> snap.txid
+        :scratch -> 0
+      end
 
     chain =
       Stream.unfold(txid, fn txid ->
@@ -773,7 +815,7 @@ defmodule Alambique.Replication.Restore do
       keep_heads(env, found)
       :small
     else
-      parallel(env, found, fn {key, total} -> prefetch_tail(env, key, total) end)
+      parallel_each(env, found, fn {key, total} -> prefetch_tail(env, key, total) end)
       :ok
     end
   end
@@ -851,30 +893,32 @@ defmodule Alambique.Replication.Restore do
     probes = buffer ++ parallel(env, new, &probe_body(env, &1))
     {admitted, left} = admit(env, probes, [])
 
-    for {key, _head, _total, _meta} <- admitted,
-        do: :ets.update_element(env.prefetched, key, {2, :reading})
-
-    parallel(env, admitted, &prefetch_body(env, &1))
+    read_admitted(env, admitted)
 
     cond do
-      stopped?() or blocked?(env, left) ->
-        :ok
-
-      left == [] and later == [] ->
-        :ok
-
+      stopped?() or blocked?(env, left) -> :ok
+      left == [] and later == [] -> :ok
       # Nothing fit and nothing new was probed: wait for the walk to free
       # room, until the deadline of the restore.
-      admitted == [] and new == [] ->
-        receive do
-          :room -> read_ahead(env, later, left)
-          :stop -> :ok
-        after
-          max(env.deadline - System.monotonic_time(:millisecond), 0) -> :ok
-        end
+      admitted == [] and new == [] -> wait_room(env, later, left)
+      true -> read_ahead(env, later, left)
+    end
+  end
 
-      true ->
-        read_ahead(env, later, left)
+  defp read_admitted(env, admitted) do
+    Enum.each(admitted, fn {key, _head, _total, _meta} ->
+      :ets.update_element(env.prefetched, key, {2, :reading})
+    end)
+
+    parallel_each(env, admitted, &prefetch_body(env, &1))
+  end
+
+  defp wait_room(env, later, left) do
+    receive do
+      :room -> read_ahead(env, later, left)
+      :stop -> :ok
+    after
+      max(env.deadline - System.monotonic_time(:millisecond), 0) -> :ok
     end
   end
 
@@ -979,6 +1023,12 @@ defmodule Alambique.Replication.Restore do
   defp stop_reader(env) do
     end_read_ahead(env)
     flush({env.tag, :changed})
+  end
+
+  defp parallel_each(env, items, fun) do
+    items
+    |> Task.async_stream(fun, max_concurrency: env.concurrency, timeout: :infinity)
+    |> Stream.run()
   end
 
   defp parallel(env, items, fun) do
