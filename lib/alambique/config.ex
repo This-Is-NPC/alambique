@@ -1123,6 +1123,8 @@ defmodule Alambique.Config do
     for key <- @compaction_non_positive,
         not (is_integer(merged[key]) and merged[key] >= 0),
         do: bad!(":compaction #{inspect(key)} must be a non-negative integer")
+
+    :ok
   end
 
   defp check_compaction_chain!(merged) do
