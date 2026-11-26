@@ -288,14 +288,17 @@ defmodule Alambique.Scrub do
       Map.merge(meta, %{cell: cell, location: location.id})
     )
 
-    with {:error, reason} <- result do
-      Logger.error(
-        "Alambique scrub: replica of #{cell} at #{location.id} is damaged: #{inspect(reason)}"
-      )
-    end
-
+    log_damage(result, cell, location)
     {location.id, cell, result}
   end
+
+  defp log_damage({:error, reason}, cell, location) do
+    Logger.error(
+      "Alambique scrub: replica of #{cell} at #{location.id} is damaged: #{inspect(reason)}"
+    )
+  end
+
+  defp log_damage(_result, _cell, _location), do: :ok
 
   defp attempts(config, settings, location, cell, left) do
     case check(config, settings, location, cell) do
@@ -339,18 +342,19 @@ defmodule Alambique.Scrub do
   end
 
   defp integrity(path, check, timeout_ms) do
-    with {:ok, conn} <- Db.open_read_only(path, timeout_ms: timeout_ms) do
-      try do
-        case Sqlite.run(conn, "PRAGMA #{check}", []) do
-          {:ok, %{rows: [["ok"]]}} -> :ok
-          {:ok, %{rows: rows}} -> {:error, {check, Enum.map(rows, &hd/1)}}
-          {:error, reason} -> {:error, {check, reason}}
-        end
-      after
-        Db.close(conn)
-      end
-    else
+    case Db.open_read_only(path, timeout_ms: timeout_ms) do
+      {:ok, conn} -> run_check(conn, check)
       {:error, reason} -> {:error, {:open, reason}}
     end
+  end
+
+  defp run_check(conn, check) do
+    case Sqlite.run(conn, "PRAGMA #{check}", []) do
+      {:ok, %{rows: [["ok"]]}} -> :ok
+      {:ok, %{rows: rows}} -> {:error, {check, Enum.map(rows, &hd/1)}}
+      {:error, reason} -> {:error, {check, reason}}
+    end
+  after
+    Db.close(conn)
   end
 end
