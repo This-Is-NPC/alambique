@@ -19,8 +19,9 @@ defmodule Alambique.Admission.Wakes do
 
   use GenServer
 
-  alias Alambique.{Admission, Telemetry}
+  alias Alambique.{Admission, Config, Telemetry}
 
+  @spec start_link(Config.t()) :: GenServer.on_start()
   def start_link(config), do: GenServer.start_link(__MODULE__, config, name: config.wakes)
 
   @impl true

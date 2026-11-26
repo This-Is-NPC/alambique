@@ -267,7 +267,8 @@ defmodule Alambique.Admission do
   defp add_bytes(_config, 0), do: :ok
 
   defp add_bytes(config, delta) when is_integer(delta) do
-    :ets.update_counter(config.admission, :bytes, delta)
+    # The new total is not needed.
+    _ = :ets.update_counter(config.admission, :bytes, delta)
     :ok
   end
 
