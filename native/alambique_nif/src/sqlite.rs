@@ -1746,7 +1746,11 @@ fn sqlite_wal_end<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64) -> Term<'
                 n => u64::from(n),
             };
             let offset = crate::wal::WAL_HEADER_SIZE + u64::from(h[4]) * (24 + size);
-            Ok((atoms::ok(), (offset, h[8], h[9], 0u32, 0u32)).encode(env))
+            // SQLite keeps the salts as the raw bytes of the WAL header (it
+            // copies them with `memcpy`), so the native words are the file's
+            // big-endian values read in native order.
+            let salt = |w: u32| u32::from_be_bytes(w.to_ne_bytes());
+            Ok((atoms::ok(), (offset, salt(h[8]), salt(h[9]), 0u32, 0u32)).encode(env))
         }),
     )
 }
