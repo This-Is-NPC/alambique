@@ -220,7 +220,7 @@ load leaves the arena off without an error. What the arena changes:
   a shared cache (`cache=shared` in a URI) a block can land in the extents of
   another connection, and with `PRAGMA threads` the helper threads allocate
   in a region all connections share. Both are correct and release less.
-- `reserved_mib` is address space, not memory; when the library cannot reserve
+- `reserved_mib` (64 up to 1,048,576) is address space, not memory; when the library cannot reserve
   it (a kernel that counts address space, a low `ulimit -v`), the arena stays
   off and `page_arena_state` says so. The arena exists on Linux only. If the
   range fills, blocks come from the BEAM's allocators (`page_arena_fallbacks`).

@@ -6,7 +6,7 @@ defmodule Alambique.Replication.NativeOptions do
   # settings the library loaded with.
   #
   #   * `enabled` - page-cache blocks live in the page arena (default false).
-  #   * `reserved_mib` - address space reserved, at least 64 (default 4096).
+  #   * `reserved_mib` - address space reserved, from 64 up to 1048576 (default 4096).
   #   * `extent_kib` - size of the extents a connection owns, a multiple of 4
   #     up to 1024 (default 64).
   #   * `trim_after_kib` - free memory that makes a trim worth running
@@ -47,7 +47,7 @@ defmodule Alambique.Replication.NativeOptions do
     unless is_boolean(opts[:enabled]),
       do: raise(ArgumentError, ":page_arena :enabled must be true or false")
 
-    check!(opts, :reserved_mib, &(&1 >= 64), "at least 64")
+    check!(opts, :reserved_mib, &(&1 >= 64 and &1 <= 1_048_576), "from 64 up to 1048576")
 
     check!(
       opts,

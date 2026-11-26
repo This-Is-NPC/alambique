@@ -134,12 +134,25 @@ impl Book {
         let pages_per_ext = ext_bytes / g.page;
         let free_words = slots.iter().copied().max()?.div_ceil(64);
         let rel_words = pages_per_ext.div_ceil(64);
-        let mut regions = Vec::with_capacity(g.max_regions);
+        // Every table gets its whole capacity now; a failure is a refusal,
+        // not an abort of the VM.
+        let mut regions = Vec::new();
+        regions.try_reserve_exact(g.max_regions).ok()?;
         regions.push(Region {
             id: 0,
             live: true,
             avail: [NONE; CLASSES],
         });
+        let mut exts = Vec::new();
+        exts.try_reserve_exact(max_ext).ok()?;
+        let mut free = Vec::new();
+        free.try_reserve_exact(max_ext.checked_mul(free_words)?)
+            .ok()?;
+        let mut rel = Vec::new();
+        rel.try_reserve_exact(max_ext.checked_mul(rel_words)?)
+            .ok()?;
+        let mut spare_regions = Vec::new();
+        spare_regions.try_reserve_exact(g.max_regions).ok()?;
         Some(Book {
             page: g.page,
             shift: ext_bytes.trailing_zeros(),
@@ -150,12 +163,12 @@ impl Book {
             free_words,
             rel_words,
             max_ext,
-            exts: Vec::with_capacity(max_ext),
-            free: Vec::with_capacity(max_ext * free_words),
-            rel: Vec::with_capacity(max_ext * rel_words),
+            exts,
+            free,
+            rel,
             regions,
             max_regions: g.max_regions,
-            spare_regions: Vec::with_capacity(g.max_regions),
+            spare_regions,
             next_id: 1,
             hot: NONE,
             cold: NONE,
