@@ -63,33 +63,27 @@ defmodule Alambique.Replication.Native do
           {min_txid :: integer, max_txid :: integer, timestamp :: integer, commit :: integer,
            pre_apply :: integer, page_size :: integer}
 
-  @doc "Segment for `txid` with the latest version of each page committed after `pos`, or `:none`."
-  @spec capture_incremental(
-          Path.t(),
-          Path.t(),
-          pos_integer,
-          wal_pos,
-          sums,
-          integer,
-          pos_integer,
-          integer
-        ) ::
-          captured | :none | error
-  def capture_incremental(_db, _wal, _page_size, _pos, _sums, _pre, _txid, _timestamp),
-    do: nif_error()
+  @typedoc """
+  What an incremental capture takes besides the files and the sums: the
+  `page_size`, the WAL position `pos` to start from, the checksum `pre` of the
+  state before, the `txid` of the segment and its `timestamp`.
+  """
+  @type capture_opts :: %{
+          page_size: pos_integer,
+          pos: wal_pos,
+          pre: integer,
+          txid: pos_integer,
+          timestamp: integer
+        }
 
-  @doc "Segment for `txid` without pages."
-  @spec capture_empty(
-          Path.t(),
-          Path.t(),
-          pos_integer,
-          wal_pos,
-          sums,
-          integer,
-          pos_integer,
-          integer
-        ) :: captured | error
-  def capture_empty(_db, _wal, _page_size, _pos, _sums, _pre, _txid, _timestamp), do: nif_error()
+  @doc "Segment for `opts.txid` with the latest version of each page committed after `opts.pos`, or `:none`."
+  @spec capture_incremental(Path.t(), Path.t(), sums, capture_opts) ::
+          captured | :none | error
+  def capture_incremental(_db, _wal, _sums, _opts), do: nif_error()
+
+  @doc "Segment for `opts.txid` without pages."
+  @spec capture_empty(Path.t(), Path.t(), sums, capture_opts) :: captured | error
+  def capture_empty(_db, _wal, _sums, _opts), do: nif_error()
 
   @doc "Whole database as of `txid` (min TXID 1), leaving out WAL frames from `limit` on."
   @spec capture_full(Path.t(), Path.t(), pos_integer, pos_integer, integer, wal_pos | nil) ::
@@ -232,19 +226,18 @@ defmodule Alambique.Replication.Native do
 
   # SQLite (see `Alambique.Sqlite`)
 
+  @type open_opts :: %{
+          readonly: boolean,
+          vfs: String.t() | nil,
+          attach: boolean,
+          timeout_ms: non_neg_integer,
+          gated: boolean,
+          exclusive: boolean,
+          lookaside: {non_neg_integer, non_neg_integer} | nil
+        }
   @doc false
-  @spec sqlite_open(
-          Path.t(),
-          boolean,
-          String.t() | nil,
-          boolean,
-          non_neg_integer,
-          boolean,
-          boolean,
-          {non_neg_integer, non_neg_integer} | nil
-        ) :: {:ok, conn, secret :: non_neg_integer} | sql_error
-  def sqlite_open(_path, _readonly, _vfs, _attach, _timeout_ms, _gated, _exclusive, _lookaside),
-    do: nif_error()
+  @spec sqlite_open(Path.t(), open_opts) :: {:ok, conn, secret :: non_neg_integer} | sql_error
+  def sqlite_open(_path, _opts), do: nif_error()
 
   @doc false
   @spec sqlite_close(conn, non_neg_integer) :: :ok | sql_error
@@ -268,19 +261,16 @@ defmodule Alambique.Replication.Native do
   @spec sqlite_run(conn, binary, list, tuple) ::
           {:ok, [String.t()], [[integer | float | binary | nil]]} | sql_error
   def sqlite_run(_conn, _sql, _params, _limits), do: nif_error()
+
+  @type feed_plan :: %{
+          bound: pos_integer | nil,
+          resumed: non_neg_integer | nil,
+          room: non_neg_integer | nil
+        }
   @doc false
-  @spec sqlite_feed_rows(
-          conn,
-          binary,
-          list,
-          pos_integer | nil,
-          non_neg_integer | nil,
-          non_neg_integer | nil,
-          pid,
-          reference
-        ) :: {:ok, [tuple], boolean, boolean} | sql_error
-  def sqlite_feed_rows(_conn, _sql, _params, _bound, _resumed, _room, _pid, _token),
-    do: nif_error()
+  @spec sqlite_feed_rows(conn, binary, list, feed_plan, pid, reference) ::
+          {:ok, [tuple], boolean, boolean} | sql_error
+  def sqlite_feed_rows(_conn, _sql, _params, _plan, _pid, _token), do: nif_error()
 
   @doc false
   @spec sqlite_user_statements() :: non_neg_integer
@@ -317,43 +307,25 @@ defmodule Alambique.Replication.Native do
           non_neg_integer,
           Path.t(),
           Path.t(),
-          pos_integer,
-          wal_pos,
           sums,
-          integer,
-          pos_integer,
-          integer
+          capture_opts
         ) :: captured | :none | error
-  def sqlite_capture_incremental(
-        _conn,
-        _key,
-        _db,
-        _wal,
-        _page_size,
-        _pos,
-        _sums,
-        _pre,
-        _txid,
-        _timestamp
-      ),
-      do: nif_error()
+  def sqlite_capture_incremental(_conn, _key, _db, _wal, _sums, _opts), do: nif_error()
 
   @doc false
   @spec sqlite_wal_pending(conn, non_neg_integer, Path.t(), pos_integer, wal_pos) ::
           {:ok, boolean} | error
   def sqlite_wal_pending(_conn, _key, _wal, _page_size, _pos), do: nif_error()
+
+  @type full_opts :: %{
+          page_size: pos_integer,
+          txid: pos_integer,
+          timestamp: integer,
+          limit: wal_pos | nil
+        }
   @doc false
-  @spec sqlite_capture_full(
-          conn,
-          non_neg_integer,
-          Path.t(),
-          pos_integer,
-          pos_integer,
-          integer,
-          wal_pos | nil
-        ) :: captured | error
-  def sqlite_capture_full(_conn, _key, _wal, _page_size, _txid, _timestamp, _limit),
-    do: nif_error()
+  @spec sqlite_capture_full(conn, non_neg_integer, Path.t(), full_opts) :: captured | error
+  def sqlite_capture_full(_conn, _key, _wal, _opts), do: nif_error()
 
   @doc false
   @spec sqlite_script(conn, binary) :: :ok | sql_error

@@ -410,16 +410,7 @@ defmodule Alambique.Replication.Replicator do
     do: Alambique.Sqlite.capture_full(conn, wal_path(s), s.page_size, 1, ts, nil)
 
   defp capture(s, :batch, ts, nil) do
-    Native.capture_incremental(
-      s.db_path,
-      wal_path(s),
-      s.page_size,
-      s.wal_pos,
-      s.sums,
-      s.checksum,
-      s.txid + 1,
-      ts
-    )
+    Native.capture_incremental(s.db_path, wal_path(s), s.sums, capture_opts(s, ts))
   end
 
   # With the connection the WAL is read up to the end its wal-index records.
@@ -438,16 +429,11 @@ defmodule Alambique.Replication.Replicator do
   end
 
   defp capture(s, :fence, ts, _conn) do
-    Native.capture_empty(
-      s.db_path,
-      wal_path(s),
-      s.page_size,
-      s.wal_pos,
-      s.sums,
-      s.checksum,
-      s.txid + 1,
-      ts
-    )
+    Native.capture_empty(s.db_path, wal_path(s), s.sums, capture_opts(s, ts))
+  end
+
+  defp capture_opts(s, ts) do
+    %{page_size: s.page_size, pos: s.wal_pos, pre: s.checksum, txid: s.txid + 1, timestamp: ts}
   end
 
   @doc """
