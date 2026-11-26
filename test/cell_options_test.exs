@@ -205,6 +205,42 @@ defmodule Alambique.CellOptionsTest do
       assert cache_size(inst, "node") == -512
     end
 
+    test "opens with the cell's lookaside, and the node's where it sets none", ctx do
+      inst = start(ctx)
+
+      Callbacks.set(fn
+        "none" <> _ -> [awake: [lookaside_bytes: 0, lookaside_count: 0]]
+        _ -> []
+      end)
+
+      held = fn name ->
+        before = Alambique.NativeStats.read().sqlite_memory_used
+
+        for i <- 1..10, do: assert({:ok, _} = wake(inst, "#{name}-#{i}"))
+        Alambique.NativeStats.read().sqlite_memory_used - before
+      end
+
+      node = held.("node")
+      none = held.("none")
+      # SQLite's default is 1200 bytes by 40 slots on each connection.
+      assert node - none >= 10 * 30_000
+    end
+
+    test "a lookaside that is not a pair SQLite can use falls back to the node's", ctx do
+      inst = start(ctx, awake: [lookaside_bytes: 512, lookaside_count: 16])
+
+      Callbacks.set(fn
+        "alone" -> [awake: [lookaside_count: 0, lookaside_bytes: nil]]
+        "big" -> [awake: [lookaside_bytes: 65_528, lookaside_count: 64]]
+        "own" -> [awake: [lookaside_bytes: 256, lookaside_count: 8]]
+      end)
+
+      for cell <- ["alone", "big", "own"], do: assert({:ok, _} = wake(inst, cell))
+      assert cell_opts(inst, "alone") == %{}
+      assert cell_opts(inst, "big") == %{}
+      assert cell_opts(inst, "own") == %{lookaside_bytes: 256, lookaside_count: 8}
+    end
+
     test "keeps the cell's cache_kib when the wake retries after :txid_taken", ctx do
       seeder = start_instance(ctx, migrations: @schema, prefix: "taken", name: :seeder)
       assert {:ok, _} = Alambique.execute(seeder, "taken-cell", "INSERT INTO t VALUES (1)")

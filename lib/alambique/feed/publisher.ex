@@ -511,7 +511,7 @@ defmodule Alambique.Feed.Publisher do
            Db.open_reader(
              state.path,
              state.config.feed.reader_cache_kib,
-             Db.lookaside(state.config)
+             Db.lookaside(state)
            ),
          do: {:ok, %{state | feed_reader: reader}}
   end

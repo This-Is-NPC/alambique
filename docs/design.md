@@ -105,8 +105,8 @@ application first, so that its environment is readable then.
 not reach the load leaves the arena off.
 
 **Lookaside.** `sqlite3_db_config(SQLITE_DBCONFIG_LOOKASIDE)` runs right after
-the open, before any statement, with the instance's `awake.lookaside_bytes` and
-`awake.lookaside_count`. SQLite makes large slots of the given size and small
+the open, before any statement, with the cell's `awake.lookaside_bytes` and
+`awake.lookaside_count` (its own, else the instance's). SQLite makes large slots of the given size and small
 ones of 128 bytes out of the same memory. A refusal is logged and the open goes
 on with SQLite's default.
 

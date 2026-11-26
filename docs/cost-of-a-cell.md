@@ -177,7 +177,8 @@ or more) below `cache_kib`. A cell whose cached pages are fewer than
 52 KiB of pages keeps them all.
 
 Closing an idle connection (`awake: [idle_close_after_ms:]`) frees its pages as
-well, whatever else is set.
+well, whatever else is set. The freed memory goes back to the allocators of the
+BEAM; it leaves the process only with the page arena (below).
 
 **Where the freed memory goes: `config :alambique, :page_arena`.** Off by
 default. SQLite hands pages back to the allocators of the BEAM, which keep
@@ -237,7 +238,9 @@ a connection no slots: it saves their memory and sends every allocation of a
 statement to the allocator. SQLite splits the memory into large slots of
 `lookaside_bytes` and small ones of 128 bytes. Both are set, `lookaside_bytes`
 is a multiple of 8 from 16 up to 65,528, and `lookaside_bytes` times
-`lookaside_count` is at most 1 MiB. The feed reader takes the same value. SQLite sets up its default lookaside
+`lookaside_count` is at most 1 MiB. A cell can set both for itself through `:cell_options`; one that gives a pair
+SQLite could not use, or only one of the two, gets the node's. The feed reader
+takes the cell's value. SQLite sets up its default lookaside
 while it opens the database, and the setting replaces it right after, so each
 open with a value of its own costs one more allocation and free of that memory
 (about 48,000 bytes at the default size).
@@ -328,10 +331,9 @@ returned, in a map of a few words, not a copy of the configuration. A function
 that does not return, raises or returns an invalid override costs one
 timeout (or less) and one telemetry event per wake of that cell, and the cell
 then serves with the node's options (or refuses the wake, with
-`cell_options_invalid: :refuse`). The page caches share one pool, so a
-cell's own `cache_kib` is a share of the node's pool, not an isolated cap, so
-raising it for one cell does not make the node hold more than the pool
-allows. `awake.cell_cache_kib_max` bounds what a cell may ask for.
+`cell_options_invalid: :refuse`). A cell's own `cache_kib` is a hard limit of
+its connection, so raising it for one cell takes memory from no other cell.
+`awake.cell_cache_kib_max` bounds what a cell may ask for.
 
 **`Alambique.refresh_options/3`.** Per call on an awake cell: one routed call
 (counted in the admission, like any call), one spawned process that runs the

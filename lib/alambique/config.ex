@@ -1456,30 +1456,32 @@ defmodule Alambique.Config do
   # slots) on every connection. Otherwise both are set: `0` in either gives
   # none; else the slot size is a multiple of 8 above 8 and the memory of one
   # connection is bounded.
-  defp lookaside!(nil, nil), do: :ok
-
   defp lookaside!(bytes, count) do
-    unless is_integer(bytes) and is_integer(count) and bytes >= 0 and count >= 0,
-      do:
-        bad!(
-          ":awake :lookaside_bytes and :lookaside_count must be set together, non-negative integers"
-        )
-
-    if bytes > 0 and count > 0 do
-      unless bytes > 8 and rem(bytes, 8) == 0 and bytes <= @lookaside_max_slot,
-        do:
-          bad!(
-            ":awake :lookaside_bytes must be 0 or a multiple of 8 from 16 up to #{@lookaside_max_slot}"
-          )
-
-      if bytes * count > @lookaside_max_bytes,
-        do:
-          bad!(
-            ":awake :lookaside_bytes times :lookaside_count must not exceed #{@lookaside_max_bytes}"
-          )
-    end
-
+    if message = lookaside_error(bytes, count), do: bad!(message)
     :ok
+  end
+
+  # The message of a pair of lookaside values SQLite could not use, or `nil`.
+  # Also the rule the resolution of a cell's options applies to the merged pair.
+  @doc false
+  @spec lookaside_error(term, term) :: String.t() | nil
+  def lookaside_error(nil, nil), do: nil
+
+  def lookaside_error(bytes, count) do
+    cond do
+      not (is_integer(bytes) and is_integer(count) and bytes >= 0 and count >= 0) ->
+        ":awake :lookaside_bytes and :lookaside_count must be set together, non-negative integers"
+
+      bytes > 0 and count > 0 and
+          not (bytes > 8 and rem(bytes, 8) == 0 and bytes <= @lookaside_max_slot) ->
+        ":awake :lookaside_bytes must be 0 or a multiple of 8 from 16 up to #{@lookaside_max_slot}"
+
+      bytes > 0 and count > 0 and bytes * count > @lookaside_max_bytes ->
+        ":awake :lookaside_bytes times :lookaside_count must not exceed #{@lookaside_max_bytes}"
+
+      true ->
+        nil
+    end
   end
 
   # `:cell_options` has one internal form, `{module, function, extra_args}`;
@@ -1542,7 +1544,9 @@ defmodule Alambique.Config do
     :locking_mode,
     :lazy_restore_mode,
     :cleanup_after_ms,
-    :track_bytes
+    :track_bytes,
+    :lookaside_bytes,
+    :lookaside_count
   ]
 
   @doc false
@@ -1584,6 +1588,22 @@ defmodule Alambique.Config do
 
   def check_cell_option(:cleanup_after_ms, _),
     do: {:error, ":feed :cleanup_after_ms must be a positive integer"}
+
+  def check_cell_option(:lookaside_bytes, nil), do: :ok
+
+  def check_cell_option(:lookaside_bytes, v) do
+    # Alone, a size is checked as for a pair; the pair is checked when merged.
+    case lookaside_error(v, 1) do
+      nil -> :ok
+      message -> {:error, message}
+    end
+  end
+
+  def check_cell_option(:lookaside_count, v) when is_nil(v) or (is_integer(v) and v >= 0),
+    do: :ok
+
+  def check_cell_option(:lookaside_count, _),
+    do: {:error, ":awake :lookaside_count must be nil or a non-negative integer"}
 
   def check_cell_option(:idle_timeout_ms, v) when is_integer(v) and v > 0, do: :ok
 

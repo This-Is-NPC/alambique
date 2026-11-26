@@ -282,7 +282,7 @@ fn sqlite_feed_rows<'a>(
     pid: LocalPid,
     token: Term<'a>,
 ) -> Term<'a> {
-    let _t = crate::stats::SQLITE_CALLS.time();
+    let _t = crate::stats::SQLITE_CALLS.time_for(&conn);
     let plan = Plan {
         bound,
         resumed,
