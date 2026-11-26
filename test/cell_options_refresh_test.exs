@@ -410,6 +410,27 @@ defmodule Alambique.CellOptionsRefreshTest do
     end
   end
 
+  describe "locking_mode" do
+    test "cannot change on an awake cell: the refresh is refused and nothing changes", ctx do
+      inst = start(ctx, lazy_restore: false, awake: [cache_kib: 128])
+      Callbacks.set(fn _ -> [sql: [locking_mode: :exclusive]] end)
+      assert {:ok, _} = wake(inst, "c")
+      before = state(inst, "c")
+      assert before.cell_opts == %{locking_mode: :exclusive}
+
+      Callbacks.set(fn _ -> [awake: [cache_kib: 64]] end)
+      assert {:error, {:cell_options, message}} = refresh(inst, "c")
+      assert message =~ "locking_mode"
+      assert state(inst, "c").cell_opts == before.cell_opts
+      assert cache_size(inst, "c") == -128
+
+      # The same lock with another cache is a valid refresh.
+      Callbacks.set(fn _ -> [sql: [locking_mode: :exclusive], awake: [cache_kib: 64]] end)
+      assert {:ok, :override, changed: [:cache_kib]} = refresh(inst, "c")
+      assert cache_size(inst, "c") == -64
+    end
+  end
+
   describe "cleanup_after_ms" do
     test "not below the idle timeout goes back to the node's, at a wake and at a refresh", ctx do
       inst = start(ctx)

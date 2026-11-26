@@ -1144,7 +1144,10 @@ defmodule Alambique do
   the cell keeps the options it has (also with `cell_options_invalid:
   :refuse`) and the answer is `{:error, {:cell_options, message}}`. The same
   limits and repairs as at a wake apply. `:track_bytes` and the feed options
-  `awake: [track_bytes: false]` clears the memory facts of the cell (a budget,
+  `sql: [locking_mode:]` cannot change on an awake cell: the lock is taken when
+  the connection opens, so a refresh that would change it is refused whole
+  (`{:error, {:cell_options, message}}`) and the new value applies at the next
+  wake. `awake: [track_bytes: false]` clears the memory facts of the cell (a budget,
   `:max_bytes`, keeps them on), and `feed: [cleanup_after_ms:]` moves a cleanup
   that is already waiting. The other feed options are not per cell: the sender's
   reader keeps `:feed` `:reader_cache_kib`, because the cell issues no pragma on it.
