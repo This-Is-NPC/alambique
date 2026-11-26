@@ -24,7 +24,7 @@
 #   lookaside  Statement time and the memory of a connection for lookaside
 #              {0, 0}, SQLite's default and {512, 16}.
 #   capacity   Awake cells a node holds before its memory reaches 95% of
-#              ALAMBIQUE_BENCH_LIMIT_MIB, with the idle shrink off and on. The
+#              ALAMBIQUE_BENCH_LIMIT_MIB, with no idle handling, the idle shrink and the idle close. The
 #              limit is a threshold on the measured memory, not a kill: run
 #              the script in a cgroup of that size to see the real one.
 #
@@ -372,14 +372,18 @@ defmodule Bench do
   def capacity do
     limit = env_int("ALAMBIQUE_BENCH_LIMIT_MIB", 1024) * 1_048_576
 
-    for shrink <- [false, true] do
+    for idle <- [:none, :shrink, :close] do
       dir = tmp()
       {:ok, store} = MemoryStore.start_link()
-      name = :"bench_capacity_#{shrink}"
+      name = :"bench_capacity_#{idle}"
 
       awake =
         [cache_kib: 512, max_cells: 100_000] ++
-          if(shrink, do: [idle_cache_after_ms: 500, idle_cache_kib: 64], else: [])
+          case idle do
+            :none -> []
+            :shrink -> [idle_cache_after_ms: 500, idle_cache_kib: 64]
+            :close -> [idle_close_after_ms: 500]
+          end
 
       {:ok, sup} =
         Supervisor.start_link(
@@ -399,10 +403,10 @@ defmodule Bench do
         )
 
       base = memory()
-      cells = wake_until(name, 0, base + trunc(limit * 0.95))
+      cells = wake_until(name, idle, 0, base + trunc(limit * 0.95))
 
       line("capacity",
-        shrink: shrink,
+        idle: idle,
         cells: cells,
         limit_mib: div(limit, 1_048_576),
         mem_mib: mib(memory() - base)
@@ -415,9 +419,35 @@ defmodule Bench do
     end
   end
 
+  # Waits until each cell of `ids` has done what `idle` asks of an idle cell
+  # (its connection closed, its cache shrunk), so the memory is measured after
+  # it; a cell that never does fails the case.
+  defp wait_idle(_name, :none, _ids), do: :ok
+
+  defp wait_idle(name, idle, ids) do
+    config = Alambique.Config.fetch!(name)
+    deadline = System.monotonic_time(:millisecond) + 60_000
+
+    for id <- ids do
+      pid = Alambique.Cell.whereis(config, id)
+      wait_until(deadline, "#{id} did not go #{idle}", fn -> idle?(:sys.get_state(pid), idle) end)
+    end
+  end
+
+  defp idle?(state, :close), do: state.kept != nil
+  defp idle?(state, :shrink), do: state.idle_cache == :shrunk
+
+  defp wait_until(deadline, failure, fun) do
+    cond do
+      fun.() -> :ok
+      System.monotonic_time(:millisecond) > deadline -> raise failure
+      true -> Process.sleep(50) && wait_until(deadline, failure, fun)
+    end
+  end
+
   # Wakes cells in batches of 50, each with a filled cache, until the memory
-  # passes `ceiling`, after the idle shrink had its turn.
-  defp wake_until(name, woken, ceiling) do
+  # passes `ceiling`, after the idle shrink or close had its turn.
+  defp wake_until(name, idle, woken, ceiling) do
     batch = for i <- (woken + 1)..(woken + 50), do: "cell-#{i}"
 
     batch
@@ -438,11 +468,11 @@ defmodule Bench do
     )
     |> Stream.run()
 
-    Process.sleep(1_500)
+    wait_idle(name, idle, batch)
 
     if memory() >= ceiling or woken >= 20_000,
       do: woken + 50,
-      else: wake_until(name, woken + 50, ceiling)
+      else: wake_until(name, idle, woken + 50, ceiling)
   end
 end
 
