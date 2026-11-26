@@ -605,7 +605,7 @@ defmodule Alambique do
       range the sender read, and only one range is handed over at a time, so
       the reader is opened once per range and holds no file between ranges.
       `:after_burst`: once nothing more is handed over than what was read, so
-      ranges that follow each other share the reader. Default `:after_burst`.
+      ranges that follow each other share the reader. Default `:after_read`.
     * `:shards` - prefixes the feed of each location is spread over (default
       16, at most 1 000). It is fixed for as long as the feed exists: consumers
       must use the same value, and a cell changes shard when it changes.

@@ -380,16 +380,16 @@ With `:sender`:
 - `reader_cache_kib` (default 64, only with `:sender`) is the page cache of the
   reader. Its memory counts in `awake: [max_bytes:]` while it is open.
 - `reader_close` (only with `:sender`) says when the cell closes the reader.
-  `:after_burst` (default): when the sender has read everything handed over,
-  so ranges that follow each other share one open. `:after_read`: after every
-  range, and the cell hands over one range at a time, so a range that is
-  acknowledged while another is read waits for that read. The reader is then
-  opened once per range and no file stays open between ranges.
+  `:after_read` (default): after every range, and the cell hands over one range
+  at a time, so a range that is acknowledged while another is read waits for
+  that read. The reader is opened once per range and no file stays open between
+  ranges. `:after_burst`: when the sender has read everything handed over, so
+  ranges that follow each other share one open.
 - A cell that stops hands over the TXIDs and waits for the sender within
   `stop_publish_ms`, as with `:cell`.
 
 `:sender` takes the read and the copy of the rows off the cell. It costs one
-read-only open per burst of handed-over ranges (per range with `:after_read`),
+read-only open per range with `:after_read` (per burst with `:after_burst`),
 a page cache of `reader_cache_kib`, and two open files while the reader is open.
 
 ## 15. Let the library build the records
