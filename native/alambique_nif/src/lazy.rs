@@ -331,8 +331,11 @@ impl Lazy {
         })
     }
 
-    fn file(&self) -> &File {
-        self.file.as_ref().expect("file is taken only by drop")
+    fn file(&self) -> std::io::Result<&File> {
+        // Only `drop` takes the file.
+        self.file
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("the plan is closed"))
     }
 
     fn inner(&self) -> MutexGuard<'_, Inner> {
@@ -507,7 +510,7 @@ impl Lazy {
         if let Some(p) = (1..=n).find(|&p| p != lock && g.map[p as usize - 1].file == NO_FILE) {
             return invalid(format!("no file holds page {p}"));
         }
-        self.file().set_len(n as u64 * self.page_size as u64)?;
+        self.file()?.set_len(n as u64 * self.page_size as u64)?;
         g.orig = n;
         g.pages = n;
         g.local = vec![0; (n as usize).div_ceil(64)];
@@ -665,7 +668,7 @@ impl Lazy {
         if g.set_local(pgno) {
             if let Err(e) = self
                 .file()
-                .write_all_at(page, (pgno as u64 - 1) * self.page_size as u64)
+                .and_then(|f| f.write_all_at(page, (pgno as u64 - 1) * self.page_size as u64))
             {
                 // Not installed: leave the page missing.
                 let i = (pgno - 1) as usize / 64;

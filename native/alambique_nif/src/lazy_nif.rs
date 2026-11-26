@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use rustler::{Atom, Binary, Encoder, Env, LocalPid, OwnedEnv, Resource, ResourceArc, Term};
 
+use crate::error::Error;
 use crate::guard::guard;
 use crate::lazy::{self, Lazy, MissRequest, Run};
 use crate::{error_term, header_tuple, sums_term, wal, SumsRes};
@@ -34,11 +35,12 @@ impl Drop for LazyRes {
 
 /// One thread for all cells sends the page-miss messages: a thread of the VM
 /// (the dirty scheduler that runs the blocked read) cannot send them itself.
-fn notifier() -> &'static Sender<(LocalPid, MissRequest)> {
-    static TX: OnceLock<Sender<(LocalPid, MissRequest)>> = OnceLock::new();
+/// `None` when the thread could not start.
+fn notifier() -> Option<&'static Sender<(LocalPid, MissRequest)>> {
+    static TX: OnceLock<Option<Sender<(LocalPid, MissRequest)>>> = OnceLock::new();
     TX.get_or_init(|| {
         let (tx, rx) = channel::<(LocalPid, MissRequest)>();
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("alambique-page-miss".into())
             .spawn(move || {
                 let mut env = OwnedEnv::new();
@@ -51,10 +53,10 @@ fn notifier() -> &'static Sender<(LocalPid, MissRequest)> {
                         });
                     });
                 }
-            })
-            .expect("page-miss thread");
-        tx
+            });
+        spawned.ok().map(|_| tx)
     })
+    .as_ref()
 }
 
 fn run_term<'a>(env: Env<'a>, run: Run) -> Term<'a> {
@@ -165,11 +167,14 @@ fn lazy_ready<'a>(env: Env<'a>, lazy: ResourceArc<LazyRes>) -> Term<'a> {
 /// Sends `{:page_miss, pgno, file, offset, size}` to `pid` for every page a
 /// read is waiting for.
 #[rustler::nif]
-fn lazy_attach(lazy: ResourceArc<LazyRes>, pid: LocalPid) -> Atom {
+fn lazy_attach<'a>(env: Env<'a>, lazy: ResourceArc<LazyRes>, pid: LocalPid) -> Term<'a> {
+    let Some(tx) = notifier() else {
+        return error_term(env, Error::Io("cannot start the page-miss thread".into()));
+    };
     lazy.0.attach(Arc::new(move |m| {
-        let _ = notifier().send((pid, m));
+        let _ = tx.send((pid, m));
     }));
-    atoms::ok()
+    atoms::ok().encode(env)
 }
 
 /// Files of at most `bytes` are fetched whole and checked (design §16).

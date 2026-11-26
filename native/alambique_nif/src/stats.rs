@@ -181,7 +181,7 @@ fn page_arena() -> Vec<(String, i64)> {
 /// Every counter and gauge as `%{atom => integer}`. `sqlite_memory_highwater`
 /// is reset by the read, so it is the peak since the previous read.
 #[rustler::nif]
-fn stats(env: Env) -> Term {
+fn stats(env: Env) -> rustler::NifResult<Term> {
     // SAFETY: both only read SQLite's global memory counters.
     let (used, high) = unsafe { (ffi::sqlite3_memory_used(), ffi::sqlite3_memory_highwater(1)) };
     let get = |c: &AtomicU64| c.load(Relaxed) as i64;
@@ -217,10 +217,12 @@ fn stats(env: Env) -> Term {
     pairs.extend(calls("sqlite", &SQLITE_CALLS));
     pairs.extend(calls("replication", &REPLICATION_CALLS));
     pairs.extend(calls("lazy", &LAZY_CALLS));
-    pairs.into_iter().fold(Term::map_new(env), |map, (k, v)| {
-        let key = rustler::Atom::from_str(env, &k).unwrap();
-        map.map_put(key.encode(env), v.encode(env)).unwrap()
-    })
+    pairs
+        .into_iter()
+        .try_fold(Term::map_new(env), |map, (k, v)| {
+            let key = rustler::Atom::from_str(env, &k)?;
+            map.map_put(key.encode(env), v.encode(env))
+        })
 }
 
 #[cfg(test)]
