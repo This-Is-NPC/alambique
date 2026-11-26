@@ -175,7 +175,9 @@ defmodule Alambique.Replication.Native do
   # SQLite (see `Alambique.Sqlite`)
 
   @doc false
-  def sqlite_open(_path, _readonly, _vfs, _attach, _timeout_ms, _gated), do: nif_error()
+  def sqlite_open(_path, _readonly, _vfs, _attach, _timeout_ms, _gated, _exclusive),
+    do: nif_error()
+
   @doc false
   def sqlite_close(_conn, _key), do: nif_error()
   @doc false

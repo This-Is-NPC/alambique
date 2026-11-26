@@ -431,6 +431,16 @@ defmodule Alambique do
       answers its own error; a write that found them before it began runs
       after the batch). Frames that a foreign checkpoint or restart took out of the
       WAL cannot be uploaded: the cell stops under both values.
+      `:locking_mode` (`:normal`, the default, or `:exclusive`) is SQLite's
+      `locking_mode` of the cell's connection. `:exclusive` takes the lock on
+      the cell's file at its first access and keeps it until the cell sleeps,
+      and the WAL then needs no shared memory: another connection that
+      honours SQLite's locks gets `SQLITE_BUSY`, so a foreign writer is
+      refused instead of found afterwards (`:orphan_frames`). It is refused
+      with `feed: [hand_over: :sender]` (the sender's reader would be busy)
+      and with `lazy_restore` on (the file a lazy restore fills would drop
+      the lock when it closes). A statement of a caller cannot change it:
+      `PRAGMA locking_mode = ...` gets `{:error, :not_authorized}`.
     * `:query` - defaults of `Alambique.Query`: `:cache_bytes` (default 1 GiB),
       `:concurrency` (cells read at once, default 16: the wait for the store
       dominates a cell, so the default does not follow the CPUs),

@@ -88,6 +88,10 @@ pub(crate) struct Control {
     /// wal-index header `watch` follows (`held`).
     watched: bool,
     watch: held::Watch,
+    /// An exclusive connection (`PRAGMA locking_mode = EXCLUSIVE`): its
+    /// wal-index lives in memory, so there is no shared memory to watch, and
+    /// the end of the log is what the WAL hook counted.
+    exclusive: bool,
     /// Test builds: the header reads as unreadable.
     #[cfg(feature = "test-panic")]
     header_unreadable: AtomicBool,
@@ -128,6 +132,7 @@ impl Control {
             wal_commits: AtomicU64::new(0),
             watched: false,
             watch: held::Watch::default(),
+            exclusive: false,
             #[cfg(feature = "test-panic")]
             header_unreadable: AtomicBool::new(false),
             #[cfg(feature = "test-panic")]
@@ -147,6 +152,12 @@ impl Control {
     fn gate(mut self, key: u64) -> Self {
         self.gated = true;
         self.key = key;
+        self
+    }
+
+    /// Marks the connection exclusive (see `exclusive`).
+    fn exclusive(mut self) -> Self {
+        self.exclusive = true;
         self
     }
 
@@ -550,6 +561,9 @@ fn pragma_reads(name: &[u8], arg: Option<&[u8]>) -> bool {
 fn pragma_allowed(name: &[u8], arg: Option<&[u8]>, read_only: bool) -> bool {
     if name.eq_ignore_ascii_case(b"wal_checkpoint") {
         false
+    } else if name.eq_ignore_ascii_case(b"locking_mode") {
+        // The library sets it when it opens a cell's connection.
+        arg.is_none()
     } else if name.eq_ignore_ascii_case(b"wal_autocheckpoint") {
         arg.is_none()
     } else if name.eq_ignore_ascii_case(b"journal_mode") {
@@ -1095,6 +1109,7 @@ fn bind_one(s: *mut ffi::sqlite3_stmt, idx: c_int, term: Term) -> Result<c_int, 
 /// connection closes when the opener ends.
 /// Returns `{:ok, conn, secret}`, the secret 0 for a connection that is not gated.
 #[rustler::nif(schedule = "DirtyIo")]
+#[allow(clippy::too_many_arguments)]
 fn sqlite_open<'a>(
     env: Env<'a>,
     path: String,
@@ -1103,11 +1118,15 @@ fn sqlite_open<'a>(
     attach: bool,
     timeout_ms: u64,
     gated: bool,
+    exclusive: bool,
 ) -> Term<'a> {
-    open(env, path, readonly, vfs, attach, timeout_ms, gated)
+    open(
+        env, path, readonly, vfs, attach, timeout_ms, gated, exclusive,
+    )
 }
 
 /// The body of `sqlite_open`, for the test NIF that opens as a foreign writer.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn open<'a>(
     env: Env<'a>,
     path: String,
@@ -1116,6 +1135,7 @@ pub(crate) fn open<'a>(
     attach: bool,
     timeout_ms: u64,
     gated: bool,
+    exclusive: bool,
 ) -> Term<'a> {
     let _t = crate::stats::SQLITE_CALLS.time();
     let run = || -> Outcome<'a> {
@@ -1151,6 +1171,26 @@ pub(crate) fn open<'a>(
             // SAFETY: `db` is the handle `sqlite3_open_v2` returned.
             unsafe { close_v2(db) };
             return Err(failure);
+        }
+        // Before the first access of the file, so that the lock is taken at
+        // the first read and the WAL keeps its index in memory.
+        if exclusive && !readonly {
+            // SAFETY: `db` is the live connection `sqlite3_open_v2` returned.
+            let rc = unsafe {
+                ffi::sqlite3_exec(
+                    db,
+                    c"PRAGMA locking_mode = EXCLUSIVE".as_ptr(),
+                    None,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            };
+            if rc != ffi::SQLITE_OK {
+                let failure = failure(db);
+                // SAFETY: `db` is the handle `sqlite3_open_v2` returned.
+                unsafe { close_v2(db) };
+                return Err(failure);
+            }
         }
         // A cell's own connection takes the file; any other read-write open
         // of a held file is refused, whichever VFS opened it (the Alambique
@@ -1221,7 +1261,9 @@ pub(crate) fn open<'a>(
         let mut control = Control::new(attach, timeout_ms);
         if gated {
             control = control.gate(key);
-            if !readonly {
+            if !readonly && exclusive {
+                control = control.exclusive();
+            } else if !readonly {
                 control = control.watch_wal();
             }
         }
@@ -1700,6 +1742,26 @@ fn sqlite_foreign_write<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64, mod
             if !ctl.key_ok(key) || ctl.expect_txn.load(Relaxed) != 0 {
                 return Err(Failure::Denied);
             }
+            if ctl.exclusive {
+                if mode == 2 {
+                    // The frames SQLite recovered when it opened the WAL: the
+                    // count its hook goes on from.
+                    let name = unsafe {
+                        // SAFETY: `db` is live; the name is copied at once.
+                        let n = ffi::sqlite3_db_filename(db, c"main".as_ptr());
+                        (!n.is_null()).then(|| CStr::from_ptr(n).to_string_lossy().into_owned())
+                    };
+                    let wal = format!("{}-wal", name.unwrap_or_default());
+                    let frames = crate::wal::committed_frames(std::path::Path::new(&wal))
+                        .map_err(|e| Failure::Message(format!("{e:?}")))?;
+                    ctl.wal_frames.store(frames, Relaxed);
+                }
+                return Ok(match mode {
+                    0 => atoms::none(),
+                    _ => atoms::ok(),
+                }
+                .encode(env));
+            }
             if !ctl.watched {
                 return Ok(atoms::none().encode(env));
             }
@@ -1829,6 +1891,26 @@ fn sqlite_capture_full<'a>(
     )
 }
 
+/// The end of the log of an exclusive connection, which has no wal-index in
+/// shared memory: the frames its WAL hook counted, in the WAL generation the
+/// file header names. `None` without a WAL file. Nothing else writes the file
+/// while the lock is held.
+fn exclusive_wal_end(db: *mut ffi::sqlite3, frames: u64) -> Option<WalPos> {
+    // SAFETY: `db` is live; the name is copied at once.
+    let name = unsafe {
+        let n = ffi::sqlite3_db_filename(db, c"main".as_ptr());
+        (!n.is_null()).then(|| CStr::from_ptr(n).to_string_lossy().into_owned())
+    }?;
+    let hdr = crate::wal::read_salts(std::path::Path::new(&format!("{name}-wal"))).ok()??;
+    Some(WalPos {
+        offset: WAL_HEADER_SIZE + frames * (24 + u64::from(hdr.0)),
+        salt1: hdr.1,
+        salt2: hdr.2,
+        cksum1: 0,
+        cksum2: 0,
+    })
+}
+
 /// The end of the committed log by the wal-index of a cell's own connection:
 /// the position past the frame `mxFrame` names, so that a scan of the WAL by
 /// path stops there. SQLite writes the header after the frames of a commit,
@@ -1836,6 +1918,9 @@ fn sqlite_capture_full<'a>(
 /// commit frame past it that is no transaction. `None` for a connection that
 /// has no header to read.
 fn wal_end_pos(ctl: &Control, db: *mut ffi::sqlite3) -> Result<Option<WalPos>, Failure> {
+    if ctl.exclusive {
+        return Ok(exclusive_wal_end(db, ctl.wal_frames.load(Relaxed)));
+    }
     if !ctl.watched {
         return Ok(None);
     }

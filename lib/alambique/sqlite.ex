@@ -58,8 +58,12 @@ defmodule Alambique.Sqlite do
   Alambique VFS (default: SQLite's), `:attach` (default `false`) to allow
   `ATTACH`, `DETACH` and `VACUUM`, and `:timeout_ms` (default 0, none), the
   deadline of every `run/4` and `execute/3` call that sets none. A statement
-  over it gives `{:error, :statement_timeout}`, and `:gated` (default `false`)
-  for a gated connection, which `open/2` then returns as a handle.
+  over it gives `{:error, :statement_timeout}`, `:gated` (default `false`)
+  for a gated connection, which `open/2` then returns as a handle, and
+  `:locking` (`:normal`, the default, or `:exclusive`): an exclusive
+  connection takes SQLite's lock on the file at its first access and keeps it
+  until it closes, and uses no shared memory for the WAL, so another
+  connection that honours SQLite's locks gets `{:error, :busy}`.
 
   A read-write connection on a database file that a cell holds open
   read-write is refused with `{:error, :held_by_cell}`, whether it goes
@@ -78,7 +82,8 @@ defmodule Alambique.Sqlite do
       vfs,
       Keyword.get(opts, :attach, false),
       Keyword.get(opts, :timeout_ms, 0),
-      Keyword.get(opts, :gated, false)
+      Keyword.get(opts, :gated, false),
+      Keyword.get(opts, :locking, :normal) == :exclusive
     )
     |> case do
       {:ok, ref, 0} -> {:ok, ref}

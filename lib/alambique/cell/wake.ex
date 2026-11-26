@@ -382,6 +382,7 @@ defmodule Alambique.Cell.Wake do
   defp open(state) do
     case Db.open(state.path,
            cache_kib: State.cell_opt(state, :cache_kib),
+           locking: state.config.sql.locking_mode,
            timeout_ms: Db.script_timeout_ms(state.config)
          ) do
       {:ok, conn} ->
