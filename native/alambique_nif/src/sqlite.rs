@@ -1944,33 +1944,42 @@ fn sqlite_foreign_write<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64, mod
 /// database mutex is held and the connection open.
 struct LiveFile(*mut ffi::sqlite3_file);
 
+impl LiveFile {
+    /// The methods of the open file.
+    fn methods(&self) -> std::io::Result<&ffi::sqlite3_io_methods> {
+        // SAFETY: by the contract of `LiveFile` the file is open.
+        let file = unsafe { self.0.as_ref() }.ok_or_else(|| std::io::Error::other("no file"))?;
+        // SAFETY: an open file points at the methods of its VFS.
+        unsafe { file.pMethods.as_ref() }.ok_or_else(|| std::io::Error::other("no methods"))
+    }
+}
+
 impl crate::capture::DbFile for LiveFile {
     fn len(&self) -> std::io::Result<u64> {
         let mut size: i64 = 0;
-        // SAFETY: by the contract of `LiveFile` the file is open and its
-        // methods are those of the VFS.
-        let rc = unsafe {
-            let methods = &*(*self.0).pMethods;
-            (methods.xFileSize.expect("xFileSize"))(self.0, &mut size)
-        };
-        if rc == ffi::SQLITE_OK {
-            Ok(size as u64)
-        } else {
-            Err(std::io::Error::other(format!("xFileSize failed: {rc}")))
+        let x_file_size = self
+            .methods()?
+            .xFileSize
+            .ok_or_else(|| std::io::Error::other("no xFileSize"))?;
+        // SAFETY: by the contract of `LiveFile` the file is open and `x_file_size`
+        // is its method.
+        let rc = unsafe { x_file_size(self.0, &mut size) };
+        if rc != ffi::SQLITE_OK {
+            return Err(std::io::Error::other(format!("xFileSize failed: {rc}")));
         }
+        u64::try_from(size).map_err(|_| std::io::Error::other("negative file size"))
     }
 
     fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        let x_read = self
+            .methods()?
+            .xRead
+            .ok_or_else(|| std::io::Error::other("no xRead"))?;
+        let too_large = |_| std::io::Error::other("read out of range");
+        let len = c_int::try_from(buf.len()).map_err(too_large)?;
+        let offset = i64::try_from(offset).map_err(too_large)?;
         // SAFETY: as above; `buf` is writable for its length.
-        let rc = unsafe {
-            let methods = &*(*self.0).pMethods;
-            (methods.xRead.expect("xRead"))(
-                self.0,
-                buf.as_mut_ptr() as *mut std::ffi::c_void,
-                buf.len() as c_int,
-                offset as i64,
-            )
-        };
+        let rc = unsafe { x_read(self.0, buf.as_mut_ptr().cast(), len, offset) };
         match rc {
             ffi::SQLITE_OK => Ok(()),
             ffi::SQLITE_IOERR_SHORT_READ => Err(std::io::ErrorKind::UnexpectedEof.into()),
@@ -2286,15 +2295,18 @@ fn sqlite_memory<'a>(env: Env<'a>, conn: ResourceArc<Conn>) -> Term<'a> {
         (atoms::lookaside_used(), ffi::SQLITE_DBSTATUS_LOOKASIDE_USED),
     ]
     .into_iter()
-    .fold(Term::map_new(env), |map, (key, op)| {
-        map.map_put(key.encode(env), used(op).encode(env)).unwrap()
+    .try_fold(Term::map_new(env), |map, (key, op)| {
+        map.map_put(key.encode(env), used(op).encode(env))
     });
     count_cache(db);
     if !mutex.is_null() {
         // SAFETY: entered by the `try` above.
         unsafe { ffi::sqlite3_mutex_leave(mutex) };
     }
-    (atoms::ok(), map).encode(env)
+    match map {
+        Ok(map) => (atoms::ok(), map).encode(env),
+        Err(_) => Failure::Message("memory map".into()).term(env),
+    }
 }
 
 #[cfg(test)]
