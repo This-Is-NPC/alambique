@@ -252,11 +252,12 @@ defmodule Alambique.ConfigOptionsTest do
   end
 
   describe "cell options" do
-    test "the callback has one internal form and defaults", ctx do
+    test "the callback has one internal form and defaults; the timeout is one second or less",
+         ctx do
       config = Alambique.Config.build(base(ctx))
 
       assert {config.cell_options, config.cell_options_timeout_ms, config.cell_options_invalid} ==
-               {nil, 1_000, :fallback}
+               {nil, 899, :fallback}
 
       assert Alambique.Config.build(base(ctx, cell_options: {Options, :options})).cell_options ==
                {Options, :options, []}
@@ -420,7 +421,7 @@ defmodule Alambique.ConfigOptionsTest do
              failure_backoff_ms: 5_000,
              backoff_ms: 200,
              backoff_max_ms: 10_000,
-             migrations_timeout_ms: 1_000,
+             migrations_timeout_ms: 899,
              backoff_factor: 2,
              backoff_jitter: 0.2
            }
@@ -591,7 +592,7 @@ defmodule Alambique.ConfigOptionsTest do
              failure_backoff_ms: 50,
              backoff_ms: 20,
              backoff_max_ms: 400,
-             migrations_timeout_ms: 1_000,
+             migrations_timeout_ms: 899,
              backoff_factor: 3,
              backoff_jitter: 0.5
            }
