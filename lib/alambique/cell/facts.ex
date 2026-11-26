@@ -160,7 +160,7 @@ defmodule Alambique.Cell.Facts do
     put(load, :lease_expires_at, state.lease.expires_at_ms)
     put(load, :cache, cache(state))
     put(load, :hydrating, state.hydrator != nil)
-    if measure? and track_bytes?(state.config), do: measure(state)
+    if measure? and track_bytes?(state), do: measure(state)
     :ok
   end
 
@@ -168,9 +168,22 @@ defmodule Alambique.Cell.Facts do
   defp cache(%State{idle_cache: :shrunk}), do: :shrunk
   defp cache(_state), do: :full
 
-  @doc "Whether the memory of the cells is measured: `awake.track_bytes`, or a budget."
-  @spec track_bytes?(Alambique.Config.t()) :: boolean
-  def track_bytes?(%{awake: awake}), do: awake.track_bytes or awake.max_bytes != nil
+  @doc """
+  Whether the memory of the cell is measured: its `track_bytes` (its own or the
+  node's), or a budget, which forces it on.
+  """
+  @spec track_bytes?(State.t()) :: boolean
+  def track_bytes?(%State{config: %{awake: awake}} = state),
+    do: State.cell_opt(state, :track_bytes) or awake.max_bytes != nil
+
+  @doc "Sets the memory facts to nil, as for a cell that does not measure."
+  @spec clear_memory(:atomics.atomics_ref()) :: :ok
+  def clear_memory(load) do
+    for slot <- [:cache_used, :schema_used, :stmt_used, :lookaside_used, :process_bytes],
+        do: put(load, slot, nil)
+
+    :ok
+  end
 
   # The bytes of the connection and, while the feed sender reads, of its
   # reader; a failed read leaves the last values, as does a busy one: the
@@ -221,7 +234,7 @@ defmodule Alambique.Cell.Facts do
   """
   @spec closed_floor(State.t()) :: non_neg_integer
   def closed_floor(%State{conn: conn} = state) do
-    with true <- track_bytes?(state.config),
+    with true <- track_bytes?(state),
          {:ok, memory} <- Sqlite.memory(conn) do
       memory.schema_used + memory.stmt_used
     else

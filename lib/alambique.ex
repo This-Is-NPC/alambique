@@ -81,8 +81,9 @@ defmodule Alambique do
       `apply(module, function, [cell_id | extra_args])`, which returns a keyword
       list in the shape of these options, with only the per-cell keys:
       `idle_timeout_ms:`, `awake: [cache_kib:, idle_cache_after_ms:,
-      idle_cache_kib:, idle_close_after_ms:, idle_gc:]`, `sql: [locking_mode:]` and
-      `lazy_restore: [mode:]` (`:ranged` or `:whole`, see `:lazy_restore`).
+      idle_cache_kib:, idle_close_after_ms:, idle_gc:, track_bytes:]`,
+      `sql: [locking_mode:]`, `lazy_restore: [mode:]` (`:ranged` or `:whole`, see
+      `:lazy_restore`) and `feed: [cleanup_after_ms:]`.
       A key that is absent keeps the node's value; `locking_mode: :exclusive` is
       dropped back to the node's value (an event says so) where the node's feed
       has `hand_over: :sender` or `:lazy_restore` is on, and `idle_close_after_ms`
@@ -1143,7 +1144,10 @@ defmodule Alambique do
   the cell keeps the options it has (also with `cell_options_invalid:
   :refuse`) and the answer is `{:error, {:cell_options, message}}`. The same
   limits and repairs as at a wake apply. `:track_bytes` and the feed options
-  are not per cell: the sender's reader keeps `:feed` `:reader_cache_kib`.
+  `awake: [track_bytes: false]` clears the memory facts of the cell (a budget,
+  `:max_bytes`, keeps them on), and `feed: [cleanup_after_ms:]` moves a cleanup
+  that is already waiting. The other feed options are not per cell: the sender's
+  reader keeps `:feed` `:reader_cache_kib`, because the cell issues no pragma on it.
 
   Emits `[:alambique, :cell, :options, :refresh]`. Option `:timeout`
   (milliseconds, default the longer of `:call_timeout_ms` and twice

@@ -1495,7 +1495,9 @@ defmodule Alambique.Config do
     :idle_gc,
     :idle_timeout_ms,
     :locking_mode,
-    :lazy_restore_mode
+    :lazy_restore_mode,
+    :cleanup_after_ms,
+    :track_bytes
   ]
 
   @doc false
@@ -1528,6 +1530,16 @@ defmodule Alambique.Config do
 
   def check_cell_option(:idle_gc, v) when is_boolean(v), do: :ok
   def check_cell_option(:idle_gc, _), do: {:error, ":awake :idle_gc must be true or false"}
+  def check_cell_option(:track_bytes, v) when is_boolean(v), do: :ok
+
+  def check_cell_option(:track_bytes, _),
+    do: {:error, ":awake :track_bytes must be true or false"}
+
+  def check_cell_option(:cleanup_after_ms, v) when is_integer(v) and v > 0, do: :ok
+
+  def check_cell_option(:cleanup_after_ms, _),
+    do: {:error, ":feed :cleanup_after_ms must be a positive integer"}
+
   def check_cell_option(:idle_timeout_ms, v) when is_integer(v) and v > 0, do: :ok
 
   def check_cell_option(:idle_timeout_ms, _),
