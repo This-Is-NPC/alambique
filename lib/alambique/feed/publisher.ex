@@ -322,7 +322,12 @@ defmodule Alambique.Feed.Publisher do
   def close_reader(%State{feed_reader: nil} = state), do: state
 
   def close_reader(%State{feed_reader: reader} = state) do
-    Db.close(reader)
+    with {:error, reason} <- Db.close(reader) do
+      Logger.warning(
+        "Alambique could not close the feed reader of #{state.id}: #{inspect(reason)}"
+      )
+    end
+
     %{state | feed_reader: nil}
   end
 
@@ -398,34 +403,9 @@ defmodule Alambique.Feed.Publisher do
     token = make_ref()
     plan = {state.config.feed.hand_over_rows, resumed, if(room == :all, do: nil, else: room)}
 
-    case Capture.send_rows(
-           state.conn,
-           {txid, seq},
-           state.pipe.acked.txid,
-           plan,
-           state.feed_pid,
-           token
-         ) do
-      {:ok, [], _more?, _cut?} ->
-        {%{state | feed_part: nil, feed_capped: false}, false}
-
-      {:ok, batches, more?, cut?} ->
-        send(state.feed_pid, {:piece, token, Enum.map(batches, &piece_meta/1)})
-        {sent_native(state, batches, cut?), more? and not cut?}
-
-      # The sender ended between the check and the send: as if it ended later.
-      {:error, :sender_gone} ->
-        {reset(state), true}
-
-      # Jason raises on such a name, which ends the sender of the other modes:
-      # the cell hands everything over again.
-      {:error, :bad_table} ->
-        unless state.feed_refused,
-          do:
-            Logger.error("Alambique found a captured table name of #{state.id} that is not UTF-8")
-
-        {%{reset(state) | feed_refused: true}, true}
-    end
+    state.conn
+    |> Capture.send_rows({txid, seq}, state.pipe.acked.txid, plan, state.feed_pid, token)
+    |> sent_rows(state, token)
   end
 
   # One piece: at most `feed.hand_over_rows` rows from the position of the
@@ -468,6 +448,26 @@ defmodule Alambique.Feed.Publisher do
 
         {sent(state, pieces, cut?), more? and not cut?}
     end
+  end
+
+  defp sent_rows({:ok, [], _more?, _cut?}, state, _token),
+    do: {%{state | feed_part: nil, feed_capped: false}, false}
+
+  defp sent_rows({:ok, batches, more?, cut?}, state, token) do
+    send(state.feed_pid, {:piece, token, Enum.map(batches, &piece_meta/1)})
+    {sent_native(state, batches, cut?), more? and not cut?}
+  end
+
+  # The sender ended between the check and the send: as if it ended later.
+  defp sent_rows({:error, :sender_gone}, state, _token), do: {reset(state), true}
+
+  # Jason raises on such a name, which ends the sender of the other modes:
+  # the cell hands everything over again.
+  defp sent_rows({:error, :bad_table}, state, _token) do
+    unless state.feed_refused,
+      do: Logger.error("Alambique found a captured table name of #{state.id} that is not UTF-8")
+
+    {%{reset(state) | feed_refused: true}, true}
   end
 
   defp sent(state, pieces, cut?) do
