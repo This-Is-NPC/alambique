@@ -192,12 +192,46 @@ defmodule Alambique.ConfigOptionsTest do
         end
       end
 
-      for opts <- [[reader_cache_kib: 64], [hand_over: :cell, reader_cache_kib: 64]] do
+      for opts <- [
+            [reader_cache_kib: 64],
+            [hand_over: :cell, reader_cache_kib: 64],
+            [hand_over: :native, reader_cache_kib: 64]
+          ] do
         assert_raise ArgumentError,
                      ~r/reader_cache_kib applies only with hand_over: :sender/,
                      fn ->
                        feed(ctx, opts)
                      end
+      end
+    end
+  end
+
+  describe "feed hand-over by the library" do
+    test "hand_over: :native has no reader", ctx do
+      assert %{hand_over: :native, reader_cache_kib: nil, reader_close: nil} =
+               feed(ctx, hand_over: :native)
+    end
+
+    test "reader_close is :after_read or :after_burst, only for :sender, by default the constant",
+         ctx do
+      assert %{reader_close: nil} = feed(ctx, [])
+      assert %{reader_close: close} = feed(ctx, hand_over: :sender)
+      assert close in [:after_read, :after_burst]
+
+      for mode <- [:after_read, :after_burst] do
+        assert feed(ctx, hand_over: :sender, reader_close: mode).reader_close == mode
+      end
+
+      for bad <- [:always, "after_read", 1] do
+        assert_raise ArgumentError, ~r/reader_close must be :after_read or :after_burst/, fn ->
+          feed(ctx, hand_over: :sender, reader_close: bad)
+        end
+      end
+
+      for opts <- [[reader_close: :after_read], [hand_over: :native, reader_close: :after_read]] do
+        assert_raise ArgumentError, ~r/reader_close applies only with hand_over: :sender/, fn ->
+          feed(ctx, opts)
+        end
       end
     end
   end
