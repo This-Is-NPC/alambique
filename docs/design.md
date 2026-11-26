@@ -253,7 +253,8 @@ rebuilds, instead of 0.
 **Options of a cell.** `cell_options` names a function that returns the
 per-cell options of one cell (`idle_timeout_ms`, `awake.cache_kib`,
 `idle_cache_after_ms`, `idle_cache_kib`, `idle_close_after_ms`, `idle_gc`,
-`sql.locking_mode`). The cell calls it once per
+`sql.locking_mode`, and `lazy_restore.mode`, which §16 reads at the restore of the
+wake). The cell calls it once per
 wake, after it holds a wake slot and before the lease, in a monitored process
 that it waits for at most `cell_options_timeout_ms`; the wait is outside the
 busy marker (§10), because it runs no native code. The result is merged over
@@ -820,7 +821,8 @@ A waking cell with no reusable local file (§7) can serve before its file is
 downloaded. `lazy_restore: false` turns this off, and `lazy_restore: [mode:
 :whole]` makes a cell read its whole chain before its first statement (the
 full restore of §6, with no hydrator and no gate to wait for); `Config.lazy_mode/2`
-is the one place that decides the mode. The two gates are
+is the one place that decides the mode: the instance's, or the one the cell
+sets for itself through `cell_options` (§7). The two gates are
 `lazy_restore: [verify_writes:, verify_reads:]`:
 
 - `verify_writes` (default `true`), the write gate: `:transaction`,
