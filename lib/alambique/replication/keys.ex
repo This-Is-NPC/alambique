@@ -105,21 +105,60 @@ defmodule Alambique.Replication.Keys do
     {segments, snapshots |> Enum.sort_by(& &1.max) |> Enum.map(&%{key: &1.key, txid: &1.max})}
   end
 
+  @doc """
+  The keys of the segments and snapshots in `keys` (listed under
+  `files_prefix`) whose page-hash sidecar is listed too (design §16).
+  """
+  @spec sidecars(String.t(), String.t(), [String.t()]) :: MapSet.t(String.t())
+  def sidecars(prefix, cell, keys) do
+    files_prefix = files_prefix(prefix, cell)
+
+    for key <- keys,
+        object = String.replace_suffix(key, ".pages", ""),
+        object != key,
+        parse_file(files_prefix, object) != nil,
+        into: MapSet.new(),
+        do: object
+  end
+
+  @doc "Level and TXID range of the segment or snapshot at `key`, or `nil` when it is neither."
+  @spec file_info(String.t()) ::
+          %{level: non_neg_integer, min: pos_integer, max: pos_integer} | nil
+  def file_info(key) do
+    with [level, file] <- key |> String.split("/") |> Enum.take(-2),
+         %{} = info <- file_info(level, file) do
+      info
+    else
+      _ -> nil
+    end
+  end
+
   defp parse_file(files_prefix, key) do
     with true <- String.starts_with?(key, files_prefix),
-         [<<level::binary-size(4)>>, file] <-
-           key |> String.replace_prefix(files_prefix, "") |> String.split("/"),
-         true <- Regex.match?(~r/\A[0-9a-f]{4}\z/, level),
-         <<min::binary-size(16), ?-, max::binary-size(16), ".ltx">> <- file,
+         [level, file] <- key |> String.replace_prefix(files_prefix, "") |> String.split("/"),
+         %{} = info <- file_info(level, file) do
+      Map.put(info, :key, key)
+    else
+      _ -> nil
+    end
+  end
+
+  defp file_info(
+         <<level::binary-size(4)>>,
+         <<min::binary-size(16), ?-, max::binary-size(16), ".ltx">>
+       ) do
+    with true <- Regex.match?(~r/\A[0-9a-f]{4}\z/, level),
          true <- Regex.match?(@hex, min) and Regex.match?(@hex, max),
          level = String.to_integer(level, 16),
          min = String.to_integer(min, 16),
          max = String.to_integer(max, 16),
          true <- level <= @snapshot_level and min >= 1 and min <= max,
          true <- level < @snapshot_level or min == 1 do
-      %{key: key, level: level, min: min, max: max}
+      %{level: level, min: min, max: max}
     else
       _ -> nil
     end
   end
+
+  defp file_info(_level, _file), do: nil
 end

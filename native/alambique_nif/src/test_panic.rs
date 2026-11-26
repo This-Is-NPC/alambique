@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use libsqlite3_sys as ffi;
-use rustler::{Atom, Env, Resource, ResourceArc, Term};
+use rustler::{Atom, Binary, Env, Resource, ResourceArc, Term};
 
 use crate::guard::{guard, probe};
 use crate::{sqlite, vfs};
@@ -26,6 +26,12 @@ fn panic_dirty_cpu() -> Atom {
 #[rustler::nif(schedule = "DirtyIo")]
 fn panic_dirty_io() -> Atom {
     panic!("test panic on a dirty I/O scheduler")
+}
+
+/// The page sidecar `side` with a wrong page hash and a right seal.
+#[rustler::nif]
+fn forge_sidecar<'a>(env: Env<'a>, side: Binary) -> Term<'a> {
+    crate::bin(env, &crate::pages::forge(side.as_slice()))
 }
 
 /// A resource whose destructor panics, like a buggy `Drop` would.

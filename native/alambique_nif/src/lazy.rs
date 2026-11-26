@@ -1538,10 +1538,7 @@ mod tests {
         assert_eq!(lazy.covered(), vec![0]);
 
         // One page hash of the sidecar is wrong (and sealed): it is dropped.
-        let mut bad = side[..side.len() - 16].to_vec();
-        bad[64 + 20 * 2 + 10] ^= 1;
-        let sealed = pages::seal(&bad);
-        bad.extend_from_slice(&sealed);
+        let bad = pages::forge(&side);
         let (_dir, lazy) = lazy_with(&a);
         lazy.stage_hashes(0, &bad, 9, 1, 1).unwrap();
         assert!(!lazy.settle_hashes(0, &a).unwrap());

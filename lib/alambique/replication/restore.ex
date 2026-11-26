@@ -4,14 +4,15 @@ defmodule Alambique.Replication.Restore do
 
   alias Alambique.Fault
   alias Alambique.Telemetry
-  alias Alambique.Replication.{Budget, Chain, Native, Objects, Retry}
+  alias Alambique.Replication.{Budget, Chain, Keys, Native, Objects, Retry}
 
   @flag Bitwise.bsl(1, 63)
 
   # A lazy restore (option `:lazy`) leaves the database file sparse and gives
   # `:lazy` (the page map, see `Alambique.Replication.Hydrator`), `:files`
-  # (the keys the map refers to, by index) and `:pins` (what each of them was
-  # when it was read: ETag, epoch and size) in the result.
+  # (the keys the map refers to, by index), `:pins` (what each of them was
+  # when it was read: ETag, epoch and size) and `:hash_bytes` (what the page
+  # hashes of the files with a sidecar take) in the result.
   @type result :: %{
           required(:cell) => String.t(),
           required(:path) => Path.t(),
@@ -25,7 +26,8 @@ defmodule Alambique.Replication.Restore do
           required(:segments) => non_neg_integer,
           optional(:lazy) => reference,
           optional(:files) => [String.t()],
-          optional(:pins) => [{String.t() | nil, non_neg_integer, non_neg_integer}]
+          optional(:pins) => [{String.t() | nil, non_neg_integer, non_neg_integer}],
+          optional(:hash_bytes) => non_neg_integer
         }
 
   def run(ctx, cell, dest, target, opts) do
@@ -34,7 +36,8 @@ defmodule Alambique.Replication.Restore do
     limits = limits(target)
 
     result =
-      with {:ok, {segments, snapshots}} <- Objects.list_cell(ctx, cell, deadline) do
+      with {:ok, {segments, snapshots}, sidecars} <-
+             Objects.list_cell_sidecars(ctx, cell, deadline) do
         env = %{
           ctx: ctx,
           cell: cell,
@@ -43,6 +46,8 @@ defmodule Alambique.Replication.Restore do
           segments: segments,
           by_min: Enum.group_by(segments, & &1.min),
           snapshots: snapshots,
+          # Files whose page-hash sidecar is listed (design §16).
+          sidecars: sidecars,
           dest: dest,
           tmp: "#{dest}.restore-#{System.unique_integer([:positive])}",
           edge_bytes: ctx.edge_bytes,
@@ -162,7 +167,10 @@ defmodule Alambique.Replication.Restore do
       lazy: nil,
       files: [],
       pins: [],
-      bytes: 0
+      bytes: 0,
+      # Bytes of the page hashes the map holds (they count against the budget
+      # of the hydration).
+      hash_bytes: 0
     }
   end
 
@@ -345,7 +353,7 @@ defmodule Alambique.Replication.Restore do
   end
 
   defp finish(env, state) do
-    state = Map.drop(state, [:lazy, :files, :pins, :bytes])
+    state = Map.drop(state, [:lazy, :files, :pins, :bytes, :hash_bytes])
 
     # A write the disk refuses (`:enospc`) fails the restore: the caller sees
     # `:disk_full` (design §6.2).
@@ -392,7 +400,8 @@ defmodule Alambique.Replication.Restore do
 
       case Native.lazy_stage(state.lazy, idx, head, tail, total) do
         {:ok, header, post} ->
-          {:ok, state, {:staged, header, post, total, pin}, header, post}
+          hashed = stage_sidecar(env, state, idx, key, total)
+          {:ok, state, {:staged, header, post, total, pin, hashed}, header, post}
 
         {:need_tail, n} ->
           # A page index larger than the edge is read whole, past the memory
@@ -415,6 +424,71 @@ defmodule Alambique.Replication.Restore do
     end
   end
 
+  # The page hashes of a file above `verify_bytes` whose sidecar was listed:
+  # its pages are then checked as they arrive and the file is not read whole
+  # at the end. A sidecar that cannot be read, or does not describe the file,
+  # is not an error: the file is checked whole as without one. Returns the
+  # bytes the hashes take.
+  defp stage_sidecar(env, state, idx, key, total) do
+    room = hash_room(env, state)
+
+    with true <- total > Map.get(env.lazy, :verify_bytes, 0) and MapSet.member?(env.sidecars, key),
+         true <- room > 0 or sidecar_event(env, key, :budget),
+         {:ok, body, _meta} <- read_sidecar(env, key, room),
+         %{level: level, min: min, max: max} <- Keys.file_info(key) do
+      grow(env, byte_size(body))
+
+      case Native.lazy_stage_hashes(state.lazy, idx, body, level, min, max) do
+        :ok ->
+          byte_size(body)
+
+        {:error, reason} ->
+          sidecar_event(env, key, :rejected, reason)
+          0
+      end
+    else
+      _ -> 0
+    end
+  end
+
+  # What the hashes of all files may take: a share of the budget of the
+  # hydration that keeps its runs fitting, and never more than an object.
+  defp hash_room(env, state) do
+    min(env.ctx.max_object_bytes, div(env.ctx.max_inflight_bytes, 4)) - state.hash_bytes
+  end
+
+  defp read_sidecar(env, key, room) do
+    case Objects.fetch_optional(
+           %{env.ctx | max_object_bytes: room},
+           Keys.sidecar(key),
+           env.deadline
+         ) do
+      {:ok, _body, _meta} = found ->
+        found
+
+      :none ->
+        sidecar_event(env, key, :absent)
+
+      {:error, {:too_large, _, _}} ->
+        sidecar_event(env, key, :budget)
+
+      {:error, reason} ->
+        sidecar_event(env, key, :read_failed, reason)
+    end
+  end
+
+  # Always false: the caller falls back to reading the file whole.
+  defp sidecar_event(env, key, result, reason \\ nil) do
+    Telemetry.emit([:replication, :sidecar], %{
+      cell: env.cell,
+      key: key,
+      result: result,
+      reason: reason
+    })
+
+    false
+  end
+
   defp apply_file(env, state, {:body, body}, _key, current, page_size) do
     case Native.apply_ltx(env.tmp, body, current, page_size) do
       {:ok, header, post} -> {:ok, state, header, post}
@@ -422,7 +496,14 @@ defmodule Alambique.Replication.Restore do
     end
   end
 
-  defp apply_file(_env, state, {:staged, header, post, total, pin}, key, current, page_size) do
+  defp apply_file(
+         _env,
+         state,
+         {:staged, header, post, total, pin, hashed},
+         key,
+         current,
+         page_size
+       ) do
     {min, _max, _ts, _commit, pre, ps} = header
 
     cond do
@@ -441,7 +522,8 @@ defmodule Alambique.Replication.Restore do
               state
               | files: [key | state.files],
                 pins: [{etag, epoch, total} | state.pins],
-                bytes: state.bytes + total
+                bytes: state.bytes + total,
+                hash_bytes: state.hash_bytes + hashed
             }
 
             {:ok, state, header, post}
