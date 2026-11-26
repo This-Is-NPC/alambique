@@ -368,7 +368,7 @@ defmodule Alambique.Replication.Restore do
 
     # A write the disk refuses (`:enospc`) fails the restore: the caller sees
     # `:disk_full` (design §6.2).
-    with :ok <- Fault.point(:restore_install, %{cell: env.cell, path: env.tmp}),
+    with :ok <- Fault.check(:restore_install, %{cell: env.cell, path: env.tmp}),
          :ok <- if(state.txid == 0, do: File.write(env.tmp, ""), else: :ok),
          :ok <- sync_file(env.tmp),
          _ = File.rm(env.dest <> "-wal"),

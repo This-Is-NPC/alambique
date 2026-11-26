@@ -84,6 +84,19 @@ defmodule AlambiqueTestkit.MemoryStoreFaultsTest do
       assert :ok = Alambique.Fault.point(:p, %{})
     end
 
+    test "check fails the operation with an injected error, point drops it" do
+      Alambique.Fault.install(fn
+        :failing, _ -> {:error, :injected}
+        :odd, _ -> :other
+      end)
+
+      on_exit(&Alambique.Fault.uninstall/0)
+
+      assert {:error, :injected} = Alambique.Fault.check(:failing, %{})
+      assert :ok = Alambique.Fault.check(:odd, %{})
+      assert :ok = Alambique.Fault.point(:failing, %{})
+    end
+
     test "raise once by default" do
       CrashPoints.arm(:p)
       assert_raise CrashPoints.Crash, fn -> Alambique.Fault.point(:p) end

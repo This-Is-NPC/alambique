@@ -101,11 +101,11 @@ defmodule Alambique.Cell.Db do
   @spec open_reader(Path.t(), pos_integer, {non_neg_integer, non_neg_integer} | nil) ::
           {:ok, Sqlite.conn()} | {:error, term}
   def open_reader(path, cache_kib, lookaside \\ nil) do
-    case Fault.point(:db_open_reader, %{path: path}) do
+    case Fault.check(:db_open_reader, %{path: path}) do
       {:error, _} = injected ->
         injected
 
-      _ ->
+      :ok ->
         with {:ok, conn} <-
                Sqlite.open(path,
                  readonly: true,
@@ -328,9 +328,9 @@ defmodule Alambique.Cell.Db do
   # that was closed: the cell stops.
   defp rollback(conn, token) do
     result =
-      case Fault.point(:db_before_rollback, Sqlite.ref(conn)) do
+      case Fault.check(:db_before_rollback, Sqlite.ref(conn)) do
         {:error, _} = injected -> injected
-        _ -> Sqlite.finish_transaction(conn, token, :rollback)
+        :ok -> Sqlite.finish_transaction(conn, token, :rollback)
       end
 
     read_only(conn)

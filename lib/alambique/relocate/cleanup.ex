@@ -153,7 +153,7 @@ defmodule Alambique.Relocate.Cleanup do
          {:ok, lease} <- Lease.claim_cleanup(lease_ctx, lease),
          {:ok, count} <- delete_objects(config, ctx, cell, deadline),
          :ok <- drop_index(config, source, cell, deadline),
-         _ = Fault.point(:cleanup_before_mark, %{cell: cell, location: source.id}),
+         Fault.point(:cleanup_before_mark, %{cell: cell, location: source.id}),
          :ok <- Lease.mark_cleaned(lease_ctx, lease),
          :ok <- Objects.delete(ctx, Keys.moved(ctx.prefix, cell), deadline) do
       {:ok, %{result: :cleaned, objects: count}}
