@@ -3,6 +3,7 @@
 
 mod alloc;
 mod arena;
+mod bytes;
 mod capture;
 mod crc;
 mod dbsum;
