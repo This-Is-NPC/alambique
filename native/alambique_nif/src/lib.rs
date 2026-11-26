@@ -38,9 +38,9 @@ mod atoms {
     }
 }
 
-type PosTuple = (u64, u32, u32, u32, u32);
+pub(crate) type PosTuple = (u64, u32, u32, u32, u32);
 
-fn pos_from(t: PosTuple) -> WalPos {
+pub(crate) fn pos_from(t: PosTuple) -> WalPos {
     WalPos {
         offset: t.0,
         salt1: t.1,
@@ -86,7 +86,7 @@ pub(crate) fn error_term<'a>(env: Env<'a>, e: Error) -> Term<'a> {
     (atoms::error(), reason).encode(env)
 }
 
-fn output_term<'a>(env: Env<'a>, o: capture::Output) -> Term<'a> {
+pub(crate) fn output_term<'a>(env: Env<'a>, o: capture::Output) -> Term<'a> {
     (
         atoms::ok(),
         bin(env, &o.segment),
