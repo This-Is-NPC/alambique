@@ -61,6 +61,10 @@ counters!(
 
 pub static CONNECTIONS_OPEN: AtomicI64 = AtomicI64::new(0);
 pub static FILES_OPEN: AtomicI64 = AtomicI64::new(0);
+/// Lazy restore plans that exist, and descriptors of dropped plans that wait
+/// for SQLite to close the file (`lazy::retire`).
+pub static LAZY_PLANS: AtomicI64 = AtomicI64::new(0);
+pub static LAZY_FDS_PARKED: AtomicI64 = AtomicI64::new(0);
 
 /// Dirty NIF calls of one class: how many, and their wall time.
 pub struct Calls {
@@ -138,6 +142,8 @@ fn stats(env: Env) -> Term {
         ("page_cache_misses".into(), get(&CACHE_MISSES)),
         ("connections_open".into(), CONNECTIONS_OPEN.load(Relaxed)),
         ("files_open".into(), FILES_OPEN.load(Relaxed)),
+        ("lazy_plans".into(), LAZY_PLANS.load(Relaxed)),
+        ("lazy_fds_parked".into(), LAZY_FDS_PARKED.load(Relaxed)),
         ("wal_frames_read".into(), get(&WAL_FRAMES_READ)),
         ("ltx_bytes_encoded".into(), get(&LTX_BYTES_ENCODED)),
         ("ltx_bytes_decoded".into(), get(&LTX_BYTES_DECODED)),

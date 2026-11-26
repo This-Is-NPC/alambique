@@ -543,6 +543,8 @@ samples. Gauges go up and down. Sizes are bytes and times are nanoseconds.
 | `page_cache_hits`, `page_cache_misses` | counters | Pages found in, and read into, the page caches of all connections. |
 | `connections_open` | gauge | Open SQLite connections. |
 | `files_open` | gauge | Files open through the Alambique VFS (a cell with a WAL holds two). |
+| `lazy_plans` | gauge | Lazy restore plans that exist (one per hydrating cell). |
+| `lazy_fds_parked` | gauge | Descriptors of dropped plans that wait to be closed until SQLite closes the database file, because closing one drops the locks of the connections. |
 | `wal_frames_read` | counter | Valid WAL frames read by replication scans. |
 | `ltx_bytes_encoded` | counter | Size of the LTX files encoded. |
 | `ltx_bytes_decoded` | counter | Size of the LTX files opened for decoding (reading only a header decodes nothing). |
