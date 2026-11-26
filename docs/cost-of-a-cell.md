@@ -214,7 +214,9 @@ config :alambique, :page_arena,
 `Alambique.NativeStats.read/0` reports what the library loaded with
 (`page_arena_state`, `page_arena_extent_kib` and the other `page_arena_*`
 settings): check it after a deploy, because a setting that did not reach the
-load keeps the default. What the arena changes:
+load keeps the default; an instance that starts with settings that differ from
+what the library loaded with logs a warning naming the keys and emits
+`[:alambique, :page_arena, :config_ignored]`. What the arena changes:
 
 - The bytes of the page caches are in `page_arena_in_use_bytes`, not in
   `:erlang.memory/0`, `recon_alloc` or the `driver_alloc` allocator; the pages the arena keeps resident are in
