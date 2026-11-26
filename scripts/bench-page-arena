@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Runs the page arena benchmark (bench/page_arena.exs) for each mode and case,
+# twice by default, each in a fresh VM because the arena is set when the
+# library loads. Arguments: cases (default all: release hot miss regrow
+# misscost lookaside capacity).
+#
+#   ALAMBIQUE_BENCH_MODES       modes to run (default "percell noregions e16 e64 e256"):
+#                                 percell    per-connection caches, no arena
+#                                 noregions  arena, all connections in one region
+#                                 e16 e64 e256  arena with regions, extents of 16, 64, 256 KiB
+#   ALAMBIQUE_BENCH_RUNS        runs per mode and case          (default 2)
+#   ALAMBIQUE_BENCH_TIMEOUT     seconds each run may take       (default 1800)
+#   ALAMBIQUE_BENCH_CGROUP_MIB  run each VM in a systemd user scope with this
+#                               memory limit (default: none)
+#
+# To compare with a node whose SQLite pools the page caches, run the same
+# cases on a checkout of that build with ALAMBIQUE_BENCH_MODES=percell: the
+# cases use only the public API and the native stats, and print without arena
+# keys when it is not there.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+cases=("$@")
+((${#cases[@]})) || cases=(release hot miss regrow misscost lookaside capacity)
+modes=${ALAMBIQUE_BENCH_MODES:-"percell noregions e16 e64 e256"}
+runs=${ALAMBIQUE_BENCH_RUNS:-2}
+limit=${ALAMBIQUE_BENCH_TIMEOUT:-1800}
+# The shipped trim settings; config/config.exs lowers them for the tests.
+base="reserved_mib: 4096, keep_kib: 4096, trim_after_kib: 1024, max_trim_kib: 4096"
+
+wrap=()
+if [[ -n "${ALAMBIQUE_BENCH_CGROUP_MIB:-}" ]]; then
+  wrap=(systemd-run --user --scope --quiet -p "MemoryMax=${ALAMBIQUE_BENCH_CGROUP_MIB}M" -p MemorySwapMax=0)
+fi
+
+for mode in $modes; do
+  case "$mode" in
+    percell) arena=0 opts="[]" ;;
+    noregions) arena=1 opts="[$base, max_regions: 1]" ;;
+    e16) arena=1 opts="[$base, extent_kib: 16]" ;;
+    e64) arena=1 opts="[$base, extent_kib: 64]" ;;
+    e256) arena=1 opts="[$base, extent_kib: 256]" ;;
+    *)
+      echo "bench-page-arena: unknown mode: $mode" >&2
+      exit 2
+      ;;
+  esac
+  for run in $(seq "$runs"); do
+    for c in "${cases[@]}"; do
+      echo "== mode=$mode run=$run case=$c"
+      ALAMBIQUE_PAGE_ARENA=$arena ALAMBIQUE_PAGE_ARENA_OPTS=$opts MIX_ENV=test \
+        timeout "$limit" "${wrap[@]}" mix run bench/page_arena.exs "$c"
+    done
+  done
+done
