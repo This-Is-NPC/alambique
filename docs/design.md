@@ -473,6 +473,28 @@ cells without waking them.
   cleanup cannot remove it. A reset (sender ended, `feed_pid` replaced) clears
   both and starts again from `feed_published`; a message with another ref is
   ignored. The stop hands over everything in a loop, within `stop_publish_ms`.
+- **Native hand-over.** With `hand_over: :native` the cell calls
+  `Sqlite.feed_rows/6` (`sqlite_feed_rows`, dirty IO) on its own connection:
+  the query of `Capture.rows_from/4`, with the text of the records
+  (`Record.rows/1`) built in Rust per batch: `{"n":N,"table":<escaped as
+  Jason does>,"op":"<op>","key":<column bytes>,"values":<column bytes or
+  null>}` joined by commas, with `n` continuing from `feed_part`. The binaries
+  are built in an environment allocated for the message and sent with
+  `enif_send` from the cell's environment, so they are never on a heap of the
+  cell; `OwnedEnv::send_and_clear` cannot be used on a scheduler thread. The call
+  returns `{txid, ts, rows, last_seq, bytes, {first, partial, rewind}}` per
+  batch, whether rows were left and whether the room ended the read. The room
+  (`max_backlog_batches` minus the backlog) is a parameter: a batch begun
+  before takes none, and the rows of a batch over it are neither read nor
+  sent. The cell then sends `{:piece, token, meta}` to the sender, which takes
+  `{:rows, token, [binary]}` with a selective receive and joins the pieces of a
+  batch with a comma, so ids and objects are those of `:cell`; a piece whose
+  rows do not arrive ends the sender and the cell hands everything over again.
+  `{:error, :sender_gone}` (the send found no process) and `{:error,
+  :bad_table}` (a table name that is not UTF-8, which `Jason.encode!/1` raises
+  on in the other modes) reset the cell as the end of the sender does.
+  `feed_part` is `{txid, seq, n}` in this mode. The sender is started before the
+  call, because the call sends to it.
 - **Reader.** With `hand_over: :sender` the cell sends `{:range, from, upto,
   reader}` and the sender reads `txid` in `[from, upto]` through a read-only
   connection to the cell's file (WAL: it sees committed rows only and holds a
@@ -482,7 +504,11 @@ cells without waking them.
   cleanup deletes whole batches up to `feed_published`, which is at most
   `feed_sent`, in one transaction, so the range is never touched. The reader
   is `feed_reader` of the cell. Only the cell closes it (`Publisher.close_reader`):
-  when the sender reports the read of the newest range, when the sender is
+  when the sender reports the read of the newest range (`reader_close:
+  :after_burst`) or of any range (`:after_read`, where the cell hands over one
+  range at a time: `feed_reading` is true until the sender reported it, and
+  `after_ack` waits, so the one reader is never closed under another range),
+  when the sender is
   replaced, and at every close of the connection in `cell.ex`, before it
   (`wake.ex` closes only before the sender starts). Closing interrupts the
   statement and waits for it. `feed_backlog` is `feed_sent - feed_published`

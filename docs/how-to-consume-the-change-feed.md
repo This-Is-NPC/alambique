@@ -364,8 +364,8 @@ the read and the copy of the rows.
 
 With `:sender`:
 
-- The cell owns the reader. It closes it when the sender has read everything
-  handed over, and always before it closes its own connection, so the stop,
+- The cell owns the reader. It closes it as `reader_close` says (below), and
+  always before it closes its own connection, so the stop,
   the checkpoint and the removal of `-wal` and `-shm` never meet an open
   reader. A reader that is waiting for a page (a lazy restore) is closed too:
   the close waits for the read to end, at most `op_timeout_ms`.
@@ -379,12 +379,46 @@ With `:sender`:
   rows. The sender queues a batch only when its last row was read.
 - `reader_cache_kib` (default 64, only with `:sender`) is the page cache of the
   reader. Its memory counts in `awake: [max_bytes:]` while it is open.
+- `reader_close` (only with `:sender`) says when the cell closes the reader.
+  `:after_burst` (default): when the sender has read everything handed over,
+  so ranges that follow each other share one open. `:after_read`: after every
+  range, and the cell hands over one range at a time, so a range that is
+  acknowledged while another is read waits for that read. The reader is then
+  opened once per range and no file stays open between ranges.
 - A cell that stops hands over the TXIDs and waits for the sender within
   `stop_publish_ms`, as with `:cell`.
 
 `:sender` takes the read and the copy of the rows off the cell. It costs one
-read-only open per burst of handed-over ranges, a page cache of
-`reader_cache_kib`, and two open files while the reader is open.
+read-only open per burst of handed-over ranges (per range with `:after_read`),
+a page cache of `reader_cache_kib`, and two open files while the reader is open.
+
+## 15. Let the library build the records
+
+`feed: [hand_over: :native]` keeps the read in the cell, on its own
+connection, but builds what the cell would build in Elixir inside the native
+library. The cell calls it once per piece. The library steps the same query as
+`:cell`, writes the text of the records of each batch (the `{"n":...}` entries
+of the object, with the table name escaped as JSON and the key and values as
+SQLite holds them) into a binary outside the heap of every process, and sends
+it to the sender. The cell gets only the counts of what was sent. Record ids
+and objects are the same as with `:cell`, byte for byte.
+
+With `:native`:
+
+- The cell still waits for the read of each piece, as with `:cell`, so
+  `hand_over_rows` (step 13) bounds that wait in the same way. What it no
+  longer does is build a list of rows, shape it and copy it to the sender: the
+  cost on the cell per batch is one call and one message, and per row, the
+  step of the query.
+- `max_backlog_batches` counts batches, as with `:cell`. The library applies
+  it: a batch that would exceed it is not read, and a batch begun in an earlier
+  piece takes no room.
+- The sender replaces bytes that are not UTF-8 in the finished object, as with
+  the other modes. A captured table name that is not UTF-8 is refused by the
+  library; the cell then hands the batches over again, which is what happens
+  with the other modes, where the sender ends on it.
+- `reader_cache_kib` and `reader_close` are refused: there is no second
+  connection.
 
 ## Troubleshooting
 
