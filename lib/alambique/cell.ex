@@ -38,7 +38,7 @@ defmodule Alambique.Cell do
 
   alias Alambique.Feed.Publisher
   alias Alambique.Store.{Breaker, Metered}
-  alias Alambique.Replication.{Replicator, Retry}
+  alias Alambique.Replication.{Replicator, Retry, Sidecar}
 
   # Lifecycle
 
@@ -1295,8 +1295,6 @@ defmodule Alambique.Cell do
       result = Replicator.upload(up, ctx, deadline: deadline)
       Process.unlink(parent)
       send(parent, {:landed, ref, result})
-      # After the report, so that no commit waits for it (design §16).
-      if result == :ok, do: Replicator.write_sidecar(up, ctx)
     end)
   end
 
@@ -1325,10 +1323,31 @@ defmodule Alambique.Cell do
 
       batch when result == :ok ->
         Fault.point(:cell_after_land, %{cell: state.id, txid: batch.txid})
+        state = write_sidecar(state, batch.upload)
         pop(%{state | pipe: Pipe.land(state.pipe, ref)}, false)
 
       batch ->
         failed(state, batch, result)
+    end
+  end
+
+  # The page-hash sidecar of a landed segment (design §16), in a process of its
+  # own so that no commit waits for it. A cell has one sidecar write under way
+  # at a time, so a slow store cannot pile them up: a segment that lands
+  # meanwhile has none, which a restore answers by reading it whole.
+  defp write_sidecar(state, up) do
+    ctx = state.repl_ctx
+
+    cond do
+      not Sidecar.wanted?(ctx, byte_size(up.segment)) ->
+        state
+
+      is_pid(state.sidecar) and Process.alive?(state.sidecar) ->
+        Telemetry.emit([:replication, :sidecar], %{key: up.key, result: :busy, reason: nil})
+        state
+
+      true ->
+        %{state | sidecar: spawn(fn -> Replicator.write_sidecar(up, ctx) end)}
     end
   end
 

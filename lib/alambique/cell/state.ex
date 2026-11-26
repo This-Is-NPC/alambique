@@ -23,6 +23,8 @@ defmodule Alambique.Cell.State do
     # hydration, because its fetch tasks may run native code on any page.
     :hydrator,
     :hydrator_marker,
+    # The process that writes the page-hash sidecar of the last landed batch.
+    :sidecar,
     :last_active,
     # Idle cache shrink: `nil` (off), the ref of the `:idle_cache` timer, or
     # `:shrunk` while the page cache holds the smaller limit.

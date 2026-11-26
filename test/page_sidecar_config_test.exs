@@ -86,6 +86,25 @@ defmodule Alambique.PageSidecarConfigTest do
                    15_000
   end
 
+  test "a cell has one sidecar write under way: a commit that lands meanwhile has none", ctx do
+    inst = start_instance(ctx, migrations: @schema, lazy_restore: @lazy ++ [page_sidecar: true])
+    cell = unique_cell()
+    {:ok, _} = Alambique.execute(inst, cell, "INSERT INTO t VALUES (1, x'00')")
+
+    MemoryStore.inject(ctx.store_config,
+      kind: :latency,
+      ms: 5_000,
+      ops: [:put],
+      key: ~r/\.pages$/
+    )
+
+    # The first of these starts a write that is held; the others find it.
+    for n <- 2..4,
+        do: {:ok, _} = Alambique.execute(inst, cell, "INSERT INTO t VALUES (#{n}, x'00')")
+
+    assert_receive {:telemetry, [:alambique, :replication, :sidecar], _, %{result: :busy}}, 5_000
+  end
+
   describe "a cell that wrote sidecars" do
     defp seed(ctx, rows) do
       seeder =
