@@ -86,11 +86,12 @@ defmodule Alambique.CellLockingModeTest do
     c = boot(env, :exclusive)
     n = boot(env, :normal)
 
-    assert Native.foreign_exec(path(c), "SELECT count(*) FROM t") == @sqlite_busy
-    assert Native.foreign_exec(path(n), "SELECT count(*) FROM t") == 0
+    {pc, pn} = {path(c), path(n)}
+    assert Native.foreign_exec(pc, "SELECT count(*) FROM t") == @sqlite_busy
+    assert Native.foreign_exec(pn, "SELECT count(*) FROM t") == 0
 
     assert :ok = Alambique.hibernate(c.inst, c.cell)
-    assert Native.foreign_exec(path(c), "SELECT count(*) FROM t") == 0
+    assert Native.foreign_exec(pc, "SELECT count(*) FROM t") == 0
   end
 
   test "the lock is held in the other process's eyes, through snapshots and wakes", env do
