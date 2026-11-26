@@ -88,33 +88,20 @@ macro_rules! delegate {
     }};
 }
 
-unsafe extern "C" fn x_open(
-    _vfs: *mut ffi::sqlite3_vfs,
+/// Clears the fields of the file and opens it through the default VFS; the
+/// file's name for the faults of tests is released again when that fails.
+///
+/// # Safety
+/// `file` has `szOsFile` writable bytes (`register`).
+unsafe fn open_base(
     name: ffi::sqlite3_filename,
     file: *mut ffi::sqlite3_file,
     flags: c_int,
     out_flags: *mut c_int,
 ) -> c_int {
-    let base = BASE.load(Ordering::Acquire);
     let f = file as *mut File;
-    // A second read-write open of a file that a cell holds, also by ATTACH,
-    // is refused (design §15).
-    if flags & ffi::SQLITE_OPEN_MAIN_DB != 0
-        && flags & ffi::SQLITE_OPEN_READWRITE != 0
-        && !name.is_null()
-    {
-        let refused = guard("x_open_held", false, || {
-            // SAFETY: a main database has a NUL-terminated file name.
-            unsafe { CStr::from_ptr(name) }
-                .to_str()
-                .is_ok_and(|p| crate::held::refuse_open(Path::new(p)))
-        });
-        if refused {
-            return ffi::SQLITE_CANTOPEN;
-        }
-    }
-    // SAFETY: SQLite passes `szOsFile` writable bytes (`register`), so the
-    // fields of `File` can be set.
+    let base = BASE.load(Ordering::Acquire);
+    // SAFETY: the fields of `File` can be set (see the contract).
     unsafe { (*f).base.pMethods = ptr::null() };
     // SAFETY: as above.
     unsafe { (*f).lazy = ptr::null() };
@@ -142,6 +129,37 @@ unsafe extern "C" fn x_open(
             // SAFETY: the name was made above and is not used again.
             unsafe { crate::test_panic::file_closed(made) };
         }
+    }
+    rc
+}
+
+unsafe extern "C" fn x_open(
+    _vfs: *mut ffi::sqlite3_vfs,
+    name: ffi::sqlite3_filename,
+    file: *mut ffi::sqlite3_file,
+    flags: c_int,
+    out_flags: *mut c_int,
+) -> c_int {
+    let f = file as *mut File;
+    // A second read-write open of a file that a cell holds, also by ATTACH,
+    // is refused (design §15).
+    if flags & ffi::SQLITE_OPEN_MAIN_DB != 0
+        && flags & ffi::SQLITE_OPEN_READWRITE != 0
+        && !name.is_null()
+    {
+        let refused = guard("x_open_held", false, || {
+            // SAFETY: a main database has a NUL-terminated file name.
+            unsafe { CStr::from_ptr(name) }
+                .to_str()
+                .is_ok_and(|p| crate::held::refuse_open(Path::new(p)))
+        });
+        if refused {
+            return ffi::SQLITE_CANTOPEN;
+        }
+    }
+    // SAFETY: SQLite passes `szOsFile` writable bytes (`register`).
+    let rc = unsafe { open_base(name, file, flags, out_flags) };
+    if rc != ffi::SQLITE_OK {
         return rc;
     }
     // `Err` is a panic: the file is closed again so that no descriptor leaks.
@@ -450,28 +468,27 @@ mod tests {
     fn scalar(db: *mut ffi::sqlite3, sql: &str) -> Result<i64, i32> {
         let sql = CString::new(sql).unwrap();
         let mut stmt = ptr::null_mut();
-        // SAFETY: a live connection; the statement is finalized before it
-        // leaves the block.
-        unsafe {
-            assert_eq!(
-                ffi::sqlite3_prepare_v2(db, sql.as_ptr(), -1, &mut stmt, ptr::null_mut()),
-                ffi::SQLITE_OK
-            );
-            let rc = ffi::sqlite3_step(stmt);
-            let value = ffi::sqlite3_column_int64(stmt, 0);
-            ffi::sqlite3_finalize(stmt);
-            if rc == ffi::SQLITE_ROW {
-                Ok(value)
-            } else {
-                Err(rc)
-            }
+        // SAFETY: a live connection; the statement is finalized below.
+        let prepared =
+            unsafe { ffi::sqlite3_prepare_v2(db, sql.as_ptr(), -1, &mut stmt, ptr::null_mut()) };
+        assert_eq!(prepared, ffi::SQLITE_OK);
+        // SAFETY: `stmt` is the statement prepared above.
+        let rc = unsafe { ffi::sqlite3_step(stmt) };
+        // SAFETY: as above.
+        let value = unsafe { ffi::sqlite3_column_int64(stmt, 0) };
+        // SAFETY: finalized once.
+        unsafe { ffi::sqlite3_finalize(stmt) };
+        if rc == ffi::SQLITE_ROW {
+            Ok(value)
+        } else {
+            Err(rc)
         }
     }
 
     /// Builds a snapshot LTX file of the database at `path` (closed).
     fn snapshot(path: &Path, ps: u32) -> Vec<u8> {
         let bytes = std::fs::read(path).unwrap();
-        let pages = (bytes.len() / ps as usize) as u32;
+        let pages = u32::try_from(bytes.len() / ps as usize).unwrap();
         let header = Header {
             page_size: ps,
             commit: pages,
@@ -512,7 +529,8 @@ mod tests {
                     lazy.fail(m.pgno, "store down".into());
                     continue;
                 }
-                let frame = &file[m.offset as usize..(m.offset + m.size as u64) as usize];
+                let (start, end) = (m.offset, m.offset + u64::from(m.size));
+                let frame = &file[usize::try_from(start).unwrap()..usize::try_from(end).unwrap()];
                 let page = lazy::decode_frame(frame, m.pgno, lazy.page_size).unwrap();
                 lazy.install(m.pgno, &page).unwrap();
             }
@@ -646,7 +664,7 @@ mod tests {
         // installs may replace what the database wrote.
         while let Some(run) = lazy.next_batch(u64::MAX) {
             for (pgno, rel, len) in &run.pages {
-                let at = (run.offset + *rel as u64) as usize;
+                let at = usize::try_from(run.offset + u64::from(*rel)).unwrap();
                 let page =
                     lazy::decode_frame(&source[at..at + *len as usize], *pgno, 4096).unwrap();
                 lazy.install(*pgno, &page).unwrap();
