@@ -212,9 +212,47 @@ with `:overloaded`, and a call gets `:busy`.
 pending, checkpoints, removes its `-wal` and `-shm`, writes a hibernation marker
 and releases the lease.
 
+**Idle close.** With `awake.idle_close_after_ms` an awake cell that stays idle
+for that long closes its SQLite connection and stays the owner: the process,
+the lease and its renewals, the timers, the registry row, the facts and the
+load slots stay, and `cache` reads `:closed`. The check runs in `info/2`,
+inside the busy marker (§10), from the time of the last call, and the cell
+closes only when nothing can need the connection: no caller waiting, no batch
+in flight or pending, no parked write, no hydration, no unsent commit, a lease
+that is valid, and the feed settled (`Publisher.settled?/1`: nothing handed
+over and not published, no piece or retry scheduled, no published row waiting
+for a cleanup). A cleanup that is due runs first, as for the shrink, and the
+checks run again after it. Then the cell closes the sender's reader, checkpoints
+(which refuses frames no batch carries; the cell stays open then) and closes the
+connection with `Sqlite.close_keep/1`.
+
+The close keeps the entry of the file in the table of held files (§15), under a
+token that its owner process alone can take back: the file is not free for any
+other read-write open in the VM while the connection is closed, and a cell that
+dies frees it. With the connection closed the file's identity can be reused by
+the file system, so the close also records the file's device, inode, size and
+modification and change times (`Sqlite.kept_state/2`). A request that runs SQL
+(`query`, `checked_query`, `transaction`, `execute`, an isolated write,
+`migrate`) opens the database again in the cell process through the same
+`Wake.open/1` the wake uses, after judging the files: a rollback journal, or a
+file that is not the one recorded, is lost and stops the cell with
+`:orphan_frames`; a non-empty WAL with frames no batch carries is judged by
+`sql: [orphan_frames:]` after the open; otherwise the files are as the close
+left them. The judgment comes before the open because `Db.open` takes the WAL
+as the baseline of the foreign-write check (§15) and would absorb a write made
+while the connection was closed. A request that needs no SQL, a checkpoint
+request (the WAL is empty) and a hibernation leave it closed; a hibernation of
+a closed cell removes `-wal` and `-shm`, writes the marker from the TXID of the
+close and gives the hold back, and judges the files first as a reopen does.
+A failed reopen stops the cell like a failed wake and gives the hold back.
+While the connection is closed the memory facts are 0 and `Admission` records
+the schema and statement bytes the connection held at the close, which a reopen
+rebuilds, instead of 0.
+
 **Options of a cell.** `cell_options` names a function that returns the
 per-cell options of one cell (`idle_timeout_ms`, `awake.cache_kib`,
-`idle_cache_after_ms`, `idle_cache_kib`, `idle_gc`, `sql.locking_mode`). The cell calls it once per
+`idle_cache_after_ms`, `idle_cache_kib`, `idle_close_after_ms`, `idle_gc`,
+`sql.locking_mode`). The cell calls it once per
 wake, after it holds a wake slot and before the lease, in a monitored process
 that it waits for at most `cell_options_timeout_ms`; the wait is outside the
 busy marker (§10), because it runs no native code. The result is merged over
@@ -222,7 +260,8 @@ the node's values, each value is clamped to the node limits
 (`awake.cell_cache_kib_max`, `cell_idle_timeout_ms_min`, `_max`), and the
 cross-field rules are repaired with a fixed result (an idle timeout not above
 `feed.cleanup_after_ms` returns to the node's value; an idle shrink not below
-the idle timeout is turned off; an `idle_cache_kib` not below `cache_kib`
+the idle timeout or the idle close is turned off; an `idle_close_after_ms` not
+below the idle timeout is turned off; an `idle_cache_kib` not below `cache_kib`
 returns to the node's value, or the shrink is turned off; `locking_mode:
 :exclusive` returns to the node's value where the feed hands over to the sender
 or a lazy restore is on, the combinations the build refuses). The cell keeps only
@@ -290,7 +329,8 @@ this node has no array.
   `pending`, the wake start and the wake source are known.
 - **Memory.** The cell measures its connections (and the feed reader while it
   is open) at the end of the wake, after each call, after an idle cache
-  shrink and at the end of a hydration, not after other messages. A
+  shrink, after an idle close and at the end of a hydration, not after other
+  messages. A
   measurement is one `sqlite_memory` call per connection, which makes four
   `sqlite3_db_status` calls on a regular scheduler, plus one
   `Process.info(self(), :memory)`. `awake.track_bytes: false` turns it off; a
