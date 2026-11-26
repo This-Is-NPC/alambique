@@ -271,5 +271,6 @@ defmodule Alambique.LtxReader do
     {pre, post}
   end
 
+  @spec fail(atom) :: no_return
   defp fail(reason), do: throw({:ltx, reason})
 end

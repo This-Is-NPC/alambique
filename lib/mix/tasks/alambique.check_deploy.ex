@@ -184,6 +184,7 @@ defmodule Mix.Tasks.Alambique.CheckDeploy do
       "or Alambique.sweep/2, then run the check again."
   end
 
+  @spec fail(String.t()) :: no_return
   defp fail(message) do
     Mix.shell().error(message)
     exit({:shutdown, 2})
