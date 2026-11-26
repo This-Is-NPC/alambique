@@ -498,6 +498,8 @@ impl Watch {
         if s.tainted {
             return false;
         }
+        // `iChange` is a 32-bit counter that wraps, so the own commits since the
+        // baseline count modulo 2^32.
         let ok = header.as_ref().map(ident).filter(|id| {
             id[0] == rec[0].wrapping_add((commits.wrapping_sub(s.commits_at) & 0xFFFF_FFFF) as u32)
                 && u64::from(id[1]) == frames
