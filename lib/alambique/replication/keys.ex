@@ -7,6 +7,7 @@ defmodule Alambique.Replication.Keys do
   @snapshot_level 9
 
   @doc "Level of the snapshots."
+  @spec snapshot_level() :: pos_integer
   def snapshot_level, do: @snapshot_level
 
   @spec cell_prefix(String.t(), String.t()) :: String.t()
