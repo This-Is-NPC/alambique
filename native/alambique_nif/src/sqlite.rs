@@ -1855,7 +1855,10 @@ fn sqlite_capture_full<'a>(
             // SAFETY: `db` is live (`with_db`); the mutex keeps another thread
             // from using the connection's file while it is read.
             let mutex = unsafe { ffi::sqlite3_db_mutex(db) };
+            // SAFETY: `mutex` is the live connection's own mutex, left below.
             unsafe { ffi::sqlite3_mutex_enter(mutex) };
+            // SAFETY: `db` is live and its mutex is held; `file` is a valid
+            // out-pointer for SQLITE_FCNTL_FILE_POINTER.
             let rc = unsafe {
                 ffi::sqlite3_file_control(
                     db,
