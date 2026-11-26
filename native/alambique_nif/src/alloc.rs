@@ -211,10 +211,11 @@ impl Drop for Region {
 /// page and SQLite's headers.
 fn arena_class(n: usize) -> Option<usize> {
     let page = n.checked_sub(PAGE_HDRSZ.load(Relaxed))?;
-    (512..=65536)
-        .contains(&page)
-        .then(|| page.trailing_zeros() as usize - 9)
-        .filter(|_| page.is_power_of_two())
+    if (512..=65536).contains(&page) && page.is_power_of_two() {
+        Some(page.trailing_zeros() as usize - 9)
+    } else {
+        None
+    }
 }
 
 /// The global allocator of the NIF library (not in unit tests, which run
@@ -514,7 +515,7 @@ fn strides(hdrsz: usize) -> [usize; arena::CLASSES] {
 fn start_arena(req: &ArenaRequest, hdrsz: usize) {
     let state = if !req.enabled {
         ArenaState::Off
-    } else if hdrsz == 0 || hdrsz % 8 != 0 || !cfg!(target_os = "linux") {
+    } else if hdrsz == 0 || !hdrsz.is_multiple_of(8) || !cfg!(target_os = "linux") {
         ArenaState::Unsupported
     } else {
         match Arena::new(req.config, strides(hdrsz)) {
@@ -631,7 +632,8 @@ mod tests {
         INIT.call_once(|| {
             PAGE_HDRSZ.store(HDRSZ, Relaxed);
             let config = arena::Config {
-                reserved: 256 << 20,
+                // Miri holds the range in its own memory.
+                reserved: if cfg!(miri) { 16 << 20 } else { 256 << 20 },
                 extent_bytes: 64 << 10,
                 keep: 0,
                 threshold: 0,

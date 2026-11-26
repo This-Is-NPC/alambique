@@ -307,10 +307,7 @@ impl Arena {
 impl Drop for Arena {
     fn drop(&mut self) {
         // SAFETY: the range `new` reserved; tests do not use it afterwards.
-        #[cfg(any(miri, target_os = "linux"))]
-        unsafe {
-            sys::unreserve(self.base as *mut u8, self.range)
-        };
+        unsafe { sys::unreserve(self.base as *mut u8, self.range) };
     }
 }
 
@@ -327,7 +324,8 @@ mod tests {
 
     fn cfg() -> Config {
         Config {
-            reserved: 256 << 20,
+            // Miri holds the range in its own memory.
+            reserved: if cfg!(miri) { 16 << 20 } else { 256 << 20 },
             extent_bytes: 64 << 10,
             keep: 0,
             threshold: 0,
@@ -374,7 +372,7 @@ mod tests {
             x ^= x << 13;
             x ^= x >> 7;
             x ^= x << 17;
-            if x % 3 != 0 || live.is_empty() {
+            if !x.is_multiple_of(3) || live.is_empty() {
                 let class = (x >> 8) as usize % 5;
                 let p = a.alloc(class, regions[(x >> 20) as usize % 3]);
                 assert!(!p.is_null() && a.contains(p));
@@ -388,7 +386,7 @@ mod tests {
                 // SAFETY: from `alloc`, out of `live`.
                 unsafe { a.free(key as *mut u8) };
             }
-            if x % 211 == 0 {
+            if x.is_multiple_of(211) {
                 trim(&a);
                 assert_eq!(a.resident_bytes() as usize, kernel_resident(&a));
             }
