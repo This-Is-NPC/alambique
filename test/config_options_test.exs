@@ -493,8 +493,8 @@ defmodule Alambique.ConfigOptionsTest do
                :idle_close_after_ms,
                :idle_gc,
                :idle_timeout_ms,
-               :locking_mode,
-               :lazy_restore_mode
+               :lazy_restore_mode,
+               :locking_mode
              ]
   end
 
