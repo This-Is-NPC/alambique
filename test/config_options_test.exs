@@ -357,6 +357,34 @@ defmodule Alambique.ConfigOptionsTest do
     end
   end
 
+  test "wake.migrations_timeout_ms is below the renewal interval when a function chooses migrations",
+       ctx do
+    # ttl 3_000: renewals come every 1_000 ms, less 10 % of jitter.
+    per_cell = [migrations: {Options, :options}]
+
+    assert Alambique.Config.build(base(ctx, per_cell ++ [wake: [migrations_timeout_ms: 899]]))
+           |> then(& &1.wake.migrations_timeout_ms) == 899
+
+    for ms <- [900, 5_000] do
+      assert_raise ArgumentError,
+                   ~r/migrations_timeout_ms must be less than the lease renewal/,
+                   fn ->
+                     Alambique.Config.build(
+                       base(ctx, per_cell ++ [wake: [migrations_timeout_ms: ms]])
+                     )
+                   end
+    end
+
+    for bad <- [0, -1, 1.5] do
+      assert_raise ArgumentError, ~r/migrations_timeout_ms/, fn ->
+        Alambique.Config.build(base(ctx, per_cell ++ [wake: [migrations_timeout_ms: bad]]))
+      end
+    end
+
+    # A static list calls nothing.
+    assert Alambique.Config.build(base(ctx, wake: [migrations_timeout_ms: 5_000]))
+  end
+
   test "each per-cell option has one rule, the one awake and the instance use" do
     check = &Alambique.Config.check_cell_option/2
 
@@ -392,6 +420,7 @@ defmodule Alambique.ConfigOptionsTest do
              failure_backoff_ms: 5_000,
              backoff_ms: 200,
              backoff_max_ms: 10_000,
+             migrations_timeout_ms: 1_000,
              backoff_factor: 2,
              backoff_jitter: 0.2
            }
@@ -562,6 +591,7 @@ defmodule Alambique.ConfigOptionsTest do
              failure_backoff_ms: 50,
              backoff_ms: 20,
              backoff_max_ms: 400,
+             migrations_timeout_ms: 1_000,
              backoff_factor: 3,
              backoff_jitter: 0.5
            }

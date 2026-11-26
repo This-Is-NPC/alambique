@@ -23,7 +23,8 @@ defmodule Alambique.AdmissionPropertiesTest do
     :open,
     :migration,
     :schema_too_new,
-    :cell_options
+    :cell_options,
+    :bad_migrations
   ]
   @transient [:lease, :owner, :timeout, :busy]
 

@@ -61,7 +61,8 @@ defmodule Alambique.Config do
     fence_attempts: 5,
     failure_backoff_ms: 5_000,
     backoff_ms: 200,
-    backoff_max_ms: 10_000
+    backoff_max_ms: 10_000,
+    migrations_timeout_ms: 1_000
   ]
   @wake_backoff_factor 2
   @wake_backoff_jitter 0.2
@@ -334,6 +335,7 @@ defmodule Alambique.Config do
             failure_backoff_ms: pos_integer,
             backoff_ms: pos_integer,
             backoff_max_ms: pos_integer,
+            migrations_timeout_ms: pos_integer,
             backoff_factor: number,
             backoff_jitter: float
           },
@@ -491,7 +493,7 @@ defmodule Alambique.Config do
       query: query,
       sql: sql(opts[:sql], op_timeout),
       routing: options!(:routing, opts[:routing], @routing_defaults),
-      wake: wake!(opts[:wake]),
+      wake: wake!(opts[:wake], migrations, ttl, jitter),
       wal: wal!(opts[:wal]),
       awake: awake!(opts[:awake], idle_timeout),
       cell_options: cell_options,
@@ -1201,9 +1203,11 @@ defmodule Alambique.Config do
     Map.new(merged)
   end
 
+  # The migrations callback is waited for at most `migrations_timeout_ms`: a
+  # serving cell asks again while it holds the lease, and its renewals wait.
   # The factor and the jitter of the wake backoff are numbers, not integers
   # (design §7).
-  defp wake!(opts) do
+  defp wake!(opts, migrations, ttl, renew_jitter) do
     opts =
       checked_keyword!(
         :wake,
@@ -1224,6 +1228,9 @@ defmodule Alambique.Config do
 
     unless wake.backoff_ms <= wake.backoff_max_ms,
       do: bad!(":wake :backoff_ms must not exceed :backoff_max_ms")
+
+    unless is_list(migrations) or wake.migrations_timeout_ms < renew_floor(ttl, renew_jitter),
+      do: bad!(":wake :migrations_timeout_ms must be less than the lease renewal interval")
 
     Map.merge(wake, %{backoff_factor: factor, backoff_jitter: jitter})
   end
@@ -1516,15 +1523,17 @@ defmodule Alambique.Config do
   @doc """
   The migrations of `cell`: the instance's list, or the result of
   `apply(module, function, [cell | extra_args])` for a per-cell instance,
-  validated like the list. A failure is `{:error, {:bad_migrations, message}}`.
+  validated like the list. The function runs in a process of its own and is
+  waited for at most `wake.migrations_timeout_ms`. A failure, a timeout
+  included, is `{:error, {:bad_migrations, message}}`.
   """
   @spec migrations_for(t, String.t()) ::
           {:ok, [{pos_integer, String.t() | (Alambique.Tx.t() -> any)}]}
           | {:error, {:bad_migrations, String.t()}}
   def migrations_for(%{migrations: list}, _cell) when is_list(list), do: {:ok, list}
 
-  def migrations_for(%{migrations: {module, function, args}}, cell) do
-    with {:ok, list} <- call_migrations(module, function, [cell | args]),
+  def migrations_for(%{migrations: {module, function, args}} = config, cell) do
+    with {:ok, list} <- call_migrations(config, module, function, [cell | args]),
          {:ok, _sorted} = ok <- validate_migrations(list) do
       ok
     else
@@ -1536,10 +1545,19 @@ defmodule Alambique.Config do
     end
   end
 
-  defp call_migrations(module, function, args) do
-    {:ok, apply(module, function, args)}
-  catch
-    kind, reason -> {:error, "failed: " <> Exception.format_banner(kind, reason)}
+  defp call_migrations(config, module, function, args) do
+    timeout = config.wake.migrations_timeout_ms
+
+    case Alambique.BoundedCall.run(fn -> apply(module, function, args) end, timeout) do
+      {:ok, value} ->
+        {:ok, value}
+
+      {:error, :timeout} ->
+        {:error, "failed: timed out after #{timeout} ms"}
+
+      {:error, {:raised, kind, reason}} ->
+        {:error, "failed: " <> Exception.format_banner(kind, reason)}
+    end
   end
 
   defp required!(opts, key) do

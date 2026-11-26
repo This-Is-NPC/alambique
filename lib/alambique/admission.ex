@@ -82,8 +82,9 @@ defmodule Alambique.Admission do
   def end_wake(config, pid), do: GenServer.cast(config.wakes, {:end, pid})
 
   # Failures a retry reproduces at the cost of a full restore: remembered for
-  # `wake.failure_backoff_ms`. A refused `cell_options` is here so that a
-  # callback that hangs is not called again by every retry.
+  # `wake.failure_backoff_ms`. `:cell_options` and `:bad_migrations` are here
+  # so that a callback that hangs is not called again by every retry, each
+  # holding a wake slot for its whole timeout.
   @deterministic [
     :restore,
     :hydration,
@@ -91,7 +92,8 @@ defmodule Alambique.Admission do
     :open,
     :migration,
     :schema_too_new,
-    :cell_options
+    :cell_options,
+    :bad_migrations
   ]
 
   # What a wrapped reason says about its origin: the step that failed.

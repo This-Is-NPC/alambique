@@ -37,6 +37,26 @@ defmodule Alambique.CellMigrationsTest do
     defp broken(:gap), do: [{1, "SELECT 1"}, {3, "SELECT 1"}]
     defp broken(:duplicate), do: [{1, "SELECT 1"}, {1, "SELECT 1"}]
     defp broken(:bad_entry), do: [{1, :sql}]
+
+    # The test is told which process runs the function: it must be dead once
+    # the wake gave up on it.
+    defp broken(:hang) do
+      report()
+      Process.sleep(:infinity)
+    end
+
+    defp broken(:late) do
+      report()
+      Process.sleep(400)
+      [{1, "SELECT 1"}]
+    end
+
+    def watch(test), do: :persistent_term.put({__MODULE__, :test}, test)
+
+    defp report do
+      with test when is_pid(test) <- :persistent_term.get({__MODULE__, :test}, nil),
+           do: send(test, {:runner, self()})
+    end
   end
 
   defmodule Named do
@@ -54,6 +74,7 @@ defmodule Alambique.CellMigrationsTest do
 
   setup do
     on_exit(fn ->
+      :persistent_term.erase({Lists, :test})
       Lists.clear()
       Enum.each([:one, :two], &Named.clear/1)
     end)
@@ -496,6 +517,94 @@ defmodule Alambique.CellMigrationsTest do
       inst = start(ctx, %{"a" => []})
       assert_raise ArgumentError, fn -> Alambique.migrate(inst, "a.1", wake: :yes) end
       assert_raise ArgumentError, fn -> Alambique.migrate(inst, "a.1", other: 1) end
+    end
+  end
+
+  describe "a function that does not return" do
+    defp free_slots(inst) do
+      config = Alambique.Config.fetch!(inst)
+      config.awake.max_wakes - map_size(:sys.get_state(config.wakes).holders)
+    end
+
+    defp lease_keys(ctx), do: Enum.filter(keys(ctx), &String.contains?(&1, "lease"))
+
+    defp runner_dead?(runner) do
+      ref = Process.monitor(runner)
+
+      receive do
+        {:DOWN, ^ref, :process, ^runner, _} -> true
+      after
+        5_000 -> false
+      end
+    end
+
+    # The wake gives up at the timeout, with the error of any bad list, and
+    # leaves no lease, no slot held, no process of the function.
+    for kind <- [:hang, :late, :raising, :exiting, :not_a_list] do
+      test "(#{kind}) at wake fails the wake and leaves nothing behind", ctx do
+        Lists.watch(self())
+        inst = start(ctx, %{"a" => {:broken, unquote(kind)}}, wake: [migrations_timeout_ms: 100])
+
+        assert {:error, {:bad_migrations, message}} = put(inst, "a.1", 1)
+        assert message =~ "Lists.migrations/1 for a.1"
+        if unquote(kind) in [:hang, :late], do: assert(message =~ "timed out after 100 ms")
+
+        if unquote(kind) in [:hang, :late] do
+          assert_receive {:runner, runner}
+          assert runner_dead?(runner)
+        end
+
+        assert Alambique.owner(inst, "a.1") == :none
+        assert lease_keys(ctx) == []
+        eventually(fn -> free_slots(inst) == Alambique.Config.fetch!(inst).awake.max_wakes end)
+        refute_receive {:runner, _}, 0
+      end
+    end
+
+    test "a hanging function is not called again by every retry", ctx do
+      Lists.watch(self())
+
+      inst =
+        start(ctx, %{"a" => {:broken, :hang}},
+          wake: [migrations_timeout_ms: 100, failure_backoff_ms: 60_000]
+        )
+
+      assert {:error, {:bad_migrations, _}} = put(inst, "a.1", 1)
+      assert_receive {:runner, _}
+      assert {:error, {:bad_migrations, _}} = put(inst, "a.1", 1)
+      refute_receive {:runner, _}, 0
+    end
+
+    for kind <- [:hang, :late] do
+      test "(#{kind}) at remigrate leaves the cell serving", ctx do
+        Lists.watch(self())
+        inst = start(ctx, %{"a" => [@v1]}, wake: [migrations_timeout_ms: 100])
+        assert {:ok, _} = put(inst, "a.1", 1)
+        pid = pid_of(inst, "a.1")
+
+        Lists.set(%{"a" => {:broken, unquote(kind)}})
+        assert {:error, {:bad_migrations, message}} = Alambique.migrate(inst, "a.1")
+        assert message =~ "timed out after 100 ms"
+        assert_receive {:runner, runner}
+        assert runner_dead?(runner)
+
+        assert pid_of(inst, "a.1") == pid
+        assert queued(pid) == 0
+        assert {:ok, _} = put(inst, "a.1", 2)
+        assert free_slots(inst) == Alambique.Config.fetch!(inst).awake.max_wakes
+      end
+    end
+
+    test "the sweeper counts it as an error for its cell and the round ends", ctx do
+      Lists.watch(self())
+      old = start(ctx, %{"a" => [@v1], "b" => [@v1]}, wake: [migrations_timeout_ms: 100])
+      for cell <- ["a.1", "b.1"], do: {:ok, _} = put(old, cell, 1)
+      for cell <- ["a.1", "b.1"], do: :ok = Alambique.hibernate(old, cell)
+
+      Lists.set(%{"a" => {:broken, :hang}, "b" => [@v1, @v2]})
+      assert {:ok, %{cells: 2, migrated: 1, errors: 1}} = Alambique.sweep(old)
+      assert_receive {:runner, runner}
+      assert runner_dead?(runner)
     end
   end
 end
