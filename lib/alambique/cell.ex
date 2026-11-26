@@ -612,8 +612,10 @@ defmodule Alambique.Cell do
     end
   end
 
-  defp cancel_timer(ref) when is_reference(ref),
-    do: :erlang.cancel_timer(ref, async: true, info: false)
+  defp cancel_timer(ref) when is_reference(ref) do
+    _ = :erlang.cancel_timer(ref, async: true, info: false)
+    :ok
+  end
 
   defp cancel_timer(_ref), do: :ok
 
@@ -2169,7 +2171,7 @@ defmodule Alambique.Cell do
     %{repl: repl, path: path} = state
 
     # The idle close checkpointed; closing left the emptied WAL and its index.
-    for suffix <- ["-wal", "-shm"], do: File.rm(path <> suffix)
+    Enum.each(["-wal", "-shm"], &File.rm(path <> &1))
     Local.mark(path, repl.txid, repl.checksum, repl.page_size)
     Sqlite.release(kept)
     %{state | kept: nil}
@@ -2188,7 +2190,7 @@ defmodule Alambique.Cell do
     else
       with {:ok, repl} <- checkpointed do
         # Closing leaves the emptied WAL and its index behind.
-        for suffix <- ["-wal", "-shm"], do: File.rm(state.path <> suffix)
+        Enum.each(["-wal", "-shm"], &File.rm(state.path <> &1))
         Local.mark(state.path, repl.txid, repl.checksum, repl.page_size)
       end
 

@@ -89,7 +89,7 @@ defmodule Alambique.Admission.Wakes do
 
       Map.has_key?(state.waiting, mon) ->
         {entry, waiting} = Map.pop!(state.waiting, mon)
-        Process.cancel_timer(entry.timer)
+        _ = Process.cancel_timer(entry.timer)
         {:noreply, %{state | waiting: waiting}}
 
       true ->
@@ -127,7 +127,7 @@ defmodule Alambique.Admission.Wakes do
           grant(state)
 
         {entry, waiting} ->
-          Process.cancel_timer(entry.timer)
+          _ = Process.cancel_timer(entry.timer)
           GenServer.reply(entry.from, :ok)
           emit(entry.at, :granted)
           grant(hold(%{state | waiting: waiting}, entry.pid, mon))

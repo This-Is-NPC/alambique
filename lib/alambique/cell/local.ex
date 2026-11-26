@@ -70,7 +70,7 @@ defmodule Alambique.Cell.Local do
   """
   @spec clean_work_dirs(Alambique.Config.t()) :: :ok
   def clean_work_dirs(config) do
-    File.rm_rf(work_root(config))
+    _ = File.rm_rf(work_root(config))
     :ok
   end
 
@@ -110,7 +110,7 @@ defmodule Alambique.Cell.Local do
   @doc "Removes the marker: the file is about to change, or is no longer trusted."
   @spec forget(Path.t()) :: :ok
   def forget(db_path) do
-    File.rm(marker(db_path))
+    _ = File.rm(marker(db_path))
     :ok
   end
 

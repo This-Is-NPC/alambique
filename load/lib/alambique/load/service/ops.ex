@@ -110,7 +110,7 @@ defmodule Alambique.Load.Service.Ops do
   @doc "Removes the local files of `cells`, so that the next wake restores them from the store."
   def drop_local(cells) do
     dir = Alambique.Config.fetch!(@instance).data_dir
-    for cell <- cells, do: File.rm_rf(Path.join(dir, cell <> ".cell"))
+    Enum.each(cells, &File.rm_rf(Path.join(dir, &1 <> ".cell")))
     :ok
   end
 

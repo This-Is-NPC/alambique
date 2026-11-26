@@ -25,7 +25,7 @@ defmodule Alambique.Drain do
   @impl true
   def init(config) do
     Process.flag(:trap_exit, true)
-    :ets.new(config.drain_status, [:named_table, :public, :set])
+    _ = :ets.new(config.drain_status, [:named_table, :public, :set])
     # A restart of this child finds the state `terminate/2` restored.
     :ok = Membership.sync(config)
     {:ok, config}

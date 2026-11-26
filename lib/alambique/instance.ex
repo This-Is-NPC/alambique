@@ -62,7 +62,7 @@ defmodule Alambique.Instance do
   @impl true
   def init({config, lock}) do
     # A replica file never outlives its process (design §21).
-    File.rm_rf!(Alambique.Replica.dir(config))
+    _ = File.rm_rf!(Alambique.Replica.dir(config))
     Alambique.Cell.Local.clean_work_dirs(config)
     Config.put(config)
     Membership.init_state(config)

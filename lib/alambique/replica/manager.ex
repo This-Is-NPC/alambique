@@ -19,8 +19,8 @@ defmodule Alambique.Replica.Manager do
   @impl true
   def init(config) do
     opts = [:named_table, :public, :set, read_concurrency: true]
-    :ets.new(config.replica_manager, opts)
-    :ets.new(config.replica_memo, opts)
+    _ = :ets.new(config.replica_manager, opts)
+    _ = :ets.new(config.replica_memo, opts)
     {:ok, %{config: config, monitors: %{}}}
   end
 
