@@ -24,7 +24,6 @@ defmodule Alambique.Config do
     migrations: [],
     migration_window: 1,
     moved_grace_ms: 600_000,
-    deletion_grace_ms: Trash.default_grace_ms(),
     trash: [],
     scrub: false,
     sweeper: false,
@@ -255,7 +254,17 @@ defmodule Alambique.Config do
     drift_ppm: 200
   ]
 
-  @known [:name, :store, :prefix, :placement, :data_dir, :node_id | Keyword.keys(@defaults)]
+  # `:deletion_grace_ms` defaults to `Trash.default_grace_ms/0`, read when the
+  # options are built so that this module has no compile-time dependency on it.
+  @known [
+    :name,
+    :store,
+    :prefix,
+    :placement,
+    :data_dir,
+    :node_id,
+    :deletion_grace_ms | Keyword.keys(@defaults)
+  ]
 
   @type t :: %{
           name: atom,
@@ -1136,7 +1145,7 @@ defmodule Alambique.Config do
   end
 
   defp deletion_grace!(opts) do
-    value = opts[:deletion_grace_ms]
+    value = Keyword.get_lazy(opts, :deletion_grace_ms, &Trash.default_grace_ms/0)
 
     unless is_integer(value) and value >= 0,
       do: bad!(":deletion_grace_ms must be a non-negative integer")
