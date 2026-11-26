@@ -194,6 +194,7 @@ are in its header (`bench/*.exs`). Tasks marked SeaweedFS start that container.
 - `bench:cells`: wake thousands of cells on one node and report resource use.
 - `bench:memory`: memory of awake cells by purpose, and read and write latency.
 - `bench:idle-close`: memory, descriptors and latency of idle cells with the connection open and closed.
+- `bench:options-refresh`: latency of `refresh_options/3` by callback, renewal gaps under a refresh storm, the time the busy marker is held, and a node-wide refresh against client latency.
 - `bench:query`: query thousands of cells cold and warm.
 - `bench:query-refresh`: refresh a large cached query replica after a small write.
 - `bench:schema`: create the same schema with one statement per call and with one script.

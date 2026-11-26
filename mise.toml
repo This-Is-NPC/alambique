@@ -143,6 +143,10 @@ run = "scripts/bench-memory"
 description = "Measure what closing the connection of an idle cell saves and costs: memory, descriptors, close and reopen time, first-call latency, renewals and a close/reopen cycle (argument: number of cells, default 250; ALAMBIQUE_BENCH_ROWS, _CLOSE, _CYCLES, _RENEWAL, _TIMEOUT)"
 run = "scripts/bench-idle-close"
 
+[tasks."bench:options-refresh"]
+description = "Measure the live refresh of the options of a cell: latency by callback, renewal gaps under a storm, busy marker time, and a node-wide refresh against client latency (argument: number of cells, default 1000; ALAMBIQUE_BENCH_CALLS, _TIMEOUT_MS, _STORM, _CLIENTS, _TIMEOUT)"
+run = "scripts/bench-options-refresh"
+
 [tasks."bench:query"]
 description = "Query thousands of cells cold and warm and report requests and time (argument: number of cells)"
 run = "scripts/bench-query"
