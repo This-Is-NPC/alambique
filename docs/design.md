@@ -686,6 +686,16 @@ is that frames committed and not yet replicated imply a write in flight
   would take the writer's rows into the store without the library ever having
   seen them as a write. The next wake restores the state of the store, which
   is every row the library acknowledged.
+  The WAL file alone does not say what committed: a commit whose frame write
+  fails after the frame reached the file is rolled back by SQLite, the
+  wal-index header is not written, and the file holds a frame with a commit
+  mark and valid checksums past `mxFrame`. Every scan of the WAL by path (a
+  batch, the first snapshot, the check for unreplicated frames) therefore
+  ends at the position `mxFrame` names, which the cell asks its connection
+  for (`Alambique.Sqlite.wal_end/1`, the same read of the header as above);
+  with the salts of another WAL generation nothing counts. The `-shm` file is
+  not opened by path: closing any descriptor of a file drops the POSIX locks
+  the process holds on it, and SQLite's shared-memory locks are among them.
 - The cell checks the rest. The native library keeps the size of the WAL
   (the WAL hook) and notes it when the connection is armed; a write that failed is an
   orphan when the WAL moved during its transaction, whether or not a batch is

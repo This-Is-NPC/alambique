@@ -264,6 +264,15 @@ defmodule Alambique.Sqlite do
   def foreign_write(conn), do: Native.sqlite_foreign_write(ref(conn), key(conn), 0)
 
   @doc """
+  Where the committed log of a cell's own connection ends, by the wal-index:
+  `{:ok, pos}` for the position a WAL scan by path must stop at (frames past
+  it are no transaction, such as a commit frame whose write failed after it
+  reached the file), `:none` for a connection with no header to read.
+  """
+  @spec wal_end(conn) :: {:ok, Alambique.Replication.Native.wal_pos()} | :none | {:error, term}
+  def wal_end(conn), do: Native.sqlite_wal_end(ref(conn), key(conn))
+
+  @doc """
   Takes the header that the latest `foreign_write/1` saw as accounted for,
   once the frames it found are replicated.
   """

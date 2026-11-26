@@ -31,6 +31,7 @@ defmodule Alambique.Cell.Commit do
 
     case Replicator.sync(repl, state.repl_ctx,
            deadline: State.deadline(state),
+           conn: state.conn,
            landed: &Hold.put_upload(state.config, state.repl_ctx, &1)
          ) do
       {:ok, ^repl} ->

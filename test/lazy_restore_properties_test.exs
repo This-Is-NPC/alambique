@@ -483,7 +483,7 @@ defmodule Alambique.LazyRestorePropertiesTest do
     Enum.reduce_while(1..20, model, fn _, model ->
       model = sync(model)
 
-      case Native.wal_pending(model.path <> "-wal", model.repl.page_size, model.repl.wal_pos) do
+      case Native.wal_pending(model.path <> "-wal", model.repl.page_size, model.repl.wal_pos, nil) do
         {:ok, false} -> {:halt, model}
         _ -> {:cont, model}
       end
