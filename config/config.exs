@@ -3,7 +3,8 @@ import Config
 # The test suite runs with the page arena on; ALAMBIQUE_PAGE_ARENA=0 runs it
 # off (`mise run test:page-arena-off`). ALAMBIQUE_PAGE_ARENA_OPTS is an Elixir
 # keyword list of other :page_arena settings (the page arena benchmark sets
-# the extent size and the regions this way). The library ships it off.
+# the extent size and the regions this way). Without this block the library
+# runs with the arena on and its own defaults.
 if config_env() == :test do
   extra =
     case System.get_env("ALAMBIQUE_PAGE_ARENA_OPTS") do
