@@ -16,7 +16,15 @@ defmodule Alambique.AdmissionPropertiesTest do
 
   @moduletag capture_log: true
 
-  @deterministic [:restore, :hydration, :local_file, :open, :migration, :schema_too_new]
+  @deterministic [
+    :restore,
+    :hydration,
+    :local_file,
+    :open,
+    :migration,
+    :schema_too_new,
+    :cell_options
+  ]
   @transient [:lease, :owner, :timeout, :busy]
 
   defp config(max_wakes, backoff_ms, hint_limit \\ 1_000, queue \\ {1, 0}) do

@@ -19,7 +19,7 @@ defmodule Alambique.Cell do
   require Logger
   require Alambique.Cell.Facts
 
-  alias Alambique.Cell.{Commit, Db, Facts, Hydration, Local, Pipe, State, Wake}
+  alias Alambique.Cell.{Commit, Db, Facts, Hydration, Local, Options, Pipe, State, Wake}
   alias Alambique.Compaction.{Compactor, Hold, Slots}
 
   alias Alambique.{
@@ -183,25 +183,47 @@ defmodule Alambique.Cell do
   # Every callback runs with the marker busy (design §10): they are the only
   # places where the cell process runs native code.
   @impl true
-  def handle_continue(:wake, state), do: Inflight.busy(state.inflight, fn -> wake(state) end)
+  def handle_continue(:wake, state), do: wake(state)
 
   # The cell holds a wake slot before any work: its caller's, or its own if
   # that caller died (design §7). Without one it does not wake, and the
   # callers already routed to it get the same `:overloaded` as any wake.
+  #
+  # The options of the cell are resolved outside the busy marker: the wait
+  # for the callback runs no native code, and a VM crash during it must not
+  # mark the cell as crashed (design §10).
   defp wake(state) do
     Fault.point(:cell_before_take_over, %{cell: state.id})
 
     case Admission.take_over(state.config, state.holder) do
-      :ok -> run_wake(state)
-      {:error, reason} -> {:stop, {:shutdown, {:wake_failed, reason}}, %{state | mode: :stopped}}
+      :ok ->
+        started = System.monotonic_time()
+
+        {options, info} =
+          case Options.resolve(state) do
+            {:ok, opts, info} -> {{:ok, opts}, info}
+            {:error, message, info} -> {{:error, message}, info}
+          end
+
+        Inflight.busy(state.inflight, fn -> run_wake(state, options, info, started) end)
+
+      {:error, reason} ->
+        {:stop, {:shutdown, {:wake_failed, reason}}, %{state | mode: :stopped}}
     end
   end
 
-  defp run_wake(state) do
-    started = System.monotonic_time()
+  defp run_wake(state, options, info, started) do
     {:reductions, reductions} = Process.info(self(), :reductions)
 
-    case Wake.run(state) do
+    # The options are resolved once: the wake re-enters its fence on
+    # `:txid_taken` and must not call the callback again.
+    result =
+      case options do
+        {:ok, opts} -> Wake.run(%{state | cell_opts: opts})
+        {:error, message} -> {:error, {:cell_options, message}, state}
+      end
+
+    case result do
       {:ok, state} ->
         Admission.end_wake(state.config, self())
         Admission.recovered(state.config, state.id)
@@ -210,11 +232,14 @@ defmodule Alambique.Cell do
         Telemetry.span_stop(
           [:cell, :wake],
           started,
-          wake_measurements(requests, store_time, reductions),
+          wake_measurements(requests, store_time, reductions, info),
           %{
             cell: state.id,
             location: state.location.id,
             result: :ok,
+            options: info.source,
+            clamped: info.clamped,
+            repaired: info.repaired,
             epoch: state.lease.epoch,
             txid: state.repl.txid,
             source: state.source,
@@ -233,10 +258,11 @@ defmodule Alambique.Cell do
         Telemetry.span_stop(
           [:cell, :wake],
           started,
-          wake_measurements(requests, store_time, reductions),
+          wake_measurements(requests, store_time, reductions, info),
           %{
             cell: state.id,
             result: :error,
+            options: info.source,
             reason: reason,
             requests: requests
           }
@@ -247,14 +273,18 @@ defmodule Alambique.Cell do
     end
   end
 
-  # The requests of the wake, the time they took summed, and the reductions the
-  # cell process ran since the wake began.
-  defp wake_measurements(requests, store_time, reductions) do
+  # The requests of the wake, the time they took summed, the reductions the
+  # cell process ran since the wake began and the time of the options callback.
+  defp wake_measurements(requests, store_time, reductions, info) do
     {:reductions, now} = Process.info(self(), :reductions)
 
     requests
     |> Metered.measurements()
-    |> Map.merge(%{store_time: store_time, reductions: now - reductions})
+    |> Map.merge(%{
+      store_time: store_time,
+      reductions: now - reductions,
+      options_time: info.time
+    })
   end
 
   # Tells the node of the previous owner, if it is a member, that its cell
@@ -290,9 +320,8 @@ defmodule Alambique.Cell do
   end
 
   defp serve(state) do
-    config = state.config
     Process.send_after(self(), :renew, first_renewal_in(state))
-    Process.send_after(self(), :idle, config.idle_timeout_ms)
+    Process.send_after(self(), :idle, State.cell_opt(state, :idle_timeout_ms))
     state = %{state | mode: :serving, last_active: System.monotonic_time(:millisecond)}
     wal_size(state)
     Facts.publish(state, true)
@@ -305,21 +334,26 @@ defmodule Alambique.Cell do
 
   # The shrink timer carries its ref, so a message that was already queued
   # when the timer was replaced is ignored.
-  defp arm_idle_cache(%State{config: %{awake: %{idle_cache_after_ms: nil}}} = state), do: state
-
-  defp arm_idle_cache(state),
-    do: arm_idle_cache(state, state.config.awake.idle_cache_after_ms)
+  defp arm_idle_cache(state) do
+    case State.cell_opt(state, :idle_cache_after_ms) do
+      nil -> state
+      ms -> arm_idle_cache(state, ms)
+    end
+  end
 
   defp arm_idle_cache(state, ms),
     do: %{state | idle_cache: :erlang.start_timer(ms, self(), :idle_cache)}
 
-  # The first call after a shrink gives the cache its full limit back.
+  # The first call after a shrink gives the cache its full limit back. If the
+  # pragma fails the cache is still small: the cell stays `:shrunk`, so the
+  # facts tell the truth and the next call tries again.
   defp restore_cache(%State{idle_cache: :shrunk} = state) do
-    Sqlite.execute(state.conn, "PRAGMA cache_size = -#{state.config.awake.cache_kib}",
-      write: true
-    )
-
-    arm_idle_cache(state)
+    case Sqlite.execute(state.conn, "PRAGMA cache_size = -#{State.cell_opt(state, :cache_kib)}",
+           write: true
+         ) do
+      :ok -> arm_idle_cache(state)
+      {:error, _reason} -> state
+    end
   end
 
   defp restore_cache(state), do: state
@@ -789,7 +823,7 @@ defmodule Alambique.Cell do
   end
 
   defp info(:idle, %State{mode: :serving} = state) do
-    idle = state.config.idle_timeout_ms
+    idle = State.cell_opt(state, :idle_timeout_ms)
     elapsed = System.monotonic_time(:millisecond) - state.last_active
 
     busy? = not idle?(state) or :atomics.get(state.load, Facts.slot(:admitted)) != 0
@@ -812,7 +846,7 @@ defmodule Alambique.Cell do
   end
 
   defp info({:timeout, ref, :idle_cache}, %State{mode: :serving, idle_cache: ref} = state) do
-    after_ms = state.config.awake.idle_cache_after_ms
+    after_ms = State.cell_opt(state, :idle_cache_after_ms)
     elapsed = System.monotonic_time(:millisecond) - state.last_active
 
     cond do
@@ -939,12 +973,12 @@ defmodule Alambique.Cell do
     if Publisher.cleanup_due?(state) do
       {:noreply, arm_idle_cache(state)}
     else
-      Sqlite.execute(state.conn, "PRAGMA cache_size = -#{state.config.awake.idle_cache_kib}",
+      Sqlite.execute(state.conn, "PRAGMA cache_size = -#{State.cell_opt(state, :idle_cache_kib)}",
         write: true
       )
 
       # The garbage of the last calls would stay for as long as the cell is idle.
-      if state.config.awake.idle_gc, do: :erlang.garbage_collect()
+      if State.cell_opt(state, :idle_gc), do: :erlang.garbage_collect()
       {:noreply, %{state | idle_cache: :shrunk}}
     end
   end
