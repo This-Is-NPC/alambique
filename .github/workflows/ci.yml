@@ -44,7 +44,8 @@ concurrency:
 
 jobs:
   # `mise run check:static` (scripts/check without the suite): warnings-as-errors
-  # compile, mix format, cargo fmt, clippy and docs links. The suite runs in
+  # compile, mix format, cargo fmt, clippy, cargo-deny, the Mix audits, Credo,
+  # Dialyzer, the cycle check and docs links. The suite runs in
   # `coverage-run` and `cluster`.
   gate:
     runs-on: ubuntu-latest
@@ -55,7 +56,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup
         with:
-          tools: erlang elixir rust
+          tools: erlang elixir rust aqua:EmbarkStudios/cargo-deny
           cache-name: gate
       - run: mise run check:static
 
