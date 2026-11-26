@@ -38,7 +38,10 @@ defmodule Alambique.PageSidecarRestoreTest do
     path = Path.join(env.dir, "lazy-#{System.unique_integer([:positive])}.db")
     ctx = Keyword.get(opts, :ctx, env.ctx)
     lazy_opts = %{min_bytes: 0, wait_ms: 1_000, verify_bytes: 0}
-    {:ok, result} = Replication.restore(ctx, cell(), path, :latest, lazy: lazy_opts)
+
+    {:ok, result} =
+      Replication.restore(ctx, cell(), path, Keyword.get(opts, :target, :latest), lazy: lazy_opts)
+
     lazy = Lazy.new(result, ctx, miss_pages: 2, batch_bytes: 256, verify_bytes: 0)
     {result, lazy}
   end
@@ -189,14 +192,11 @@ defmodule Alambique.PageSidecarRestoreTest do
         env: env,
         hostile: hostile
       } do
-        {_result, lazy} = lazy_restore(env)
+        # The first file alone holds several pages: the first is installed, if
+        # any is.
+        {_result, lazy} = lazy_restore(env, target: {:txid, 1})
         {_total, unknown} = Native.lazy_progress(lazy.handle)
-        # A run of at least two pages: the first is installed, if any is.
-        run =
-          Enum.find(
-            Stream.repeatedly(fn -> Native.lazy_next_batch(lazy.handle, 1_000_000) end),
-            &(not match?({_, _, _, [_]}, &1))
-          )
+        run = Native.lazy_next_batch(lazy.handle, 1_000_000)
 
         assert {_file, _offset, _len, [_, _ | _]} = run
 
