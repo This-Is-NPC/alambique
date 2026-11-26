@@ -47,23 +47,27 @@ defmodule Alambique.Freeze do
   @spec unfreeze(Alambique.Replication.ctx(), String.t(), keyword) :: :ok | {:error, term}
   def unfreeze(ctx, cell, opts \\ []) do
     started = System.monotonic_time()
-    {store, config} = ctx.store
-    key = Keys.frozen(ctx.prefix, cell)
     deadline = deadline(ctx, opts)
 
     result =
       with :ok <- Quarantine.reset(ctx, cell, deadline: deadline) do
-        Retry.run(ctx, deadline, fn ->
-          case store.delete(config, key) do
-            :ok -> :ok
-            {:error, :not_found} -> :ok
-            {:error, reason} -> {:retry, reason}
-          end
-        end)
+        delete_marker(ctx, Keys.frozen(ctx.prefix, cell), deadline)
       end
 
     emit([:cell, :unfreeze], started, cell, result)
     result
+  end
+
+  defp delete_marker(ctx, key, deadline) do
+    {store, config} = ctx.store
+
+    Retry.run(ctx, deadline, fn ->
+      case store.delete(config, key) do
+        :ok -> :ok
+        {:error, :not_found} -> :ok
+        {:error, reason} -> {:retry, reason}
+      end
+    end)
   end
 
   @doc "Whether `cell` is frozen. Reads one object, with retries until the deadline."

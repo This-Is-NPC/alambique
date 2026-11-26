@@ -94,18 +94,18 @@ defmodule Alambique.Inflight.Tracker do
     dir
     |> File.ls!()
     |> Enum.map(&Path.join(dir, &1))
-    |> Enum.reduce(%{}, fn path, acc ->
-      case read(path) do
-        {cell, kind} ->
-          Map.update(acc, cell, entry(path, kind), fn e ->
-            %{e | files: [path | e.files], kinds: [kind | e.kinds]}
-          end)
-
-        nil ->
-          acc
-      end
-    end)
+    |> Enum.reduce(%{}, &add_marker/2)
   end
+
+  defp add_marker(path, acc) do
+    case read(path) do
+      {cell, kind} -> Map.update(acc, cell, entry(path, kind), &join(&1, path, kind))
+      nil -> acc
+    end
+  end
+
+  defp join(entry, path, kind),
+    do: %{entry | files: [path | entry.files], kinds: [kind | entry.kinds]}
 
   defp entry(path, kind), do: %{files: [path], kinds: [kind], counter: nil}
 
@@ -156,22 +156,25 @@ defmodule Alambique.Inflight.Tracker do
     with :ok <- Placement.validate_id(config, cell),
          {:ok, location} <- mod.locate(opts, cell) do
       ctx = Config.repl_ctx(config, location)
-
-      case record(config, ctx, location, cell, entry, deadline) do
-        {:ok, entry} ->
-          case quarantine(config, ctx, location, cell, entry.counter, deadline) do
-            :ok -> :done
-            {:error, reason} -> unsettled(cell, entry, reason)
-          end
-
-        {:error, reason} ->
-          unsettled(cell, entry, reason)
-      end
+      record_and_freeze(config, ctx, location, cell, entry, deadline)
     else
       {:error, reason} -> unsettled(cell, entry, reason)
     end
   rescue
     exception -> unsettled(cell, entry, Exception.message(exception))
+  end
+
+  defp record_and_freeze(config, ctx, location, cell, entry, deadline) do
+    case record(config, ctx, location, cell, entry, deadline) do
+      {:ok, entry} ->
+        case quarantine(config, ctx, location, cell, entry.counter, deadline) do
+          :ok -> :done
+          {:error, reason} -> unsettled(cell, entry, reason)
+        end
+
+      {:error, reason} ->
+        unsettled(cell, entry, reason)
+    end
   end
 
   defp unsettled(cell, entry, reason) do
