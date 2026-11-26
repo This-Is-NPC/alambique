@@ -396,7 +396,7 @@ mod tests {
                 let class = (x >> 8) as usize % 5;
                 let p = a.alloc(class, regions[(x >> 20) as usize % 3]);
                 assert!(!p.is_null() && a.contains(p));
-                let (len, v) = (strides()[class], (x >> 32) as u8);
+                let (len, v) = (strides()[class], x.to_le_bytes()[4]);
                 fill(p, len, v);
                 live.insert(p as usize, (class, len, v));
             } else {
@@ -408,14 +408,17 @@ mod tests {
             }
             if x.is_multiple_of(211) {
                 trim(&a);
-                assert_eq!(a.resident_bytes() as usize, kernel_resident(&a));
+                assert_eq!(
+                    usize::try_from(a.resident_bytes()).unwrap(),
+                    kernel_resident(&a)
+                );
             }
         }
         for (&p, &(_, len, v)) in &live {
             assert!(holds(p as *mut u8, len, v), "a trim damaged a live slot");
         }
         let used: usize = live.values().map(|m| m.1).sum();
-        assert_eq!(a.in_use_bytes() as usize, used);
+        assert_eq!(usize::try_from(a.in_use_bytes()).unwrap(), used);
     }
 
     #[test]
@@ -427,21 +430,30 @@ mod tests {
         for &p in &ps {
             fill(p, strides()[C4K], 7);
         }
-        assert_eq!(a.resident_bytes() as usize, kernel_resident(&a));
+        assert_eq!(
+            usize::try_from(a.resident_bytes()).unwrap(),
+            kernel_resident(&a)
+        );
         for &p in &ps {
             // SAFETY: from `alloc`, not used afterwards.
             unsafe { a.free(p) };
         }
         let freed = trim(&a);
         assert!(freed > 0);
-        assert_eq!(a.resident_bytes() as usize, kernel_resident(&a));
-        assert_eq!(a.released_bytes() as usize, freed);
+        assert_eq!(
+            usize::try_from(a.resident_bytes()).unwrap(),
+            kernel_resident(&a)
+        );
+        assert_eq!(usize::try_from(a.released_bytes()).unwrap(), freed);
         // Nothing left to release: no second call on the same pages.
         assert_eq!(trim(&a), 0);
         let p = a.alloc(C4K, r);
         assert!(holds(p, strides()[C4K], 0));
         fill(p, strides()[C4K], 9);
-        assert_eq!(a.resident_bytes() as usize, kernel_resident(&a));
+        assert_eq!(
+            usize::try_from(a.resident_bytes()).unwrap(),
+            kernel_resident(&a)
+        );
     }
 
     #[test]
@@ -486,7 +498,7 @@ mod tests {
             // SAFETY: from `alloc`, not used afterwards.
             s.spawn(|| unsafe { a.free(first as *mut u8) });
         });
-        assert_eq!(a.in_use_bytes() as usize, strides()[C4K]);
+        assert_eq!(usize::try_from(a.in_use_bytes()).unwrap(), strides()[C4K]);
         assert_eq!(a.alloc(C4K, r) as usize, first);
         assert_ne!(first, second);
     }
@@ -498,14 +510,14 @@ mod tests {
         for class in 0..CLASSES {
             let p = a.alloc(class, r);
             assert!(!p.is_null() && a.contains(p), "class {class}");
-            fill(p, strides()[class], class as u8 + 1);
+            fill(p, strides()[class], u8::try_from(class).unwrap() + 1);
             let q = a.alloc(class, r);
             assert!(!q.is_null());
             assert!(
                 (p as usize).abs_diff(q as usize) >= strides()[class],
                 "class {class} slots overlap"
             );
-            assert!(holds(p, strides()[class], class as u8 + 1));
+            assert!(holds(p, strides()[class], u8::try_from(class).unwrap() + 1));
         }
     }
 
@@ -565,7 +577,7 @@ mod tests {
             // SAFETY: from `alloc`, not used afterwards.
             unsafe { a.free(p) };
         }
-        let before = a.resident_bytes() as usize;
+        let before = usize::try_from(a.resident_bytes()).unwrap();
         let first = trim(&a);
         // The bound, and at most one extent over it.
         assert!(
