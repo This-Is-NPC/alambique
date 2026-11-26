@@ -71,6 +71,28 @@ defmodule Alambique.VfsFaultTest do
     assert Native.vfs_fault_hits() == 1
   end
 
+  test "a commit that writes no frame does not meet a commit-frame fault", env do
+    c = boot(env)
+    noop = "UPDATE t SET n = n WHERE n = 99"
+    assert {:ok, _} = Alambique.execute(c.inst, c.cell, noop)
+
+    # The write that cleans the feed rows of the batches published has
+    # frames; the next one, with nothing left to clean, has none.
+    pid = Cell.whereis(Config.fetch!(c.inst), c.cell)
+
+    assert eventually(fn ->
+             state = :sys.get_state(pid)
+             state.feed_published == state.feed_cleaned
+           end)
+
+    vfs_fault(wal(c), :commit_frame, :ioerr_write)
+    assert {:ok, _} = Alambique.execute(c.inst, c.cell, noop)
+    assert Native.vfs_fault_hits() == 0
+    # The fault is still armed for the first commit that has a frame.
+    assert {:error, _} = insert(c, 1)
+    assert Native.vfs_fault_hits() == 1
+  end
+
   test "a sync fault fails a checkpoint and leaves the cell serving", env do
     c = boot(env)
     {:ok, _} = insert(c, 1)
