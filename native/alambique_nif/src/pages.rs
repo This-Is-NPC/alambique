@@ -61,7 +61,7 @@ pub fn meta_hash(head: &[u8], rest: &[u8]) -> Hash {
     digest(&[b"alambique-meta-v1", head, rest])
 }
 
-pub(crate) fn seal(body: &[u8]) -> Hash {
+fn seal(body: &[u8]) -> Hash {
     digest(&[b"alambique-sidecar-v1", body])
 }
 
@@ -166,6 +166,17 @@ pub fn build(level: u8, object: &[u8]) -> Result<Vec<u8>> {
     let sealed = seal(&out);
     out.extend_from_slice(&sealed);
     Ok(out)
+}
+
+/// A copy of the sidecar `side` whose first page hash is wrong and whose seal
+/// is right: intact, and wrong (for tests of what a restore does with one).
+#[cfg(any(test, feature = "test-panic"))]
+pub fn forge(side: &[u8]) -> Vec<u8> {
+    let mut body = side[..side.len() - HASH_LEN].to_vec();
+    body[HEAD_LEN + 4] ^= 1;
+    let sealed = seal(&body);
+    body.extend_from_slice(&sealed);
+    body
 }
 
 /// Where the page index starts in a verified object.

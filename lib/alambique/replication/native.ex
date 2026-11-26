@@ -269,6 +269,8 @@ defmodule Alambique.Replication.Native do
 
   if @test_build do
     @doc false
+    def forge_sidecar(_sidecar), do: nif_error()
+    @doc false
     def panic_normal, do: nif_error()
     @doc false
     def panic_dirty_cpu, do: nif_error()

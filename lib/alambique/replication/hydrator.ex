@@ -217,6 +217,7 @@ defmodule Alambique.Replication.Hydrator do
   defp checked(state, stats) do
     %{
       check_objects: Map.get(stats, :objects, 0),
+      check_covered: Map.get(stats, :covered, 0),
       check_bytes: Map.get(stats, :bytes, 0),
       check_duration: System.monotonic_time() - state.check_started
     }

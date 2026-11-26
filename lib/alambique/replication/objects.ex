@@ -41,6 +41,17 @@ defmodule Alambique.Replication.Objects do
   end
 
   @doc """
+  Like `list_cell/3`, with the segments and snapshots whose page-hash sidecar
+  is listed (`Keys.sidecars/3`).
+  """
+  @spec list_cell_sidecars(map, String.t(), integer) ::
+          {:ok, {[map], [map]}, MapSet.t(String.t())} | {:error, term}
+  def list_cell_sidecars(ctx, cell, deadline) do
+    with {:ok, keys} <- list(ctx, Keys.files_prefix(ctx.prefix, cell), deadline),
+         do: {:ok, Keys.parse(ctx.prefix, cell, keys), Keys.sidecars(ctx.prefix, cell, keys)}
+  end
+
+  @doc """
   An object and its metadata, retried. A missing object is retried too, in
   case the listing was ahead of the read, unless `ctx.missing_final` is set:
   a reader that lists first (`Alambique.Query`) then knows the file was

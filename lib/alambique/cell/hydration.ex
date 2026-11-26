@@ -19,7 +19,7 @@ defmodule Alambique.Cell.Hydration do
   def restore_opts(%State{config: %{lazy_restore: lazy, op_timeout_ms: op}}) do
     # A statement waits a little longer than the hydrator's fetch, so that its
     # failure reaches the statement before the wait ends.
-    [lazy: %{min_bytes: lazy.min_bytes, wait_ms: op + 1_000}]
+    [lazy: %{min_bytes: lazy.min_bytes, verify_bytes: lazy.verify_bytes, wait_ms: op + 1_000}]
   end
 
   @doc """

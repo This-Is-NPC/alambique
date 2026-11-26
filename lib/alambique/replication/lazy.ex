@@ -3,9 +3,12 @@ defmodule Alambique.Replication.Lazy do
   # A lazily restored database (design §16): the page map built by
   # `Restore` (a NIF resource the VFS reads) and where its frames live in the
   # store. `fetch_run/3` is the one way a page gets from the store into the file;
-  # `check_objects/3` compares the pages it installed with the whole objects.
+  # `check_objects/3` compares the pages it installed with the whole objects,
+  # except those of files whose page-hash sidecar vouched for them as they
+  # arrived.
 
   alias Alambique.Replication.{Budget, Native, Objects, Retry}
+  alias Alambique.Telemetry
 
   @enforce_keys [:handle, :files, :pins, :ctx, :budget]
   defstruct [
@@ -18,7 +21,8 @@ defmodule Alambique.Replication.Lazy do
     :cell,
     miss_pages: 16,
     batch_bytes: 4_194_304,
-    verify_bytes: 0
+    verify_bytes: 0,
+    hash_bytes: 0
   ]
 
   @type t :: %__MODULE__{
@@ -31,7 +35,8 @@ defmodule Alambique.Replication.Lazy do
           cell: String.t() | nil,
           miss_pages: pos_integer,
           batch_bytes: pos_integer,
-          verify_bytes: non_neg_integer
+          verify_bytes: non_neg_integer,
+          hash_bytes: non_neg_integer
         }
 
   @doc "The lazy part of a `Restore` result."
@@ -47,10 +52,13 @@ defmodule Alambique.Replication.Lazy do
           ctx: ctx,
           budget: Budget.new(ctx.max_inflight_bytes),
           checksum: result.checksum,
-          cell: result.cell
+          cell: result.cell,
+          hash_bytes: Map.get(result, :hash_bytes, 0)
         ] ++ opts
       )
 
+    # The page hashes the map holds are memory of the hydration like a run.
+    :ok = Budget.force(lazy.budget, lazy.hash_bytes)
     :ok = Native.lazy_set_whole(handle, lazy.verify_bytes)
     lazy
   end
@@ -66,10 +74,17 @@ defmodule Alambique.Replication.Lazy do
   """
   @spec fetch_run(t, {non_neg_integer, non_neg_integer, pos_integer, list}, integer) ::
           {:ok, boolean} | {:error, term}
-  def fetch_run(%__MODULE__{} = lazy, {file, offset, len, pages}, deadline) do
+  def fetch_run(%__MODULE__{} = lazy, run, deadline) do
+    case deliver(lazy, run, deadline) do
+      {:error, {:page_hash, pgno}} -> settle(lazy, run, pgno, deadline)
+      other -> other
+    end
+  end
+
+  defp deliver(lazy, {file, offset, len, pages}, deadline) do
     key = elem(lazy.files, file)
     {etag, epoch, size} = elem(lazy.pins, file)
-    weight = Budget.weigh(lazy.budget, len)
+    weight = weigh(lazy, len)
 
     with :ok <- Budget.acquire(lazy.budget, weight, deadline) do
       try do
@@ -90,6 +105,47 @@ defmodule Alambique.Replication.Lazy do
     end
   end
 
+  # A page of a covered file did not match its hash, and none of the run was
+  # installed. The whole object says who is wrong. If it fails its file
+  # checksum, so does the run, as it would without a sidecar. If it agrees with
+  # the sidecar, the ranged read was wrong. Otherwise the sidecar is: it is
+  # dropped, the file is checked whole at the end as without one, and the run
+  # is read again.
+  defp settle(lazy, {file, offset, _len, _pages} = run, pgno, deadline) do
+    key = elem(lazy.files, file)
+
+    result =
+      with_object(lazy, file, deadline, fn body ->
+        Native.lazy_settle_hashes(lazy.handle, file, body)
+      end)
+
+    case result do
+      :range ->
+        sidecar_event(lazy, key, :bad_range, pgno)
+        {:error, {:bad_range, offset}}
+
+      :dropped ->
+        sidecar_event(lazy, key, :mismatch, pgno)
+        deliver(lazy, run, deadline)
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp sidecar_event(lazy, key, result, pgno) do
+    Telemetry.emit([:replication, :sidecar], %{
+      cell: lazy.cell,
+      key: key,
+      result: result,
+      reason: {:page_hash, pgno}
+    })
+  end
+
+  # What a run weighs: no more than the budget leaves after the page hashes.
+  defp weigh(lazy, bytes),
+    do: min(Budget.weigh(lazy.budget, bytes), lazy.budget.cap - lazy.hash_bytes)
+
   # A store that raises or exits is a failed read, not a crash of the caller.
   defp fetch_range(ctx, key, offset, len, etag, deadline) do
     Objects.fetch_range(ctx, key, offset, len, deadline, etag)
@@ -106,16 +162,19 @@ defmodule Alambique.Replication.Lazy do
   within `fetch_ms`. Returns the objects and bytes read.
   """
   @spec check_objects(t, pos_integer, pos_integer) ::
-          {:ok, %{objects: non_neg_integer, bytes: non_neg_integer}} | {:error, term}
+          {:ok, %{objects: non_neg_integer, bytes: non_neg_integer, covered: non_neg_integer}}
+          | {:error, term}
   def check_objects(%__MODULE__{} = lazy, concurrency, fetch_ms) do
-    0..(tuple_size(lazy.files) - 1)//1
+    covered = Native.lazy_covered(lazy.handle)
+
+    (Enum.to_list(0..(tuple_size(lazy.files) - 1)//1) -- covered)
     |> Task.async_stream(&check_object(lazy, &1, fetch_ms),
       max_concurrency: concurrency,
       timeout: :infinity
     )
-    |> Enum.reduce_while({:ok, %{objects: 0, bytes: 0}}, fn
+    |> Enum.reduce_while({:ok, %{objects: 0, bytes: 0, covered: length(covered)}}, fn
       {:ok, {:ok, bytes}}, {:ok, sum} ->
-        {:cont, {:ok, %{objects: sum.objects + 1, bytes: sum.bytes + bytes}}}
+        {:cont, {:ok, %{sum | objects: sum.objects + 1, bytes: sum.bytes + bytes}}}
 
       {:ok, {:error, _} = error}, _ ->
         {:halt, error}
@@ -126,18 +185,24 @@ defmodule Alambique.Replication.Lazy do
   end
 
   defp check_object(lazy, file, fetch_ms) do
+    with_object(lazy, file, Retry.deadline_in(fetch_ms), fn body ->
+      with {:ok, _pages} <- Native.lazy_check_object(lazy.handle, file, body),
+           do: {:ok, byte_size(body)}
+    end)
+  end
+
+  # Reads the whole object `file` of the chain, within the budget, and gives
+  # it to `fun`.
+  defp with_object(lazy, file, deadline, fun) do
     key = elem(lazy.files, file)
     {_etag, _epoch, size} = elem(lazy.pins, file)
-    deadline = Retry.deadline_in(fetch_ms)
-    weight = Budget.weigh(lazy.budget, size)
+    weight = weigh(lazy, size)
 
     with :ok <- Budget.acquire(lazy.budget, weight, deadline) do
       try do
         with {:ok, body} <- fetch_whole(lazy.ctx, key, deadline),
              :ok <- if(byte_size(body) == size, do: :ok, else: {:error, {:changed, key}}),
-             {:ok, _pages} <- Native.lazy_check_object(lazy.handle, file, body) do
-          {:ok, byte_size(body)}
-        end
+             do: fun.(body)
       after
         Budget.release(lazy.budget, weight)
       end
