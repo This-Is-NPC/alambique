@@ -510,6 +510,16 @@ fn strides(hdrsz: usize) -> [usize; arena::CLASSES] {
     std::array::from_fn(|i| (512 << i) + hdrsz + HEADER)
 }
 
+/// Why the arena could not start: settings it cannot use, or a range the
+/// system would not give.
+fn failure_state(e: &std::io::Error) -> ArenaState {
+    if e.kind() == std::io::ErrorKind::InvalidInput {
+        ArenaState::Unsupported
+    } else {
+        ArenaState::ReserveFailed
+    }
+}
+
 /// Sets up the arena if asked; on failure the library runs without it and
 /// `arena_state` says why.
 fn start_arena(req: &ArenaRequest, hdrsz: usize) {
@@ -526,10 +536,9 @@ fn start_arena(req: &ArenaRequest, hdrsz: usize) {
                     _ => ArenaState::Unsupported,
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => ArenaState::Unsupported,
             Err(e) => {
-                eprintln!("alambique_nif: page arena off, could not reserve the range: {e}");
-                ArenaState::ReserveFailed
+                eprintln!("alambique_nif: page arena off: {e}");
+                failure_state(&e)
             }
         }
     };
@@ -745,6 +754,19 @@ mod tests {
             // SAFETY: from `x_malloc`, not used again.
             unsafe { x_free(p) };
         }
+    }
+
+    #[test]
+    fn a_failure_to_start_is_reported_by_its_cause() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            failure_state(&Error::from(ErrorKind::OutOfMemory)),
+            ArenaState::ReserveFailed
+        );
+        assert_eq!(
+            failure_state(&Error::from(ErrorKind::InvalidInput)),
+            ArenaState::Unsupported
+        );
     }
 
     #[test]

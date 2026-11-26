@@ -75,6 +75,15 @@ unsafe impl Sync for Arena {}
 impl Arena {
     /// Reserves the range. `strides` are the slot bytes of the classes.
     pub fn new(cfg: Config, strides: [usize; CLASSES]) -> io::Result<Arena> {
+        Arena::with_reserve(cfg, strides, sys::reserve)
+    }
+
+    /// `new` with the reservation of the range given, so tests can make it fail.
+    fn with_reserve(
+        cfg: Config,
+        strides: [usize; CLASSES],
+        reserve: impl FnOnce(usize) -> io::Result<*mut u8>,
+    ) -> io::Result<Arena> {
         let page = sys::page_size();
         let book = Book::new(Geometry {
             page,
@@ -85,7 +94,7 @@ impl Arena {
         })
         .ok_or(io::ErrorKind::InvalidInput)?;
         let range = book.range_bytes();
-        let base = sys::reserve(range)? as usize;
+        let base = reserve(range)? as usize;
         Ok(Arena {
             base,
             range,
@@ -501,6 +510,23 @@ mod tests {
         // SAFETY: from `alloc`, not used afterwards.
         unsafe { a.free(ps[0]) };
         assert_eq!(a.alloc(C4K, 0), ps[0]);
+    }
+
+    #[test]
+    fn a_range_the_system_refuses_is_an_error_and_a_bad_geometry_another() {
+        let refused =
+            Arena::with_reserve(cfg(), strides(), |_| Err(io::ErrorKind::OutOfMemory.into()));
+        assert_eq!(
+            refused.err().map(|e| e.kind()),
+            Some(io::ErrorKind::OutOfMemory)
+        );
+        let mut bad = cfg();
+        bad.max_regions = 0;
+        let invalid = Arena::with_reserve(bad, strides(), |_| panic!("no range for no tables"));
+        assert_eq!(
+            invalid.err().map(|e| e.kind()),
+            Some(io::ErrorKind::InvalidInput)
+        );
     }
 
     #[test]

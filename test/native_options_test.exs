@@ -41,7 +41,8 @@ defmodule Alambique.NativeOptionsTest do
   test "settings that cannot work are refused when the library loads" do
     for {opts, message} <- [
           {[enabled: 1], ":enabled must be true or false"},
-          {[reserved_mib: 63], ":reserved_mib must be at least 64"},
+          {[reserved_mib: 63], ":reserved_mib must be from 64 up to 1048576"},
+          {[reserved_mib: 1_048_577], ":reserved_mib must be from 64 up to 1048576"},
           {[extent_kib: 6], ":extent_kib must be a multiple of 4 up to 1024"},
           {[extent_kib: 2048], ":extent_kib must be a multiple of 4 up to 1024"},
           {[keep_kib: -1], ":keep_kib must be a non-negative integer"},
