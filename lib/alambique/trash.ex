@@ -86,18 +86,29 @@ defmodule Alambique.Trash do
   Idempotent: marking a key again only adds a manifest that finds nothing
   to delete. A crash leaves the objects in place, with or without a
   manifest; it never leaves a manifest for objects that were not meant to
-  go. Only segment and snapshot keys are marked: the fixed keys of a cell
-  (`frozen`, `trashed`, `crashes`) belong to its current residency and are
-  never deleted through a manifest.
+  go. Only segment and snapshot keys (and their page-hash sidecars) are
+  marked: the fixed keys of a cell (`frozen`, `trashed`, `crashes`) belong to
+  its current residency and are never deleted through a manifest.
+
+  `:sidecars` is the set of keys among `keys` that have a sidecar in the
+  store (`Keys.sidecars/3`): each is marked together with its sidecar. The
+  sidecar of an object that is deleted first is deleted too, in the same
+  manifest; one that outlives its object is an orphan, which retention
+  marks on its next run.
   """
   @spec mark(Alambique.Replication.ctx(), String.t(), [String.t()], keyword, integer) ::
           {:ok, non_neg_integer} | {:error, term}
   def mark(ctx, cell, keys, opts, deadline) do
+    sidecars = Keyword.get(opts, :sidecars, MapSet.new())
+
     case Keys.data_keys(ctx.prefix, cell, keys) do
       [] -> {:ok, 0}
-      keys -> do_mark(ctx, cell, keys, opts, deadline)
+      keys -> do_mark(ctx, cell, Enum.flat_map(keys, &with_sidecar(&1, sidecars)), opts, deadline)
     end
   end
+
+  defp with_sidecar(key, sidecars),
+    do: if(MapSet.member?(sidecars, key), do: [key, Keys.sidecar(key)], else: [key])
 
   defp do_mark(ctx, cell, keys, opts, deadline) do
     started = System.monotonic_time()
@@ -158,6 +169,8 @@ defmodule Alambique.Trash do
 
   # Keys go in order, so lower levels go before the merged files built from
   # them and a crash never leaves a merged file to be rebuilt (design §9.1).
+  # An object sorts before its sidecar (`x.ltx` before `x.ltx.pages`): a crash
+  # between the two leaves an orphan sidecar, which retention sweeps.
   defp delete_all(ctx, cell, keys, concurrency, rate, deadline) do
     # A manifest could name a fixed key such as `frozen`; deleting it
     # could hit the marker of a new residency.

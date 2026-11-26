@@ -180,7 +180,8 @@ defmodule Alambique.Compaction do
   # State
 
   defp load(ctx, cell, opts, deadline) do
-    with {:ok, {segments, snapshots}} <- Objects.list_cell(ctx, cell, deadline) do
+    with {:ok, {segments, snapshots}, sidecars} <-
+           Objects.list_cell_sidecars(ctx, cell, deadline) do
       newest = List.last(snapshots)
       from = if(newest, do: newest.txid, else: 0)
       index = Plan.index(segments)
@@ -190,6 +191,8 @@ defmodule Alambique.Compaction do
          ctx: ctx,
          cell: cell,
          opts: opts,
+         # Keys with a page-hash sidecar in the listing: marked with it.
+         sidecars: sidecars,
          hold: opts[:hold],
          max_merges: opts[:max_merges],
          merge_concurrency: opts[:merge_concurrency],
@@ -397,12 +400,20 @@ defmodule Alambique.Compaction do
     %{
       state
       | index: Plan.add(state.index, seg),
+        sidecars: sidecar_listed(state, seg.key),
         merges: merges,
         bytes: state.bytes + bytes,
         l0_bytes: if(outcome == :ok, do: state.l0_bytes + level0, else: state.l0_bytes),
         superseded: superseded(state, group, outcome)
     }
   end
+
+  # A merged file of this pass has a sidecar when the context writes them (a
+  # missing one is deleted all the same, harmlessly).
+  defp sidecar_listed(%{ctx: %{page_sidecar: size}, sidecars: set}, key) when is_integer(size),
+    do: MapSet.put(set, key)
+
+  defp sidecar_listed(%{sidecars: set}, _key), do: set
 
   # The inputs of a merge to level 2 or above that this pass wrote. Level 0
   # stays for the rewind; a file that already existed was another compactor's
@@ -423,7 +434,10 @@ defmodule Alambique.Compaction do
 
   defp mark(state, keys) do
     opts =
-      [grace_ms: state.opts[:deletion_grace_ms] || Trash.default_grace_ms()] ++
+      [
+        grace_ms: state.opts[:deletion_grace_ms] || Trash.default_grace_ms(),
+        sidecars: state.sidecars
+      ] ++
         Keyword.take(state.opts, [:batch_keys, :concurrency])
 
     Trash.mark(state.ctx, state.cell, keys, opts, state.deadline)

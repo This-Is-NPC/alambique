@@ -41,8 +41,9 @@ defmodule Alambique.Replication.Objects do
   end
 
   @doc """
-  Like `list_cell/3`, with the segments and snapshots whose page-hash sidecar
-  is listed (`Keys.sidecars/3`).
+  Like `list_cell/3`, with the keys of the segments and snapshots whose
+  page-hash sidecar is listed (`Keys.sidecars/3`), whether or not the object
+  itself is.
   """
   @spec list_cell_sidecars(map, String.t(), integer) ::
           {:ok, {[map], [map]}, MapSet.t(String.t())} | {:error, term}

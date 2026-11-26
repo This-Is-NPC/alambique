@@ -78,13 +78,21 @@ defmodule Alambique.Replication.Keys do
 
   @doc """
   The keys in `keys` that name a segment or a snapshot, in the order of the
-  input for segments and oldest first for snapshots. Fixed keys such as the
-  lease, the frozen marker or the crash counter are dropped.
+  input for segments and oldest first for snapshots, then the page-hash
+  sidecars among them. Fixed keys such as the lease, the frozen marker or the
+  crash counter are dropped. Only this function returns sidecars: `parse/3`
+  never does, so planning a restore and listing a cell do not see them.
   """
   @spec data_keys(String.t(), String.t(), [String.t()]) :: [String.t()]
   def data_keys(prefix, cell, keys) do
     {segments, snapshots} = parse(prefix, cell, keys)
-    Enum.map(segments ++ snapshots, & &1.key)
+    Enum.map(segments ++ snapshots, & &1.key) ++ sidecar_keys(prefix, cell, keys)
+  end
+
+  # The page-hash sidecars among `keys`: every caller of `data_keys/3` deletes
+  # what it returns, and a sidecar goes with its object (design §16).
+  defp sidecar_keys(prefix, cell, keys) do
+    for object <- sidecars(prefix, cell, keys), do: sidecar(object)
   end
 
   @doc """
