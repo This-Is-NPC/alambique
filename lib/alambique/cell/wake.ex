@@ -6,14 +6,14 @@ defmodule Alambique.Cell.Wake do
   # returns `{:ok, state}` or `{:error, reason, state}` with the resources
   # taken so far, so the caller can release them.
 
-  alias Alambique.{Config, Fault, Freeze, Lease, Placement, Replication, Schema}
   alias Alambique.Cell.{Commit, Db, Facts, Hydration, Local, Pipe, Sql, State}
-  alias Alambique.Feed.{Capture, Publisher}
   alias Alambique.Compaction.{Compactor, Hold}
-  alias Alambique.Store.Metered
+  alias Alambique.{Config, Fault, Freeze, Lease, Placement, Replication, Schema}
+  alias Alambique.Feed.{Capture, Publisher}
   alias Alambique.Replication.{Replicator, Retry}
-  alias Alambique.Tx
+  alias Alambique.Store.Metered
   alias Alambique.Telemetry
+  alias Alambique.Tx
 
   @spec run(State.t()) :: {:ok, State.t()} | {:error, term, State.t()}
   def run(%State{} = state) do

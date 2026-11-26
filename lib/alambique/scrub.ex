@@ -47,8 +47,8 @@ defmodule Alambique.Scrub do
 
   require Logger
 
-  alias Alambique.{Config, Placement, Schema, Telemetry}
   alias Alambique.Cell.Db
+  alias Alambique.{Config, Placement, Schema, Telemetry}
   alias Alambique.Replication
   alias Alambique.Replication.{Native, Retry}
   alias Alambique.Sqlite

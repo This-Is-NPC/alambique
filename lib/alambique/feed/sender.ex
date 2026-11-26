@@ -20,8 +20,8 @@ defmodule Alambique.Feed.Sender do
   # How long the sender waits for the rows a piece announced.
   @rows_wait_ms 1_000
 
-  alias Alambique.{Fault, Telemetry}
   alias Alambique.Cell.State
+  alias Alambique.{Fault, Telemetry}
   alias Alambique.Feed.{Keys, Pieces, Record}
   alias Alambique.Replication.Retry
   alias Alambique.Store.Breaker
