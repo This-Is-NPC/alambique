@@ -309,6 +309,37 @@ defmodule Alambique.LeaseFaultsTest do
     end
   end
 
+  describe "release telemetry on the error path" do
+    setup %{ctx: ctx} do
+      id = make_ref()
+      events = for op <- [:release, :lost], do: [:alambique, :lease, op]
+      :telemetry.attach_many(id, events, &__MODULE__.forward/4, self())
+      on_exit(fn -> :telemetry.detach(id) end)
+      {:ok, lease} = Lease.acquire(ctx, "c", "a")
+      {:ok, lease: lease}
+    end
+
+    test "an injected put error is reported with its reason", %{
+      store: store,
+      ctx: ctx,
+      lease: lease
+    } do
+      MemoryStore.inject(store, kind: :error, ops: [:put], times: 1)
+      assert {:error, :injected} = Lease.release(ctx, lease)
+
+      assert_received {:event, [:alambique, :lease, :release], %{duration: _},
+                       %{cell: "c", owner: "a", result: :error, reason: :injected}}
+    end
+
+    test "a lease another node took is reported lost", %{ctx: ctx, lease: lease} do
+      {:ok, _, _} = Lease.take_over(ctx, "c", "b")
+      assert {:error, :lost} = Lease.release(ctx, lease)
+
+      assert_received {:event, [:alambique, :lease, :release], %{duration: _},
+                       %{cell: "c", owner: "a", result: :lost}}
+    end
+  end
+
   describe "a store that never answers" do
     # The lease can be used for `ttl - skew margin`: 800 ms here.
     setup %{store: store, world: world} do
