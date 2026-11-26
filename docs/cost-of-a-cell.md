@@ -159,19 +159,85 @@ code and are not measured. It does not work with `feed: [hand_over: :sender]`
 
 **`awake: [cache_kib: ...]`.** The page cache of each awake cell's connection,
 in KiB, set with `PRAGMA cache_size` when the cell wakes. The default is 512.
-It caps the memory an awake cell takes for its database pages, and a cell with
-a smaller database holds less. The figures are with 512 and with 256 (sections
-1 to 3).
+Each connection has a page cache of its own, so `cache_kib` is a hard limit: a
+cell whose working set is above it reads pages again from the file, and a cell
+with a smaller database holds less. The figures are with 512 and with 256
+(sections 1 to 3). A cache shared by all connections, where a busy cell
+borrows what idle ones do not use, is not available.
 
 **`awake: [idle_cache_after_ms: ..., idle_cache_kib: ...]`.** Off by default
 (`idle_cache_after_ms: nil`). When set, an awake cell with no call for
 `idle_cache_after_ms` lowers its page cache to `idle_cache_kib` (default 64),
-and the next call restores `cache_kib`. SQLite's page cache is one pool for the
-whole process, so the shrunk cell lowers what the awake cells may hold in total
-by `cache_kib - idle_cache_kib`; the pages freed are the least recently used
-ones of the node, not necessarily the cell's own. The cost is cold pages: the
-first call after a shrink reads its pages again. `idle_cache_after_ms` must be
-below `idle_timeout_ms`, and `idle_cache_kib` (0 or more) below `cache_kib`.
+and the next call restores `cache_kib`. The shrink evicts the pages of that
+connection at once, and their memory goes back to the allocators of the BEAM.
+The cost is cold pages: the first call after a shrink reads its pages again.
+`idle_cache_after_ms` must be below `idle_timeout_ms`, and `idle_cache_kib` (0
+or more) below `cache_kib`. A cell whose cached pages are fewer than
+`idle_cache_kib` evicts nothing: with the default 64, a small cell that holds
+52 KiB of pages keeps them all.
+
+Closing an idle connection (`awake: [idle_close_after_ms:]`) frees its pages as
+well, whatever else is set.
+
+**Where the freed memory goes: `config :alambique, :page_arena`.** Off by
+default. SQLite hands pages back to the allocators of the BEAM, which keep
+their carriers, so the memory freed by a shrink or a close is free for the VM
+but stays in the process. With the arena on, the page-cache blocks of each
+connection come from a range of address space that the library reserves at
+load, and a trim thread returns the pages of free blocks to the kernel
+(`madvise` with `MADV_DONTNEED`). The settings are read when the library loads,
+before any cell, and cannot change while the node runs; set them in
+`config/runtime.exs` or `config/config.exs`:
+
+```elixir
+config :alambique, :page_arena,
+  enabled: true,
+  reserved_mib: 4096,
+  extent_kib: 64,
+  trim_after_kib: 1024,
+  keep_kib: 4096,
+  max_trim_kib: 4096
+```
+
+`Alambique.NativeStats.read/0` reports what the library loaded with
+(`page_arena_state`, `page_arena_extent_kib` and the other `page_arena_*`
+settings): check it after a deploy, because a setting that did not reach the
+load leaves the arena off without an error. What the arena changes:
+
+- The bytes of the page caches are in `page_arena_in_use_bytes`, not in
+  `:erlang.memory/0` or `recon_alloc`. `sqlite_memory_used` still counts them.
+- A connection takes its blocks from extents it owns, each `extent_kib` of
+  blocks of one page size (at least one block), so the pages of an idle cell sit together
+  and whole OS pages are free to release. A page that shares an OS page with
+  a block in use stays resident; `page_arena_unreleasable_bytes` is that
+  remainder. `keep_kib` of free memory is left resident, and a trim runs when
+  more than `trim_after_kib` above it is free, releasing at most `max_trim_kib`
+  at once. Trims run on their own thread, so a scheduler never waits for the
+  kernel.
+- A page that was released comes back as a fault when the cell grows its cache
+  again: the first scan after a restore costs one page fault per page.
+- The arena attributes a block to the connection whose call allocates it. With
+  a shared cache (`cache=shared` in a URI) a block can land in the extents of
+  another connection, and with `PRAGMA threads` the helper threads allocate
+  in a region all connections share. Both are correct and release less.
+- `reserved_mib` is address space, not memory; when the library cannot reserve
+  it (a kernel that counts address space, a low `ulimit -v`), the arena stays
+  off and `page_arena_state` says so. The arena exists on Linux only. If the
+  range fills, blocks come from the BEAM's allocators (`page_arena_fallbacks`).
+- The tables of the arena are allocated in full when the library loads, so the
+  allocation hooks never allocate. They become resident as extents and
+  connections are used: under 100 bytes per extent and 48 bytes per connection.
+
+**`awake: [lookaside_bytes: ..., lookaside_count: ...]`.** Off by default
+(`nil`: SQLite's default, 1200 bytes by 40 slots, which is 48,000 bytes of
+memory on each connection). SQLite serves the small allocations of a running
+statement from these slots instead of the allocator, so fewer of them take the
+lock the allocator shares with every other thread. Setting either to `0` gives
+a connection no slots: it saves their memory and sends every allocation of a
+statement to the allocator. SQLite splits the memory into large slots of
+`lookaside_bytes` and small ones of 128 bytes. Both are set, `lookaside_bytes`
+is a multiple of 8 from 16 up to 65,528, and `lookaside_bytes` times
+`lookaside_count` is at most 1 MiB. The feed reader takes the same value.
 
 `idle_gc` (default `true`) makes the cell also collect its own garbage when the
 shrink happens. It returns the garbage of the last calls. With `cache_kib: 512`,

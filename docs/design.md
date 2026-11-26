@@ -36,6 +36,80 @@ The NIFs that panic on purpose exist only in test builds (cargo feature
 `test-panic`). `mise run check:release-nif` builds the release NIF and fails if
 the shared object contains one of their names.
 
+### 2.2 Page-cache memory
+
+SQLite allocates through hooks of the crate (`alloc.rs`): `enif_alloc` blocks
+with an 8-byte size header, a per-thread cache of small blocks, and, with the
+page arena on, a separate path for the blocks of the page caches.
+
+**One page cache per connection.** SQLite is built without
+`SQLITE_ENABLE_MEMORY_MANAGEMENT` (`native/alambique_nif/.cargo/config.toml`,
+forced so that a `LIBSQLITE3_FLAGS` already set does not win). That option makes
+every connection of the process share one page cache group, whatever is
+configured at run time, so `PRAGMA cache_size` would be a share of a pool and
+lowering it would evict nothing while the pool is not full. The library refuses
+to load when `sqlite3_compileoption_used("ENABLE_MEMORY_MANAGEMENT")` is true.
+The crate also configures `SQLITE_CONFIG_PAGECACHE` with no buffer, which keeps
+SQLite from carving the first pages of a cache out of one bulk block that a
+shrink cannot free. Cargo reads the config file only for a build started in the
+crate directory, so every cargo command of the project runs there.
+
+**The arena** (`arena/`, off unless `config :alambique, :page_arena` enables it
+at load). A block of a page-cache size, a power of two from 512 to 65,536 bytes
+plus the bytes SQLite reports with `SQLITE_CONFIG_PCACHE_HDRSZ` and the 8-byte
+header, is a slot of one of eight classes. The crate reserves one address range
+(`mmap` with `MAP_NORESERVE`, no huge pages) and never unmaps it. If the
+reservation fails, the arena stays off and `page_arena_state` says so.
+
+- The range is cut into extents of one size, a power of two chosen so that a
+  class fits at least one slot (`extent_kib` of slots of a class, rounded to
+  whole slots and OS pages, but at least one slot, so a 64 KiB page takes an
+  extent larger than 64 KiB). The extent of an address is found by a shift.
+- An extent holds slots of one class while a region owns it, and returns to a
+  pool when all its slots are free. The pool has extents with resident pages
+  first, then released ones, then a new extent from the range.
+- A region is one connection. `Conn` opens it before `sqlite3_open_v2` and
+  closes it with the database. A thread-local holds the region of the NIF call
+  running on the thread; the call timer sets it for the call and restores the
+  previous one when it ends. A block allocated with no region set, by a thread
+  of `PRAGMA threads` or a destructor, is in region 0, shared by all. Regions
+  have 64-bit ids that never repeat and a table of fixed size
+  (`max_regions`, 65,536); when it is full, new connections use region 0.
+  Closing a region passes its extents that have free slots to region 0; its
+  full extents pass when a slot is freed (the id does not match any more).
+- A free is by address from any thread: the extent gives the class and slot.
+  The block of an address outside the range was served by the BEAM, and is
+  freed there.
+- Every table (extents, the bits of free slots and of released OS pages,
+  regions) is a vector whose capacity is reserved when the library loads and
+  that never grows, so the hooks, which run under SQLite's global memory mutex,
+  allocate nothing and make no system call. Pages are resident only as the
+  tables fill.
+
+**Release.** A trim claims, under the arena lock, runs of free slots and fully
+free extents whose OS pages are resident, takes them out of the allocators'
+reach, calls `madvise(MADV_DONTNEED)` on the whole OS pages inside them with
+the lock released, and then marks the pages released and returns the slots. An
+extent with slots claimed does not return to the pool until the trim ends. A
+trim looks at 64 extents and releases at most 256 pages per round and at most
+`max_trim_kib` per cycle, resuming from a cursor. One thread runs the trims;
+the end of a NIF call and the close of a connection wake it when the free
+resident bytes exceed `keep_kib` plus `trim_after_kib` and the remainder of the
+last trim. A NIF call therefore pays a few atomic loads for it, never a system
+call.
+
+**Settings.** The load data (`Alambique.Replication.NativeOptions`) comes from
+the application environment when the NIF loads; the module loads the
+application first, so that its environment is readable then.
+`Native.stats/0` reports what the library loaded with, and a setting that did
+not reach the load leaves the arena off.
+
+**Lookaside.** `sqlite3_db_config(SQLITE_DBCONFIG_LOOKASIDE)` runs right after
+the open, before any statement, with the instance's `awake.lookaside_bytes` and
+`awake.lookaside_count`. SQLite makes large slots of the given size and small
+ones of 128 bytes out of the same memory. A refusal is logged and the open goes
+on with SQLite's default.
+
 ## 3. Store behaviour
 
 `Alambique.Store` is the only interface to object storage: conditional `put`,
