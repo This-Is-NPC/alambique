@@ -41,7 +41,9 @@ pub fn merge(inputs: &[&[u8]]) -> Result<Vec<u8>> {
         last_post = trailer.post_apply;
         headers.push(header);
     }
-    let (first, last) = (&headers[0], &headers[headers.len() - 1]);
+    let (Some(first), Some(last)) = (headers.first(), headers.last()) else {
+        return invalid("at least one input required");
+    };
     // A page that no input has would be a hole in a merged snapshot.
     let lock = ltx::lock_pgno(first.page_size);
     if first.is_snapshot()

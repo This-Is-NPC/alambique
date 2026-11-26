@@ -8,7 +8,7 @@ use std::fs::{File, OpenOptions};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 
-use crate::error::{invalid, Error, Result};
+use crate::error::{fit, invalid, Error, Result};
 use crate::ltx::{self, lock_pgno, page_crc, Decoder, CHECKSUM_FLAG};
 
 /// Database checksum from per-page CRCs.
@@ -23,19 +23,25 @@ pub fn file_sums(path: &Path, page_size: u32) -> Result<Vec<u64>> {
         return invalid("invalid page size");
     }
     let file = File::open(path)?;
-    let pages = file.metadata()?.len() / page_size as u64;
-    let lock = lock_pgno(page_size) as u64;
-    let mut buf = vec![0u8; page_size as usize];
-    let mut sums = Vec::with_capacity(pages as usize);
+    let ps = u64::from(page_size);
+    let pages: u32 = fit(file.metadata()?.len() / ps, "page count")?;
+    let lock = lock_pgno(page_size);
+    let mut buf = vec![0u8; fit::<usize, _>(page_size, "page size")?];
+    let mut sums = Vec::with_capacity(fit(pages, "page count")?);
     for pgno in 1..=pages {
         if pgno == lock {
             sums.push(0);
             continue;
         }
-        file.read_exact_at(&mut buf, (pgno - 1) * page_size as u64)?;
-        sums.push(page_crc(pgno as u32, &buf));
+        file.read_exact_at(&mut buf, page_offset(pgno, ps))?;
+        sums.push(page_crc(pgno, &buf));
     }
     Ok(sums)
+}
+
+/// Where page `pgno` (1-based) starts in a file of pages of `ps` bytes.
+fn page_offset(pgno: u32, ps: u64) -> u64 {
+    u64::from(pgno.saturating_sub(1)) * ps
 }
 
 #[derive(Debug)]
@@ -57,7 +63,7 @@ pub fn apply(path: &Path, data: &[u8], current: u64, page_size: u32) -> Result<A
             header.page_size
         ));
     }
-    let ps = header.page_size as u64;
+    let ps = u64::from(header.page_size);
     let lock = lock_pgno(header.page_size);
 
     let file = OpenOptions::new()
@@ -70,7 +76,7 @@ pub fn apply(path: &Path, data: &[u8], current: u64, page_size: u32) -> Result<A
     let old_commit = if snapshot {
         0
     } else {
-        (file.metadata()?.len() / ps) as u32
+        fit(file.metadata()?.len() / ps, "page count")?
     };
     if !snapshot && header.pre_apply != current {
         return Err(Error::PreApplyMismatch {
@@ -79,7 +85,10 @@ pub fn apply(path: &Path, data: &[u8], current: u64, page_size: u32) -> Result<A
         });
     }
     // Pages the file leaves out would stay holes that no checksum accounts for.
-    let added = frames.iter().filter(|f| f.0 > old_commit).count() as u64;
+    let added: u64 = fit(
+        frames.iter().filter(|f| f.0 > old_commit).count(),
+        "frame count",
+    )?;
     if added != ltx::pages_added(old_commit, header.commit, lock) {
         return invalid("file lacks pages the database grows by");
     }
@@ -93,24 +102,25 @@ pub fn apply(path: &Path, data: &[u8], current: u64, page_size: u32) -> Result<A
     };
 
     let mut dec = Decoder::new(data)?;
-    let mut buf = vec![0u8; ps as usize];
-    let mut old = vec![0u8; ps as usize];
+    let psz: usize = fit(ps, "page size")?;
+    let mut buf = vec![0u8; psz];
+    let mut old = vec![0u8; psz];
     while let Some(pgno) = dec.next_page(&mut buf)? {
         if pgno <= old_commit {
-            file.read_exact_at(&mut old, (pgno as u64 - 1) * ps)?;
+            file.read_exact_at(&mut old, page_offset(pgno, ps))?;
             acc ^= page_crc(pgno, &old);
         }
         acc ^= page_crc(pgno, &buf);
-        file.write_all_at(&buf, (pgno as u64 - 1) * ps)?;
+        file.write_all_at(&buf, page_offset(pgno, ps))?;
     }
     for pgno in header.commit.saturating_add(1)..=old_commit {
         if pgno == lock {
             continue;
         }
-        file.read_exact_at(&mut old, (pgno as u64 - 1) * ps)?;
+        file.read_exact_at(&mut old, page_offset(pgno, ps))?;
         acc ^= page_crc(pgno, &old);
     }
-    file.set_len(header.commit as u64 * ps)?;
+    file.set_len(u64::from(header.commit) * ps)?;
 
     let post_apply = CHECKSUM_FLAG | acc;
     if post_apply != trailer.post_apply {
@@ -125,7 +135,7 @@ pub fn apply(path: &Path, data: &[u8], current: u64, page_size: u32) -> Result<A
 /// Fully decodes `data` without applying it.
 pub fn verify(data: &[u8]) -> Result<(ltx::Header, ltx::Trailer)> {
     let mut dec = Decoder::new(data)?;
-    let mut buf = vec![0u8; dec.header.page_size as usize];
+    let mut buf = vec![0u8; fit::<usize, _>(dec.header.page_size, "page size")?];
     while dec.next_page(&mut buf)?.is_some() {}
     let header = dec.header.clone();
     let trailer = dec.finish()?;

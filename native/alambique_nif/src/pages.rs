@@ -20,7 +20,7 @@
 //! trailer).
 
 use crate::bytes::Reader;
-use crate::error::{invalid, Error, Result};
+use crate::error::{fit, invalid, Error, Result};
 use crate::ltx::{peek, Decoder, HEADER_SIZE, TRAILER_SIZE};
 
 const MAGIC: &[u8; 4] = b"ALPH";
@@ -78,7 +78,9 @@ impl Hashes {
     pub fn matches(&self, pgno: u32, page: &[u8]) -> bool {
         self.pgnos
             .binary_search(&pgno)
-            .is_ok_and(|i| self.hashes[i] == page_hash(self.file_checksum, pgno, page))
+            .ok()
+            .and_then(|i| self.hashes.get(i))
+            .is_some_and(|h| *h == page_hash(self.file_checksum, pgno, page))
     }
 
     pub fn pgnos(&self) -> &[u32] {
@@ -94,6 +96,24 @@ pub struct Parsed {
     pub object_size: u64,
     pub meta: Hash,
     pub hashes: Hashes,
+}
+
+/// The `count` page entries of a sidecar whose entries take `len` bytes.
+fn read_entries(r: &mut Reader, count: u32, len: usize) -> Result<(Vec<u32>, Vec<Hash>)> {
+    let count = fit::<usize, _>(count, "page count")?;
+    if count.checked_mul(ENTRY_LEN) != Some(len) {
+        return invalid("page sidecar count differs from its size");
+    }
+    let mut pgnos = Vec::with_capacity(count);
+    let mut hashes = Vec::with_capacity(count);
+    for _ in 0..count {
+        let (Some(pgno), Some(hash)) = (r.u32(), r.array::<HASH_LEN>()) else {
+            return invalid("page sidecar count differs from its size");
+        };
+        pgnos.push(pgno);
+        hashes.push(hash);
+    }
+    Ok((pgnos, hashes))
 }
 
 /// Reads a sidecar. Anything but a sidecar of this version, intact, is an
@@ -133,20 +153,7 @@ pub fn parse(b: &[u8]) -> Result<Parsed> {
     else {
         return invalid("short page sidecar");
     };
-    let count = count as usize;
-    let entries_len = count.checked_mul(ENTRY_LEN);
-    if body.len() - HEAD_LEN != entries_len.unwrap_or(usize::MAX) {
-        return invalid("page sidecar count differs from its size");
-    }
-    let mut pgnos = Vec::with_capacity(count);
-    let mut hashes = Vec::with_capacity(count);
-    for _ in 0..count {
-        let (Some(pgno), Some(hash)) = (r.u32(), r.array::<HASH_LEN>()) else {
-            return invalid("page sidecar count differs from its size");
-        };
-        pgnos.push(pgno);
-        hashes.push(hash);
-    }
+    let (pgnos, hashes) = read_entries(&mut r, count, body.len() - HEAD_LEN)?;
     Ok(Parsed {
         level,
         min_txid,
@@ -187,7 +194,7 @@ pub fn build(level: u8, object: &[u8]) -> Result<Vec<u8>> {
     out.extend_from_slice(&header.min_txid.to_be_bytes());
     out.extend_from_slice(&header.max_txid.to_be_bytes());
     out.extend_from_slice(&header.page_size.to_be_bytes());
-    out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+    out.extend_from_slice(&fit::<u32, _>(entries.len(), "page count")?.to_be_bytes());
     out.extend_from_slice(&trailer.file_checksum.to_be_bytes());
     out.extend_from_slice(&(object.len() as u64).to_be_bytes());
     out.extend_from_slice(&meta_hash(head, rest));
@@ -203,17 +210,17 @@ pub fn build(level: u8, object: &[u8]) -> Result<Vec<u8>> {
 /// A copy of the sidecar `side` with the byte at `at` changed and the seal
 /// recomputed: intact, and wrong (for tests of what a restore does with one).
 #[cfg(any(test, feature = "test-panic"))]
-pub fn forge_at(side: &[u8], at: usize) -> Vec<u8> {
-    let mut body = side[..side.len() - HASH_LEN].to_vec();
-    body[at] ^= 1;
+pub fn forge_at(side: &[u8], at: usize) -> Option<Vec<u8>> {
+    let mut body = side.get(..side.len().checked_sub(HASH_LEN)?)?.to_vec();
+    *body.get_mut(at)? ^= 1;
     let sealed = seal(&body);
     body.extend_from_slice(&sealed);
-    body
+    Some(body)
 }
 
 /// `forge_at` the first byte of the first page hash.
 #[cfg(any(test, feature = "test-panic"))]
-pub fn forge(side: &[u8]) -> Vec<u8> {
+pub fn forge(side: &[u8]) -> Option<Vec<u8>> {
     forge_at(side, HEAD_LEN + 4)
 }
 

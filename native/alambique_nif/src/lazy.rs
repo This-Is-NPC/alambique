@@ -926,10 +926,12 @@ impl Lazy {
             if f & F_SUM != 0 {
                 continue;
             }
-            if f & F_CRC != 0 {
-                sums.set(p as usize - 1, g.crc[p as usize - 1]);
-            } else {
-                missing.push(p);
+            let crc = (f & F_CRC != 0)
+                .then(|| g.crc.get(p as usize - 1).copied())
+                .flatten();
+            match crc {
+                Some(crc) if sums.set(p as usize - 1, crc) => {}
+                _ => missing.push(p),
             }
         }
         missing
@@ -1603,7 +1605,7 @@ mod tests {
             (67, "page number"),
         ] {
             let (_dir, lazy) = lazy_with(&a);
-            let forged = pages::forge_at(&side, at);
+            let forged = pages::forge_at(&side, at).unwrap();
             assert!(lazy.stage_hashes(0, &forged, 9, 1, 1).is_err(), "{what}");
             assert!(lazy.covered().is_empty(), "{what}");
         }
@@ -1677,7 +1679,7 @@ mod tests {
         assert_eq!(lazy.covered(), vec![0]);
 
         // One page hash of the sidecar is wrong (and sealed): it is dropped.
-        let bad = pages::forge(&side);
+        let bad = pages::forge(&side).unwrap();
         let (_dir, lazy) = lazy_with(&a);
         lazy.stage_hashes(0, &bad, 9, 1, 1).unwrap();
         assert!(!lazy.settle_hashes(0, &a).unwrap());
@@ -1916,17 +1918,17 @@ mod tests {
         let data = decode_frame(&a[e.offset as usize..][..e.size as usize], 4, PS).unwrap();
         lazy.install(4, &data).unwrap();
         assert_eq!(lazy.prepare_sums(&mut sums, &[2, 4]), vec![2]);
-        assert_eq!(sums.get(3), page_crc(4, &data));
+        assert_eq!(sums.get(3), Some(page_crc(4, &data)));
         // A batch that failed to upload is prepared again from a state without
         // the sums: they are filled again.
         let mut again = Sums::zeroed(7);
         assert_eq!(lazy.prepare_sums(&mut again, &[4]), Vec::<u32>::new());
-        assert_eq!(again.get(3), page_crc(4, &data));
+        assert_eq!(again.get(3), Some(page_crc(4, &data)));
         // Once the batch is captured, the replicator owns the sum.
         lazy.mark_sums(&[4]);
-        sums.set(3, 77);
+        assert!(sums.set(3, 77));
         assert_eq!(lazy.prepare_sums(&mut sums, &[4]), Vec::<u32>::new());
-        assert_eq!(sums.get(3), 77);
+        assert_eq!(sums.get(3), Some(77));
     }
 }
 

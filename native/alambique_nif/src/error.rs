@@ -25,6 +25,11 @@ impl From<std::io::Error> for Error {
     }
 }
 
+/// `n` as the narrower type `T`, or an error naming `what`.
+pub fn fit<T: TryFrom<U>, U>(n: U, what: &str) -> Result<T> {
+    T::try_from(n).map_err(|_| Error::Invalid(format!("{what} out of range")))
+}
+
 pub fn invalid<T>(msg: impl Into<String>) -> Result<T> {
     Err(Error::Invalid(msg.into()))
 }
