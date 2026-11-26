@@ -21,7 +21,7 @@ defmodule Alambique.Replica.Read do
     q = System.monotonic_time(:microsecond)
     timeout = timeout || config.call_timeout_ms
 
-    case route(config, cell, sql, params, q, bound, timeout) do
+    case route(config, cell, {sql, params, q, bound, timeout}) do
       {:replica, reply, %{txid: txid, lag_ms: lag_ms}} ->
         Telemetry.span_stop([:replica, :read], started, %{lag_ms: lag_ms}, %{
           cell: cell,
@@ -44,9 +44,9 @@ defmodule Alambique.Replica.Read do
     end
   end
 
-  defp route(%{replicas: nil}, _cell, _sql, _params, _q, _bound, _timeout), do: {:owner, :off}
+  defp route(%{replicas: nil}, _cell, _query), do: {:owner, :off}
 
-  defp route(config, cell, sql, params, q, bound, timeout) do
+  defp route(config, cell, {sql, params, q, bound, timeout}) do
     with nil <- Cell.whereis(config, cell),
          {:ok, location} <- Placement.locate(config, cell) do
       case Registry.lookup(config.replica_registry, {location.id, cell}) do

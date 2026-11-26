@@ -226,37 +226,43 @@ defmodule Alambique.Replica do
     deadline = Retry.deadline_in(config.op_timeout_ms)
     after_key = Keys.segment(ctx.prefix, cell, 0, txid, txid)
 
-    listing =
-      Task.async(fn ->
-        Objects.list(ctx, Keys.level_prefix(ctx.prefix, cell, 0), deadline, after_key)
-      end)
+    reads = start_reads(data, deadline, after_key)
 
-    snapshots =
-      Task.async(fn ->
-        Objects.list(ctx, Keys.level_prefix(ctx.prefix, cell, Keys.snapshot_level()), deadline)
-      end)
-
-    lease = Task.async(fn -> Lease.read(data.lease_ctx, cell) end)
-
-    marker =
-      if data.check_marker?,
-        do: Task.async(fn -> Marker.enabled?(ctx, cell, deadline) end)
-
-    with {:ok, lease} <- Task.await(lease, :infinity) |> lease_ok(),
-         :ok <- placed?(data, lease),
-         {:ok, keys} <- Task.await(listing, :infinity),
-         {:ok, snapshot_keys} <- Task.await(snapshots, :infinity),
+    with :ok <- placed?(data, Task.await(reads.lease, :infinity)),
+         {:ok, keys} <- Task.await(reads.listing, :infinity),
+         {:ok, snapshot_keys} <- Task.await(reads.snapshots, :infinity),
          {:ok, run} <- plan(ctx, cell, txid, keys, snapshot_keys),
          {:ok, run, more?} <- bodies(ctx, run, config.op_timeout_ms),
          :ok <- grow(data, run) do
-      {:ok, %{s: s, run: run, more: more?, marker: marker && Task.await(marker, :infinity)}}
+      {:ok, %{s: s, run: run, more: more?, marker: await_marker(reads.marker)}}
     end
   end
 
-  defp lease_ok({:error, reason}), do: {:error, {:lease, reason}}
-  defp lease_ok(other), do: {:ok, other}
+  defp await_marker(nil), do: nil
+  defp await_marker(task), do: Task.await(task, :infinity)
+
+  # The requests of a refresh that do not depend on each other.
+  defp start_reads(%{follow_ctx: ctx, cell: cell} = data, deadline, after_key) do
+    %{
+      listing:
+        Task.async(fn ->
+          Objects.list(ctx, Keys.level_prefix(ctx.prefix, cell, 0), deadline, after_key)
+        end),
+      snapshots:
+        Task.async(fn ->
+          Objects.list(ctx, Keys.level_prefix(ctx.prefix, cell, Keys.snapshot_level()), deadline)
+        end),
+      lease: Task.async(fn -> Lease.read(data.lease_ctx, cell) end),
+      marker:
+        if(data.check_marker?,
+          do: Task.async(fn -> Marker.enabled?(ctx, cell, deadline) end)
+        )
+    }
+  end
 
   # A moved cell keeps its old chain for a while, which would look fresh.
+  defp placed?(_data, {:error, reason}), do: {:error, {:lease, reason}}
+
   defp placed?(data, lease) do
     moved? = match?({:ok, %{moved_to: to}} when to != nil, lease)
 
@@ -443,7 +449,7 @@ defmodule Alambique.Replica do
   end
 
   defp schedule(state) do
-    if state.timer, do: _ = Process.cancel_timer(state.timer)
+    _ = if state.timer, do: Process.cancel_timer(state.timer)
     delay = poll_interval(state.settings, now() - state.last_read)
     %{state | timer: Process.send_after(self(), :poll, delay)}
   end
@@ -507,7 +513,7 @@ defmodule Alambique.Replica do
   defp close(%{conn: nil} = state), do: state
 
   defp close(state) do
-    Db.close(state.conn)
+    _ = Db.close(state.conn)
     %{state | conn: nil}
   end
 
@@ -559,7 +565,7 @@ defmodule Alambique.Replica do
   # The task stops first, so that nothing writes in the directory after it is
   # removed.
   defp finish(state) do
-    if state.task, do: Task.shutdown(state.task.handle, :brutal_kill)
+    _ = if state.task, do: Task.shutdown(state.task.handle, :brutal_kill)
     state = close(%{state | task: nil})
     _ = File.rm_rf(state.dir)
     state
