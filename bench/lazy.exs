@@ -3,6 +3,9 @@
 #   mise run bench:lazy             # 2048 MB
 #   mise run bench:lazy -- 512      # size of the database in MB
 #
+# The size is the data: the database file is about 16 % larger, and one object
+# may not exceed `max_object_bytes` (1 GiB), so the largest size is about 880.
+#
 # A synthetic database of incompressible rows is generated in a temporary
 # directory and replicated as TXID 1 plus 20 small batches. It is then
 # restored in full, and lazily: time to the page map, to the first query
@@ -140,7 +143,7 @@ defmodule Bench do
     {:ok, %{rows: [[_]]}} = Db.run(db, "SELECT count(*) FROM t WHERE k = 7", [])
     first_ms = ms(t)
     # The first write without the gate: it runs as soon as the file serves.
-    :ok = Sqlite.execute(db, "PRAGMA query_only = OFF; UPDATE t SET k = k WHERE id = 3")
+    :ok = write(db, "UPDATE t SET k = k WHERE id = 3")
     open_write_ms = ms(t)
 
     receive do
@@ -152,7 +155,7 @@ defmodule Bench do
 
     complete_ms = ms(t)
     # With the gate (`verify_writes`) the first write waits for the hydration.
-    :ok = Sqlite.execute(db, "PRAGMA query_only = OFF; UPDATE t SET k = k WHERE id = 4")
+    :ok = write(db, "UPDATE t SET k = k WHERE id = 4")
     gated_write_ms = ms(t)
     :telemetry.detach(handler)
 
@@ -199,6 +202,13 @@ defmodule Bench do
     end
 
     "objects #{length(objects)}, #{mb(bytes.(objects))} MB; sidecars #{length(pages)}, #{bytes.(pages)} bytes"
+  end
+
+  # A write on the connection of a cell goes through its transaction token.
+  defp write(db, sql) do
+    {:ok, token} = Sqlite.begin_transaction(db)
+    :ok = Sqlite.execute(db, sql)
+    Sqlite.finish_transaction(db, token, :commit)
   end
 
   defp seaweedfs(conn, path, dir) do
