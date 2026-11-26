@@ -8,18 +8,23 @@ defmodule Alambique.Cell.Hydration do
   # starts a new lazy restore: no marker is written, so the half-filled file
   # is never taken for a complete one.
 
-  alias Alambique.Inflight
+  alias Alambique.{Config, Inflight}
   alias Alambique.Cell.State
   alias Alambique.Replication.{Hydrator, Lazy, Native, Replicator, Retry}
 
   # Options of `Replication.restore/5` for this cell.
   @spec restore_opts(State.t()) :: keyword
-  def restore_opts(%State{config: %{lazy_restore: nil}}), do: []
+  def restore_opts(%State{config: config, id: cell}) do
+    case Config.lazy_mode(config, cell) do
+      :whole ->
+        []
 
-  def restore_opts(%State{config: %{lazy_restore: lazy, op_timeout_ms: op}}) do
-    # A statement waits a little longer than the hydrator's fetch, so that its
-    # failure reaches the statement before the wait ends.
-    [lazy: %{min_bytes: lazy.min_bytes, verify_bytes: lazy.verify_bytes, wait_ms: op + 1_000}]
+      :ranged ->
+        %{lazy_restore: lazy, op_timeout_ms: op} = config
+        # A statement waits a little longer than the hydrator's fetch, so that
+        # its failure reaches the statement before the wait ends.
+        [lazy: %{min_bytes: lazy.min_bytes, verify_bytes: lazy.verify_bytes, wait_ms: op + 1_000}]
+    end
   end
 
   @doc """
