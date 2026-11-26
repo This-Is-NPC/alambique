@@ -19,7 +19,6 @@ allow = [
   "Unicode-3.0",
   "NCSA",
   "CC0-1.0",
-  "LGPL-2.1-or-later", # one arm of the "MIT OR Apache-2.0 OR LGPL-2.1-or-later" of a crate
 ]
 confidence-threshold = 0.9
 
