@@ -74,8 +74,12 @@ defmodule Alambique.QuarantineClusterTest do
       assert {:error, :frozen} = insert(c, name, inst, poison, 2)
     end
 
-    # The other cell never noticed.
-    for name <- Cluster.names(c), do: assert({:ok, _} = insert(c, name, inst, healthy, 2))
+    # The other cell never noticed. Its owner may be a node that just crashed,
+    # so its lease runs out on its own clock, not the poison cell's: until it
+    # does the call is `{:unavailable, owner, expires}` (`Alambique.execute/4`).
+    for name <- Cluster.names(c) do
+      assert eventually(fn -> match?({:ok, _}, insert(c, name, inst, healthy, 2)) end, 8_000)
+    end
 
     # An operator looks, then lets it wake: its data is intact.
     assert :ok = on(c, :n1, :unfreeze, [inst, poison])
