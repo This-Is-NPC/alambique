@@ -1237,13 +1237,6 @@ defmodule Alambique.Cell do
     end
   end
 
-  defp cleanup_then_close(state) do
-    case cleanup_if_due(state) do
-      {:ok, state} -> if closable?(state), do: close_idle(state), else: rearmed(state)
-      {:stop, reason, state} -> stop_serving(state, reason)
-    end
-  end
-
   # The lazy phase of the file (design §16) ended.
   defp info({:hydrated, pid}, %State{hydrator: pid} = state) do
     case Hydration.done(state) do
@@ -1266,6 +1259,13 @@ defmodule Alambique.Cell do
   end
 
   defp info(_message, state), do: {:noreply, state}
+
+  defp cleanup_then_close(state) do
+    case cleanup_if_due(state) do
+      {:ok, state} -> if closable?(state), do: close_idle(state), else: rearmed(state)
+      {:stop, reason, state} -> stop_serving(state, reason)
+    end
+  end
 
   # Feed cleanup (design §13)
 
