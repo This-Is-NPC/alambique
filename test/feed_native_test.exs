@@ -332,22 +332,25 @@ defmodule Alambique.FeedNativeTest do
     for mode <- [:cell, :native] do
       test "is handed over again and again as with hand_over: #{inspect(mode)}", ctx do
         inst = start(ctx, "bad-#{unquote(mode)}", hand_over: unquote(mode))
-        hands = count_hands(@cell)
+        # The hand-over loops, and every turn logs.
+        capture_log(fn ->
+          hands = count_hands(@cell)
 
-        # A row of the feed as a trigger writes it, for a table that has such a name.
-        {:ok, _} =
-          Alambique.execute(
-            inst,
-            @cell,
-            "INSERT INTO _alambique_feed (txid, ts, tbl, op, key) " <>
-              "VALUES (-2, 0, CAST(x'ff' AS TEXT), 'insert', '{}')"
-          )
+          # A row of the feed as a trigger writes it, for a table that has such a name.
+          {:ok, _} =
+            Alambique.execute(
+              inst,
+              @cell,
+              "INSERT INTO _alambique_feed (txid, ts, tbl, op, key) " <>
+                "VALUES (-2, 0, CAST(x'ff' AS TEXT), 'insert', '{}')"
+            )
 
-        eventually(fn -> :counters.get(hands, 1) >= 3 end)
+          eventually(fn -> :counters.get(hands, 1) >= 3 end)
 
-        # The cell serves meanwhile, and nothing was published.
-        assert {:ok, %{rows: [[1]]}} = Alambique.query(inst, @cell, "SELECT 1")
-        assert records(ctx, "bad-#{unquote(mode)}") == []
+          # The cell serves meanwhile, and nothing was published.
+          assert {:ok, %{rows: [[1]]}} = Alambique.query(inst, @cell, "SELECT 1")
+          assert records(ctx, "bad-#{unquote(mode)}") == []
+        end)
       end
     end
   end
@@ -380,6 +383,8 @@ defmodule Alambique.FeedNativeTest do
     test ":after_burst keeps the reader while a later range was handed over", ctx do
       inst = start(ctx, "after-burst", sender(reader_close: :after_burst), name: :after_burst)
       assert %{reader_close: :after_burst} = Alambique.Config.fetch!(inst).feed
+      insert(inst, @cell, [1])
+      eventually(fn -> keys(records(ctx, "after-burst")) == [1] end)
 
       # Read up to 3 of 5 handed over: more is coming, so the reader stays.
       {kept, closed, gone} =
