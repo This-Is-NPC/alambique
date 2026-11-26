@@ -507,7 +507,12 @@ defmodule Alambique.Feed.Publisher do
   end
 
   defp open_reader(%State{feed_reader: nil} = state) do
-    with {:ok, reader} <- Db.open_reader(state.path, state.config.feed.reader_cache_kib),
+    with {:ok, reader} <-
+           Db.open_reader(
+             state.path,
+             state.config.feed.reader_cache_kib,
+             Db.lookaside(state.config)
+           ),
          do: {:ok, %{state | feed_reader: reader}}
   end
 

@@ -308,6 +308,37 @@ defmodule Alambique.ConfigOptionsTest do
     end
   end
 
+  test "awake lookaside is SQLite's default unless both keys are set", ctx do
+    awake = Alambique.Config.build(base(ctx, [])).awake
+    assert %{lookaside_bytes: nil, lookaside_count: nil} = awake
+    assert Alambique.Cell.Db.lookaside(%{awake: awake}) == nil
+
+    for {bytes, count, expected} <- [{512, 16, {512, 16}}, {0, 0, {0, 0}}, {1200, 0, {1200, 0}}] do
+      config =
+        Alambique.Config.build(base(ctx, awake: [lookaside_bytes: bytes, lookaside_count: count]))
+
+      assert Alambique.Cell.Db.lookaside(config) == expected
+    end
+  end
+
+  test "awake lookaside sizes that SQLite would refuse or that cost too much are refused", ctx do
+    for {bytes, count, message} <- [
+          {512, nil, ~r/must be set together/},
+          {nil, 16, ~r/must be set together/},
+          {-8, 16, ~r/must be set together/},
+          {:big, 16, ~r/must be set together/},
+          {8, 16, ~r/multiple of 8 from 16/},
+          {1203, 40, ~r/multiple of 8 from 16/},
+          {65_536, 4, ~r/multiple of 8 from 16/},
+          {65_528, 17, ~r/must not exceed 1048576/},
+          {1200, 1000, ~r/must not exceed 1048576/}
+        ] do
+      assert_raise ArgumentError, message, fn ->
+        Alambique.Config.build(base(ctx, awake: [lookaside_bytes: bytes, lookaside_count: count]))
+      end
+    end
+  end
+
   test "awake.idle_cache_kib is a non-negative integer below cache_kib when the shrink is on",
        ctx do
     for bad <- [-1, 1.5, :small] do

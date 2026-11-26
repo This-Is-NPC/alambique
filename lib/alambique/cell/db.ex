@@ -61,6 +61,15 @@ defmodule Alambique.Cell.Db do
   defp cache_size(conn, kib), do: Sqlite.execute(conn, "PRAGMA cache_size = -#{kib}", write: true)
 
   @doc """
+  The lookaside memory of the connections of the instance (`:awake`
+  `:lookaside_bytes` and `:lookaside_count`), for the `:lookaside` option of
+  `Alambique.Sqlite.open/2`; `nil` keeps SQLite's default.
+  """
+  @spec lookaside(map) :: {non_neg_integer, non_neg_integer} | nil
+  def lookaside(%{awake: %{lookaside_bytes: nil}}), do: nil
+  def lookaside(%{awake: awake}), do: {awake.lookaside_bytes, awake.lookaside_count}
+
+  @doc """
   Opens a replica file (design §14) for reading only. The file never changes
   while it is open, so it is opened `immutable`: no locks, and no `-wal` or
   `-shm` file even though the header says WAL. The connection is also
@@ -81,14 +90,21 @@ defmodule Alambique.Cell.Db do
   see committed rows only, and hold no lock between statements. The page
   cache is `cache_kib`.
   """
-  @spec open_reader(Path.t(), pos_integer) :: {:ok, Sqlite.conn()} | {:error, term}
-  def open_reader(path, cache_kib) do
+  @spec open_reader(Path.t(), pos_integer, {non_neg_integer, non_neg_integer} | nil) ::
+          {:ok, Sqlite.conn()} | {:error, term}
+  def open_reader(path, cache_kib, lookaside \\ nil) do
     case Fault.point(:db_open_reader, %{path: path}) do
       {:error, _} = injected ->
         injected
 
       _ ->
-        with {:ok, conn} <- Sqlite.open(path, readonly: true, vfs: :alambique, gated: true) do
+        with {:ok, conn} <-
+               Sqlite.open(path,
+                 readonly: true,
+                 vfs: :alambique,
+                 gated: true,
+                 lookaside: lookaside
+               ) do
           settle(conn, cache_size(conn, cache_kib))
         end
     end
