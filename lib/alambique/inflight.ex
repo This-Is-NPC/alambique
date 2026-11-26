@@ -41,10 +41,11 @@ defmodule Alambique.Inflight do
 
     body = [@idle, Jason.encode!(%{cell: cell, kind: kind})]
 
-    with {:ok, fd} <- open_file(path, dir, body) do
-      Tracker.track(config, path)
-      %__MODULE__{fd: fd, path: path}
-    else
+    case open_file(path, dir, body) do
+      {:ok, fd} ->
+        Tracker.track(config, path)
+        %__MODULE__{fd: fd, path: path}
+
       {:error, reason} ->
         Logger.warning("Alambique could not create the marker of #{cell}: #{inspect(reason)}")
         nil
