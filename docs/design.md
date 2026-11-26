@@ -54,7 +54,7 @@ SQLite from carving the first pages of a cache out of one bulk block that a
 shrink cannot free. Cargo reads the config file only for a build started in the
 crate directory, so every cargo command of the project runs there.
 
-**The arena** (`arena/`, off unless `config :alambique, :page_arena` enables it
+**The arena** (`arena/`, on unless `config :alambique, :page_arena` disables it
 at load). A block of a page-cache size, a power of two from 512 to 65,536 bytes
 plus the bytes SQLite reports with `SQLITE_CONFIG_PCACHE_HDRSZ` and the 8-byte
 header, is a slot of one of eight classes. The crate reserves one address range
