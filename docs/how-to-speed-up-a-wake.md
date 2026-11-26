@@ -132,8 +132,9 @@ Fewer requests, or requests that run together, make the wake faster. Design
      such object written, after the acknowledgment of the commit (a failed one is
      reported by `[:alambique, :replication, :sidecar]` and costs only the
      whole read of that object at a wake), `80 + 20 × pages` bytes stored (0.6 % of an object of 4 KiB pages) for each, and one `GET` of that
-     size for each covered file at a wake, before the first query (about 0.3 to
-     0.6 s on a local S3 server for 5 MB). The download of an 861 MB cell took
+     size for each covered file at a wake, made together for the files of the
+     chain and beside the reads of their edges (with 20 files and 20 ms per
+     request the plan took 0.93 s instead of 1.33 s). The download of an 861 MB cell took
      1.89 s instead of 6.76 s in the memory store, because the covered file is
      not read again (design §16 has the measurements and their limits). Reading uses a sidecar whenever one
      exists, so turn it on for the writers first. Writes still wait for the end
