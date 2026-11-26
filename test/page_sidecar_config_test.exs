@@ -103,6 +103,13 @@ defmodule Alambique.PageSidecarConfigTest do
         do: {:ok, _} = Alambique.execute(inst, cell, "INSERT INTO t VALUES (#{n}, x'00')")
 
     assert_receive {:telemetry, [:alambique, :replication, :sidecar], _, %{result: :busy}}, 5_000
+
+    # The write that is held does not outlive the cell.
+    pid = Alambique.Cell.whereis(Config.fetch!(inst), cell)
+    writer = in_cell(pid, & &1.sidecar)
+    assert is_pid(writer) and Process.alive?(writer)
+    :ok = Alambique.hibernate(inst, cell)
+    eventually(fn -> not Process.alive?(writer) end)
   end
 
   describe "a cell that wrote sidecars" do
