@@ -31,6 +31,8 @@
 #   ALAMBIQUE_BENCH_CELLS      connections of release and hot     (default "250")
 #   ALAMBIQUE_BENCH_KIB        page cache filled per connection   (default "1024")
 #   ALAMBIQUE_BENCH_LIMIT_MIB  memory limit of capacity           (default "1024")
+#   ALAMBIQUE_BENCH_STEP       rows a connection adds per turn when
+#                              interleaving (1 mixes pages finest)  (default "10")
 #   ALAMBIQUE_BENCH_SECONDS    seconds of each hot window         (default "5")
 #   ALAMBIQUE_BENCH_MAX_CELLS  cells capacity stops at            (default "5000")
 #   ALAMBIQUE_BENCH_DATA_DIR   where the cells of capacity keep their files
@@ -130,9 +132,10 @@ defmodule Bench do
 
   def fill(conns, kib, :interleaved) do
     total = rows(kib)
+    step = env_int("ALAMBIQUE_BENCH_STEP", 10)
 
-    for from <- 1..total//10, c <- conns do
-      grow(c, from, min(from + 9, total))
+    for from <- 1..total//step, c <- conns do
+      grow(c, from, min(from + step - 1, total))
     end
   end
 
