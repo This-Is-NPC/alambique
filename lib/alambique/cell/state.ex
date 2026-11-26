@@ -114,7 +114,11 @@ defmodule Alambique.Cell.State do
   @type t :: %__MODULE__{}
 
   @spec now_ms(t) :: integer
-  def now_ms(%__MODULE__{config: %{clock: {clock, clock_config}}}), do: clock.now_ms(clock_config)
+  def now_ms(%__MODULE__{config: %{clock: {clock, clock_config}}}) do
+    case clock.now_ms(clock_config) do
+      ms when is_integer(ms) -> ms
+    end
+  end
 
   @doc """
   An option a cell may set for itself: its own value (`nil` included) or the
