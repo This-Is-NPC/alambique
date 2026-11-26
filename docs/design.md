@@ -321,7 +321,9 @@ nobody calls.
 `sql.locking_mode` is taken when the connection opens and the idle close and
 the feed rely on it, so a refresh whose merged `locking_mode` differs from the
 cell's is refused whole, before any pragma or timer, and applies at the next
-wake. Every other per-cell key applies live.
+wake. `lazy_restore.mode` is only read when the cell restores a file, so a
+refresh stores it and lists it in `changed`, and nothing about the running cell
+changes. Every other per-cell key applies live.
 
 A function that fails or an override that is invalid keeps the options the
 cell has, with either `cell_options_invalid`: stopping a serving cell for a
