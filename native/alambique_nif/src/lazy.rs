@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use crate::bytes::Reader;
 use crate::dbsum::fold;
 use crate::error::{invalid, Result};
 use crate::ltx::{
@@ -103,23 +104,35 @@ pub fn stage_file(
     if total < (HEADER_SIZE + PAGE_HEADER_SIZE + TRAILER_SIZE + 9) as u64 {
         return invalid("short file");
     }
-    if tail.len() < TRAILER_SIZE + 8 {
-        return Ok(Err(TRAILER_SIZE + 8));
-    }
-    let t = &tail[tail.len() - TRAILER_SIZE..];
-    let post_apply = trailer_post(&header, u64::from_be_bytes(t[..8].try_into().unwrap()))?;
-    let size_at = tail.len() - TRAILER_SIZE - 8;
-    let index_len = u64::from_be_bytes(tail[size_at..size_at + 8].try_into().unwrap());
+    let short = TRAILER_SIZE + 8;
+    let Some((rest, trailer)) = tail.split_last_chunk::<TRAILER_SIZE>() else {
+        return Ok(Err(short));
+    };
+    let Some((rest, size_field)) = rest.split_last_chunk::<8>() else {
+        return Ok(Err(short));
+    };
+    let mut tr = Reader::new(trailer);
+    let (Some(wire_post), Some(file_checksum)) = (tr.u64(), tr.u64()) else {
+        return invalid("short trailer");
+    };
+    let post_apply = trailer_post(&header, wire_post)?;
+    let index_len = u64::from_be_bytes(*size_field);
     // The most a valid index takes: at most `commit` entries of three varints,
     // and the terminator. A larger claim would make the host read the file.
+    let out_of_range = || crate::error::Error::Invalid("page index size out of range".into());
     let need = index_len
-        .checked_add((TRAILER_SIZE + 8) as u64)
-        .filter(|n| *n <= total && index_len <= MAX_INDEX_ENTRY * header.commit as u64 + 1)
-        .ok_or_else(|| crate::error::Error::Invalid("page index size out of range".into()))?;
-    if (tail.len() as u64) < need {
-        return Ok(Err(need as usize));
+        .checked_add(short as u64)
+        .filter(|n| *n <= total && index_len <= MAX_INDEX_ENTRY * u64::from(header.commit) + 1)
+        .ok_or_else(out_of_range)?;
+    let need = usize::try_from(need).map_err(|_| out_of_range())?;
+    if tail.len() < need {
+        return Ok(Err(need));
     }
-    let index = &tail[size_at - index_len as usize..size_at];
+    let index_start = usize::try_from(index_len)
+        .ok()
+        .and_then(|n| rest.len().checked_sub(n))
+        .ok_or_else(out_of_range)?;
+    let index = rest.get(index_start..).ok_or_else(out_of_range)?;
     let mut entries = Vec::new();
     let (mut p, mut prev) = (0usize, 0u32);
     loop {
@@ -129,26 +142,36 @@ pub fn stage_file(
         }
         let offset = get_uvarint(index, &mut p)?;
         let size = get_uvarint(index, &mut p)?;
-        if pgno > header.commit as u64 || pgno as u32 <= prev {
-            return invalid("page index out of order");
-        }
+        let pgno = u32::try_from(pgno)
+            .ok()
+            .filter(|n| *n <= header.commit && *n > prev)
+            .ok_or_else(|| crate::error::Error::Invalid("page index out of order".into()))?;
         let min_size = (PAGE_HEADER_SIZE + 4) as u64;
-        if offset < HEADER_SIZE as u64 || size < min_size || offset.saturating_add(size) > total {
-            return invalid("page frame outside the file");
-        }
-        prev = pgno as u32;
-        entries.push((prev, offset, size as u32));
+        let size = u32::try_from(size)
+            .ok()
+            .filter(|s| {
+                offset >= HEADER_SIZE as u64
+                    && u64::from(*s) >= min_size
+                    && offset.saturating_add(u64::from(*s)) <= total
+            })
+            .ok_or_else(|| crate::error::Error::Invalid("page frame outside the file".into()))?;
+        prev = pgno;
+        entries.push((pgno, offset, size));
     }
     if p != index.len() {
         return invalid("page index size mismatch");
     }
-    let meta = pages::meta_hash(&head[..HEADER_SIZE], &tail[size_at - index_len as usize..]);
+    let meta_head = head
+        .first_chunk::<HEADER_SIZE>()
+        .ok_or_else(|| crate::error::Error::Invalid("short header".into()))?;
+    let meta_tail = tail.get(index_start..).ok_or_else(out_of_range)?;
+    let meta = pages::meta_hash(meta_head, meta_tail);
     Ok(Ok(Staged {
         header,
         post_apply,
         total,
         entries,
-        file_checksum: u64::from_be_bytes(t[8..].try_into().unwrap()),
+        file_checksum,
         meta,
     }))
 }
@@ -163,22 +186,25 @@ pub fn frame_of(data: &[u8], rel: u32, len: u32) -> Result<&[u8]> {
 /// frame must be exactly what the page index says: the size flag, and a block
 /// that ends where the frame does.
 pub fn decode_frame(frame: &[u8], pgno: u32, page_size: u32) -> Result<Vec<u8>> {
-    let head = PAGE_HEADER_SIZE + 4;
-    if frame.len() < head {
+    let mut r = Reader::new(frame);
+    let (Some(got_pgno), Some(flags), Some(n)) = (r.u32(), r.u16(), r.u32()) else {
         return invalid("short page frame");
-    }
-    if u32::from_be_bytes(frame[0..4].try_into().unwrap()) != pgno {
+    };
+    if got_pgno != pgno {
         return invalid(format!("frame is not page {pgno}"));
     }
-    if u16::from_be_bytes(frame[4..PAGE_HEADER_SIZE].try_into().unwrap()) != PAGE_FLAG_SIZE {
+    if flags != PAGE_FLAG_SIZE {
         return invalid(format!("page {pgno} frame has unexpected flags"));
     }
-    let n = u32::from_be_bytes(frame[PAGE_HEADER_SIZE..head].try_into().unwrap()) as usize;
-    if frame.len() - head != n {
-        return invalid(format!("page {pgno} frame length differs from its size"));
-    }
+    let head = PAGE_HEADER_SIZE + 4;
+    let block = frame
+        .get(head..)
+        .filter(|b| u32::try_from(b.len()).is_ok_and(|len| len == n))
+        .ok_or_else(|| {
+            crate::error::Error::Invalid(format!("page {pgno} frame length differs from its size"))
+        })?;
     let mut page = vec![0u8; page_size as usize];
-    let got = lz4_flex::block::decompress_into(&frame[head..], &mut page)
+    let got = lz4_flex::block::decompress_into(block, &mut page)
         .map_err(|e| crate::error::Error::Invalid(format!("decompress page {pgno}: {e}")))?;
     if got != page.len() {
         return invalid(format!("page {pgno} decompressed to {got} bytes"));
@@ -1117,6 +1143,35 @@ mod tests {
         tail.extend_from_slice(&(index.len() as u64).to_be_bytes());
         tail.extend_from_slice(&[0; TRAILER_SIZE]);
         let total = 1 << 40;
+        assert!(stage_file(&header.to_bytes(), &tail, total).is_err());
+    }
+
+    #[test]
+    fn a_frame_longer_than_four_gib_is_rejected() {
+        let header = Header {
+            page_size: PS,
+            commit: 1,
+            min_txid: 1,
+            max_txid: 1,
+            flags: crate::ltx::HEADER_FLAG_NO_CHECKSUM,
+            post_apply: crate::ltx::CHECKSUM_FLAG | 1,
+            ..Default::default()
+        };
+        let varint = |mut v: u64| {
+            let mut out = Vec::new();
+            while v >= 0x80 {
+                out.push(v as u8 | 0x80);
+                v >>= 7;
+            }
+            out.push(v as u8);
+            out
+        };
+        let index: Vec<u8> = [1, 100, 5 << 30, 0].into_iter().flat_map(varint).collect();
+        let mut tail = index.clone();
+        tail.extend_from_slice(&(index.len() as u64).to_be_bytes());
+        tail.extend_from_slice(&[0; TRAILER_SIZE]);
+        let total = 1 << 40;
+        // The size must not be cut to 32 bits and then accepted.
         assert!(stage_file(&header.to_bytes(), &tail, total).is_err());
     }
 

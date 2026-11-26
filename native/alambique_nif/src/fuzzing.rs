@@ -57,7 +57,7 @@ pub fn ltx_decode(data: &[u8]) {
         assert_eq!((header, trailer), (h2, t2));
         for frame in frames {
             assert!(frame.1 + frame.2 <= data.len());
-            let _ = ltx::frame_payload(data, frame);
+            assert!(ltx::frame_payload(data, frame).is_ok());
         }
         // What the decoder accepts, the lazy-restore parser accepts too.
         let staged = lazy::stage_file(&data[..HEADER_SIZE], data, data.len() as u64);

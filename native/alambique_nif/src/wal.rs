@@ -12,7 +12,8 @@ use std::io::ErrorKind;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 
-use crate::error::{invalid, Result};
+use crate::bytes::Reader;
+use crate::error::{invalid, Error, Result};
 
 pub const WAL_HEADER_SIZE: u64 = 32;
 const FRAME_HEADER_SIZE: usize = 24;
@@ -52,23 +53,13 @@ struct WalHeader {
     cksum2: u32,
 }
 
-fn be32(b: &[u8]) -> u32 {
-    u32::from_be_bytes(b[..4].try_into().unwrap())
-}
-
 /// SQLite's WAL checksum over `data` (a multiple of 8 bytes).
 fn checksum(big_endian: bool, data: &[u8], mut s0: u32, mut s1: u32) -> (u32, u32) {
-    for c in data.as_chunks::<8>().0 {
+    for &[a, b] in data.as_chunks::<4>().0.as_chunks::<2>().0 {
         let (a, b) = if big_endian {
-            (
-                u32::from_be_bytes(c[0..4].try_into().unwrap()),
-                u32::from_be_bytes(c[4..8].try_into().unwrap()),
-            )
+            (u32::from_be_bytes(a), u32::from_be_bytes(b))
         } else {
-            (
-                u32::from_le_bytes(c[0..4].try_into().unwrap()),
-                u32::from_le_bytes(c[4..8].try_into().unwrap()),
-            )
+            (u32::from_le_bytes(a), u32::from_le_bytes(b))
         };
         s0 = s0.wrapping_add(a).wrapping_add(s1);
         s1 = s1.wrapping_add(b).wrapping_add(s0);
@@ -83,20 +74,32 @@ fn read_header(file: &File) -> Result<Option<WalHeader>> {
         Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e.into()),
     }
-    let magic = be32(&b[0..4]);
+    let Some((front, _)) = b.split_first_chunk::<24>() else {
+        return Ok(None);
+    };
+    let mut r = Reader::new(&b);
+    let (Some(magic), Some(_version), Some(page_size), Some(_seq)) =
+        (r.u32(), r.u32(), r.u32(), r.u32())
+    else {
+        return Ok(None);
+    };
+    let (Some(salt1), Some(salt2), Some(sum1), Some(sum2)) = (r.u32(), r.u32(), r.u32(), r.u32())
+    else {
+        return Ok(None);
+    };
     if magic != MAGIC_LE && magic != MAGIC_BE {
         return Ok(None);
     }
     let big_endian = magic == MAGIC_BE;
-    let (c1, c2) = checksum(big_endian, &b[..24], 0, 0);
-    if (c1, c2) != (be32(&b[24..28]), be32(&b[28..32])) {
+    let (c1, c2) = checksum(big_endian, front, 0, 0);
+    if (c1, c2) != (sum1, sum2) {
         return Ok(None);
     }
     Ok(Some(WalHeader {
         big_endian,
-        page_size: be32(&b[8..12]),
-        salt1: be32(&b[16..20]),
-        salt2: be32(&b[20..24]),
+        page_size,
+        salt1,
+        salt2,
         cksum1: c1,
         cksum2: c2,
     }))
@@ -175,7 +178,10 @@ pub fn scan(
             0
         }
     });
-    let frame_len = FRAME_HEADER_SIZE + page_size as usize;
+    let frame_len = usize::try_from(page_size)
+        .ok()
+        .and_then(|p| p.checked_add(FRAME_HEADER_SIZE))
+        .ok_or_else(|| Error::Invalid(format!("wal page size {page_size} too large")))?;
     let mut buf = vec![0u8; frame_len];
     let mut offset = start.offset;
     let (mut s0, mut s1) = (start.cksum1, start.cksum2);
@@ -193,23 +199,36 @@ pub fn scan(
             Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
             Err(e) => return Err(e.into()),
         }
-        if be32(&buf[8..12]) != hdr.salt1 || be32(&buf[12..16]) != hdr.salt2 {
+        let Some((head, page)) = buf.split_first_chunk::<FRAME_HEADER_SIZE>() else {
+            break;
+        };
+        let mut r = Reader::new(head);
+        let (Some(front), Some(salt1), Some(salt2), Some(sum1), Some(sum2)) =
+            (r.array::<8>(), r.u32(), r.u32(), r.u32(), r.u32())
+        else {
+            break;
+        };
+        let mut f = Reader::new(&front);
+        let (Some(pgno), Some(db_size)) = (f.u32(), f.u32()) else {
+            break;
+        };
+        if salt1 != hdr.salt1 || salt2 != hdr.salt2 {
             break;
         }
-        let (c0, c1) = checksum(hdr.big_endian, &buf[..8], s0, s1);
-        let (c0, c1) = checksum(hdr.big_endian, &buf[FRAME_HEADER_SIZE..], c0, c1);
-        if (c0, c1) != (be32(&buf[16..20]), be32(&buf[20..24])) {
+        let (c0, c1) = checksum(hdr.big_endian, &front, s0, s1);
+        let (c0, c1) = checksum(hdr.big_endian, page, c0, c1);
+        if (c0, c1) != (sum1, sum2) {
             break;
         }
         (s0, s1) = (c0, c1);
         crate::stats::WAL_FRAMES_READ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        offset += frame_len as u64;
-        let pgno = be32(&buf[0..4]);
+        offset = offset
+            .checked_add(frame_len as u64)
+            .ok_or_else(|| Error::Invalid("wal offset overflows".into()))?;
         if pgno == 0 {
             break;
         }
-        pending.insert(pgno, buf[FRAME_HEADER_SIZE..].to_vec());
-        let db_size = be32(&buf[4..8]);
+        pending.insert(pgno, page.to_vec());
         if db_size != 0 {
             committed.append(&mut pending);
             commit = Some(db_size);
@@ -245,7 +264,7 @@ pub fn repair(b: &mut [u8]) {
     let big_endian = b[0] & 1 == 1;
     let magic = if big_endian { MAGIC_BE } else { MAGIC_LE };
     b[0..4].copy_from_slice(&magic.to_be_bytes());
-    let mut page_size = be32(&b[8..12]);
+    let mut page_size = crate::bytes::u32_at(b, 8).unwrap_or(0);
     if !crate::ltx::valid_page_size(page_size) {
         page_size = 512;
         b[8..12].copy_from_slice(&page_size.to_be_bytes());

@@ -19,7 +19,8 @@
 //! the LTX file and everything after its last frame (page index, index size,
 //! trailer).
 
-use crate::error::{invalid, Result};
+use crate::bytes::Reader;
+use crate::error::{invalid, Error, Result};
 use crate::ltx::{peek, Decoder, HEADER_SIZE, TRAILER_SIZE};
 
 const MAGIC: &[u8; 4] = b"ALPH";
@@ -105,30 +106,56 @@ pub fn parse(b: &[u8]) -> Result<Parsed> {
     if seal(body) != tail {
         return invalid("page sidecar seal mismatch");
     }
-    if &body[..4] != MAGIC || body[4] != VERSION || body[5] != HASH_BLAKE3_128 || body[7] != 0 {
+    let mut r = Reader::new(body);
+    let (Some(magic), Some([version, kind, level, zero])) = (r.array::<4>(), r.array::<4>()) else {
+        return invalid("short page sidecar");
+    };
+    if &magic != MAGIC || version != VERSION || kind != HASH_BLAKE3_128 || zero != 0 {
         return invalid("unknown page sidecar version");
     }
-    let be64 = |at: usize| u64::from_be_bytes(body[at..at + 8].try_into().unwrap());
-    let be32 = |at: usize| u32::from_be_bytes(body[at..at + 4].try_into().unwrap());
-    let count = be32(28) as usize;
-    if body.len() - HEAD_LEN != count * ENTRY_LEN {
+    let (
+        Some(min_txid),
+        Some(max_txid),
+        Some(page_size),
+        Some(count),
+        Some(file_checksum),
+        Some(object_size),
+        Some(meta),
+    ) = (
+        r.u64(),
+        r.u64(),
+        r.u32(),
+        r.u32(),
+        r.u64(),
+        r.u64(),
+        r.array::<HASH_LEN>(),
+    )
+    else {
+        return invalid("short page sidecar");
+    };
+    let count = count as usize;
+    let entries_len = count.checked_mul(ENTRY_LEN);
+    if body.len() - HEAD_LEN != entries_len.unwrap_or(usize::MAX) {
         return invalid("page sidecar count differs from its size");
     }
     let mut pgnos = Vec::with_capacity(count);
     let mut hashes = Vec::with_capacity(count);
-    for e in body[HEAD_LEN..].chunks_exact(ENTRY_LEN) {
-        pgnos.push(u32::from_be_bytes(e[..4].try_into().unwrap()));
-        hashes.push(e[4..].try_into().unwrap());
+    for _ in 0..count {
+        let (Some(pgno), Some(hash)) = (r.u32(), r.array::<HASH_LEN>()) else {
+            return invalid("page sidecar count differs from its size");
+        };
+        pgnos.push(pgno);
+        hashes.push(hash);
     }
     Ok(Parsed {
-        level: body[6],
-        min_txid: be64(8),
-        max_txid: be64(16),
-        page_size: be32(24),
-        object_size: be64(40),
-        meta: body[48..64].try_into().unwrap(),
+        level,
+        min_txid,
+        max_txid,
+        page_size,
+        object_size,
+        meta,
         hashes: Hashes {
-            file_checksum: be64(32),
+            file_checksum,
             pgnos,
             hashes,
         },
@@ -140,6 +167,9 @@ pub fn parse(b: &[u8]) -> Result<Parsed> {
 /// from damaged bytes.
 pub fn build(level: u8, object: &[u8]) -> Result<Vec<u8>> {
     let (header, trailer) = peek(object)?;
+    let head = object
+        .first_chunk::<HEADER_SIZE>()
+        .ok_or_else(|| Error::Invalid("short header".into()))?;
     let mut dec = Decoder::new(object)?;
     let mut page = vec![0u8; header.page_size as usize];
     let mut entries = Vec::new();
@@ -147,7 +177,9 @@ pub fn build(level: u8, object: &[u8]) -> Result<Vec<u8>> {
         entries.push((pgno, page_hash(trailer.file_checksum, pgno, &page)));
     }
     dec.finish()?;
-    let rest = &object[rest_start(object)?..];
+    let rest = object
+        .get(rest_start(object)?..)
+        .ok_or_else(|| Error::Invalid("page index outside the object".into()))?;
 
     let mut out = Vec::with_capacity(len_for(entries.len()));
     out.extend_from_slice(MAGIC);
@@ -158,7 +190,7 @@ pub fn build(level: u8, object: &[u8]) -> Result<Vec<u8>> {
     out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
     out.extend_from_slice(&trailer.file_checksum.to_be_bytes());
     out.extend_from_slice(&(object.len() as u64).to_be_bytes());
-    out.extend_from_slice(&meta_hash(&object[..HEADER_SIZE], rest));
+    out.extend_from_slice(&meta_hash(head, rest));
     for (pgno, hash) in &entries {
         out.extend_from_slice(&pgno.to_be_bytes());
         out.extend_from_slice(hash);
@@ -187,11 +219,15 @@ pub fn forge(side: &[u8]) -> Vec<u8> {
 
 /// Where the page index starts in a verified object.
 fn rest_start(object: &[u8]) -> Result<usize> {
-    let at = object.len() - TRAILER_SIZE - 8;
-    let index_len = u64::from_be_bytes(object[at..at + 8].try_into().unwrap());
+    let size_at = object
+        .len()
+        .checked_sub(TRAILER_SIZE + 8)
+        .ok_or_else(|| Error::Invalid("short file".into()))?;
+    let index_len =
+        crate::bytes::u64_at(object, size_at).ok_or_else(|| Error::Invalid("short file".into()))?;
     usize::try_from(index_len)
         .ok()
-        .and_then(|n| at.checked_sub(n))
+        .and_then(|n| size_at.checked_sub(n))
         .map_or_else(|| invalid("page index size out of range"), Ok)
 }
 

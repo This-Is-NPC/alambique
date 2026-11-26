@@ -63,7 +63,10 @@ pub fn merge(inputs: &[&[u8]]) -> Result<Vec<u8>> {
     let mut enc = Encoder::new(out)?;
     let mut page = vec![0u8; first.page_size as usize];
     for (pgno, (i, frame)) in latest.range(..=last.commit) {
-        let payload = ltx::frame_payload(inputs[*i], frame);
+        let input = inputs
+            .get(*i)
+            .ok_or_else(|| crate::error::Error::Invalid("merge input missing".into()))?;
+        let payload = ltx::frame_payload(input, frame)?;
         let got = lz4_flex::block::decompress_into(payload, &mut page)
             .map_err(|e| crate::error::Error::Invalid(format!("decompress page {pgno}: {e}")))?;
         if got != page.len() {
