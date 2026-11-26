@@ -511,7 +511,9 @@ defmodule Alambique.ConfigOptionsTest do
           {:idle_timeout_ms, 5, 0},
           {:lazy_restore_mode, :whole, :eager},
           {:track_bytes, false, 1},
-          {:cleanup_after_ms, 5, 0}
+          {:cleanup_after_ms, 5, 0},
+          {:lookaside_bytes, 1200, 7},
+          {:lookaside_count, 40, -1}
         ] do
       assert check.(key, good) == :ok
       assert {:error, message} = check.(key, bad)
@@ -529,6 +531,8 @@ defmodule Alambique.ConfigOptionsTest do
                :idle_timeout_ms,
                :lazy_restore_mode,
                :locking_mode,
+               :lookaside_bytes,
+               :lookaside_count,
                :track_bytes
              ]
   end

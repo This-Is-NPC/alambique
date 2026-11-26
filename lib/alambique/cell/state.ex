@@ -131,6 +131,8 @@ defmodule Alambique.Cell.State do
           | :lazy_restore_mode
           | :cleanup_after_ms
           | :track_bytes
+          | :lookaside_bytes
+          | :lookaside_count
         ) ::
           term
   def cell_opt(%__MODULE__{cell_opts: opts, config: config}, key) do

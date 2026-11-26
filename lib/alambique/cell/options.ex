@@ -22,7 +22,9 @@ defmodule Alambique.Cell.Options do
     :idle_cache_kib,
     :idle_close_after_ms,
     :idle_gc,
-    :track_bytes
+    :track_bytes,
+    :lookaside_bytes,
+    :lookaside_count
   ]
 
   @type info :: %{
@@ -168,6 +170,9 @@ defmodule Alambique.Cell.Options do
   # 7. `locking_mode: :exclusive` where the node's feed hands over to the
   #    sender or a lazy restore is on: the node's value (the build refuses
   #    the combination for the node's own value).
+  # 8. `lookaside_bytes` and `lookaside_count` that are not a pair SQLite can
+  #    use (one alone, or too much memory): both keys are dropped, so the
+  #    node's pair applies.
   defp repair(config, id, override) do
     steps = [
       {:cleanup_after_ms,
@@ -215,6 +220,12 @@ defmodule Alambique.Cell.Options do
            _ -> nil
          end
        end},
+      {:lookaside_bytes,
+       fn o ->
+         bytes = value(config, o, :lookaside_bytes)
+         count = value(config, o, :lookaside_count)
+         if Config.lookaside_error(bytes, count), do: :drop_lookaside
+       end},
       {:locking_mode,
        fn o ->
          if o.locking_mode == :exclusive and
@@ -226,10 +237,20 @@ defmodule Alambique.Cell.Options do
     {repaired, override} =
       Enum.reduce(steps, {[], override}, fn {key, rule}, {repaired, acc} ->
         case if(rule_applies?(key, acc), do: rule.(acc)) do
-          nil -> {repaired, acc}
-          :drop -> {[key | repaired], Map.delete(acc, key)}
-          {:put, v} -> {[key | repaired], Map.put(acc, key, v)}
-          :off -> {[:idle_cache_after_ms | repaired], Map.put(acc, :idle_cache_after_ms, nil)}
+          nil ->
+            {repaired, acc}
+
+          :drop ->
+            {[key | repaired], Map.delete(acc, key)}
+
+          :drop_lookaside ->
+            {[key | repaired], Map.drop(acc, [:lookaside_bytes, :lookaside_count])}
+
+          {:put, v} ->
+            {[key | repaired], Map.put(acc, key, v)}
+
+          :off ->
+            {[:idle_cache_after_ms | repaired], Map.put(acc, :idle_cache_after_ms, nil)}
         end
       end)
 
@@ -243,6 +264,10 @@ defmodule Alambique.Cell.Options do
   defp rule_applies?(:idle_timeout_ms, override), do: Map.has_key?(override, :idle_timeout_ms)
   defp rule_applies?(:locking_mode, override), do: Map.has_key?(override, :locking_mode)
   defp rule_applies?(:cleanup_after_ms, override), do: Map.has_key?(override, :cleanup_after_ms)
+
+  defp rule_applies?(:lookaside_bytes, override),
+    do: Map.has_key?(override, :lookaside_bytes) or Map.has_key?(override, :lookaside_count)
+
   defp rule_applies?(_key, _override), do: true
 
   defp value(config, override, key) do

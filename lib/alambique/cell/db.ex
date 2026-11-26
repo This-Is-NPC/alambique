@@ -62,10 +62,18 @@ defmodule Alambique.Cell.Db do
 
   @doc """
   The lookaside memory of the connections of the instance (`:awake`
-  `:lookaside_bytes` and `:lookaside_count`), for the `:lookaside` option of
+  `:lookaside_bytes` and `:lookaside_count`, or the cell's own), for the `:lookaside` option of
   `Alambique.Sqlite.open/2`; `nil` keeps SQLite's default.
   """
   @spec lookaside(map) :: {non_neg_integer, non_neg_integer} | nil
+  def lookaside(%Alambique.Cell.State{} = state) do
+    case {Alambique.Cell.State.cell_opt(state, :lookaside_bytes),
+          Alambique.Cell.State.cell_opt(state, :lookaside_count)} do
+      {nil, _} -> nil
+      {bytes, count} -> {bytes, count}
+    end
+  end
+
   def lookaside(%{awake: %{lookaside_bytes: nil}}), do: nil
   def lookaside(%{awake: awake}), do: {awake.lookaside_bytes, awake.lookaside_count}
 

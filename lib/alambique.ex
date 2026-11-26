@@ -310,7 +310,8 @@ defmodule Alambique do
       connection, `PRAGMA cache_size`, a hard limit of that connection, default 512 KiB; SQLite's own default
       is 2 000) and by `:max_bytes` (default `nil`, no budget). A cell can
       set `:cache_kib`, `:idle_cache_after_ms`, `:idle_cache_kib`,
-      `:idle_close_after_ms` and `:idle_gc` through `:cell_options`. `:cell_cache_kib_max` (default `nil`, no limit; in KiB, and at
+      `:idle_close_after_ms`, `:idle_gc`, `:lookaside_bytes` and
+      `:lookaside_count` through `:cell_options`. `:cell_cache_kib_max` (default `nil`, no limit; in KiB, and at
       most `:max_bytes` when that is set) and `:cell_idle_timeout_ms_min` and
       `:cell_idle_timeout_ms_max` (default `nil`) clamp the values a cell
       chose, and the node's own `:cache_kib` and `:idle_timeout_ms` must be

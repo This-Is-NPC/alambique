@@ -254,6 +254,8 @@ impl Conn {
         // SAFETY: the write lock waited for every user; the pointer is out of
         // the slot, so nothing can use it again.
         unsafe { close(db) };
+        self.region.close();
+        crate::alloc::poke_trim();
         // The table entry is the caller's now: `Conn` must not release it.
         self.released.store(true, Relaxed);
         name.map(|name| (id, name))
@@ -1418,7 +1420,7 @@ impl Drop for Kept {
 /// what the file looked like at the close (`sqlite_kept_state`).
 #[rustler::nif(schedule = "DirtyIo")]
 fn sqlite_close_keep<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64) -> Term<'a> {
-    let _t = crate::stats::SQLITE_CALLS.time();
+    let _t = crate::stats::SQLITE_CALLS.time_for(&conn);
     let run = || -> Outcome<'a> {
         check_opener(env, &conn)?;
         let ctl = &conn.control;
@@ -1992,7 +1994,7 @@ fn sqlite_capture_full<'a>(
     timestamp: i64,
     limit: Option<crate::PosTuple>,
 ) -> Term<'a> {
-    let _t = crate::stats::REPLICATION_CALLS.time();
+    let _t = crate::stats::REPLICATION_CALLS.time_for(&conn);
     if let Err(f) = check_user(env, &conn) {
         return f.term(env);
     }
@@ -2142,7 +2144,7 @@ fn sqlite_capture_incremental<'a>(
     txid: u64,
     timestamp: i64,
 ) -> Term<'a> {
-    let _t = crate::stats::REPLICATION_CALLS.time();
+    let _t = crate::stats::REPLICATION_CALLS.time_for(&conn);
     with_wal_end(env, &conn, key, |end| {
         let args = crate::mk_args(
             &db, &wal, page_size, pos, &sums.0, pre, txid, timestamp, end,
@@ -2165,7 +2167,7 @@ fn sqlite_wal_pending<'a>(
     page_size: u32,
     pos: crate::PosTuple,
 ) -> Term<'a> {
-    let _t = crate::stats::REPLICATION_CALLS.time();
+    let _t = crate::stats::REPLICATION_CALLS.time_for(&conn);
     with_wal_end(env, &conn, key, |end| {
         match crate::capture::pending(
             std::path::Path::new(&wal),
