@@ -185,6 +185,10 @@ defmodule Alambique.Replication.Native do
   @doc false
   def sqlite_run(_conn, _sql, _params, _limits), do: nif_error()
   @doc false
+  def sqlite_feed_rows(_conn, _sql, _params, _bound, _resumed, _room, _pid, _token),
+    do: nif_error()
+
+  @doc false
   def sqlite_user_statements, do: nif_error()
   @doc false
   def sqlite_interrupt(_conn), do: nif_error()
