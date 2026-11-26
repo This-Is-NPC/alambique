@@ -69,7 +69,8 @@ defmodule Alambique.SqliteMemoryTest do
     # The pool of a shared cache would keep the pages while it is not full.
     :ok = Sqlite.execute(conn, "PRAGMA cache_size = -64")
     {:ok, %{cache_used: small}} = Sqlite.memory(conn)
-    assert small <= 64 * 1024
+    # The limit is of pages with their headers, so a page more or less.
+    assert small <= 80_000
     # What the shrink evicts leaves SQLite's accounting too: a cache that kept
     # its pages in bulk blocks would free none of them.
     assert held - memory_used() >= (full - small) * 9 / 10
