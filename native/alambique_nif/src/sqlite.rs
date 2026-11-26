@@ -1616,7 +1616,11 @@ fn sqlite_run<'a>(
                 return Ok((atoms::ok(), Vec::<Term>::new(), Vec::<Term>::new()).encode(env));
             };
             let _guard = Finalize(s);
-            refuse_tail(db, &sql[end..])?;
+            refuse_tail(
+                db,
+                sql.get(end..)
+                    .ok_or_else(|| Failure::Message("statement end".into()))?,
+            )?;
             bind_all(db, s, params)?;
             let columns = column_names(env, s);
             let rows = all_rows(env, db, s, &conn.control, &limits)?;
@@ -1647,10 +1651,12 @@ fn sqlite_script<'a>(env: Env<'a>, conn: ResourceArc<Conn>, sql: Binary) -> Term
             };
             let _call = Call::new(&conn.control, db, &limits);
             let mut at = 0;
-            while at < sql.len() {
+            while let Some(rest) = sql.get(at..).filter(|rest| !rest.is_empty()) {
                 check_transaction(&conn.control, db)?;
-                let (stmt, used) = prepare_at(db, &sql[at..])?;
-                let text = &sql[at..at + used];
+                let (stmt, used) = prepare_at(db, rest)?;
+                let text = rest
+                    .get(..used)
+                    .ok_or_else(|| Failure::Message("statement end".into()))?;
                 at += used;
                 let Some(StmtPtr(s)) = stmt else {
                     if used == 0 {
@@ -1936,11 +1942,7 @@ fn sqlite_foreign_write<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64, mod
                 if mode == 2 {
                     // The frames SQLite recovered when it opened the WAL: the
                     // count its hook goes on from.
-                    let name = unsafe {
-                        // SAFETY: `db` is live; the name is copied at once.
-                        let n = ffi::sqlite3_db_filename(db, c"main".as_ptr());
-                        (!n.is_null()).then(|| CStr::from_ptr(n).to_string_lossy().into_owned())
-                    };
+                    let name = main_filename(db);
                     let wal = format!("{}-wal", name.unwrap_or_default());
                     let frames = crate::wal::committed_frames(std::path::Path::new(&wal))
                         .map_err(|e| Failure::Message(format!("{e:?}")))?;
@@ -2110,11 +2112,7 @@ fn sqlite_capture_full<'a>(
 /// file header names. `None` without a WAL file. Nothing else writes the file
 /// while the lock is held.
 fn exclusive_wal_end(db: *mut ffi::sqlite3, frames: u64) -> Option<WalPos> {
-    // SAFETY: `db` is live; the name is copied at once.
-    let name = unsafe {
-        let n = ffi::sqlite3_db_filename(db, c"main".as_ptr());
-        (!n.is_null()).then(|| CStr::from_ptr(n).to_string_lossy().into_owned())
-    }?;
+    let name = main_filename(db)?;
     let hdr = crate::wal::read_salts(std::path::Path::new(&format!("{name}-wal"))).ok()??;
     Some(WalPos {
         offset: WAL_HEADER_SIZE + frames * (24 + u64::from(hdr.0)),
@@ -2386,7 +2384,9 @@ mod tests {
         ] {
             let s = prepare(db, sql.as_bytes()).ok().flatten().expect(sql).0;
             // SAFETY: `s` is a live statement of `db`.
-            let (rc, value) = unsafe { (ffi::sqlite3_step(s), ffi::sqlite3_column_int64(s, 0)) };
+            let rc = unsafe { ffi::sqlite3_step(s) };
+            // SAFETY: as above.
+            let value = unsafe { ffi::sqlite3_column_int64(s, 0) };
             assert_eq!(rc, ffi::SQLITE_ROW, "{sql}");
             assert_eq!(value, expected, "{sql}");
             finalize(s);
@@ -2417,9 +2417,9 @@ mod tests {
                 &mut cur,
                 &mut hits,
                 0,
-            );
-            close_v2(db);
-        }
+            )
+        };
+        close_unused(db);
         hits
     }
 
@@ -2468,20 +2468,8 @@ mod tests {
         }
     }
 
-    #[test]
-    #[cfg_attr(miri, ignore = "calls SQLite")]
-    fn a_gated_connection_writes_only_in_a_transaction_or_flagged() {
-        let db = mem();
-        let ctl = Box::new(Control::new(false, 0).gate(7));
-        let ctx = &*ctl as *const Control as *mut std::ffi::c_void;
-        // SAFETY: `db` is live and `ctl` outlives it.
-        unsafe { ffi::sqlite3_set_authorizer(db, Some(authorize), ctx) };
-
-        ctl.flagged.store(true, Relaxed);
-        assert!(run(db, "CREATE TABLE t (a)").is_ok());
-        assert!(run(db, "CREATE INDEX k ON t (a)").is_ok());
-        ctl.flagged.store(false, Relaxed);
-
+    /// Reads pass, and every write is refused, while nothing is flagged.
+    fn assert_reads_pass_and_writes_fail(db: *mut ffi::sqlite3) {
         let reads = [
             "SELECT * FROM t",
             "PRAGMA user_version",
@@ -2511,6 +2499,12 @@ mod tests {
         for sql in writes {
             assert!(run(db, sql).is_err(), "{sql} unarmed");
         }
+    }
+
+    /// A flagged call writes (not attach, vacuum or checkpoint); an armed
+    /// connection writes in the transaction of the library and cannot begin or
+    /// end one.
+    fn assert_flagged_and_armed_calls(db: *mut ffi::sqlite3, ctl: &Control) {
         // Not even a flagged call attaches on a connection without `attach`.
         ctl.flagged.store(true, Relaxed);
         assert!(run(db, "ATTACH ':memory:' AS x").is_err());
@@ -2525,6 +2519,24 @@ mod tests {
         assert!(run(db, "ANALYZE").is_ok());
         assert!(run(db, "BEGIN").is_err());
         assert!(run(db, "COMMIT").is_err());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "calls SQLite")]
+    fn a_gated_connection_writes_only_in_a_transaction_or_flagged() {
+        let db = mem();
+        let ctl = Box::new(Control::new(false, 0).gate(7));
+        let ctx = &*ctl as *const Control as *mut std::ffi::c_void;
+        // SAFETY: `db` is live and `ctl` outlives it.
+        unsafe { ffi::sqlite3_set_authorizer(db, Some(authorize), ctx) };
+
+        ctl.flagged.store(true, Relaxed);
+        assert!(run(db, "CREATE TABLE t (a)").is_ok());
+        assert!(run(db, "CREATE INDEX k ON t (a)").is_ok());
+        ctl.flagged.store(false, Relaxed);
+
+        assert_reads_pass_and_writes_fail(db);
+        assert_flagged_and_armed_calls(db, &ctl);
         // SAFETY: `db` is live and not used afterwards.
         unsafe { close_v2(db) };
     }
@@ -2544,6 +2556,20 @@ mod tests {
         );
     }
 
+    /// Every statement runs.
+    fn all_ok(db: *mut ffi::sqlite3, sqls: &[&str]) {
+        for sql in sqls {
+            assert!(run(db, sql).is_ok(), "{sql}");
+        }
+    }
+
+    /// Every statement is refused.
+    fn all_err(db: *mut ffi::sqlite3, sqls: &[&str]) {
+        for sql in sqls {
+            assert!(run(db, sql).is_err(), "{sql}");
+        }
+    }
+
     #[test]
     #[cfg_attr(miri, ignore = "calls SQLite")]
     fn the_authorizer_reads_the_connection_mode() {
@@ -2553,56 +2579,57 @@ mod tests {
         // SAFETY: `db` is live and `ctl` outlives it.
         unsafe { ffi::sqlite3_set_authorizer(db, Some(authorize), ctx) };
 
-        assert!(run(db, "CREATE TABLE t (a)").is_ok());
-        assert!(run(db, "BEGIN").is_ok());
-        assert!(run(db, "ROLLBACK").is_ok());
-        assert!(run(db, "ATTACH ':memory:' AS x").is_err());
-        assert!(run(db, "VACUUM").is_err());
+        all_ok(db, &["CREATE TABLE t (a)", "BEGIN", "ROLLBACK"]);
+        all_err(db, &["ATTACH ':memory:' AS x", "VACUUM"]);
 
         ctl.read_only.store(true, Relaxed);
-        assert!(run(db, "SELECT * FROM t").is_ok());
-        assert!(run(db, "BEGIN").is_err());
-        assert!(run(db, "SAVEPOINT s").is_err());
-        assert!(run(db, "PRAGMA recursive_triggers(0)").is_err());
-        assert!(run(db, "PRAGMA table_info(t)").is_ok());
-        assert!(run(db, "SELECT * FROM pragma_table_info('t')").is_ok());
+        all_ok(
+            db,
+            &[
+                "SELECT * FROM t",
+                "PRAGMA table_info(t)",
+                "SELECT * FROM pragma_table_info('t')",
+            ],
+        );
+        all_err(
+            db,
+            &["BEGIN", "SAVEPOINT s", "PRAGMA recursive_triggers(0)"],
+        );
         ctl.read_only.store(false, Relaxed);
-        assert!(run(db, "PRAGMA recursive_triggers(0)").is_ok());
+        all_ok(db, &["PRAGMA recursive_triggers(0)"]);
 
         // A user's text cannot end the transaction; savepoints are allowed.
         ctl.no_txn_control.store(true, Relaxed);
-        for sql in [
-            "BEGIN",
-            "BEGIN IMMEDIATE",
-            "COMMIT",
-            "END",
-            "END TRANSACTION",
-            "ROLLBACK",
-        ] {
-            assert!(run(db, sql).is_err(), "{sql}");
-        }
-        for sql in [
-            "SAVEPOINT s",
-            "ROLLBACK TO s",
-            "RELEASE s",
-            "INSERT INTO t VALUES (1)",
-        ] {
-            assert!(run(db, sql).is_ok(), "{sql}");
-        }
+        all_err(
+            db,
+            &[
+                "BEGIN",
+                "BEGIN IMMEDIATE",
+                "COMMIT",
+                "END",
+                "END TRANSACTION",
+                "ROLLBACK",
+            ],
+        );
+        all_ok(
+            db,
+            &[
+                "SAVEPOINT s",
+                "ROLLBACK TO s",
+                "RELEASE s",
+                "INSERT INTO t VALUES (1)",
+            ],
+        );
         ctl.no_txn_control.store(false, Relaxed);
-        assert!(run(db, "BEGIN").is_ok());
-        assert!(run(db, "ROLLBACK").is_ok());
+        all_ok(db, &["BEGIN", "ROLLBACK"]);
 
         // While a transaction of the library is open, no call may control it.
-        assert!(run(db, "BEGIN").is_ok());
+        all_ok(db, &["BEGIN"]);
         ctl.expect_txn.store(1, Relaxed);
-        for sql in ["BEGIN", "COMMIT", "END", "ROLLBACK"] {
-            assert!(run(db, sql).is_err(), "{sql}");
-        }
-        assert!(run(db, "SAVEPOINT s").is_ok());
-        assert!(run(db, "RELEASE s").is_ok());
+        all_err(db, &["BEGIN", "COMMIT", "END", "ROLLBACK"]);
+        all_ok(db, &["SAVEPOINT s", "RELEASE s"]);
         ctl.expect_txn.store(0, Relaxed);
-        assert!(run(db, "COMMIT").is_ok());
+        all_ok(db, &["COMMIT"]);
 
         // SAFETY: `db` is live and not used afterwards.
         unsafe { close_v2(db) };
