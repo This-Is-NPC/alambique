@@ -447,6 +447,7 @@ defmodule Alambique.Config do
     op_timeout = pos_int!(opts, :op_timeout_ms)
     idle_timeout = pos_int!(opts, :idle_timeout_ms)
     feed = feed!(opts[:feed], idle_timeout)
+    lazy_restore = lazy_restore!(opts[:lazy_restore])
     query = query!(opts[:query])
     migrations = migrations!(opts[:migrations])
     cell_options = cell_options!(opts[:cell_options])
@@ -498,7 +499,7 @@ defmodule Alambique.Config do
       compaction: compaction!(opts[:compaction]),
       retention: retention!(opts[:retention]),
       query: query,
-      sql: sql(opts[:sql], op_timeout),
+      sql: sql(opts[:sql], op_timeout, feed, lazy_restore),
       routing: options!(:routing, opts[:routing], @routing_defaults),
       wake: wake!(opts[:wake], migrations, ttl, jitter),
       wal: wal!(opts[:wal]),
@@ -515,7 +516,7 @@ defmodule Alambique.Config do
       upload: upload!(opts[:upload]),
       breaker: options!(:breaker, opts[:breaker], @breaker_defaults),
       hydrator: options!(:hydrator, opts[:hydrator], @hydrator_defaults),
-      lazy_restore: lazy_restore!(opts[:lazy_restore]),
+      lazy_restore: lazy_restore,
       drain: drain!(opts[:drain]),
       quarantine: quarantine!(opts[:quarantine]),
       replicas: replicas!(opts[:replicas]),
@@ -1195,12 +1196,15 @@ defmodule Alambique.Config do
   # the node share; the default leaves two for them. With few schedulers it
   # keeps two slots: a write's statements hold slots too, so one slot refused
   # reads while a scheduler was free.
-  defp sql(opts, op_timeout) do
+  defp sql(opts, op_timeout, feed, lazy_restore) do
     opts = if Keyword.keyword?(opts), do: opts, else: bad!(":sql must be a keyword list")
     {orphans, opts} = Keyword.pop(opts, :orphan_frames, :stop)
 
     unless orphans in @orphan_frames,
       do: bad!(":sql orphan_frames must be one of #{inspect(@orphan_frames)}")
+
+    {locking, opts} = Keyword.pop(opts, :locking_mode, :normal)
+    locking_mode!(locking, feed, lazy_restore)
 
     :sql
     |> options!(
@@ -1213,7 +1217,25 @@ defmodule Alambique.Config do
         @sql_defaults
     )
     |> Map.put(:orphan_frames, orphans)
+    |> Map.put(:locking_mode, locking)
   end
+
+  @locking_modes [:normal, :exclusive]
+
+  # An exclusive connection keeps SQLite's lock on the file for its life, so
+  # every second connection that honours SQLite's locks gets `SQLITE_BUSY`
+  # (the feed's sender reader), and any descriptor of the file that is closed
+  # drops the lock (the file a lazy restore fills).
+  defp locking_mode!(mode, _feed, _lazy) when mode not in @locking_modes,
+    do: bad!(":sql locking_mode must be one of #{inspect(@locking_modes)}")
+
+  defp locking_mode!(:exclusive, %{hand_over: :sender}, _lazy),
+    do: bad!(":sql locking_mode: :exclusive does not work with feed hand_over: :sender")
+
+  defp locking_mode!(:exclusive, _feed, lazy) when lazy != nil,
+    do: bad!(":sql locking_mode: :exclusive needs lazy_restore: false")
+
+  defp locking_mode!(_mode, _feed, _lazy), do: :ok
 
   @doc false
   @spec default_statement_slots(pos_integer) :: pos_integer

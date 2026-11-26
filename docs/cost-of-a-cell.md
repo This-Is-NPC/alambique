@@ -143,6 +143,20 @@ it costs no file and no page cache. With 300 cells publishing 500 rows each,
 the dirty IO schedulers were busy 28.5 % of the window for `:native`, 38.7 to
 45.3 % for `:sender` and 39.2 % for `:cell`.
 
+**`sql: [locking_mode: :exclusive]`.** Off by default (`:normal`). The cell's
+connection takes SQLite's lock on the database file at its first access and
+keeps it until the cell sleeps, and keeps the WAL's index in memory. Another
+connection that honours SQLite's locks, in this process or another, gets
+`SQLITE_BUSY`, so a foreign writer is kept out instead of found afterwards.
+Per awake cell it has no `-shm` file: one open file and one 32 KiB shared
+mapping fewer than `:normal`. Per transaction it makes no shared-memory lock
+calls. Per batch and per check for unreplicated frames it reads the 32-byte
+header of the `-wal` file (one open and one read) where `:normal` reads the
+wal-index header from memory. These differences come from reading SQLite's
+code and are not measured. It does not work with `feed: [hand_over: :sender]`
+(the sender's reader would be refused) or with a lazy restore, so it needs
+`lazy_restore: false`; the instance refuses both at start.
+
 **`awake: [cache_kib: ...]`.** The page cache of each awake cell's connection,
 in KiB, set with `PRAGMA cache_size` when the cell wakes. The default is 512.
 It caps the memory an awake cell takes for its database pages, and a cell with

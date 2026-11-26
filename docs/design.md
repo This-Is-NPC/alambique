@@ -665,6 +665,24 @@ is that frames committed and not yet replicated imply a write in flight
   process, a raw write of the file, other native code, a connection opened
   before the cell woke (the cell opens after it and holds the file from
   then on), a connection of another VFS in another process.
+- With `sql: [locking_mode: :exclusive]` a foreign writer that honours
+  SQLite's locks is prevented, not found afterwards. The library opens the
+  connection with `PRAGMA locking_mode = EXCLUSIVE` before its first access
+  of the file (`sqlite_open`), so the lock is taken when `journal_mode` is
+  read and held until the connection closes, and the WAL keeps its index in
+  heap memory: no `-shm` file, and no `xShmMap` or `xShmLock` call. A user
+  statement cannot change the mode: `PRAGMA locking_mode` with an argument is
+  refused by the authorizer on every connection. The lock is a POSIX lock,
+  and closing any descriptor of the file in the process drops it, so the
+  library never opens the live file by path: a snapshot of it is read through
+  the file SQLite holds (`SQLITE_FCNTL_FILE_POINTER`, `sqlite_capture_full`).
+  Without a shared header there is nothing for `Watch` to read, so
+  `foreign_write` answers `:none` and `wal_end` is the number of frames the
+  WAL hook counted, in the generation named by the header of the `-wal` file,
+  starting from the frames SQLite recovered when it opened the WAL. A second
+  connection of the library on the file would be busy: the feed sender's
+  reader (`hand_over: :sender`) and the file a lazy restore fills close and
+  open descriptors of their own, so both are refused with this mode.
 - A foreign writer that got through is found by the header of the wal-index.
   The frame count is not a witness: it returns to 0 after a restart of the
   WAL, and a foreign commit, a checkpoint and as many frames as the cell last counted leave

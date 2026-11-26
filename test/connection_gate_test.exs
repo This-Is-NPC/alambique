@@ -42,6 +42,8 @@ defmodule Alambique.ConnectionGateTest do
     {:never, "VACUUM"},
     {:never, "PRAGMA wal_checkpoint"},
     {:never, "PRAGMA journal_mode = DELETE"},
+    {:never, "PRAGMA locking_mode = NORMAL"},
+    {:never, "PRAGMA locking_mode = EXCLUSIVE"},
     {:txn, "BEGIN; ROLLBACK"},
     {:txn, "BEGIN; COMMIT"},
     {:txn, "BEGIN; END"},

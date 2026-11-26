@@ -102,6 +102,27 @@ fn read_header(file: &File) -> Result<Option<WalHeader>> {
     }))
 }
 
+/// The page size and the two salts of the WAL header at `path`, `None` when
+/// there is no valid WAL. The WAL file carries no POSIX lock of SQLite's, so
+/// opening it by path is safe.
+pub fn read_salts(path: &Path) -> Result<Option<(u32, u32, u32)>> {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    Ok(read_header(&file)?.map(|h| (h.page_size, h.salt1, h.salt2)))
+}
+
+/// How many frames of the WAL at `path` are committed, `0` without a valid WAL.
+pub fn committed_frames(path: &Path) -> Result<u64> {
+    let Some((page_size, ..)) = read_salts(path)? else {
+        return Ok(0);
+    };
+    let end = scan(path, page_size, None, None)?.pos.offset;
+    Ok(end.saturating_sub(WAL_HEADER_SIZE) / (FRAME_HEADER_SIZE as u64 + u64::from(page_size)))
+}
+
 /// Scans committed frames.
 ///
 /// With `from` set and its salts equal to the WAL header's, scanning resumes
