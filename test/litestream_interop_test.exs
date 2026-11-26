@@ -101,6 +101,24 @@ defmodule Alambique.LitestreamInteropTest do
     assert dump_file(mine) == dump_file(out)
   end
 
+  # The page sidecars (`.ltx.pages`) sit beside the files in their level
+  # directory: Litestream skips them as it skips any name that is not an LTX
+  # file.
+  test "Litestream restores a replica that has page sidecars", t do
+    t = %{t | ctx: Map.put(t.ctx, :page_sidecar, 0)}
+    replicate(t)
+
+    {:ok, keys, nil} =
+      Alambique.Store.S3.list(config(), Keys.files_prefix(t.prefix, "cell"), nil, 1000)
+
+    assert Enum.any?(keys, &String.ends_with?(&1, ".ltx.pages"))
+
+    out = Path.join(t.dir, "litestream.db")
+    assert {"", 0} = litestream_restore(t, out)
+    assert integrity(out) == [["ok"]]
+    assert dump_file(out) == dump(t.conn)
+  end
+
   # TXID 2 is before the snapshot, so Litestream applies level-0 files only.
   test "Litestream restores a TXID as Alambique does", t do
     replicate(t)

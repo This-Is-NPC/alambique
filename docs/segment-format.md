@@ -109,6 +109,56 @@ For a timestamp restore it reads the stamp from the object metadata key
 back to the last-modified time. Compaction `:max_level` is therefore
 limited to 8.
 
+### Page-hash sidecar
+
+A segment or snapshot may have a second object, `<key>.pages`, such as
+`0000/0000000000000001-0000000000000001.ltx.pages`. Litestream skips it like
+any name that is not an LTX filename (the rule above; `mise run test:litestream`
+restores a replica that has sidecars). Alambique's planning and listings do
+not see it: only the deletion of a cell's data does.
+
+It holds one BLAKE3-128 hash per page, and one of every byte of the file that
+is not a page frame, so that a lazy restore can trust the pages it reads by
+range without reading the file whole (design §16). Big endian:
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 4 | `ALPH` |
+| 4 | 1 | version (1; another version is read as no sidecar) |
+| 5 | 1 | hash id (1: BLAKE3, first 16 bytes) |
+| 6 | 1 | level of the file (0 to 9) |
+| 7 | 1 | 0 |
+| 8 | 8 | min TXID |
+| 16 | 8 | max TXID |
+| 24 | 4 | page size |
+| 28 | 4 | page count |
+| 32 | 8 | file checksum (the last 8 bytes of the file) |
+| 40 | 8 | size of the file |
+| 48 | 16 | hash of the LTX header (100 bytes) and of everything after the last page frame: page index, index size, trailer |
+| 64 | 20 each | page number (4), page hash (16), by ascending page number |
+| end - 16 | 16 | hash of all the bytes before it |
+
+The page hash is BLAKE3 of `"alambique-page-v1"`, the page number, the file
+checksum and the decompressed page. Unlike the CRC-64 of the file it is not
+linear, so errors cannot cancel in it, and it names the page and the file it
+belongs to. A sidecar is `80 + 20 × pages` bytes: 5 MiB for 1 GiB of 4 KiB
+pages.
+
+A writer puts the file first and its sidecar after it, only for files larger
+than `lazy_restore: [verify_bytes:]` and only with `lazy_restore:
+[page_sidecar: true]`. A crash between the two leaves a file without a
+sidecar, which a restore reads whole. A sidecar of a file that was
+overwritten (a zombie owner's file, see design §6) is replaced with
+`If-Match`. A key that already exists gets a sidecar only if its file
+checksum is the one of the file the writer holds.
+
+Deleting an object deletes its sidecar in the same manifest, and objects sort
+before their sidecars (`x.ltx` before `x.ltx.pages`). A sidecar whose file is
+not in the listing is an orphan: retention marks it with the deletion grace.
+A version of Alambique without sidecars does not know the name: its retention
+and cleanup of a moved cell leave the sidecars in place, and a version with
+them sweeps what is left.
+
 ### Deviations from upstream
 
 - Only the format version 3 page frame (size prefix set) is read. Version 2
@@ -260,8 +310,10 @@ trailer for the post-apply checksum; and the page index at the end, a list of
 `(page number, frame offset, frame size)` that points at each page's frame
 (page header, size prefix, LZ4 block). The page index is what makes a page
 readable on its own. A frame read this way is not covered by the file
-checksum, which spans the whole file, so lazily read pages are verified by the
-database checksum when the last page has arrived. Files that are not ours
+checksum, which spans the whole file. A file with a page-hash sidecar
+(above) has each page checked against it as it arrives; the pages of the
+other files are checked when the last page has arrived, against the whole
+objects and the database checksum. Files that are not ours
 (without the checksums in the reserved bytes) cannot be read lazily for the
 same reason they cannot be applied.
 
@@ -342,6 +394,7 @@ crash test can stop the process. The test kit arms them one at a time; see
 | `:repl_before_capture` | `sync` start: the transaction is committed locally and nothing is captured. |
 | `:repl_after_encode` | The segment is encoded and not uploaded. |
 | `:repl_after_put` | The segment landed and the caller was not told. Runs in the upload process; the context has `owner_pid`, the cell that encoded the segment. |
+| `:repl_before_sidecar` | An object landed and its page-hash sidecar is not written. Every writer passes it; the context has the `key` of the object. |
 | `:cell_after_land` | An upload process reported a landed put and the cell has not acknowledged anything yet. |
 | `:cell_before_ack` | A batch is at the head of the queue and landed; its callers are not answered yet. |
 | `:cell_after_ack` | The callers of a batch were answered and nothing else ran yet. |

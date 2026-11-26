@@ -123,6 +123,24 @@ Fewer requests, or requests that run together, make the wake faster. Design
      it is used. A miss on such a file reads the whole file, not 16 pages. Set it
      to 0 to read frames only and rely on the comparison with the whole objects
      at the end of the download, or raise it to check larger files.
+   - `lazy_restore: [page_sidecar: true]` (default `false`) makes every writer
+     of the instance put a page-hash sidecar beside each segment and snapshot
+     larger than `verify_bytes`. A lazy restore then checks each page against
+     it as the page arrives, and does not read the files it covers whole at the
+     end of the download: `check_covered` in the hydrate event counts them, and
+     `check_bytes` shrinks by their size. It costs one more `PUT` for each
+     such object written, in the acknowledgment of a commit whose segment is
+     that large, `80 + 20 × pages` bytes stored for each, and one `GET` of that
+     size for each covered file at a wake. Reading uses a sidecar whenever one
+     exists, so turn it on for the writers first. Writes still wait for the end
+     of the download (`verify_writes`): the sidecar vouches for pages as they
+     arrive, not for the chain.
+   - `lazy_restore: [mode: :whole]` (default `:ranged`) makes the cell read
+     its whole chain before its first statement, as a restore does when the
+     chain is under `min_bytes`. The first call then waits for the whole
+     download and nothing is held later: no first write waits and no query
+     waits for a page. Choose it when the cells are small enough to download
+     within the deadline of the first call. `verify_bytes` has no effect in it.
    - `lazy_restore: [verify_writes:]` (default `true`) makes the first write
      after a lazy wake wait until the whole file is downloaded and its checksum
      matched. Set it to `false` only if first-write latency matters more than
