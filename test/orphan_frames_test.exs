@@ -47,6 +47,8 @@ defmodule Alambique.OrphanFramesTest do
 
   defp store(c), do: c.env |> durable_rows(c.cell, "SELECT n FROM t ORDER BY n") |> List.flatten()
 
+  defp wal(c), do: pid(c) |> :sys.get_state() |> Map.fetch!(:path) |> Kernel.<>("-wal")
+
   defp asleep?(c), do: eventually(fn -> Alambique.owner(c.inst, c.cell) == :none end)
 
   # The change feed holds the row once, whatever the mode.
@@ -60,9 +62,82 @@ defmodule Alambique.OrphanFramesTest do
     end)
   end
 
+  # 20000 keys: tens of pages, so the commit writes many frames. With
+  # `spill?` the page cache holds eight pages, and the pages that do not fit
+  # reach the WAL before the commit.
+  defp big_insert(c, spill?) do
+    Alambique.transaction(c.inst, c.cell, fn tx ->
+      if spill?, do: {:ok, _} = Tx.execute(tx, "PRAGMA cache_size = 8")
+
+      sql =
+        "WITH RECURSIVE k(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM k WHERE x < 20000) " <>
+          "INSERT INTO t SELECT 100 + x FROM k"
+
+      case Tx.execute(tx, sql) do
+        {:ok, _} -> :done
+        {:error, reason} -> Tx.rollback(tx, reason)
+      end
+    end)
+  end
+
+  # A write SQLite rolled back leaves no trace: the caller was told so, and
+  # the cut, the release, the store, the change feed and the next wake agree
+  # with its answer, and the cell takes the next write.
+  defp assert_rolled_back(c, result) do
+    assert {:error, reason} = result
+    refute match?({:committed, _}, reason)
+    assert {:ok, _} = Alambique.position(c.inst, c.cell)
+    refute unreplicated?(c)
+    assert rows(c) == [0, 1]
+    assert :ok = Alambique.hibernate(c.inst, c.cell)
+    assert asleep?(c)
+    assert store(c) == [0, 1]
+    assert rows(c) == [0, 1]
+    assert feed_keys(c, 1) == [0, 1]
+
+    assert {:ok, _} = Alambique.execute(c.inst, c.cell, "INSERT INTO t VALUES (8)")
+    assert store(c) == [0, 1, 8]
+    assert rows(c) == [0, 1, 8]
+    assert feed_keys(c, 8) == [0, 1, 8]
+  end
+
   for mode <- [:stop, :replicate] do
     describe "orphan_frames: #{inspect(mode)}" do
       setup env, do: %{c: boot(env, unquote(mode))}
+
+      # SQLite rolls the commit back, but the WAL holds the whole commit frame
+      # with valid checksums past the end its wal-index records.
+      for rc <- [:ioerr_write, :full] do
+        test "a commit whose frame write fails after the frame is kept nowhere (#{rc})", %{c: c} do
+          vfs_fault(wal(c), :commit_frame, unquote(rc))
+          result = Alambique.execute(c.inst, c.cell, "INSERT INTO t VALUES (6)")
+          assert Native.vfs_fault_hits() == 1
+          assert_rolled_back(c, result)
+        end
+      end
+
+      test "a frame of a big transaction fails before the commit", %{c: c} do
+        vfs_fault(wal(c), :frame, :ioerr_write, skip: 3)
+        result = big_insert(c, false)
+        assert Native.vfs_fault_hits() == 1
+        assert_rolled_back(c, result)
+      end
+
+      # The frames of a transaction that spilled are in the WAL before its
+      # commit: they are no orphans, and the failed commit still leaves nothing.
+      test "a spilled transaction whose commit frame fails is kept nowhere", %{c: c} do
+        vfs_fault(wal(c), :commit_frame, :ioerr_write)
+        result = big_insert(c, true)
+        assert Native.vfs_fault_hits() == 1
+        assert_rolled_back(c, result)
+      end
+
+      test "a spilled transaction whose frame fails mid-way is kept nowhere", %{c: c} do
+        vfs_fault(wal(c), :frame, :ioerr_write, skip: 5)
+        result = big_insert(c, true)
+        assert Native.vfs_fault_hits() == 1
+        assert_rolled_back(c, result)
+      end
 
       test "position never cuts above frames no write carries", %{c: c} do
         orphan(c, 5)
