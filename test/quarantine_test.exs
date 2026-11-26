@@ -51,6 +51,20 @@ defmodule Alambique.QuarantineTest do
       eventually(fn -> match?([%{flag: :idle}], markers(dir)) end)
     end
 
+    test "a marker that cannot be written is logged and the work goes on", ctx do
+      config = %{quarantine: %{}, data_dir: ctx.dir, inflight: :no_tracker}
+      marker = Inflight.open(config, unique_cell(), :cell)
+      :ok = :file.close(marker.fd)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert :ok = Inflight.hold(marker)
+          assert :done = Inflight.busy(marker, fn -> :done end)
+        end)
+
+      assert log =~ "could not write a marker"
+    end
+
     test "hibernation removes the marker", ctx do
       inst = start_instance(ctx, migrations: @schema)
       dir = Config.fetch!(inst).data_dir

@@ -63,7 +63,7 @@ defmodule Alambique.Inflight do
             {:ok, fd}
 
           {:error, _} = error ->
-            :file.close(fd)
+            _ = :file.close(fd)
             error
         end
 
@@ -78,16 +78,17 @@ defmodule Alambique.Inflight do
   @doc "Marks the marker busy for work that outlives one callback."
   @spec hold(t) :: :ok
   def hold(nil), do: :ok
-  def hold(%__MODULE__{fd: fd}), do: :file.pwrite(fd, 0, @busy)
+  def hold(%__MODULE__{fd: fd}), do: flag(fd, @busy)
 
   @doc "Marks the marker idle, closes it and removes its file."
   @spec close(Alambique.Config.t(), t) :: :ok
   def close(_config, nil), do: :ok
 
   def close(config, %__MODULE__{fd: fd, path: path}) do
-    :file.pwrite(fd, 0, @idle)
-    :file.close(fd)
-    File.rm(path)
+    flag(fd, @idle)
+    # Cleanup: the tracker removes what is left.
+    _ = :file.close(fd)
+    _ = File.rm(path)
     Tracker.untrack(config, path)
   end
 
@@ -96,12 +97,12 @@ defmodule Alambique.Inflight do
   def busy(nil, fun), do: fun.()
 
   def busy(%__MODULE__{fd: fd}, fun) do
-    :file.pwrite(fd, 0, @busy)
+    flag(fd, @busy)
 
     try do
       fun.()
     after
-      :file.pwrite(fd, 0, @idle)
+      flag(fd, @idle)
     end
   end
 
@@ -115,6 +116,14 @@ defmodule Alambique.Inflight do
       busy(marker, fun)
     after
       close(config, marker)
+    end
+  end
+
+  # A marker that cannot be written leaves the cell unprotected, as without one.
+  defp flag(fd, byte) do
+    case :file.pwrite(fd, 0, byte) do
+      :ok -> :ok
+      {:error, reason} -> Logger.warning("Alambique could not write a marker: #{inspect(reason)}")
     end
   end
 end
