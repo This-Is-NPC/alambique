@@ -110,10 +110,7 @@ defmodule Alambique.Cell.Facts do
   """
   @spec publish(State.t(), boolean) :: :ok
   def publish(%State{load: load} = state, measure? \\ false) do
-    put(load, :txid, state.repl.txid)
-    put(load, :acked_txid, state.pipe.acked.txid)
-    put(load, :batches_in_flight, length(state.pipe.queue))
-    put(load, :parked, length(state.parked))
+    publish_queue(load, state)
     publish_feed(load, state)
     put(load, :lease_epoch, state.lease.epoch)
     put(load, :lease_expires_at, state.lease.expires_at_ms)
@@ -121,6 +118,13 @@ defmodule Alambique.Cell.Facts do
     put(load, :hydrating, state.hydrator != nil)
     if measure? and track_bytes?(state), do: measure(state)
     :ok
+  end
+
+  defp publish_queue(load, state) do
+    put(load, :txid, state.repl.txid)
+    put(load, :acked_txid, state.pipe.acked.txid)
+    put(load, :batches_in_flight, length(state.pipe.queue))
+    put(load, :parked, length(state.parked))
   end
 
   defp publish_feed(load, state) do
