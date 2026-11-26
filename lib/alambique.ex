@@ -228,7 +228,12 @@ defmodule Alambique do
       `:op_timeout_ms` plus one second. `true` keeps reads off the schedulers
       on a node with one or two, and gives up the early reads of a lazy wake).
       Replica reads and `Alambique.Query` read their own downloaded files, so
-      the option does not apply to them. `:mode` is `:ranged` (default: the
+      the option does not apply to them. `:page_sidecar` (default `false`)
+      writes a page-hash sidecar beside every segment and snapshot larger than
+      `:verify_bytes`, which lets a lazy restore trust the pages it reads by
+      range without reading those objects whole (`docs/segment-format.md`; one
+      more request per object written). Reading uses a sidecar whenever one
+      exists. `:mode` is `:ranged` (default: the
       lazy restore above) or `:whole`: the cell reads its whole chain before
       its first statement, as with `false`, and the other options of the list
       then do not apply to it.
