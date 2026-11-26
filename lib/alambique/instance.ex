@@ -84,15 +84,15 @@ defmodule Alambique.Instance do
     base(config, lock) ++
       tracker(config) ++
       cells(config) ++
-      only_if(config.feed.retention_ms, [{Alambique.Feed.Janitor, config}]) ++
-      only_if(config.compaction, [compactor(config)]) ++
-      only_if(config.sweeper, [sweeper(config)]) ++
+      only_if(config.feed.retention_ms, fn -> [{Alambique.Feed.Janitor, config}] end) ++
+      only_if(config.compaction, fn -> [compactor(config)] end) ++
+      only_if(config.sweeper, fn -> [sweeper(config)] end) ++
       Alambique.Trash.children(config) ++
       Alambique.Scrub.children(config) ++
       Alambique.WalBudget.children(config) ++
       LocalCache.children(config) ++
       replicas(config) ++
-      only_if(config.nodes, [Alambique.NodeRegistry.child_spec(config)])
+      only_if(config.nodes, fn -> [Alambique.NodeRegistry.child_spec(config)] end)
   end
 
   defp base(config, lock) do
@@ -116,7 +116,8 @@ defmodule Alambique.Instance do
     ]
   end
 
-  defp only_if(setting, children), do: if(setting, do: children, else: [])
+  # The children are built only when the setting is on.
+  defp only_if(setting, children), do: if(setting, do: children.(), else: [])
 
   # Before the membership, so the crashes of the previous VM are settled before
   # this node takes calls. It stops after the cells.
