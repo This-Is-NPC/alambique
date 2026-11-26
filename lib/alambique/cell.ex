@@ -456,9 +456,7 @@ defmodule Alambique.Cell do
 
         {{:ok, info.source, changed: changed}, state}
 
-      {:error, reason} ->
-        message = "cache_size failed: " <> inspect(reason)
-
+      {:error, message} ->
         refresh_done(state, refresh, :error, %{options_time: info.time, timers_rearmed: 0}, %{
           options: :kept,
           reason: message
@@ -494,7 +492,8 @@ defmodule Alambique.Cell do
     changed =
       for key <- @option_keys, State.cell_opt(state, key) != State.cell_opt(next, key), do: key
 
-    with :ok <- refresh_cache(state, next, changed) do
+    with :ok <- locking_unchanged(state, next),
+         :ok <- refresh_cache(state, next, changed) do
       {next, rearmed} = rearm(state, next, changed)
 
       if :track_bytes in changed and not Facts.track_bytes?(next),
@@ -502,6 +501,16 @@ defmodule Alambique.Cell do
 
       {:ok, next, changed, rearmed}
     end
+  end
+
+  # The lock is taken when the connection opens, and the cell chose it for
+  # what the connection does (the idle close and the feed depend on it), so a
+  # refresh cannot change it: the whole refresh is refused and the cell keeps
+  # its options. The new value applies at the next wake.
+  defp locking_unchanged(state, next) do
+    if State.cell_opt(state, :locking_mode) == State.cell_opt(next, :locking_mode),
+      do: :ok,
+      else: {:error, "locking_mode cannot change while the cell is awake"}
   end
 
   # The cache limit the new options ask for, if the connection holds another.
@@ -530,8 +539,11 @@ defmodule Alambique.Cell do
   # Only the pragma runs native code, so only it holds the marker.
   defp set_cache(state, kib) do
     Inflight.busy(state.inflight, fn ->
-      with :ok <- refresh_fault(state) do
-        Sqlite.execute(state.conn, "PRAGMA cache_size = -#{kib}", write: true)
+      with :ok <- refresh_fault(state),
+           :ok <- Sqlite.execute(state.conn, "PRAGMA cache_size = -#{kib}", write: true) do
+        :ok
+      else
+        {:error, reason} -> {:error, "cache_size failed: " <> inspect(reason)}
       end
     end)
   end

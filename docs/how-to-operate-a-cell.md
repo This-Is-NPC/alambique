@@ -584,7 +584,7 @@ owns the cell.
 | `{:ok, :override, changed: keys}` | The function returned options; `keys` are the ones whose value changed (`[]` when none did). | Nothing. |
 | `{:ok, :node, changed: keys}` | The function returned `nil` or `[]`, or there is none: the cell uses the node's values. | Nothing. |
 | `{:ok, :asleep}` | Nobody owns the cell. It is not woken; it reads the options at its next wake. | Nothing. |
-| `{:error, {:cell_options, message}}` | The function raised, did not return in `cell_options_timeout_ms`, or returned an invalid override, or the page cache could not be set. The cell keeps the options it had. | Fix the function and repeat the call. |
+| `{:error, {:cell_options, message}}` | The function raised (or asked for another `sql: [locking_mode:]`, which only a wake applies), did not return in `cell_options_timeout_ms`, or returned an invalid override, or the page cache could not be set. The cell keeps the options it had. | Fix the function and repeat the call. |
 
 To refresh every cell awake on a node, for example after you changed the
 function, call it with `:all` on each node:
