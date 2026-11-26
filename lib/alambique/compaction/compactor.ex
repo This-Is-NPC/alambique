@@ -448,18 +448,21 @@ defmodule Alambique.Compaction.Compactor do
   defp requeue(config, {cell, first, last, _due}, delay) do
     due = now_ms() + delay
 
-    unless :ets.insert_new(config.compactor, {cell, first, last, due}) do
-      case :ets.lookup(config.compactor, cell) do
-        [{_, f, _, d}] ->
-          start = for(n <- [f, first], n > 0, do: n) |> Enum.min(fn -> 0 end)
-          :ets.update_element(config.compactor, cell, [{2, start}, {4, min(d, due)}])
-
-        [] ->
-          :ok
-      end
-    end
+    unless :ets.insert_new(config.compactor, {cell, first, last, due}),
+      do: merge_row(config, cell, first, due)
 
     :ok
+  end
+
+  defp merge_row(config, cell, first, due) do
+    case :ets.lookup(config.compactor, cell) do
+      [{_, f, _, d}] ->
+        start = for(n <- [f, first], n > 0, do: n) |> Enum.min(fn -> 0 end)
+        :ets.update_element(config.compactor, cell, [{2, start}, {4, min(d, due)}])
+
+      [] ->
+        :ok
+    end
   end
 
   defp now_ms, do: System.monotonic_time(:millisecond)
