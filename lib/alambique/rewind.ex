@@ -17,10 +17,10 @@ defmodule Alambique.Rewind do
   #      (a stale writer got the TXID): start again from 3.
   #   5. Release the lease. The next wake restores through the segment.
 
-  alias Alambique.{Config, Exclusive, Fault, Inflight, Lease, Placement}
-  alias Alambique.{Replication, Schema, Telemetry}
   alias Alambique.Cell.{Db, Local}
+  alias Alambique.{Config, Exclusive, Fault, Inflight, Lease, Placement}
   alias Alambique.Feed.Capture
+  alias Alambique.{Replication, Schema, Telemetry}
   alias Alambique.Replication.{Objects, Replicator, Retry}
   alias Alambique.Rewind.Reconcile
 

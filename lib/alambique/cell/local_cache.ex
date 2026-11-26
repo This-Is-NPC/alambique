@@ -14,6 +14,7 @@ defmodule Alambique.Cell.LocalCache do
   # (design §8). So a wake and an eviction never touch the same directory.
   # A directory without a marker is not reusable either, so it goes the same way.
 
+  alias Alambique.Cell.Facts
   alias Alambique.Telemetry
 
   @defaults [max_bytes: 21_474_836_480, interval_ms: 60_000]
@@ -99,7 +100,7 @@ defmodule Alambique.Cell.LocalCache do
   defp evict(config, dir, acc) do
     task =
       Task.async(fn ->
-        case Registry.register(config.registry, dir.cell, Alambique.Cell.Facts.new()) do
+        case Registry.register(config.registry, dir.cell, Facts.new()) do
           {:ok, _} ->
             _ = File.rm_rf(dir.dir)
             :evicted

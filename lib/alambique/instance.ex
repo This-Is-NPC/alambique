@@ -6,14 +6,17 @@ defmodule Alambique.Instance do
 
   use Supervisor
 
+  alias Alambique.Cell.Local
+  alias Alambique.Cell.LocalCache
   alias Alambique.{Config, Membership, Store}
+  alias Alambique.Replication.NativeOptions
 
   require Logger
 
   # The store is checked and the data directory locked before the tree
   # starts, so a refused start touches no file (design §1).
   def start_link(config) do
-    Alambique.Replication.NativeOptions.check_applied(config.name)
+    NativeOptions.check_applied(config.name)
 
     with :ok <- check_stores(config),
          {:ok, lock} <- Alambique.DataDir.acquire(config.data_dir) do
@@ -63,7 +66,7 @@ defmodule Alambique.Instance do
   def init({config, lock}) do
     # A replica file never outlives its process (design §21).
     _ = File.rm_rf!(Alambique.Replica.dir(config))
-    Alambique.Cell.Local.clean_work_dirs(config)
+    Local.clean_work_dirs(config)
     Config.put(config)
     Membership.init_state(config)
 
@@ -102,7 +105,7 @@ defmodule Alambique.Instance do
       children ++
         Alambique.Trash.children(config) ++
         Alambique.Scrub.children(config) ++
-        Alambique.WalBudget.children(config) ++ Alambique.Cell.LocalCache.children(config)
+        Alambique.WalBudget.children(config) ++ LocalCache.children(config)
 
     children = children ++ replicas(config)
 

@@ -20,6 +20,8 @@ defmodule Alambique.Replication.NativeOptions do
   #   * `trim_idle_ms` - how long the trim thread waits for a wake-up before it
   #     looks anyway (default 30000); the tests set it high to see the wake-ups.
 
+  alias Alambique.Replication.Native
+
   require Logger
 
   @defaults [
@@ -101,7 +103,7 @@ defmodule Alambique.Replication.NativeOptions do
   """
   @spec differing() :: [atom]
   def differing do
-    stats = Alambique.Replication.Native.stats()
+    stats = Native.stats()
     wanted = load_data()
     on? = stats.page_arena_state != 0
 

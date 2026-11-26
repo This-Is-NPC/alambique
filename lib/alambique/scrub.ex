@@ -47,8 +47,9 @@ defmodule Alambique.Scrub do
 
   require Logger
 
-  alias Alambique.{Config, Placement, Schema, Telemetry}
   alias Alambique.Cell.Db
+  alias Alambique.Cell.Local
+  alias Alambique.{Config, Placement, Schema, Telemetry}
   alias Alambique.Replication
   alias Alambique.Replication.{Native, Retry}
   alias Alambique.Sqlite
@@ -304,7 +305,7 @@ defmodule Alambique.Scrub do
 
   # Restores into a directory of its own, removed in every case.
   defp check(config, settings, location, cell) do
-    dir = Alambique.Cell.Local.work_dir(config, :scrub)
+    dir = Local.work_dir(config, :scrub)
     path = Path.join(dir, "cell.db")
     ctx = %{Config.repl_ctx(config, location) | timeout_ms: settings.timeout_ms}
 

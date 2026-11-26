@@ -23,6 +23,7 @@ defmodule Alambique.Lease do
   """
 
   alias Alambique.{Conditional, Fault, Telemetry}
+  alias Alambique.Store.Breaker
 
   @enforce_keys [:cell, :epoch, :owner, :token, :seq, :expires_at_ms]
   defstruct [
@@ -173,7 +174,7 @@ defmodule Alambique.Lease do
     # A renewal keeps a lease the cell already holds: it is one request in a
     # third of the TTL for each cell, and an open breaker must not make a cell
     # lose its lease after the store recovered (design §3).
-    ctx = %{ctx | store: Alambique.Store.Breaker.bypass(ctx.store)}
+    ctx = %{ctx | store: Breaker.bypass(ctx.store)}
 
     started = System.monotonic_time()
     result = renew_put(ctx, lease)
