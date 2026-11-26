@@ -1533,6 +1533,22 @@ mod tests {
             assert!(lazy.stage_hashes(0, &side, 9, 1, 1).is_err(), "{what}");
             assert!(lazy.covered().is_empty(), "{what}");
         }
+        // A sidecar that is intact and says something else than the file: each
+        // field the restore binds is checked on its own.
+        for (at, what) in [
+            (6, "level"),
+            (15, "min TXID"),
+            (23, "max TXID"),
+            (27, "page size"),
+            (39, "file checksum"),
+            (47, "object size"),
+            (67, "page number"),
+        ] {
+            let (_dir, lazy) = lazy_with(&a);
+            let forged = pages::forge_at(&side, at);
+            assert!(lazy.stage_hashes(0, &forged, 9, 1, 1).is_err(), "{what}");
+            assert!(lazy.covered().is_empty(), "{what}");
+        }
         let (_dir, lazy) = lazy_with(&a);
         assert!(lazy.stage_hashes(0, &side, 0, 1, 1).is_err(), "level");
         assert!(lazy.stage_hashes(0, &side, 9, 1, 2).is_err(), "txid range");
