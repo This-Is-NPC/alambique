@@ -1329,8 +1329,9 @@ defmodule Alambique.Config do
     if idle_min && idle_max && idle_min > idle_max,
       do: bad!(":awake :cell_idle_timeout_ms_min must not exceed :cell_idle_timeout_ms_max")
 
-    if (idle_min && idle_timeout_ms < idle_min) or (idle_max && idle_timeout_ms > idle_max),
-      do: bad!(":idle_timeout_ms must be within :awake :cell_idle_timeout_ms_min and _max")
+    if (not is_nil(idle_min) and idle_timeout_ms < idle_min) or
+         (not is_nil(idle_max) and idle_timeout_ms > idle_max),
+       do: bad!(":idle_timeout_ms must be within :awake :cell_idle_timeout_ms_min and _max")
 
     :ok
   end
