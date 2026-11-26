@@ -38,7 +38,7 @@ defmodule Alambique.Drain do
     # The leave of a stop or a crash is not a drain the host asked for: keep the
     # state, so a restart of this child puts the node back as it was.
     state = Membership.state(config)
-    run(config, [])
+    {:ok, _summary} = run(config, [])
     Membership.put_state(config, state)
     :ok
   end
@@ -192,12 +192,13 @@ defmodule Alambique.Drain do
   defp deadline_cut({:error, :timeout}), do: {:error, :deadline}
   defp deadline_cut(result), do: result
 
-  defp record(config, results, cell, result) do
-    case result do
-      :ok -> :ets.update_counter(config.drain_status, :done, 1)
-      {:error, reason} -> :ets.insert(config.drain_status, {{:error, cell}, reason})
-    end
+  defp record(config, results, cell, :ok) do
+    :ets.update_counter(config.drain_status, :done, 1)
+    Map.put(results, cell, :ok)
+  end
 
+  defp record(config, results, cell, {:error, reason} = result) do
+    :ets.insert(config.drain_status, {{:error, cell}, reason})
     Map.put(results, cell, result)
   end
 

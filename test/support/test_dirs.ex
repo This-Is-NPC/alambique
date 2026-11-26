@@ -21,7 +21,7 @@ defmodule Alambique.TestDirs do
   @doc "Removes this run's root."
   @spec clean() :: :ok
   def clean do
-    File.rm_rf(root())
+    {:ok, _} = File.rm_rf(root())
     :ok
   end
 
@@ -31,7 +31,7 @@ defmodule Alambique.TestDirs do
     tmp = System.tmp_dir!()
 
     for name <- File.ls!(tmp), pid = owner(name), pid != nil, not alive?(pid) do
-      File.rm_rf(Path.join(tmp, name))
+      {:ok, _} = File.rm_rf(Path.join(tmp, name))
     end
 
     :ok

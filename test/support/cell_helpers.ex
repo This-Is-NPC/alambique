@@ -103,7 +103,14 @@ defmodule Alambique.CellHelpers do
   an instance that is not running: busy, and nobody removes it.
   """
   def leave_busy_marker(data_dir, cell, kind \\ :cell) do
-    config = %{quarantine: %{}, data_dir: data_dir, inflight: :no_tracker}
+    # No tracker runs under this name, so the marker is only a file.
+    config =
+      Alambique.Config.build(
+        name: :busy_marker_writer,
+        store: {AlambiqueTestkit.MemoryStore, %{server: nil}},
+        data_dir: data_dir
+      )
+
     marker = Alambique.Inflight.open(config, cell, kind)
     :ok = :file.pwrite(marker.fd, 0, <<1>>)
     :ok = :file.close(marker.fd)
@@ -190,7 +197,7 @@ defmodule Alambique.CellHelpers do
   @doc "Sends the given telemetry events to the calling process as `{:telemetry, event, measurements, meta}`."
   def capture(events) do
     id = {__MODULE__, make_ref()}
-    :telemetry.attach_many(id, events, &__MODULE__.relay/4, self())
+    :ok = :telemetry.attach_many(id, events, &__MODULE__.relay/4, self())
 
     on_exit(fn -> :telemetry.detach(id) end)
   end
@@ -267,7 +274,8 @@ defmodule Alambique.CellHelpers do
   vanishes under it.
   """
   def stop_distribution do
-    Node.stop()
+    # An error means the node was not distributed: the state this wants.
+    _ = Node.stop()
     eventually(fn -> not Node.alive?() end)
   end
 
@@ -326,7 +334,7 @@ defmodule Alambique.CellHelpers do
     {:ok, _} = Alambique.Replication.restore(ctx, cell, path, :latest)
     {:ok, conn} = Alambique.Sqlite.open(path, readonly: true)
     {:ok, %{rows: rows}} = Alambique.Sqlite.run(conn, sql, [])
-    Alambique.Sqlite.close(conn)
+    :ok = Alambique.Sqlite.close(conn)
     File.rm(path)
     rows
   end
