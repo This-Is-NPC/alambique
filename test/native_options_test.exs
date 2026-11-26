@@ -66,4 +66,68 @@ defmodule Alambique.NativeOptionsTest do
       assert stats.page_arena_keep_kib == (expected[:keep_kib] || 4096)
     end
   end
+
+  describe "a setting that arrives after the library loaded" do
+    import ExUnit.CaptureLog
+    import Alambique.CellHelpers, only: [setup_store: 0, start_instance: 2]
+
+    setup do
+      handler = {__MODULE__, make_ref()}
+      test = self()
+
+      :telemetry.attach(
+        handler,
+        [:alambique, :page_arena, :config_ignored],
+        fn _event, measurements, meta, _ -> send(test, {:ignored, measurements, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+      setup_store()
+    end
+
+    defp start_with(ctx, env) do
+      current = Application.get_env(:alambique, :page_arena, [])
+      Application.put_env(:alambique, :page_arena, Keyword.merge(current, env))
+      capture_log(fn -> start_instance(ctx, []) end)
+    end
+
+    test "is warned about and reported with the keys that differ", ctx do
+      log = start_with(ctx, extent_kib: 128, keep_kib: 1)
+
+      if Native.stats().page_arena_state == 1 do
+        assert log =~ "differs from what the library loaded with"
+        assert log =~ "extent_kib"
+        assert log =~ "config/config.exs"
+        assert_receive {:ignored, %{keys: 2}, %{keys: keys, instance: _}}
+        assert Enum.sort(keys) == [:extent_kib, :keep_kib]
+      else
+        # The library applied nothing but the switch: nothing to compare.
+        refute log =~ "differs from what the library loaded with"
+      end
+    end
+
+    test "an arena switched off or on after the load is reported as :enabled", ctx do
+      on? = Native.stats().page_arena_state != 0
+      log = start_with(ctx, enabled: not on?)
+
+      assert log =~ ":enabled"
+      assert_receive {:ignored, _, %{keys: [:enabled]}}
+    end
+
+    test "a setting the library refuses is reported", ctx do
+      log = start_with(ctx, extent_kib: 6)
+
+      assert log =~ ":invalid"
+      assert_receive {:ignored, _, %{keys: [:invalid]}}
+    end
+
+    test "what the library loaded with is not reported", ctx do
+      log = capture_log(fn -> start_instance(ctx, []) end)
+
+      refute log =~ "differs from what the library loaded with"
+      assert NativeOptions.differing() == []
+      refute_received {:ignored, _, _}
+    end
+  end
 end

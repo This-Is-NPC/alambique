@@ -531,6 +531,7 @@ metadata. To sample them, add a poller to your supervision tree:
 | Event | Measurements | Metadata |
 | --- | --- | --- |
 | `[:alambique, :native, :stats]` | the measurements below | none |
+| `[:alambique, :page_arena, :config_ignored]` | `keys`: how many | `instance`, `keys`: the keys of `config :alambique, :page_arena` that differ from what the library loaded with. Emitted when an instance starts, with a warning in the log: the library reads them once, at load. |
 
 Counters only grow since the node started; use differences between two
 samples. Gauges go up and down. Sizes are bytes and times are nanoseconds.
@@ -551,7 +552,7 @@ samples. Gauges go up and down. Sizes are bytes and times are nanoseconds.
 | `ltx_bytes_decoded` | counter | Size of the LTX files opened for decoding (reading only a header decodes nothing). |
 | `page_arena_state` | gauge | The page arena: 0 off, 1 on, 2 asked for but the address range could not be reserved, 3 asked for but not supported (not Linux, or settings it cannot use). |
 | `page_arena_page_hdrsz` | gauge | Bytes SQLite adds to each page of a page cache. |
-| `page_arena_reserved_bytes`, `page_arena_extent_kib`, `page_arena_trim_after_kib`, `page_arena_keep_kib`, `page_arena_max_trim_kib` | gauges | The settings the library loaded with (`config :alambique, :page_arena`). Present only while the arena is on. |
+| `page_arena_reserved_bytes`, `page_arena_reserved_mib`, `page_arena_extent_kib`, `page_arena_trim_after_kib`, `page_arena_keep_kib`, `page_arena_max_trim_kib`, `page_arena_max_regions`, `page_arena_trim_idle_ms` | gauges | The settings the library loaded with (`config :alambique, :page_arena`). Present only while the arena is on. |
 | `page_arena_in_use_bytes` | gauge | Bytes of page-cache blocks in use. Not in `:erlang.memory/0`. |
 | `page_arena_mapped_bytes` | gauge | Bytes of the reserved range cut into extents so far. |
 | `page_arena_resident_bytes` | gauge | Bytes of the range that are resident: in use, free and not yet released, and the unused rest of pages shared with blocks in use. |

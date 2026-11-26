@@ -14,7 +14,7 @@ use std::alloc::{GlobalAlloc, Layout};
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::os::raw::c_int;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering::Relaxed};
 use std::sync::OnceLock;
 
 use libsqlite3_sys as ffi;
@@ -111,6 +111,8 @@ mod heap {
 static ARENA: OnceLock<Arena> = OnceLock::new();
 /// Bytes SQLite adds to the page size in a page-cache block (`PCACHE_HDRSZ`).
 static PAGE_HDRSZ: AtomicUsize = AtomicUsize::new(0);
+/// The idle wait of the trim thread, in ms, as loaded.
+static TRIM_IDLE_MS: AtomicU64 = AtomicU64::new(0);
 static ARENA_STATE: AtomicU8 = AtomicU8::new(ArenaState::Off as u8);
 
 /// Why the arena is on or off, reported in the stats.
@@ -133,6 +135,11 @@ pub fn arena_state() -> ArenaState {
         3 => ArenaState::Unsupported,
         _ => ArenaState::Off,
     }
+}
+
+/// The trim thread's idle wait in ms, as loaded.
+pub fn trim_idle_ms() -> u64 {
+    TRIM_IDLE_MS.load(Relaxed)
 }
 
 pub fn arena() -> Option<&'static Arena> {
@@ -546,6 +553,7 @@ fn start_arena(req: &ArenaRequest, hdrsz: usize) {
         match Arena::new(req.config, strides(hdrsz)) {
             Ok(a) => {
                 let _ = ARENA.set(a);
+                TRIM_IDLE_MS.store(req.trim_idle.as_millis() as u64, Relaxed);
                 match ARENA.get().map(|a| a.start_trimmer(req.trim_idle)) {
                     Some(Ok(())) => ArenaState::On,
                     _ => ArenaState::Unsupported,
