@@ -168,6 +168,10 @@ run = "scripts/bench-amplification"
 description = "Write to 12 cells at fixed rates and print a per-second timeline of latency, run queues, NIF calls, spans, store requests and threads blocked in the kernel, to find stalls (argument: seconds per rate, default 60; ALAMBIQUE_BENCH_RATES, _CELLS, _STORE=memory|seaweedfs, _OPTS; TMPDIR picks the disk)"
 run = "scripts/bench-stall"
 
+[tasks."bench:sidecar"]
+description = "Time the commits of a cell with and without a page-hash sidecar (argument: commits per case)"
+run = "scripts/bench-sidecar"
+
 [tasks."bench:lazy"]
 description = "Compare a lazy restore with a full restore of a large cell (argument: database size in MB)"
 depends = ["seaweedfs:up"]
