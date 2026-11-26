@@ -193,6 +193,8 @@ are in its header (`bench/*.exs`). Tasks marked SeaweedFS start that container.
 
 - `bench:cells`: wake thousands of cells on one node and report resource use.
 - `bench:memory`: memory of awake cells by purpose, and read and write latency.
+- `bench:facts`: cost of the cell facts: writes, calls, unit costs, `cells/2` pages and a busy connection.
+- `bench:feed-handover`: the hand-over of the feed's rows by mode: query, build, copy, cell reductions, first write after a large batch, `reader_close`, files and dirty IO.
 - `bench:idle-close`: memory, descriptors and latency of idle cells with the connection open and closed.
 - `bench:options-refresh`: latency of `refresh_options/3` by callback, renewal gaps under a refresh storm, the time the busy marker is held, and a node-wide refresh against client latency.
 - `bench:query`: query thousands of cells cold and warm.
@@ -203,6 +205,7 @@ are in its header (`bench/*.exs`). Tasks marked SeaweedFS start that container.
 - `bench:wal`: one awake cell under steady writes: commits/s, p99, WAL size and memory.
 - `bench:stall`: stalls of the write path (see below).
 - `bench:sums`: commit of a single-row change in cells of many pages.
+- `bench:sidecar`: commit latency of one cell with and without a page-hash sidecar.
 - `bench:lazy` (SeaweedFS): lazy restore of a large cell against a full restore.
 - `bench:wake`: time of the first query after a wake, with latency on every store request.
 - `bench:trips`: store requests of a job by kind, at two store latencies and two concurrencies.
