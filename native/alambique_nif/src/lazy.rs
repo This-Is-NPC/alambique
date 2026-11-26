@@ -133,6 +133,25 @@ pub fn stage_file(
         .and_then(|n| rest.len().checked_sub(n))
         .ok_or_else(out_of_range)?;
     let index = rest.get(index_start..).ok_or_else(out_of_range)?;
+    let entries = parse_index(index, header.commit, total)?;
+    let meta_head = head
+        .first_chunk::<HEADER_SIZE>()
+        .ok_or_else(|| crate::error::Error::Invalid("short header".into()))?;
+    let meta_tail = tail.get(index_start..).ok_or_else(out_of_range)?;
+    let meta = pages::meta_hash(meta_head, meta_tail);
+    Ok(Ok(Staged {
+        header,
+        post_apply,
+        total,
+        entries,
+        file_checksum,
+        meta,
+    }))
+}
+
+/// Decodes the page index: `(pgno, offset, size)` per frame, in page order,
+/// every frame inside the file of `total` bytes.
+fn parse_index(index: &[u8], commit: u32, total: u64) -> Result<Vec<(u32, u64, u32)>> {
     let mut entries = Vec::new();
     let (mut p, mut prev) = (0usize, 0u32);
     loop {
@@ -144,7 +163,7 @@ pub fn stage_file(
         let size = get_uvarint(index, &mut p)?;
         let pgno = u32::try_from(pgno)
             .ok()
-            .filter(|n| *n <= header.commit && *n > prev)
+            .filter(|n| *n <= commit && *n > prev)
             .ok_or_else(|| crate::error::Error::Invalid("page index out of order".into()))?;
         let min_size = (PAGE_HEADER_SIZE + 4) as u64;
         let size = u32::try_from(size)
@@ -161,19 +180,7 @@ pub fn stage_file(
     if p != index.len() {
         return invalid("page index size mismatch");
     }
-    let meta_head = head
-        .first_chunk::<HEADER_SIZE>()
-        .ok_or_else(|| crate::error::Error::Invalid("short header".into()))?;
-    let meta_tail = tail.get(index_start..).ok_or_else(out_of_range)?;
-    let meta = pages::meta_hash(meta_head, meta_tail);
-    Ok(Ok(Staged {
-        header,
-        post_apply,
-        total,
-        entries,
-        file_checksum,
-        meta,
-    }))
+    Ok(entries)
 }
 
 /// The frame of `len` bytes at `rel` in a fetched run.
@@ -1154,7 +1161,7 @@ mod tests {
 
     pub(super) fn page(pgno: u32, fill: u8) -> Vec<u8> {
         (0..PS)
-            .map(|i| fill.wrapping_add((i % 13) as u8) ^ pgno as u8)
+            .map(|i| fill.wrapping_add((i % 13) as u8) ^ pgno.to_le_bytes()[0])
             .collect()
     }
 
@@ -1205,15 +1212,6 @@ mod tests {
             post_apply: crate::ltx::CHECKSUM_FLAG | 1,
             ..Default::default()
         };
-        let varint = |mut v: u64| {
-            let mut out = Vec::new();
-            while v >= 0x80 {
-                out.push(v as u8 | 0x80);
-                v >>= 7;
-            }
-            out.push(v as u8);
-            out
-        };
         let index: Vec<u8> = [1, u64::MAX - 5, 100, 0]
             .into_iter()
             .flat_map(varint)
@@ -1235,15 +1233,6 @@ mod tests {
             flags: crate::ltx::HEADER_FLAG_NO_CHECKSUM,
             post_apply: crate::ltx::CHECKSUM_FLAG | 1,
             ..Default::default()
-        };
-        let varint = |mut v: u64| {
-            let mut out = Vec::new();
-            while v >= 0x80 {
-                out.push(v as u8 | 0x80);
-                v >>= 7;
-            }
-            out.push(v as u8);
-            out
         };
         let index: Vec<u8> = [1, 100, 5 << 30, 0].into_iter().flat_map(varint).collect();
         let mut tail = index.clone();
@@ -1298,10 +1287,25 @@ mod tests {
         assert!(stage_file(&f[..HEADER_SIZE], tail, total).is_err());
     }
 
+    fn varint(mut v: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        while v >= 0x80 {
+            out.push(v.to_le_bytes()[0] | 0x80);
+            v >>= 7;
+        }
+        out.push(v.to_le_bytes()[0]);
+        out
+    }
+
+    /// The `size` bytes at `offset` of `file`.
+    fn bytes_at(file: &[u8], offset: u64, size: u32) -> &[u8] {
+        let start = usize::try_from(offset).unwrap();
+        &file[start..start + usize::try_from(size).unwrap()]
+    }
+
     pub(super) fn frame<'a>(file: &'a [u8], run: &Run, i: usize) -> &'a [u8] {
         let (_, rel, len) = run.pages[i];
-        let start = run.offset as usize + rel as usize;
-        &file[start..start + len as usize]
+        bytes_at(file, run.offset + u64::from(rel), len)
     }
 
     fn files() -> (Vec<u8>, Vec<u8>) {
@@ -1614,7 +1618,8 @@ mod tests {
 
     fn index_at(tail: &[u8]) -> usize {
         let at = tail.len() - TRAILER_SIZE - 8;
-        let len = u64::from_be_bytes(tail[at..at + 8].try_into().unwrap()) as usize;
+        let len =
+            usize::try_from(u64::from_be_bytes(tail[at..at + 8].try_into().unwrap())).unwrap();
         at - len
     }
 
@@ -1699,7 +1704,11 @@ mod tests {
         for &p in pgnos {
             let src = if p == 3 { evil.unwrap_or(a) } else { a };
             let (_, start, len) = *verify(src).unwrap().2.iter().find(|f| f.0 == p).unwrap();
-            pages.push((p, data.len() as u32, len as u32));
+            pages.push((
+                p,
+                u32::try_from(data.len()).unwrap(),
+                u32::try_from(len).unwrap(),
+            ));
             data.extend_from_slice(&src[start..start + len]);
         }
         (data, pages)
@@ -1882,12 +1891,7 @@ mod tests {
             rx.try_recv().is_err(),
             "the second reader must not ask again"
         );
-        let data = decode_frame(
-            &a[miss.offset as usize..(miss.offset + miss.size as u64) as usize],
-            3,
-            PS,
-        )
-        .unwrap();
+        let data = decode_frame(bytes_at(&a, miss.offset, miss.size), 3, PS).unwrap();
         lazy.install(3, &data).unwrap();
         assert_eq!(reader.join().unwrap(), Ok(()));
         assert_eq!(second.join().unwrap(), Ok(()));
@@ -1947,7 +1951,7 @@ mod tests {
         .unwrap();
         // The old page arrives late.
         let e = lazy.inner().map[2];
-        let old = decode_frame(&a[e.offset as usize..][..e.size as usize], 3, PS).unwrap();
+        let old = decode_frame(bytes_at(&a, e.offset, e.size), 3, PS).unwrap();
         lazy.install(3, &old).unwrap();
         assert_eq!(
             &std::fs::read(&path).unwrap()[2 * PS as usize..3 * PS as usize],
@@ -1972,7 +1976,7 @@ mod tests {
         assert!(!lazy.inner().is_local(2));
         // A late page 5 does not extend the file.
         let e = lazy.inner().map[4];
-        let data = decode_frame(&a[e.offset as usize..][..e.size as usize], 5, PS).unwrap();
+        let data = decode_frame(bytes_at(&a, e.offset, e.size), 5, PS).unwrap();
         lazy.install(5, &data).unwrap();
         assert_eq!(std::fs::metadata(&lazy.path).unwrap().len(), 7 * PS as u64);
         assert_eq!(lazy.inner().pages, 3);
@@ -1989,7 +1993,7 @@ mod tests {
         let mut sums = Sums::zeroed(7);
         assert_eq!(lazy.prepare_sums(&mut sums, &[2, 4]), vec![2, 4]);
         let e = lazy.inner().map[3];
-        let data = decode_frame(&a[e.offset as usize..][..e.size as usize], 4, PS).unwrap();
+        let data = decode_frame(bytes_at(&a, e.offset, e.size), 4, PS).unwrap();
         lazy.install(4, &data).unwrap();
         assert_eq!(lazy.prepare_sums(&mut sums, &[2, 4]), vec![2]);
         assert_eq!(sums.get(3), Some(page_crc(4, &data)));
@@ -2038,8 +2042,8 @@ mod props {
             let mut fills: Vec<u8> = vec![0; first as usize];
             let mut files = vec![ltx(1, first, &(1..=first).map(|p| (p, 0)).collect::<Vec<_>>())];
             for (i, (size, writes)) in steps.iter().enumerate() {
-                let fill = i as u8 + 1;
-                let old = fills.len() as u32;
+                let fill = u8::try_from(i).unwrap() + 1;
+                let old = u32::try_from(fills.len()).unwrap();
                 let mut touched: Vec<u32> = (old + 1..=*size).collect();
                 touched.extend(writes.iter().filter(|p| **p <= *size));
                 touched.sort_unstable();
@@ -2052,7 +2056,7 @@ mod props {
                 files.push(ltx(i as u64 + 2, *size, &pages));
             }
             for (i, f) in files.iter().enumerate() {
-                stage_all(&lazy, i as u32, f);
+                stage_all(&lazy, u32::try_from(i).unwrap(), f);
             }
             lazy.ready().unwrap();
 
@@ -2067,12 +2071,12 @@ mod props {
                 }
             }
             fetched.sort_unstable();
-            prop_assert_eq!(fetched, (1..=fills.len() as u32).collect::<Vec<_>>());
+            prop_assert_eq!(fetched, (1..=u32::try_from(fills.len()).unwrap()).collect::<Vec<_>>());
             prop_assert!(lazy.is_complete());
             let expected: Vec<u8> = fills
                 .iter()
                 .enumerate()
-                .flat_map(|(i, f)| page(i as u32 + 1, *f))
+                .flat_map(|(i, f)| page(u32::try_from(i).unwrap() + 1, *f))
                 .collect();
             prop_assert_eq!(std::fs::read(&path).unwrap(), expected);
         }
