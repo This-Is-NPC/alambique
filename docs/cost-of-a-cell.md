@@ -151,6 +151,36 @@ with no measurable cost on the next call. It does nothing while
 `idle_cache_after_ms` is `nil`; with `idle_gc: false` the cell shrinks its cache
 and keeps the garbage.
 
+**`awake: [idle_close_after_ms: ...]`.** Off by default (`nil`). An awake cell
+with no call for `idle_close_after_ms` checkpoints and closes its SQLite
+connection, and keeps its process, its lease and its renewals. It must be below
+`idle_timeout_ms` and above `idle_cache_after_ms`; it can be set per cell.
+
+Per cell, while closed, the cell frees the page cache (up to `cache_kib`), the
+schema, the prepared statements and the open files of the connection (the
+database, its WAL and its WAL index). It keeps the process
+(about 22 KiB), its registry and admission rows (about 4.5 KiB) and one lease
+renewal request every third of `lease_ttl_ms`, the same as an open idle cell.
+The memory the budget (`awake.max_bytes`) counts for it is what its schema and
+statements held at the close, which the reopen rebuilds, not 0. Run
+`mise run bench:idle-close` for the figures of your cells: it prints the
+resident memory, the descriptors and the times below per cell, open against
+closed.
+
+Per operation: a close is one checkpoint (a `TRUNCATE` that copies the WAL into
+the database and syncs it), one close and, with `track_bytes`, one memory read
+before it. A reopen, on the first call that runs SQL, is a check of three files,
+one open (the pragmas, the WAL index rebuilt by the first connection) and the
+schema read by the first statement; it makes no request to the store and takes
+no lease. It runs inside the cell, so the cell serves nothing else while it
+runs, as it does not during a wake's open. The first call is slower by that
+time, so a cell called about every `idle_close_after_ms` pays it on every call
+and saves nothing: set the value above the longest pause between calls you want
+served warm. A hibernation, which ends the process and gives the lease back,
+costs a wake (lease, store reads, the open) on the next call; a close costs only
+the reopen, so it fits the pauses of minutes, and the hibernation the pauses of
+hours.
+
 **`cell_options: {module, function}`.** Off by default. With it, each wake
 calls the function with the cell id, in a process of its own, and the cell
 waits for it. The cost per wake is one spawned process and the call itself,
@@ -175,7 +205,7 @@ not return.
 bytes SQLite holds for its connections and the memory of its process, which
 `Alambique.cells/2` and `Alambique.facts/2` report. A measurement is about
 3.6 µs of the cell, at the end of its wake, after each call, after an idle
-cache shrink and at the end of a hydration. `track_bytes: false` saves that
+cache shrink, after an idle close and at the end of a hydration. `track_bytes: false` saves that
 and leaves those fields `nil`. A budget (`awake: [max_bytes:]`) measures
 whatever the option says.
 

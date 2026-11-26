@@ -81,8 +81,9 @@ defmodule Alambique do
       `apply(module, function, [cell_id | extra_args])`, which returns a keyword
       list in the shape of these options, with only the per-cell keys:
       `idle_timeout_ms:` and `awake: [cache_kib:, idle_cache_after_ms:,
-      idle_cache_kib:, idle_gc:]`. A key that is absent keeps the node's value;
-      `idle_cache_after_ms: nil` turns the idle shrink off for that cell. Any
+      idle_cache_kib:, idle_close_after_ms:, idle_gc:]`. A key that is absent keeps the node's value;
+      `idle_cache_after_ms: nil` turns the idle shrink off for that cell, and
+      `idle_close_after_ms: nil` the idle close. Any
       other key, a repeated key or a value the option refuses makes the whole
       override invalid. The function must be exported with arity
       `1 + length(extra_args)` and be cheap: it runs in a process of its own,
@@ -293,8 +294,8 @@ defmodule Alambique do
       cells is bounded by `:cache_kib` (page cache of each cell's SQLite
       connection, `PRAGMA cache_size`, default 512 KiB; SQLite's own default
       is 2 000) and by `:max_bytes` (default `nil`, no budget). A cell can
-      set `:cache_kib`, `:idle_cache_after_ms`, `:idle_cache_kib` and
-      `:idle_gc` through `:cell_options`. Until the page caches are per
+      set `:cache_kib`, `:idle_cache_after_ms`, `:idle_cache_kib`,
+      `:idle_close_after_ms` and `:idle_gc` through `:cell_options`. Until the page caches are per
       connection, a cell's `:cache_kib` is a share of the node's pool, not an
       isolated cap: one cell with a large value can push out the pages of the
       others. `:cell_cache_kib_max` (default `nil`, no limit; in KiB, and at
@@ -303,9 +304,36 @@ defmodule Alambique do
       chose, and the node's own `:cache_kib` and `:idle_timeout_ms` must be
       inside them. After the clamp, a rule that the merge broke is repaired:
       an idle timeout not above `:feed` `:cleanup_after_ms` goes back to the
-      node's, an idle shrink not below the idle timeout is turned off, and an
-      `:idle_cache_kib` not below `:cache_kib` goes back to the node's, or the
-      shrink is turned off if that is not below either.
+      node's, an idle shrink not below the idle timeout or the idle close is
+      turned off, an idle close not below the idle timeout is turned off, and
+      an `:idle_cache_kib` not below `:cache_kib` goes back to the node's, or
+      the shrink is turned off if that is not below either.
+      `:idle_close_after_ms` (default `nil`, off; when set, a positive integer
+      below `:idle_timeout_ms` and above `:idle_cache_after_ms`) makes an
+      awake cell that has had no call for that long checkpoint and close its
+      SQLite connection. The cell stays awake and the owner: its lease is
+      renewed as before, and its timers and facts go on. A call or message
+      that runs SQL opens the database again in the cell process, after a
+      check of the files (below); a request that needs no SQL, such as
+      `position/3`, leaves it closed. The close frees the page cache, the
+      schema, the statements and four descriptors, and leaves about the
+      process and its registry row. A cell with a call, a batch, parked work
+      or feed rows in flight, or committed frames that no batch carries, does
+      not close; the check runs again after `:idle_close_after_ms`. While
+      closed the cell keeps its hold on the file: another read-write open of
+      it in this VM is refused (`{:error, :held_by_cell}`) as for an open
+      cell. Frames or a change made to the file by another process while it is
+      closed are found at the reopen, before the new connection takes the WAL
+      as its baseline: frames in the WAL are judged by
+      `:sql` `:orphan_frames` like any frames no write carries, and another
+      file, a different size or time, or a rollback journal stops the cell
+      with `{:error, :orphan_frames}` (the next wake restores what the store
+      holds). A reopen that fails stops the cell like a failed wake, with
+      `{:error, {:reopen, reason}}`. The cost is one reopen after each idle
+      close: the open, its pragmas and a reload of the schema, with no request
+      to the store; a cell called about every `:idle_close_after_ms` pays it
+      on each call. Hibernation and a move of a closed cell find its file
+      checkpointed and need no connection.
       `:idle_cache_after_ms` (default `nil`, off; when set, a positive integer
       below `:idle_timeout_ms`) makes an awake cell that has had no call for
       that long lower its page cache to `:idle_cache_kib` (default 64, `0`
@@ -565,7 +593,8 @@ defmodule Alambique do
       of one more batch per published batch. `:idle_or_write`: as `:idle`, and
       a write that finds rows waiting removes them as `:in_write` does, which
       bounds the table under constant load. A cell removes the published rows
-      before it shrinks its page cache (`:idle_cache_after_ms`). A cleanup that
+      before it shrinks its page cache (`:idle_cache_after_ms`) or closes its
+      connection (`:idle_close_after_ms`). A cleanup that
       fails is tried again at growing intervals; it stops the cell only when it
       leaves the connection unusable (`{:query_only, _}`, `{:rollback_failed, _}`).
     * `:cleanup_after_ms` - time without a call before the idle modes clean
@@ -1748,8 +1777,11 @@ defmodule Alambique do
       and its expiry in milliseconds of the instance clock, as of its last
       renewal.
     * `:cache` - `:shrunk` while the idle cache shrink holds the page cache at
-      `:idle_cache_kib`, else `:full`. The first call after a shrink restores
-      it.
+      `:idle_cache_kib`, `:closed` while the idle close keeps the connection
+      closed, else `:full`. The first call after a shrink restores the cache,
+      and the first that runs SQL after a close opens the database again.
+      `:cache_used`, `:schema_used`, `:stmt_used` and `:lookaside_used` are 0
+      while it is closed.
     * `:hydrating` - `true` while the hydrator still fills the file of a
       lazy restore (design §16).
     * `:feed_published`, `:feed_sent`, `:feed_cleaned`, `:feed_backlog`,

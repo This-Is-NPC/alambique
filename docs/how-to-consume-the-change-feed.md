@@ -302,8 +302,9 @@ other. `feed: [cleanup:]` says when:
 `idle_timeout_ms` is 1 000 or less the default is one less than it) is the time
 without a call that makes the cell idle for `:idle` and `:idle_or_write`. Reads
 count as calls, so a cell that is read often does not clean while idle. A cell
-whose idle cache shrink is on (`awake: [idle_cache_after_ms:]`) removes the
-published rows first and shrinks after.
+whose idle cache shrink (`awake: [idle_cache_after_ms:]`) or idle close
+(`awake: [idle_close_after_ms:]`) is on removes the published rows first and
+shrinks or closes after.
 
 `cleanup_rows` (default `nil`, all rows) bounds the rows one cleanup removes.
 It cuts only between batches, never inside one: a batch that has more rows than
