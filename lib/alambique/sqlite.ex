@@ -81,22 +81,30 @@ defmodule Alambique.Sqlite do
   def open(path, opts \\ []) do
     vfs = if Keyword.get(opts, :vfs) == :alambique, do: "alambique"
 
-    Native.sqlite_open(
-      path,
-      Keyword.get(opts, :readonly, false),
-      vfs,
-      Keyword.get(opts, :attach, false),
-      Keyword.get(opts, :timeout_ms, 0),
-      Keyword.get(opts, :gated, false),
-      Keyword.get(opts, :locking, :normal) == :exclusive,
-      Keyword.get(opts, :lookaside)
-    )
+    Native.sqlite_open(path, %{
+      readonly: Keyword.get(opts, :readonly, false),
+      vfs: vfs,
+      attach: Keyword.get(opts, :attach, false),
+      timeout_ms: Keyword.get(opts, :timeout_ms, 0),
+      gated: Keyword.get(opts, :gated, false),
+      exclusive: Keyword.get(opts, :locking, :normal) == :exclusive,
+      lookaside: lookaside!(Keyword.get(opts, :lookaside))
+    })
     |> case do
       {:ok, ref, 0} -> {:ok, ref}
       {:ok, ref, key} -> {:ok, %Handle{ref: ref, key: key}}
       error -> error
     end
   end
+
+  defp lookaside!(nil), do: nil
+
+  defp lookaside!({bytes, slots} = pair)
+       when is_integer(bytes) and bytes >= 0 and is_integer(slots) and slots >= 0,
+       do: pair
+
+  defp lookaside!(other),
+    do: raise(ArgumentError, ":lookaside must be nil or {bytes, slots}, got: #{inspect(other)}")
 
   @doc false
   @spec ref(conn) :: reference
@@ -235,16 +243,8 @@ defmodule Alambique.Sqlite do
   @spec feed_rows(conn, iodata, list, feed_plan, pid, reference) ::
           {:ok, [feed_batch], boolean, boolean} | {:error, term}
   def feed_rows(conn, sql, params, {bound, resumed, room}, pid, token) do
-    Native.sqlite_feed_rows(
-      ref(conn),
-      IO.iodata_to_binary(sql),
-      params,
-      bound,
-      resumed,
-      room,
-      pid,
-      token
-    )
+    plan = %{bound: bound, resumed: resumed, room: room}
+    Native.sqlite_feed_rows(ref(conn), IO.iodata_to_binary(sql), params, plan, pid, token)
   end
 
   @doc "User statements running now on the node (`:max_concurrent` of `run/4`)."
@@ -336,24 +336,14 @@ defmodule Alambique.Sqlite do
   def foreign_write(conn), do: Native.sqlite_foreign_write(ref(conn), key(conn), 0)
 
   @doc """
-  `Alambique.Replication.Native.capture_incremental/8` of the files of a
+  `Alambique.Replication.Native.capture_incremental/4` of the files of a
   cell's own connection, reading the WAL up to the end its wal-index records:
   frames past it are no transaction (a commit frame whose write failed after
   it reached the file). The header is read in the same native call.
   """
   def capture_incremental(conn, db, wal, page_size, pos, sums, pre, txid, timestamp) do
-    Native.sqlite_capture_incremental(
-      ref(conn),
-      key(conn),
-      db,
-      wal,
-      page_size,
-      pos,
-      sums,
-      pre,
-      txid,
-      timestamp
-    )
+    opts = %{page_size: page_size, pos: pos, pre: pre, txid: txid, timestamp: timestamp}
+    Native.sqlite_capture_incremental(ref(conn), key(conn), db, wal, sums, opts)
   end
 
   @doc """
@@ -370,8 +360,10 @@ defmodule Alambique.Sqlite do
   """
   @spec capture_full(conn, Path.t(), pos_integer, pos_integer, integer, term) ::
           Alambique.Replication.Native.captured() | Alambique.Replication.Native.error()
-  def capture_full(conn, wal, page_size, txid, timestamp, limit),
-    do: Native.sqlite_capture_full(ref(conn), key(conn), wal, page_size, txid, timestamp, limit)
+  def capture_full(conn, wal, page_size, txid, timestamp, limit) do
+    opts = %{page_size: page_size, txid: txid, timestamp: timestamp, limit: limit}
+    Native.sqlite_capture_full(ref(conn), key(conn), wal, opts)
+  end
 
   @doc """
   Takes the header that the latest `foreign_write/1` saw as accounted for,
