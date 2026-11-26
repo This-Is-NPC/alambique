@@ -808,6 +808,59 @@ mod tests {
     }
 
     #[test]
+    fn a_full_range_falls_back_to_the_heap_and_frees_by_address() {
+        let (_g, a) = hooks();
+        let before = a.fallbacks();
+        let mut blocks = Vec::new();
+        let mut spilled = None;
+        // 64 KiB pages take one extent each: the range is soon used up.
+        for _ in 0..4096 {
+            // SAFETY: SQLite's contract: a positive size.
+            let p = unsafe { x_malloc(page_block(7)) };
+            assert!(!p.is_null(), "the heap serves what the arena cannot");
+            if !a.contains(p as *const u8) {
+                spilled = Some(p);
+                break;
+            }
+            blocks.push(p);
+        }
+        assert!(spilled.is_some(), "the range was never used up");
+        assert!(a.fallbacks() > before);
+        for p in blocks.into_iter().chain(spilled) {
+            // SAFETY: from `x_malloc`, not used again.
+            unsafe { x_free(p) };
+        }
+    }
+
+    #[test]
+    fn a_failure_to_start_is_reported_by_its_cause() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            failure_state(&Error::from(ErrorKind::OutOfMemory)),
+            ArenaState::ReserveFailed
+        );
+        assert_eq!(
+            failure_state(&Error::from(ErrorKind::InvalidInput)),
+            ArenaState::Unsupported
+        );
+    }
+
+    #[test]
+    fn the_region_guard_nests_and_restores() {
+        assert_eq!(current(), 0);
+        {
+            let _a = RegionGuard::enter(3);
+            assert_eq!(current(), 3);
+            {
+                let _b = RegionGuard::enter(5);
+                assert_eq!(current(), 5);
+            }
+            assert_eq!(current(), 3);
+        }
+        assert_eq!(current(), 0);
+    }
+
+    #[test]
     fn blocks_come_from_the_extents_of_the_connection_that_asks() {
         let (_g, a) = hooks();
         let (ra, rb) = (Region::open(), Region::open());
