@@ -5,7 +5,7 @@ defmodule Alambique.Replication.NativeOptions do
   # then and cannot change while the node runs. `Native.stats/0` reports the
   # settings the library loaded with.
   #
-  #   * `enabled` - page-cache blocks live in the page arena (default false).
+  #   * `enabled` - page-cache blocks live in the page arena (default true).
   #   * `reserved_mib` - address space reserved, from 64 up to 1048576 (default 4096).
   #   * `extent_kib` - size of the extents a connection owns, a multiple of 4
   #     up to 1024 (default 64).
@@ -19,7 +19,7 @@ defmodule Alambique.Replication.NativeOptions do
   #     looks anyway (default 30000); the tests set it high to see the wake-ups.
 
   @defaults [
-    enabled: false,
+    enabled: true,
     reserved_mib: 4096,
     extent_kib: 64,
     trim_after_kib: 1024,

@@ -21,9 +21,9 @@ defmodule Alambique.NativeOptionsTest do
     NativeOptions.load_data()
   end
 
-  test "the arena is off unless asked for, with documented defaults" do
+  test "the arena is on, with documented defaults" do
     assert load([]) == %{
-             enabled: false,
+             enabled: true,
              reserved_mib: 4096,
              extent_kib: 64,
              trim_after_kib: 1024,
