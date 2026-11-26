@@ -168,6 +168,7 @@ defmodule Alambique.Config do
     hand_over_rows: nil,
     hand_over: :cell,
     reader_cache_kib: nil,
+    reader_close: nil,
     shards: Alambique.Feed.Keys.default_shards(),
     internal_prefixes: [],
     tables: %{},
@@ -276,6 +277,7 @@ defmodule Alambique.Config do
             hand_over_rows: pos_integer | nil,
             hand_over: :cell | :sender | :native,
             reader_cache_kib: pos_integer | nil,
+            reader_close: :after_read | :after_burst | nil,
             shards: pos_integer,
             internal_prefixes: [String.t()],
             tables: %{String.t() => Alambique.Feed.Capture.spec()},
@@ -749,6 +751,7 @@ defmodule Alambique.Config do
       do: bad!(":feed hand_over must be :cell, :sender or :native")
 
     reader_cache = reader_cache!(feed, hand_over_mode)
+    reader_close = reader_close!(feed, hand_over_mode)
 
     %{
       window_ms: pos_int!(feed, :window_ms),
@@ -766,6 +769,7 @@ defmodule Alambique.Config do
       hand_over_rows: hand_over,
       hand_over: hand_over_mode,
       reader_cache_kib: reader_cache,
+      reader_close: reader_close,
       shards: shards!(feed),
       internal_prefixes: internal_prefixes!(feed[:internal_prefixes]),
       tables: tables!(feed[:tables]),
@@ -774,7 +778,8 @@ defmodule Alambique.Config do
     }
   end
 
-  # The sender's reader and its page cache exist only with `hand_over: :sender`.
+  # The sender's reader, its page cache and its lifetime exist only with
+  # `hand_over: :sender`.
   defp reader_cache!(feed, mode) when mode in [:cell, :native] do
     if feed[:reader_cache_kib] != nil,
       do: bad!(":feed reader_cache_kib applies only with hand_over: :sender")
@@ -784,6 +789,23 @@ defmodule Alambique.Config do
 
   defp reader_cache!(feed, :sender),
     do: if(feed[:reader_cache_kib] == nil, do: 64, else: pos_int!(feed, :reader_cache_kib))
+
+  # Default of `reader_close`; one place to flip it.
+  @reader_close_default :after_burst
+
+  defp reader_close!(feed, :sender) do
+    case feed[:reader_close] || @reader_close_default do
+      mode when mode in [:after_read, :after_burst] -> mode
+      _ -> bad!(":feed reader_close must be :after_read or :after_burst")
+    end
+  end
+
+  defp reader_close!(feed, _mode) do
+    if feed[:reader_close] != nil,
+      do: bad!(":feed reader_close applies only with hand_over: :sender")
+
+    nil
+  end
 
   # A value that is not given is `cleanup_after_ms`'s default, kept below an
   # `idle_timeout_ms` that is shorter; a value that is given must be below it.

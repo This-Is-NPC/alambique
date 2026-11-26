@@ -137,6 +137,10 @@ defmodule Alambique.Feed.Publisher do
   # The next piece is on its way.
   def after_ack(%State{feed_tick: tick} = state) when tick != nil, do: state
 
+  # `reader_close: :after_read`: the reader serves one range at a time, so no
+  # other range is handed over until the sender reported this one.
+  def after_ack(%State{feed_reading: true} = state), do: state
+
   # A batch that is partly with the sender takes no room: it must be finished.
   def after_ack(%State{feed_backlog: backlog, feed_part: part} = state) do
     limit = state.config.feed.max_backlog_batches
@@ -257,10 +261,18 @@ defmodule Alambique.Feed.Publisher do
   defp backlog(state, _txid, count), do: state.feed_backlog - count
 
   @doc """
-  Handles the report that the sender read up to `upto`: with nothing more
-  handed over than that, the reader is closed.
+  Handles the report that the sender read up to `upto`. With `reader_close:
+  :after_read` the reader is closed now and the next range, if any, is handed
+  over; with `:after_burst`, only when nothing more is handed over than that.
   """
   @spec read_done(State.t(), pid, non_neg_integer) :: State.t()
+  def read_done(
+        %State{feed_pid: pid, config: %{feed: %{reader_close: :after_read}}} = state,
+        pid,
+        _upto
+      ),
+      do: after_ack(%{close_reader(state) | feed_reading: false})
+
   def read_done(%State{feed_pid: pid, feed_sent: sent} = state, pid, upto) when upto >= sent,
     do: close_reader(state)
 
@@ -292,7 +304,8 @@ defmodule Alambique.Feed.Publisher do
         feed_sent: state.feed_published,
         feed_backlog: 0,
         feed_part: nil,
-        feed_tick: nil
+        feed_tick: nil,
+        feed_reading: false
     }
 
   # `hand_over: :sender`: the cell hands over the TXIDs, at most `room` of
@@ -314,7 +327,8 @@ defmodule Alambique.Feed.Publisher do
          state
          | feed_sent: upto,
            feed_backlog: upto - state.feed_published,
-           feed_capped: upto < acked
+           feed_capped: upto < acked,
+           feed_reading: state.config.feed.reader_close == :after_read
        }, false}
     else
       false ->

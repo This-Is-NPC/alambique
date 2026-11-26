@@ -78,6 +78,9 @@ defmodule Alambique.Cell.State do
     # With `hand_over: :sender`: the read-only connection the sender reads
     # with. Only the cell closes it, before it closes its own connection.
     feed_reader: nil,
+    # With `reader_close: :after_read`: a range is with the sender, which has
+    # not reported it read yet.
+    feed_reading: false,
     # The `:feed_cleanup` timer (`nil` when none is armed) and the failed
     # cleanups since the last one that committed.
     feed_cleanup: nil,
