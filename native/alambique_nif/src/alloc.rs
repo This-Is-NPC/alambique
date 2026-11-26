@@ -78,34 +78,37 @@ mod heap {
         // SAFETY: the layout has a positive size.
         let p = unsafe { std::alloc::alloc(layout(n)) };
         // SAFETY: `p` has room for the prefix.
-        unsafe {
-            *(p as *mut usize) = n;
-            p.add(PREFIX) as *mut c_void
-        }
+        unsafe { *(p as *mut usize) = n };
+        // SAFETY: the prefix is inside the allocation.
+        unsafe { p.add(PREFIX) as *mut c_void }
     }
 
     /// # Safety
     /// `p` came from `alloc`.
     pub unsafe fn free(p: *mut c_void) {
         FREES.fetch_add(1, Relaxed);
-        // SAFETY: by the contract above.
-        unsafe {
-            let q = (p as *mut u8).sub(PREFIX);
-            std::alloc::dealloc(q, layout(*(q as *mut usize)));
-        }
+        // SAFETY: by the contract above, the prefix is inside the allocation.
+        let q = unsafe { (p as *mut u8).sub(PREFIX) };
+        // SAFETY: the prefix holds the size.
+        let size = unsafe { *(q as *mut usize) };
+        // SAFETY: `q` was allocated with this layout.
+        unsafe { std::alloc::dealloc(q, layout(size)) };
     }
 
     /// # Safety
     /// `p` came from `alloc`.
     pub unsafe fn realloc(p: *mut c_void, n: usize) -> *mut c_void {
         // SAFETY: by the contract above.
-        unsafe {
-            let q = alloc(n);
-            let old = *((p as *mut u8).sub(PREFIX) as *mut usize);
-            std::ptr::copy_nonoverlapping(p as *const u8, q as *mut u8, old.min(n));
-            free(p);
-            q
-        }
+        let q = unsafe { alloc(n) };
+        // SAFETY: the prefix of `p` is inside its allocation.
+        let head = unsafe { (p as *mut u8).sub(PREFIX) };
+        // SAFETY: the prefix holds the size.
+        let old = unsafe { *(head as *mut usize) };
+        // SAFETY: both blocks hold at least `old.min(n)` bytes and differ.
+        unsafe { std::ptr::copy_nonoverlapping(p as *const u8, q as *mut u8, old.min(n)) };
+        // SAFETY: `p` came from `alloc`.
+        unsafe { free(p) };
+        q
     }
 }
 
@@ -294,25 +297,37 @@ impl Cache {
     /// `block` is a live `enif_alloc` block of the class, with room for the
     /// header and the link, that the caller does not use afterwards.
     unsafe fn push(&mut self, class: usize, block: *mut usize) -> bool {
-        if self.len[class] as usize >= (CACHE_BUDGET / ((class + 1) * CLASS)).max(4) {
+        let (Some(len), Some(head)) = (self.len.get_mut(class), self.head.get_mut(class)) else {
+            return false;
+        };
+        if *len as usize >= (CACHE_BUDGET / ((class + 1) * CLASS)).max(4) {
             return false;
         }
-        // SAFETY: by the contract above.
-        unsafe { *block.add(1) = self.head[class] as usize };
-        self.head[class] = block;
-        self.len[class] += 1;
+        // SAFETY: by the contract above, the block has room for the link.
+        let link = unsafe { block.add(1) };
+        // SAFETY: as above.
+        unsafe { *link = *head as usize };
+        *head = block;
+        *len += 1;
         self.kept += 1;
         true
     }
 
     /// A kept block of the class, or null.
     fn pop(&mut self, class: usize) -> *mut usize {
-        let block = self.head[class];
+        let Some(head) = self.head.get_mut(class) else {
+            return std::ptr::null_mut();
+        };
+        let block = *head;
         if !block.is_null() {
             // SAFETY: `push` made `block` a live block whose first payload
             // word is the link.
-            self.head[class] = unsafe { *block.add(1) } as *mut usize;
-            self.len[class] -= 1;
+            let link = unsafe { block.add(1) };
+            // SAFETY: as above.
+            *head = unsafe { *link } as *mut usize;
+            if let Some(len) = self.len.get_mut(class) {
+                *len -= 1;
+            }
             self.kept -= 1;
         }
         block
@@ -420,16 +435,18 @@ unsafe fn raw_free(block: *mut usize, n: usize) {
 /// SQLite's `xMalloc` contract: `n` is positive.
 unsafe extern "C" fn x_malloc(n: c_int) -> *mut c_void {
     guard("x_malloc", std::ptr::null_mut(), || {
-        let block = raw_alloc(n as usize);
+        let Ok(len) = usize::try_from(n) else {
+            return std::ptr::null_mut();
+        };
+        let block = raw_alloc(len);
         if block.is_null() {
             return block as *mut c_void;
         }
-        shard().sqlite_alloc.fetch_add(n as u64, Relaxed);
+        shard().sqlite_alloc.fetch_add(len as u64, Relaxed);
         // SAFETY: the block has room for the header and `n` bytes.
-        unsafe {
-            *block = n as usize;
-            block.add(1) as *mut c_void
-        }
+        unsafe { *block = len };
+        // SAFETY: as above.
+        unsafe { block.add(1) as *mut c_void }
     })
 }
 
@@ -439,14 +456,15 @@ unsafe extern "C" fn x_free(p: *mut c_void) {
     guard("x_free", (), || {
         // SAFETY: every block has its header, the size `raw_alloc` was asked
         // for, before the pointer SQLite holds.
-        unsafe {
-            let block = (p as *mut usize).sub(1);
-            let n = *block;
-            shard().sqlite_free.fetch_add(n as u64, Relaxed);
-            match ARENA.get() {
-                Some(a) if a.contains(block as *const u8) => a.free(block as *mut u8),
-                _ => raw_free(block, n),
-            }
+        let block = unsafe { (p as *mut usize).sub(1) };
+        // SAFETY: as above.
+        let n = unsafe { *block };
+        shard().sqlite_free.fetch_add(n as u64, Relaxed);
+        match ARENA.get() {
+            // SAFETY: the block is in the arena, which `x_malloc` took it from.
+            Some(a) if a.contains(block as *const u8) => unsafe { a.free(block as *mut u8) },
+            // SAFETY: the block came from `raw_alloc(n)`.
+            _ => unsafe { raw_free(block, n) },
         }
     })
 }
@@ -455,45 +473,55 @@ unsafe extern "C" fn x_free(p: *mut c_void) {
 /// SQLite's `xRealloc` contract: `p` came from these hooks, `n` is positive.
 unsafe extern "C" fn x_realloc(p: *mut c_void, n: c_int) -> *mut c_void {
     guard("x_realloc", std::ptr::null_mut(), || {
-        // SAFETY: every block has its header before the pointer SQLite holds;
-        // `x_malloc` and `x_free` have SQLite's contracts, which hold here;
-        // the copy stays inside both blocks; a block of a cache-free size
-        // is a live `enif_alloc` block, which `enif_realloc` may move.
-        unsafe {
-            let old = (p as *mut usize).sub(1);
-            let old_size = *old;
-            let n = n as usize;
-            let in_arena = ARENA
-                .get()
-                .is_some_and(|a| a.contains(old as *const u8) || arena_class(n).is_some());
-            if old_size <= CACHE_MAX || n <= CACHE_MAX || in_arena {
-                // A cached size class or the arena is involved: move to a
-                // block of the new size.
-                let q = x_malloc(n as c_int);
-                if !q.is_null() {
-                    std::ptr::copy_nonoverlapping(p as *const u8, q as *mut u8, old_size.min(n));
-                    x_free(p);
-                }
-                return q;
+        let Ok(len) = usize::try_from(n) else {
+            return std::ptr::null_mut();
+        };
+        // SAFETY: every block has its header before the pointer SQLite holds.
+        let old = unsafe { (p as *mut usize).sub(1) };
+        // SAFETY: as above.
+        let old_size = unsafe { *old };
+        let in_arena = ARENA
+            .get()
+            .is_some_and(|a| a.contains(old as *const u8) || arena_class(len).is_some());
+        if old_size <= CACHE_MAX || len <= CACHE_MAX || in_arena {
+            // A cached size class or the arena is involved: move to a block
+            // of the new size.
+            // SAFETY: `x_malloc` has SQLite's contract, which holds here.
+            let q = unsafe { x_malloc(n) };
+            if !q.is_null() {
+                // SAFETY: the copy stays inside both blocks.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(p as *const u8, q as *mut u8, old_size.min(len))
+                };
+                // SAFETY: `x_free` has SQLite's contract, which holds here.
+                unsafe { x_free(p) };
             }
-            let block = heap::realloc(old as *mut c_void, n + HEADER) as *mut usize;
-            if block.is_null() {
-                return block as *mut c_void;
-            }
-            *block = n;
-            shard().sqlite_free.fetch_add(old_size as u64, Relaxed);
-            shard().sqlite_alloc.fetch_add(n as u64, Relaxed);
-            block.add(1) as *mut c_void
+            return q;
         }
+        // SAFETY: a block of a cache-free size is a live `enif_alloc` block,
+        // which `enif_realloc` may move.
+        let block = unsafe { heap::realloc(old as *mut c_void, len + HEADER) } as *mut usize;
+        if block.is_null() {
+            return block as *mut c_void;
+        }
+        // SAFETY: the new block has its header.
+        unsafe { *block = len };
+        shard().sqlite_free.fetch_add(old_size as u64, Relaxed);
+        shard().sqlite_alloc.fetch_add(len as u64, Relaxed);
+        // SAFETY: as above.
+        unsafe { block.add(1) as *mut c_void }
     })
 }
 
 /// # Safety
 /// SQLite's `xSize` contract: `p` came from these hooks.
 unsafe extern "C" fn x_size(p: *mut c_void) -> c_int {
-    // SAFETY: every block has its header before the pointer SQLite holds.
-    guard("x_size", 0, || unsafe { *(p as *mut usize).sub(1) }
-        as c_int)
+    guard("x_size", 0, || {
+        // SAFETY: every block has its header before the pointer SQLite holds.
+        let header = unsafe { (p as *mut usize).sub(1) };
+        // SAFETY: as above.
+        c_int::try_from(unsafe { *header }).unwrap_or(c_int::MAX)
+    })
 }
 
 extern "C" fn x_roundup(n: c_int) -> c_int {
@@ -556,7 +584,10 @@ fn start_arena(req: &ArenaRequest, hdrsz: usize) {
         match Arena::new(req.config, strides(hdrsz)) {
             Ok(a) => {
                 let _ = ARENA.set(a);
-                TRIM_IDLE_MS.store(req.trim_idle.as_millis() as u64, Relaxed);
+                TRIM_IDLE_MS.store(
+                    u64::try_from(req.trim_idle.as_millis()).unwrap_or(u64::MAX),
+                    Relaxed,
+                );
                 match ARENA.get().map(|a| a.start_trimmer(req.trim_idle)) {
                     Some(Ok(())) => ArenaState::On,
                     _ => ArenaState::Unsupported,
@@ -590,28 +621,37 @@ pub fn install_sqlite(req: &ArenaRequest) -> Result<(), String> {
     };
     let mut hdrsz: c_int = 0;
     // SAFETY: SQLite copies the table; `sqlite3_config` runs before
-    // initialization (`on_load`). `PCACHE_HDRSZ` writes one int. `PAGECACHE`
-    // with no buffer keeps SQLite from carving pages out of bulk blocks,
-    // which a shrink could not free.
-    let ok = unsafe {
+    // initialization (`on_load`).
+    let mut ok = unsafe {
         ffi::sqlite3_config(
             ffi::SQLITE_CONFIG_MALLOC,
             &methods as *const ffi::sqlite3_mem_methods,
-        ) == ffi::SQLITE_OK
-            && ffi::sqlite3_config(ffi::SQLITE_CONFIG_PCACHE_HDRSZ, &mut hdrsz as *mut c_int)
-                == ffi::SQLITE_OK
-            && ffi::sqlite3_config(
+        )
+    } == ffi::SQLITE_OK;
+    if ok {
+        // SAFETY: `PCACHE_HDRSZ` writes one int.
+        ok = unsafe {
+            ffi::sqlite3_config(ffi::SQLITE_CONFIG_PCACHE_HDRSZ, &mut hdrsz as *mut c_int)
+        } == ffi::SQLITE_OK;
+    }
+    if ok {
+        // SAFETY: `PAGECACHE` with no buffer keeps SQLite from carving pages
+        // out of bulk blocks, which a shrink could not free.
+        ok = unsafe {
+            ffi::sqlite3_config(
                 ffi::SQLITE_CONFIG_PAGECACHE,
                 std::ptr::null_mut::<c_void>(),
                 0 as c_int,
                 0 as c_int,
-            ) == ffi::SQLITE_OK
-    };
+            )
+        } == ffi::SQLITE_OK;
+    }
     if !ok {
         return Err("sqlite3_config failed".into());
     }
-    PAGE_HDRSZ.store(hdrsz.max(0) as usize, Relaxed);
-    start_arena(req, hdrsz.max(0) as usize);
+    let hdrsz = usize::try_from(hdrsz).unwrap_or(0);
+    PAGE_HDRSZ.store(hdrsz, Relaxed);
+    start_arena(req, hdrsz);
     Ok(())
 }
 
@@ -682,8 +722,12 @@ mod tests {
     }
 
     /// SQLite asks for the page and its headers.
+    fn page_len(class: usize) -> usize {
+        (512 << class) + HDRSZ
+    }
+
     fn page_block(class: usize) -> c_int {
-        ((512 << class) + HDRSZ) as c_int
+        c_int::try_from(page_len(class)).unwrap()
     }
 
     fn current() -> u32 {
@@ -736,25 +780,31 @@ mod tests {
     #[test]
     fn realloc_moves_a_block_between_the_arena_and_the_heap() {
         let (_g, a) = hooks();
-        // SAFETY: SQLite's contract for each hook: live blocks of these
-        // hooks, positive sizes; the copies stay inside the blocks.
-        unsafe {
-            let p = x_malloc(page_block(3)) as *mut u8;
-            assert!(a.contains(p));
-            std::ptr::write_bytes(p, 0xAB, page_block(3) as usize);
-            let q = x_realloc(p as *mut c_void, 6000) as *mut u8;
-            assert!(!q.is_null() && !a.contains(q));
-            assert_eq!(x_size(q as *mut c_void), 6000);
-            assert!(std::slice::from_raw_parts(q, page_block(3) as usize)
-                .iter()
-                .all(|&b| b == 0xAB));
-            let r = x_realloc(q as *mut c_void, page_block(3)) as *mut u8;
-            assert!(a.contains(r));
-            assert!(std::slice::from_raw_parts(r, page_block(3) as usize)
-                .iter()
-                .all(|&b| b == 0xAB));
-            x_free(r as *mut c_void);
-        }
+        let len = page_len(3);
+        // SAFETY: SQLite's contract for each hook below: live blocks of these
+        // hooks and positive sizes.
+        let p = unsafe { x_malloc(page_block(3)) } as *mut u8;
+        assert!(a.contains(p));
+        // SAFETY: `p` holds `len` bytes.
+        unsafe { std::ptr::write_bytes(p, 0xAB, len) };
+        // SAFETY: as above.
+        let q = unsafe { x_realloc(p as *mut c_void, 6000) } as *mut u8;
+        assert!(!q.is_null() && !a.contains(q));
+        // SAFETY: `q` is a live block of the hooks.
+        assert_eq!(unsafe { x_size(q as *mut c_void) }, 6000);
+        // SAFETY: `q` holds the first `len` bytes of the old block.
+        assert!(unsafe { std::slice::from_raw_parts(q, len) }
+            .iter()
+            .all(|&b| b == 0xAB));
+        // SAFETY: as above.
+        let r = unsafe { x_realloc(q as *mut c_void, page_block(3)) } as *mut u8;
+        assert!(a.contains(r));
+        // SAFETY: `r` holds the first `len` bytes of the old block.
+        assert!(unsafe { std::slice::from_raw_parts(r, len) }
+            .iter()
+            .all(|&b| b == 0xAB));
+        // SAFETY: from `x_realloc`, not used again.
+        unsafe { x_free(r as *mut c_void) };
     }
 
     #[test]
@@ -858,17 +908,18 @@ mod tests {
     // The hooks need ERTS to allocate, so these only prove what a panic does.
     #[test]
     fn a_panic_in_a_hook_returns_its_failure_value() {
-        // SAFETY: the probe panics before the hooks touch their arguments.
-        unsafe {
-            let _p = probe::panic_at("x_malloc");
-            assert!(x_malloc(16).is_null());
-            let _p = probe::panic_at("x_realloc");
-            assert!(x_realloc(std::ptr::null_mut(), 16).is_null());
-            let _p = probe::panic_at("x_free");
-            x_free(std::ptr::null_mut());
-            let _p = probe::panic_at("x_size");
-            assert_eq!(x_size(std::ptr::null_mut()), 0);
-        }
+        let _p = probe::panic_at("x_malloc");
+        // SAFETY: the probe panics before the hook touches its argument.
+        assert!(unsafe { x_malloc(16) }.is_null());
+        let _p = probe::panic_at("x_realloc");
+        // SAFETY: as above.
+        assert!(unsafe { x_realloc(std::ptr::null_mut(), 16) }.is_null());
+        let _p = probe::panic_at("x_free");
+        // SAFETY: as above.
+        unsafe { x_free(std::ptr::null_mut()) };
+        let _p = probe::panic_at("x_size");
+        // SAFETY: as above.
+        assert_eq!(unsafe { x_size(std::ptr::null_mut()) }, 0);
         let _p = probe::panic_at("x_roundup");
         assert_eq!(x_roundup(13), 13);
     }
