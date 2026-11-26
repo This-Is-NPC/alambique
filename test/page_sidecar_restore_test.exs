@@ -166,7 +166,7 @@ defmodule Alambique.PageSidecarRestoreTest do
   end
 
   test "hashes that do not fit the budget are not used", %{env: env} do
-    ctx = %{env.ctx | max_inflight_bytes: 400}
+    ctx = %{env.ctx | max_inflight_bytes: 160}
     {_result, lazy} = lazy_restore(env, ctx: ctx)
 
     assert Native.lazy_covered(lazy.handle) == []
@@ -191,7 +191,13 @@ defmodule Alambique.PageSidecarRestoreTest do
       } do
         {_result, lazy} = lazy_restore(env)
         {_total, unknown} = Native.lazy_progress(lazy.handle)
-        run = Native.lazy_next_batch(lazy.handle, 1_000_000)
+        # A run of at least two pages: the first is installed, if any is.
+        run =
+          Enum.find(
+            Stream.repeatedly(fn -> Native.lazy_next_batch(lazy.handle, 1_000_000) end),
+            &(not match?({_, _, _, [_]}, &1))
+          )
+
         assert {_file, _offset, _len, [_, _ | _]} = run
 
         HostileStore.damage(hostile, unquote(Macro.escape(kind)), 1)
