@@ -274,7 +274,7 @@ defmodule Alambique.Config do
             cleanup_after_ms: pos_integer,
             cleanup_rows: pos_integer | nil,
             hand_over_rows: pos_integer | nil,
-            hand_over: :cell | :sender,
+            hand_over: :cell | :sender | :native,
             reader_cache_kib: pos_integer | nil,
             shards: pos_integer,
             internal_prefixes: [String.t()],
@@ -745,8 +745,8 @@ defmodule Alambique.Config do
 
     hand_over_mode = feed[:hand_over]
 
-    unless hand_over_mode in [:cell, :sender],
-      do: bad!(":feed hand_over must be :cell or :sender")
+    unless hand_over_mode in [:cell, :sender, :native],
+      do: bad!(":feed hand_over must be :cell, :sender or :native")
 
     reader_cache = reader_cache!(feed, hand_over_mode)
 
@@ -774,8 +774,8 @@ defmodule Alambique.Config do
     }
   end
 
-  # The page cache of the sender's reader exists only with `hand_over: :sender`.
-  defp reader_cache!(feed, :cell) do
+  # The sender's reader and its page cache exist only with `hand_over: :sender`.
+  defp reader_cache!(feed, mode) when mode in [:cell, :native] do
     if feed[:reader_cache_kib] != nil,
       do: bad!(":feed reader_cache_kib applies only with hand_over: :sender")
 

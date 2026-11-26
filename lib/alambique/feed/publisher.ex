@@ -331,6 +331,47 @@ defmodule Alambique.Feed.Publisher do
     end
   end
 
+  # `hand_over: :native`: the library reads the rows on the cell's connection,
+  # builds the text of their records and sends it to the sender from an
+  # environment of its own, so it is never on the heap of the cell. What the
+  # call returns is only what the cell counts, and the sender gets it in a
+  # message that names the rows. The room is the library's to apply: a batch
+  # begun before takes none, and the rows of those over it are not sent.
+  defp hand_over(%State{config: %{feed: %{hand_over: :native}}} = state, room) do
+    state = if alive?(state.feed_pid), do: state, else: reset(state)
+    state = if state.feed_pid, do: state, else: %{state | feed_pid: Sender.start(state)}
+    {txid, seq, resumed} = state.feed_part || {state.feed_sent + 1, -1, nil}
+    Fault.point(:feed_before_publish, %{cell: state.id, txid: txid, sender: state.feed_pid})
+    token = make_ref()
+    plan = {state.config.feed.hand_over_rows, resumed, if(room == :all, do: nil, else: room)}
+
+    case Capture.send_rows(
+           state.conn,
+           {txid, seq},
+           state.pipe.acked.txid,
+           plan,
+           state.feed_pid,
+           token
+         ) do
+      {:ok, [], _more?, _cut?} ->
+        {%{state | feed_part: nil, feed_capped: false}, false}
+
+      {:ok, batches, more?, cut?} ->
+        send(state.feed_pid, {:piece, token, Enum.map(batches, &piece_meta/1)})
+        {sent_native(state, batches, cut?), more? and not cut?}
+
+      # The sender ended between the check and the send: as if it ended later.
+      {:error, :sender_gone} ->
+        {reset(state), true}
+
+      # Jason raises on such a name, which ends the sender of the other modes:
+      # the cell hands everything over again.
+      {:error, :bad_table} ->
+        Logger.error("Alambique found a captured table name of #{state.id} that is not UTF-8")
+        {reset(state), true}
+    end
+  end
+
   # One piece: at most `feed.hand_over_rows` rows from the position of the
   # hand-over: whole batches as far as they fit, and the start or the middle
   # of the one the bound cuts. Returns the state and whether more rows follow
@@ -381,6 +422,29 @@ defmodule Alambique.Feed.Publisher do
       | feed_part: if(last.partial, do: {last.txid, last.seq}),
         feed_sent: if(last.partial, do: state.feed_sent, else: last.txid),
         feed_backlog: state.feed_backlog + Enum.count(pieces, & &1.first),
+        feed_capped: cut?
+    }
+  end
+
+  defp piece_meta({txid, ts, rows, _seq, _bytes, {_first, partial, rewind}}),
+    do: %{txid: txid, ts: ts, rows: rows, partial: partial, rewind: rewind}
+
+  # The position of a batch cut inside carries the `n` of its next row.
+  defp sent_native(state, batches, cut?) do
+    {txid, _ts, rows, seq, _bytes, {first, partial, _rewind}} = List.last(batches)
+
+    part =
+      if partial do
+        {_txid, _seq, n} = state.feed_part || {txid, seq, 0}
+        {txid, seq, if(first, do: rows, else: n + rows)}
+      end
+
+    %{
+      state
+      | feed_part: part,
+        feed_sent: if(partial, do: state.feed_sent, else: txid),
+        feed_backlog:
+          state.feed_backlog + Enum.count(batches, fn {_, _, _, _, _, {first, _, _}} -> first end),
         feed_capped: cut?
     }
   end

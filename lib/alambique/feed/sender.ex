@@ -17,6 +17,9 @@ defmodule Alambique.Feed.Sender do
 
   require Logger
 
+  # How long the sender waits for the rows a piece announced.
+  @rows_wait_ms 5_000
+
   alias Alambique.{Fault, Telemetry}
   alias Alambique.Cell.State
   alias Alambique.Feed.{Keys, Pieces, Record}
@@ -85,6 +88,7 @@ defmodule Alambique.Feed.Sender do
   defp receive_batches(w, :infinity) do
     receive do
       {:batches, batches} -> enqueue(w, batches)
+      {:piece, token, pieces} -> piece(w, token, pieces)
       {:range, from, upto, reader} -> read(w, from, upto, reader)
       {:flush, ref} -> %{w | flush: ref}
       {:DOWN, _, :process, _, _} -> exit(:normal)
@@ -99,6 +103,7 @@ defmodule Alambique.Feed.Sender do
 
     receive do
       {:batches, batches} -> receive_until(enqueue(w, batches), deadline)
+      {:piece, token, pieces} -> receive_until(piece(w, token, pieces), deadline)
       {:range, from, upto, reader} -> receive_until(read(w, from, upto, reader), deadline)
       {:flush, ref} -> receive_until(%{w | flush: ref}, deadline)
       {:DOWN, _, :process, _, _} -> exit(:normal)
@@ -120,16 +125,52 @@ defmodule Alambique.Feed.Sender do
     Enum.reduce(batches, w, &accept(&2, &1, arrived))
   end
 
+  # `hand_over: :native`: the rows of the pieces are text that the library built
+  # and sent in a message of its own, before the cell announced them. It is
+  # already in the mailbox, or on its way when the cell is faster; the wait only
+  # bounds a cell whose announcement has no rows, which ends the sender and
+  # makes the cell hand the batches over again.
+  defp piece(w, token, pieces) do
+    receive do
+      {:rows, ^token, bodies} ->
+        batches = Enum.zip_with(pieces, bodies, &native_batch/2)
+        enqueue(w, batches)
+    after
+      @rows_wait_ms -> exit({:feed_rows_missing, token})
+    end
+  end
+
+  # A rewind is the one row of its batch, which goes out as the marker.
+  defp native_batch(%{rewind: true} = piece, body),
+    do: %{txid: piece.txid, ts: piece.ts, changes: [{"", "rewind", "{}", body}], partial: false}
+
+  defp native_batch(piece, body),
+    do: %{
+      txid: piece.txid,
+      ts: piece.ts,
+      changes: {:encoded, body, piece.rows},
+      partial: piece.partial
+    }
+
   # A batch handed over in pieces (`feed.hand_over_rows`) is queued once its
   # last piece came, so ids and objects are those of a batch that came whole.
   defp accept(w, %{partial: true} = piece, _arrived),
     do: %{w | part: [piece.changes | w.part]}
 
   defp accept(w, batch, arrived) do
-    changes = Enum.concat(Enum.reverse([batch.changes | w.part]))
+    changes = join(Enum.reverse([batch.changes | w.part]))
     batch = %{batch | changes: changes} |> Map.delete(:partial) |> Map.put(:arrived, arrived)
     %{w | part: [], last: batch.txid, queue: :queue.in(batch, w.queue)}
   end
+
+  # The rows of the pieces of a batch: lists of changes, or the text of the
+  # records of each piece (`{:encoded, iodata, count}`), joined by a comma.
+  defp join([{:encoded, _, _} | _] = parts) do
+    {:encoded, parts |> Enum.map(&elem(&1, 1)) |> Enum.intersperse(?,),
+     parts |> Enum.map(&elem(&1, 2)) |> Enum.sum()}
+  end
+
+  defp join(parts), do: Enum.concat(parts)
 
   # `hand_over: :sender`: reads the rows of the TXIDs `from` to `upto` with the
   # reader of the cell, `feed.hand_over_rows` at a time (a batch is never
@@ -189,6 +230,7 @@ defmodule Alambique.Feed.Sender do
          :queue.len(w.queue) < w.config.feed.max_backlog_batches do
       receive do
         {:batches, batches} -> w |> enqueue(batches) |> fill(deadline)
+        {:piece, token, pieces} -> w |> piece(token, pieces) |> fill(deadline)
         {:range, from, upto, reader} -> w |> read(from, upto, reader) |> fill(deadline)
         {:flush, ref} -> fill(%{w | flush: ref}, deadline)
         {:DOWN, _, :process, _, _} -> exit(:normal)
@@ -282,7 +324,10 @@ defmodule Alambique.Feed.Sender do
     end
   end
 
-  defp records(batches), do: Enum.reduce(batches, 0, &(length(&1.changes) + &2))
+  defp records(batches), do: Enum.reduce(batches, 0, &(count(&1.changes) + &2))
+
+  defp count({:encoded, _, count}), do: count
+  defp count(changes), do: length(changes)
 
   defp meta(w, last, lifted?, result, count),
     do: %{
