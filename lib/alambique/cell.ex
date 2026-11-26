@@ -1347,7 +1347,7 @@ defmodule Alambique.Cell do
         state
 
       true ->
-        %{state | sidecar: spawn(fn -> Replicator.write_sidecar(up, ctx) end)}
+        %{state | sidecar: spawn_link(fn -> Replicator.write_sidecar(up, ctx) end)}
     end
   end
 
@@ -1995,6 +1995,9 @@ defmodule Alambique.Cell do
 
   @impl true
   def terminate(reason, state) do
+    # A sidecar write does not outlive the cell: a link does not end it on a
+    # normal stop.
+    if is_pid(state.sidecar), do: Process.exit(state.sidecar, :kill)
     mark_stopped(state)
     result = Inflight.busy(state.inflight, fn -> finish(reason, state) end)
     # After the last acknowledgement of a clean stop.
