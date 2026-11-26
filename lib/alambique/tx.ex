@@ -74,13 +74,15 @@ defmodule Alambique.Tx do
   effects remain and the error is returned. Returns `:ok`.
   """
   @spec script(t, String.t()) :: :ok | {:error, term}
-  def script(%__MODULE__{conn: conn, capture: capture, select: select} = tx, sql) do
-    with :ok <- active(tx) do
-      if capture,
-        do: Capture.around_ddl(conn, select, fn -> atomic(conn, sql) end),
-        else: atomic(conn, sql)
-    end
+  def script(%__MODULE__{conn: conn, capture: capture} = tx, sql) do
+    with :ok <- active(tx), do: around(tx, capture, fn -> atomic(conn, sql) end)
   end
+
+  # Runs `fun` inside one change-capture cycle when `cycle?`.
+  defp around(%__MODULE__{conn: conn, select: select}, true, fun),
+    do: Capture.around_ddl(conn, select, fun)
+
+  defp around(_tx, false, fun), do: fun.()
 
   # A savepoint makes the script all or nothing inside the transaction.
   defp atomic(conn, sql) do
@@ -133,13 +135,13 @@ defmodule Alambique.Tx do
     if Process.get(Db.active_key()) == ref, do: :ok, else: {:error, :inactive_transaction}
   end
 
-  defp guarded(%__MODULE__{conn: conn, capture: capture, select: select} = tx, sql, params) do
+  defp guarded(%__MODULE__{conn: conn, capture: capture} = tx, sql, params) do
     with :ok <- active(tx) do
       limits = @user_text ++ tx.limits
 
-      if capture and Alambique.Sqlite.ddl?(sql),
-        do: Capture.around_ddl(conn, select, fn -> Db.run(conn, sql, params, limits) end),
-        else: Db.run(conn, sql, params, limits)
+      around(tx, capture and Alambique.Sqlite.ddl?(sql), fn ->
+        Db.run(conn, sql, params, limits)
+      end)
     end
   end
 end

@@ -45,31 +45,36 @@ defmodule Alambique.Quarantine do
   # A lost race is read again at once: the winner changed the object, so there
   # is nothing to wait for.
   defp attempt(ctx, key, settings, id, kinds, deadline) do
-    {store, config} = ctx.store
-
     with {:ok, counter, condition} <- load(ctx, key) do
       # A write whose outcome was unknown is read again: if the entry is
       # there, it was applied.
       if Enum.any?(counter.recent, &(&1.id == id)) do
         {:ok, counter}
       else
-        updated = add(counter, ctx, settings, id, kinds)
-
-        case store.put(config, key, Jason.encode!(updated), condition, %{}) do
-          {:ok, _etag} ->
-            {:ok, updated}
-
-          {:error, :precondition_failed} ->
-            if System.monotonic_time(:millisecond) < deadline,
-              do: attempt(ctx, key, settings, id, kinds, deadline),
-              else: {:retry, :precondition_failed}
-
-          {:error, reason} ->
-            {:retry, reason}
-        end
+        ctx
+        |> put_counter(key, add(counter, ctx, settings, id, kinds), condition)
+        |> lost_race(deadline, &attempt(ctx, key, settings, id, kinds, &1))
       end
     end
   end
+
+  defp put_counter(ctx, key, updated, condition) do
+    {store, config} = ctx.store
+
+    case store.put(config, key, Jason.encode!(updated), condition, %{}) do
+      {:ok, _etag} -> {:ok, updated}
+      {:error, :precondition_failed} = lost -> lost
+      {:error, reason} -> {:retry, reason}
+    end
+  end
+
+  defp lost_race({:error, :precondition_failed}, deadline, again) do
+    if System.monotonic_time(:millisecond) < deadline,
+      do: again.(deadline),
+      else: {:retry, :precondition_failed}
+  end
+
+  defp lost_race(result, _deadline, _again), do: result
 
   defp load(ctx, key) do
     case Alambique.Store.get_capped(ctx.store, key, ctx.max_control_bytes) do
