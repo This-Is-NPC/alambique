@@ -378,7 +378,7 @@ defmodule Alambique.Cell.Wake do
     end
   end
 
-  defp open(state) do
+  def open(state) do
     case Db.open(state.path,
            cache_kib: State.cell_opt(state, :cache_kib),
            timeout_ms: Db.script_timeout_ms(state.config)
