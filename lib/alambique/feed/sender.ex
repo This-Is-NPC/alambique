@@ -36,7 +36,7 @@ defmodule Alambique.Feed.Sender do
       config: state.config,
       prefix: state.location.prefix,
       epoch: state.lease.epoch,
-      floor: state.feed_floor
+      floor: state.feed.floor
     }
 
     spawn_link(fn -> init(args) end)

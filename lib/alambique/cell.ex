@@ -165,12 +165,15 @@ defmodule Alambique.Cell do
       config: config,
       id: id,
       path: Local.db_path(config, id),
-      takeover: opts[:takeover],
-      lease_seen: opts[:lease_seen],
       inflight: Inflight.open(config, id, :cell),
       pipe: Pipe.new(config),
       load: load,
-      holder: opts[:holder]
+      origin: %{
+        takeover: opts[:takeover],
+        lease_seen: opts[:lease_seen],
+        holder: opts[:holder],
+        trips: nil
+      }
     }
 
     Facts.put(load, :wake_started_at, System.system_time(:millisecond))
@@ -197,7 +200,7 @@ defmodule Alambique.Cell do
   defp wake(state) do
     Fault.point(:cell_before_take_over, %{cell: state.id})
 
-    case Admission.take_over(state.config, state.holder) do
+    case Admission.take_over(state.config, state.origin.holder) do
       :ok ->
         started = System.monotonic_time()
 
@@ -297,7 +300,9 @@ defmodule Alambique.Cell do
   # Tells the node of the previous owner, if it is a member, that its cell
   # was taken over, so the old cell checks its lease at once instead of at
   # its next renewal. Only a shortcut: fencing does not depend on it.
-  defp notify_previous(%State{takeover: %{previous: %{owner: owner, incarnation: inc}}} = state) do
+  defp notify_previous(
+         %State{origin: %{takeover: %{previous: %{owner: owner, incarnation: inc}}}} = state
+       ) do
     case Membership.node_of(state.config, owner, inc) do
       {:ok, target} when target != node() ->
         :erpc.cast(target, __MODULE__, :superseded, [
@@ -333,8 +338,8 @@ defmodule Alambique.Cell do
     state = %{
       state
       | mode: :serving,
-        idle_timer: idle_timer,
-        last_active: System.monotonic_time(:millisecond)
+        last_active: System.monotonic_time(:millisecond),
+        idle: %{state.idle | timer: idle_timer}
     }
 
     wal_size(state)
@@ -346,7 +351,8 @@ defmodule Alambique.Cell do
     state |> arm_idle_cache() |> arm_idle_close()
   end
 
-  defp arm_idle(state, ms), do: %{state | idle_timer: :erlang.start_timer(ms, self(), :idle)}
+  defp arm_idle(state, ms),
+    do: %{state | idle: %{state.idle | timer: :erlang.start_timer(ms, self(), :idle)}}
 
   # The shrink timer carries its ref, so a message that was already queued
   # when the timer was replaced is ignored.
@@ -358,7 +364,7 @@ defmodule Alambique.Cell do
   end
 
   defp arm_idle_cache(state, ms),
-    do: %{state | idle_cache: :erlang.start_timer(ms, self(), :idle_cache)}
+    do: %{state | idle: %{state.idle | cache: :erlang.start_timer(ms, self(), :idle_cache)}}
 
   # The close timer carries its ref like the shrink timer does.
   defp arm_idle_close(state) do
@@ -369,12 +375,12 @@ defmodule Alambique.Cell do
   end
 
   defp arm_idle_close(state, ms),
-    do: %{state | idle_close: :erlang.start_timer(ms, self(), :idle_close)}
+    do: %{state | idle: %{state.idle | close: :erlang.start_timer(ms, self(), :idle_close)}}
 
   # The first call after a shrink gives the cache its full limit back. If the
   # pragma fails the cache is still small: the cell stays `:shrunk`, so the
   # facts tell the truth and the next call tries again.
-  defp restore_cache(%State{idle_cache: :shrunk} = state) do
+  defp restore_cache(%State{idle: %{cache: :shrunk}} = state) do
     case Sqlite.execute(state.conn, "PRAGMA cache_size = -#{State.cell_opt(state, :cache_kib)}",
            write: true
          ) do
@@ -529,7 +535,7 @@ defmodule Alambique.Cell do
   # connection takes the options when it opens again; a refresh never opens it.
   defp refresh_cache(%State{conn: nil}, _next, _changed), do: :ok
 
-  defp refresh_cache(%State{idle_cache: :shrunk} = state, next, changed) do
+  defp refresh_cache(%State{idle: %{cache: :shrunk}} = state, next, changed) do
     cond do
       State.cell_opt(next, :idle_cache_after_ms) == nil ->
         set_cache(state, State.cell_opt(next, :cache_kib))
@@ -578,7 +584,7 @@ defmodule Alambique.Cell do
 
   defp rearm_idle({next, rearmed}, state, changed, left) do
     if :idle_timeout_ms in changed do
-      cancel_timer(state.idle_timer)
+      cancel_timer(state.idle.timer)
       {arm_idle(next, left.(:idle_timeout_ms)), rearmed + 1}
     else
       {next, rearmed}
@@ -590,17 +596,17 @@ defmodule Alambique.Cell do
       :idle_cache_after_ms not in changed or state.conn == nil ->
         {next, rearmed}
 
-      state.idle_cache == :shrunk ->
+      state.idle.cache == :shrunk ->
         # Stays shrunk; the shrink off means the pragma above gave the cache back.
         if State.cell_opt(next, :idle_cache_after_ms) == nil,
-          do: {%{next | idle_cache: nil}, rearmed},
+          do: {%{next | idle: %{next.idle | cache: nil}}, rearmed},
           else: {next, rearmed}
 
       true ->
-        cancel_timer(state.idle_cache)
+        cancel_timer(state.idle.cache)
 
         arm_or_off(
-          %{next | idle_cache: nil},
+          %{next | idle: %{next.idle | cache: nil}},
           rearmed,
           :idle_cache_after_ms,
           left,
@@ -611,10 +617,10 @@ defmodule Alambique.Cell do
 
   defp rearm_idle_close({next, rearmed}, state, changed, left) do
     if :idle_close_after_ms in changed and state.conn != nil do
-      cancel_timer(state.idle_close)
+      cancel_timer(state.idle.close)
 
       arm_or_off(
-        %{next | idle_close: nil},
+        %{next | idle: %{next.idle | close: nil}},
         rearmed,
         :idle_close_after_ms,
         left,
@@ -637,10 +643,12 @@ defmodule Alambique.Cell do
   # The wait before a feed cleanup. A timer that waits out a failure keeps
   # its backoff, and `:after_publish` waits for nothing.
   defp rearm_cleanup({next, rearmed}, state, changed, left) do
-    if :cleanup_after_ms in changed and is_reference(state.feed_cleanup) and
-         state.feed_cleanup_failures == 0 and state.config.feed.cleanup != :after_publish do
-      cancel_timer(state.feed_cleanup)
-      {arm_cleanup(%{next | feed_cleanup: nil}, left.(:cleanup_after_ms)), rearmed + 1}
+    if :cleanup_after_ms in changed and is_reference(state.feed.cleanup) and
+         state.feed.cleanup_failures == 0 and state.config.feed.cleanup != :after_publish do
+      cancel_timer(state.feed.cleanup)
+
+      {arm_cleanup(%{next | feed: %{next.feed | cleanup: nil}}, left.(:cleanup_after_ms)),
+       rearmed + 1}
     else
       {next, rearmed}
     end
@@ -1107,8 +1115,8 @@ defmodule Alambique.Cell do
   defp info({:feed_part, ref}, %State{mode: :serving} = state),
     do: {:noreply, Publisher.continue(state, ref)}
 
-  defp info({:timeout, ref, :feed_cleanup}, %State{mode: :serving, feed_cleanup: ref} = state) do
-    state = %{state | feed_cleanup: nil}
+  defp info({:timeout, ref, :feed_cleanup}, %State{mode: :serving, feed: %{cleanup: ref}} = state) do
+    state = %{state | feed: %{state.feed | cleanup: nil}}
 
     cond do
       not Publisher.cleanup_due?(state) ->
@@ -1128,7 +1136,7 @@ defmodule Alambique.Cell do
     end
   end
 
-  defp info({:EXIT, pid, _reason}, %State{mode: :serving, feed_pid: pid} = state),
+  defp info({:EXIT, pid, _reason}, %State{mode: :serving, feed: %{pid: pid}} = state),
     do: {:noreply, Publisher.sender_down(state, pid)}
 
   # A frozen cell (design §10) hibernates at its next renewal.
@@ -1174,7 +1182,7 @@ defmodule Alambique.Cell do
 
   # The idle timer carries its ref, so a message that was already queued when
   # the timer was replaced is ignored.
-  defp info({:timeout, ref, :idle}, %State{mode: :serving, idle_timer: ref} = state) do
+  defp info({:timeout, ref, :idle}, %State{mode: :serving, idle: %{timer: ref}} = state) do
     idle = State.cell_opt(state, :idle_timeout_ms)
     elapsed = System.monotonic_time(:millisecond) - state.last_active
 
@@ -1195,7 +1203,7 @@ defmodule Alambique.Cell do
     end
   end
 
-  defp info({:timeout, ref, :idle_cache}, %State{mode: :serving, idle_cache: ref} = state) do
+  defp info({:timeout, ref, :idle_cache}, %State{mode: :serving, idle: %{cache: ref}} = state) do
     after_ms = State.cell_opt(state, :idle_cache_after_ms)
     elapsed = System.monotonic_time(:millisecond) - state.last_active
 
@@ -1220,8 +1228,8 @@ defmodule Alambique.Cell do
   # Closes the connection of a cell that stayed idle (`idle_close_after_ms`).
   # The published feed rows go first, as for the shrink. The cleanup may have
   # sent a batch, so the checks run again after it.
-  defp info({:timeout, ref, :idle_close}, %State{mode: :serving, idle_close: ref} = state) do
-    state = %{state | idle_close: nil}
+  defp info({:timeout, ref, :idle_close}, %State{mode: :serving, idle: %{close: ref}} = state) do
+    state = %{state | idle: %{state.idle | close: nil}}
     after_ms = State.cell_opt(state, :idle_close_after_ms)
     elapsed = System.monotonic_time(:millisecond) - state.last_active
 
@@ -1290,7 +1298,7 @@ defmodule Alambique.Cell do
         Fault.point(:feed_after_cleanup, %{cell: state.id, txid: state.repl.txid})
 
         # Rows left by a bounded cleanup follow at once.
-        case flush(%{state | unsent: true, feed_cleanup_failures: 0}) do
+        case flush(%{state | feed: %{state.feed | unsent: true, cleanup_failures: 0}}) do
           {:ok, state} -> {:ok, arm_cleanup(state, 0)}
           {:stop, _reason, _state} = stop -> stop
         end
@@ -1301,9 +1309,9 @@ defmodule Alambique.Cell do
       {:error, state} ->
         %{retry_backoff_max_ms: max} = state.config.upload
         base = State.cell_opt(state, :cleanup_after_ms)
-        failures = state.feed_cleanup_failures
+        failures = state.feed.cleanup_failures
         delay = min(base * Integer.pow(2, min(failures, 20)), max(max, base))
-        {:ok, arm_cleanup(%{state | feed_cleanup_failures: failures + 1}, delay)}
+        {:ok, arm_cleanup(%{state | feed: %{state.feed | cleanup_failures: failures + 1}}, delay)}
     end
   end
 
@@ -1327,7 +1335,7 @@ defmodule Alambique.Cell do
 
   # A published batch has rows to remove. The timer carries its ref, so a
   # message that was already queued when the timer was replaced is ignored.
-  defp arm_cleanup(%State{feed_cleanup: nil} = state) do
+  defp arm_cleanup(%State{feed: %{cleanup: nil}} = state) do
     delay =
       if state.config.feed.cleanup == :after_publish,
         do: 0,
@@ -1338,9 +1346,9 @@ defmodule Alambique.Cell do
 
   defp arm_cleanup(state), do: state
 
-  defp arm_cleanup(%State{feed_cleanup: nil} = state, ms) do
+  defp arm_cleanup(%State{feed: %{cleanup: nil}} = state, ms) do
     if Publisher.cleanup_due?(state),
-      do: %{state | feed_cleanup: :erlang.start_timer(ms, self(), :feed_cleanup)},
+      do: %{state | feed: %{state.feed | cleanup: :erlang.start_timer(ms, self(), :feed_cleanup)}},
       else: state
   end
 
@@ -1355,7 +1363,7 @@ defmodule Alambique.Cell do
   # it out and `closable?/1` does not.
   defp quiet?(%State{conn: conn} = state) do
     conn != nil and idle?(state) and :atomics.get(state.load, Facts.slot(:admitted)) == 0 and
-      state.parked == [] and state.hydrator == nil and not state.unsent and
+      state.parked == [] and state.hydrator == nil and not state.feed.unsent and
       Publisher.delivered?(state) and State.lease_valid?(state)
   end
 
@@ -1382,7 +1390,14 @@ defmodule Alambique.Cell do
   defp close_kept(state, started, bytes, floor) do
     case Sqlite.close_keep(state.conn) do
       {:ok, kept} ->
-        state = %{state | conn: nil, kept: kept, idle_cache: nil, reopen_floor: floor}
+        state = %{
+          state
+          | conn: nil,
+            kept: kept,
+            reopen_floor: floor,
+            idle: %{state.idle | cache: nil}
+        }
+
         wal_size(state)
         idle_closed(state, started, bytes, :ok)
         # The page cache and the statements are gone: so is their garbage.
@@ -1510,7 +1525,7 @@ defmodule Alambique.Cell do
              write: true
            ) do
       collect_idle_garbage(state)
-      {:noreply, %{state | idle_cache: :shrunk}}
+      {:noreply, %{state | idle: %{state.idle | cache: :shrunk}}}
     else
       {:error, _reason} -> {:noreply, arm_idle_cache(state)}
     end
@@ -1549,7 +1564,7 @@ defmodule Alambique.Cell do
 
   # Encodes the pending commits as the next batch. A full pipeline defers the
   # flush to the next acknowledgement: the commits meanwhile grow the batch.
-  defp flush(%State{pending: [], unsent: false} = state), do: {:ok, state}
+  defp flush(%State{pending: [], feed: %{unsent: false}} = state), do: {:ok, state}
 
   defp flush(state) do
     if Pipe.full?(state.pipe),
@@ -1558,7 +1573,7 @@ defmodule Alambique.Cell do
   end
 
   # Like `flush/1`, but waits for a free slot.
-  defp flush_now(%State{pending: [], unsent: false} = state), do: {:ok, state}
+  defp flush_now(%State{pending: [], feed: %{unsent: false}} = state), do: {:ok, state}
 
   defp flush_now(state) do
     if Pipe.full?(state.pipe) do
@@ -1587,7 +1602,7 @@ defmodule Alambique.Cell do
            conn: state.conn
          ) do
       :none ->
-        release(%{state | pending: [], unsent: false}, items)
+        release(%{state | pending: [], feed: %{state.feed | unsent: false}}, items)
 
       {:ok, repl, up} ->
         ref = make_ref()
@@ -1610,7 +1625,7 @@ defmodule Alambique.Cell do
         }
 
         pipe = %{Pipe.push(state.pipe, batch) | flush_wanted: false}
-        {:ok, %{state | repl: repl, pending: [], unsent: false, pipe: pipe}}
+        {:ok, %{state | repl: repl, pending: [], pipe: pipe, feed: %{state.feed | unsent: false}}}
 
       {:error, reason} ->
         {:stop, {:sync_failed, reason}, state}
@@ -1910,7 +1925,7 @@ defmodule Alambique.Cell do
   # `:frames` are in the WAL and a batch can carry them; `:lost` says the WAL
   # restarted or the header cannot be read, so no batch can: the cell stops
   # whatever `sql: [orphan_frames:]` says.
-  defp orphan(%State{conn: conn, unsent: false, pending: []} = state) when conn != nil do
+  defp orphan(%State{conn: conn, pending: [], feed: %{unsent: false}} = state) when conn != nil do
     case Sqlite.foreign_write(conn) do
       :none -> if Replicator.unreplicated?(state.repl, conn), do: :frames, else: false
       :advanced -> :frames
@@ -1964,7 +1979,7 @@ defmodule Alambique.Cell do
   defp orphan_batch(state) do
     with :ok <- Sqlite.accept_foreign_write(state.conn),
          {:ok, state} <- Publisher.try_stamp(state) do
-      flush_now(%{state | unsent: true})
+      flush_now(%{state | feed: %{state.feed | unsent: true}})
     else
       {:error, reason} -> {:stop, {:stamp_failed, reason}, state}
     end
@@ -2323,7 +2338,7 @@ defmodule Alambique.Cell do
 
     # The cell stops whatever the release answers, and it logs its failure.
     _ = if reason in [:fenced, :lease_lost], do: close(state), else: abandon(state)
-    state = %{state | mode: :stopped, conn: nil, kept: nil, feed_reader: nil}
+    state = %{state | mode: :stopped, conn: nil, kept: nil, feed: %{state.feed | reader: nil}}
 
     if reply,
       do: {:stop, {:shutdown, reason}, reply, state},

@@ -162,16 +162,16 @@ defmodule Alambique.Cell.Facts do
   end
 
   defp publish_feed(load, state) do
-    put(load, :feed_published, state.feed_published)
-    put(load, :feed_sent, state.feed_sent)
-    put(load, :feed_cleaned, state.feed_cleaned)
-    put(load, :feed_backlog, state.feed_backlog)
-    put(load, :feed_capped, state.feed_capped)
-    put(load, :feed_reader_open, state.feed_reader != nil)
+    put(load, :feed_published, state.feed.published)
+    put(load, :feed_sent, state.feed.sent)
+    put(load, :feed_cleaned, state.feed.cleaned)
+    put(load, :feed_backlog, state.feed.backlog)
+    put(load, :feed_capped, state.feed.capped)
+    put(load, :feed_reader_open, state.feed.reader != nil)
   end
 
   defp cache(%State{conn: nil}), do: :closed
-  defp cache(%State{idle_cache: :shrunk}), do: :shrunk
+  defp cache(%State{idle: %{cache: :shrunk}}), do: :shrunk
   defp cache(_state), do: :full
 
   @doc """
@@ -209,7 +209,7 @@ defmodule Alambique.Cell.Facts do
   end
 
   defp measure(state) do
-    memories = Enum.map([state.conn | List.wrap(state.feed_reader)], &Sqlite.memory/1)
+    memories = Enum.map([state.conn | List.wrap(state.feed.reader)], &Sqlite.memory/1)
     if Enum.all?(memories, &match?({:ok, _}, &1)), do: record_memories(state, memories)
     put_process_bytes(state)
   end

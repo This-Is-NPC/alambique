@@ -27,36 +27,32 @@ defmodule Alambique.Cell.State do
     # The process that writes the page-hash sidecar of the last landed batch.
     :sidecar,
     :last_active,
-    # The ref of the `:idle` timer; a message with another ref is stale.
-    :idle_timer,
-    # Idle cache shrink: `nil` (off), the ref of the `:idle_cache` timer, or
-    # `:shrunk` while the page cache holds the smaller limit.
-    :idle_cache,
-    # Idle close: `nil` (off, or the connection is closed), or the ref of the
-    # `:idle_close` timer.
-    :idle_close,
     # While the connection is closed: what `Sqlite.close_keep/1` kept, which
     # holds the file for this cell.
     :kept,
     # Marker of work in flight (design §10), `nil` when quarantine is off.
     :inflight,
-    # Set by `Alambique.take_over/4`: `%{reason, epoch}`, and `previous` (the
-    # lease that was replaced) once the wake took the lease.
-    :takeover,
-    # `%{location, answer, trips}`: the lease object the router read just before
-    # the wake (`answer` is `:none` or `{:ok, lease}`) and the counters of that
-    # read. It saves the wake reading the lease again.
-    :lease_seen,
-    # The process that woke the cell, whose wake slot the cell takes over.
-    :holder,
-    # Counters of the store requests of the wake (`Store.Metered`).
-    :trips,
     :pipe,
     # Counter of callers accepted and not answered yet, read by `Cell.load/2`.
     :load,
     # The options this cell set for itself (`Cell.Options`): only the keys it
     # changed. Read through `cell_opt/2`.
     cell_opts: %{},
+    # How the cell came to wake: `takeover`, set by `Alambique.take_over/4` as
+    # `%{reason, epoch}` and `previous` (the lease that was replaced) once the
+    # wake took the lease; `lease_seen`, `%{location, answer, trips}`, the
+    # lease object the router read just before the wake (`answer` is `:none`
+    # or `{:ok, lease}`) and the counters of that read, which saves the wake
+    # reading the lease again; `holder`, the process that woke the cell, whose
+    # wake slot the cell takes over; `trips`, the counters of the store
+    # requests of the wake (`Store.Metered`).
+    origin: %{takeover: nil, lease_seen: nil, holder: nil, trips: nil},
+    # The idle timers: `timer` is the ref of the `:idle` timer, a message with
+    # another ref is stale. `cache` is the idle cache shrink: `nil` (off), the
+    # ref of the `:idle_cache` timer, or `:shrunk` while the page cache holds
+    # the smaller limit. `close` is the idle close: `nil` (off, or the
+    # connection is closed), or the ref of the `:idle_close` timer.
+    idle: %{timer: nil, cache: nil, close: nil},
     # The refresh of the options in progress (`Alambique.refresh_options/3`):
     # `%{gen, pid, mon, started, waiting, queued}`, or `nil`. One resolve runs
     # at a time, in a process of its own; the callers that asked meanwhile
@@ -77,38 +73,40 @@ defmodule Alambique.Cell.State do
     # Commits not yet encoded, newest first: callers and reads that wait.
     pending: [],
     flush_queued: false,
-    # Change feed (design §13): the latest time a batch took, the newest TXID
-    # published and the newest one whose rows the database no longer holds.
-    feed_floor: 0,
-    feed_published: 0,
-    feed_cleaned: 0,
-    # The sender process, the newest TXID handed to it, how many batches it
-    # holds, and whether more wait in the file for room.
-    feed_pid: nil,
-    feed_sent: 0,
-    feed_backlog: 0,
-    feed_capped: false,
-    # The position `{txid, seq}` of a batch whose rows are handed over in
-    # pieces (`feed.hand_over_rows`), the ref of the message that continues
-    # it, and nil for none.
-    feed_part: nil,
-    feed_tick: nil,
-    # With `hand_over: :sender`: the read-only connection the sender reads
-    # with. Only the cell closes it, before it closes its own connection.
-    feed_reader: nil,
-    # With `reader_close: :after_read`: a range is with the sender, which has
-    # not reported it read yet.
-    feed_reading: false,
-    # With `hand_over: :native`: a table name that is not UTF-8 was refused and
-    # logged; cleared by the next hand-over that sent rows.
-    feed_refused: false,
-    # The `:feed_cleanup` timer (`nil` when none is armed) and the failed
-    # cleanups since the last one that committed.
-    feed_cleanup: nil,
-    feed_cleanup_failures: 0,
-    # A commit that no caller waits for (the feed cleanup) whose batch is not
-    # encoded yet.
-    unsent: false
+    # Change feed (design §13): `floor` is the latest time a batch took,
+    # `published` the newest TXID published and `cleaned` the newest one whose
+    # rows the database no longer holds. `pid` is the sender process, `sent`
+    # the newest TXID handed to it, `backlog` how many batches it holds, and
+    # `capped` whether more wait in the file for room. `part` is the position
+    # `{txid, seq}` of a batch whose rows are handed over in pieces
+    # (`feed.hand_over_rows`), `tick` the ref of the message that continues it
+    # (nil for none). `reader` is, with `hand_over: :sender`, the read-only
+    # connection the sender reads with; only the cell closes it, before it
+    # closes its own connection. `reading` is, with `reader_close:
+    # :after_read`, whether a range is with the sender, which has not
+    # reported it read yet. `refused` is, with `hand_over: :native`, whether a
+    # table name that is not UTF-8 was refused and logged; cleared by the next
+    # hand-over that sent rows. `cleanup` is the `:feed_cleanup` timer (`nil`
+    # when none is armed) and `cleanup_failures` the failed cleanups since the
+    # last one that committed. `unsent` is whether a commit that no caller
+    # waits for (the feed cleanup) has a batch that is not encoded yet.
+    feed: %{
+      floor: 0,
+      published: 0,
+      cleaned: 0,
+      pid: nil,
+      sent: 0,
+      backlog: 0,
+      capped: false,
+      part: nil,
+      tick: nil,
+      reader: nil,
+      reading: false,
+      refused: false,
+      cleanup: nil,
+      cleanup_failures: 0,
+      unsent: false
+    }
   ]
 
   @type t :: %__MODULE__{}

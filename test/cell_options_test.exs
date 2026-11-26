@@ -100,8 +100,8 @@ defmodule Alambique.CellOptionsTest do
 
       assert {:ok, _} = wake(inst, "off")
       assert {:ok, _} = wake(inst, "node")
-      assert in_cell(pid(inst, "off"), & &1.idle_cache) == nil
-      assert is_reference(in_cell(pid(inst, "node"), & &1.idle_cache))
+      assert in_cell(pid(inst, "off"), & &1.idle.cache) == nil
+      assert is_reference(in_cell(pid(inst, "node"), & &1.idle.cache))
     end
 
     test "with idle_close_after_ms nil turns the node's close off for its cell", ctx do
@@ -116,7 +116,7 @@ defmodule Alambique.CellOptionsTest do
       assert {:ok, _} = wake(inst, "node")
       eventually(fn -> in_cell(pid(inst, "node"), & &1.conn) == nil end)
       # The cell that closed is the proof the timer ran for the other.
-      assert in_cell(pid(inst, "off"), & &1.idle_close) == nil
+      assert in_cell(pid(inst, "off"), & &1.idle.close) == nil
       assert in_cell(pid(inst, "off"), & &1.conn) != nil
     end
 
@@ -144,7 +144,7 @@ defmodule Alambique.CellOptionsTest do
 
       assert {:ok, _} = wake(inst, "on")
       assert {:ok, _} = wake(inst, "node")
-      assert in_cell(pid(inst, "node"), & &1.idle_cache) == nil
+      assert in_cell(pid(inst, "node"), & &1.idle.cache) == nil
       eventually(fn -> cache_size(inst, "on") == -8 end)
     end
 
@@ -356,7 +356,7 @@ defmodule Alambique.CellOptionsTest do
         &(&1.field == :idle_cache_after_ms)
       )
 
-      assert in_cell(pid(inst, "both"), & &1.idle_cache) == nil
+      assert in_cell(pid(inst, "both"), & &1.idle.cache) == nil
     end
   end
 
@@ -520,7 +520,7 @@ defmodule Alambique.CellOptionsTest do
 
       assert {:ok, _} = wake(inst, "locked")
       assert cell_opts(inst, "locked") == %{locking_mode: :exclusive, idle_close_after_ms: nil}
-      assert in_cell(pid(inst, "locked"), & &1.idle_close) == nil
+      assert in_cell(pid(inst, "locked"), & &1.idle.close) == nil
 
       await_event(
         [:alambique, :cell, :options, :repaired],
@@ -536,7 +536,7 @@ defmodule Alambique.CellOptionsTest do
 
       assert {:ok, _} = wake(inst, "close")
       assert cell_opts(inst, "close") == %{idle_close_after_ms: nil}
-      assert in_cell(pid(inst, "close"), & &1.idle_close) == nil
+      assert in_cell(pid(inst, "close"), & &1.idle.close) == nil
     end
 
     test "keeps the idle close of a cell that is normal where the node is exclusive", ctx do

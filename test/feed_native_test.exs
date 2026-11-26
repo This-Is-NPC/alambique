@@ -166,7 +166,7 @@ defmodule Alambique.FeedNativeTest do
       txid = elem(hd(records).position, 0)
       assert Enum.map(records, & &1.position) == for(n <- 0..9, do: {txid, n})
       assert :counters.get(hands, 1) >= 3
-      assert %State{feed_part: nil, feed_backlog: 0} = state(inst)
+      assert %State{feed: %{part: nil, backlog: 0}} = state(inst)
     end
 
     test "three batches acknowledged together with room for one: one is sent", ctx do
@@ -177,13 +177,13 @@ defmodule Alambique.FeedNativeTest do
       # The rows are still in the file: hand them over from 0, as after a reset.
       {sent, state} =
         in_cell(pid(inst), fn st ->
-          sent = Publisher.after_ack(%{st | feed_sent: 0, feed_published: 0, feed_backlog: 0})
+          sent = Publisher.after_ack(%{st | feed: %{st.feed | sent: 0, published: 0, backlog: 0}})
           {sent, st}
         end)
 
       # Only the batch with room was sent: the library does not send the others.
-      assert %{feed_backlog: 1, feed_capped: true} = sent
-      assert sent.feed_sent < state.pipe.acked.txid
+      assert %{feed: %{backlog: 1, capped: true}} = sent
+      assert sent.feed.sent < state.pipe.acked.txid
     end
 
     test "leaves no binary of the rows on the heap of the cell", ctx do
@@ -210,12 +210,15 @@ defmodule Alambique.FeedNativeTest do
           _ =
             Publisher.after_ack(%{
               st
-              | feed_sent: 0,
-                feed_published: 0,
-                feed_backlog: 0,
-                feed_capped: false,
-                feed_part: nil,
-                feed_tick: nil
+              | feed: %{
+                  st.feed
+                  | sent: 0,
+                    published: 0,
+                    backlog: 0,
+                    capped: false,
+                    part: nil,
+                    tick: nil
+                }
             })
 
           sizes.() -- before
@@ -254,7 +257,7 @@ defmodule Alambique.FeedNativeTest do
       assert Enum.map(records, & &1.position) ==
                for(n <- 0..9, do: {elem(hd(records).position, 0), n})
 
-      assert %State{feed_part: nil, feed_backlog: 0} = state(inst)
+      assert %State{feed: %{part: nil, backlog: 0}} = state(inst)
     end
 
     test "gone when the library sends makes the cell start over, as if it ended later", ctx do
@@ -276,17 +279,20 @@ defmodule Alambique.FeedNativeTest do
         in_cell(pid(inst), fn st ->
           Publisher.after_ack(%{
             st
-            | feed_sent: 0,
-              feed_published: 0,
-              feed_backlog: 0,
-              feed_capped: false,
-              feed_part: nil,
-              feed_tick: nil
+            | feed: %{
+                st.feed
+                | sent: 0,
+                  published: 0,
+                  backlog: 0,
+                  capped: false,
+                  part: nil,
+                  tick: nil
+              }
           })
         end)
 
-      assert %State{feed_sent: 0, feed_pid: nil, feed_backlog: 0} = result
-      assert result.feed_tick != nil
+      assert %State{feed: %{sent: 0, pid: nil, backlog: 0}} = result
+      assert result.feed.tick != nil
     end
 
     test "that never gets the rows of a piece ends and the batches are handed over again",
@@ -294,12 +300,12 @@ defmodule Alambique.FeedNativeTest do
       inst = start(ctx, "stale", native(), name: :stale)
       insert(inst, @cell, [1])
       eventually(fn -> keys(records(ctx, "stale")) == [1] end)
-      %State{feed_pid: old} = state(inst)
+      %State{feed: %{pid: old}} = state(inst)
 
       # A piece whose rows were never sent: the sender gives it up.
       meta = %{txid: 99, ts: 1, rows: 1, partial: false, rewind: false}
       send(old, {:piece, make_ref(), [meta]})
-      eventually(fn -> (s = state(inst)).feed_pid != old and s end)
+      eventually(fn -> (s = state(inst)).feed.pid != old and s end)
 
       insert(inst, @cell, [2])
       eventually(fn -> keys(records(ctx, "stale")) == [1, 2] end)
@@ -387,18 +393,18 @@ defmodule Alambique.FeedNativeTest do
       # A second write while the first range is read: its range waits.
       insert(inst, @cell, [2])
       s = state(inst)
-      assert s.feed_reading and s.feed_reader != nil
-      assert s.feed_sent < s.pipe.acked.txid
+      assert s.feed.reading and s.feed.reader != nil
+      assert s.feed.sent < s.pipe.acked.txid
 
       open(gate)
       eventually(fn -> keys(records(ctx, "after-read")) == [1, 2] end)
 
       eventually(fn ->
-        (s = state(inst)).feed_reader == nil and not s.feed_reading and s.feed_backlog == 0
+        (s = state(inst)).feed.reader == nil and not s.feed.reading and s.feed.backlog == 0
       end)
 
       # The reader was never closed under a read: the sender never ended.
-      assert state(inst).feed_pid == held
+      assert state(inst).feed.pid == held
       assert Process.alive?(held)
     end
 
@@ -413,9 +419,9 @@ defmodule Alambique.FeedNativeTest do
         in_cell(pid(inst), fn st ->
           {:ok, reader} = Alambique.Cell.Db.open_reader(st.path, 64)
           me = self()
-          base = %{st | feed_reader: reader, feed_pid: me, feed_sent: 5}
-          kept = Publisher.read_done(base, me, 3).feed_reader == reader
-          closed = Publisher.read_done(base, me, 5).feed_reader == nil
+          base = %{st | feed: %{st.feed | reader: reader, pid: me, sent: 5}}
+          kept = Publisher.read_done(base, me, 3).feed.reader == reader
+          closed = Publisher.read_done(base, me, 5).feed.reader == nil
           {kept, closed, Sqlite.run(reader, "SELECT 1", [])}
         end)
 
@@ -436,12 +442,12 @@ defmodule Alambique.FeedNativeTest do
       log =
         capture_log(fn ->
           insert(inst, @cell, [1])
-          eventually(fn -> state(inst).feed_tick != nil end)
+          eventually(fn -> state(inst).feed.tick != nil end)
           eventually(fn -> keys(records(ctx, "no-reader")) == [1] end)
         end)
 
       assert log =~ "could not open the feed reader"
-      eventually(fn -> (s = state(inst)).feed_tick == nil and s.feed_reader == nil end)
+      eventually(fn -> (s = state(inst)).feed.tick == nil and s.feed.reader == nil end)
     end
   end
 
@@ -450,7 +456,7 @@ defmodule Alambique.FeedNativeTest do
       inst = start(ctx, "give-up", sender(stop_publish_ms: 100), name: :give_up)
       insert(inst, @cell, [1])
       eventually(fn -> keys(records(ctx, "give-up")) == [1] end)
-      eventually(fn -> state(inst).feed_reader == nil end)
+      eventually(fn -> state(inst).feed.reader == nil end)
       baseline = files(ctx)
 
       gate = hold(:feed_after_read, self())
@@ -479,7 +485,7 @@ defmodule Alambique.FeedNativeTest do
       gate = hold(:feed_after_read, self())
       insert(inst, @cell, 1..5)
       assert_receive {:held, :feed_after_read, _, _}, 5_000
-      assert state(inst).feed_reader != nil
+      assert state(inst).feed.reader != nil
 
       [wal] = Path.wildcard(Path.join(ctx.dir, "**/*.db-wal"))
       before = salt(wal)

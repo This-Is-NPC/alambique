@@ -257,7 +257,7 @@ defmodule Alambique.TransactionControlPropertiesTest do
     case pid(ctx, cell) do
       pid when is_pid(pid) ->
         s = :sys.get_state(pid, 2_000)
-        s.feed_cleaned == s.feed_published
+        s.feed.cleaned == s.feed.published
 
       _ ->
         true

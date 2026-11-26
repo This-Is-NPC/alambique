@@ -83,7 +83,7 @@ defmodule Alambique.VfsFaultTest do
     assert eventually(fn ->
              state = :sys.get_state(pid)
 
-             state.feed_published == state.feed_cleaned and
+             state.feed.published == state.feed.cleaned and
                not in_cell(pid, &Replicator.unreplicated?(&1.repl, &1.conn))
            end)
 
