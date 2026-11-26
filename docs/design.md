@@ -253,15 +253,16 @@ rebuilds, instead of 0.
 **Options of a cell.** `cell_options` names a function that returns the
 per-cell options of one cell (`idle_timeout_ms`, `awake.cache_kib`,
 `idle_cache_after_ms`, `idle_cache_kib`, `idle_close_after_ms`, `idle_gc`,
-`sql.locking_mode`, and `lazy_restore.mode`, which §16 reads at the restore of the
-wake). The cell calls it once per
+`track_bytes`, `sql.locking_mode`, `feed.cleanup_after_ms`, and `lazy_restore.mode`,
+which §16 reads at the restore of the wake). The cell calls it once per
 wake, after it holds a wake slot and before the lease, in a monitored process
 that it waits for at most `cell_options_timeout_ms`; the wait is outside the
 busy marker (§10), because it runs no native code. The result is merged over
 the node's values, each value is clamped to the node limits
 (`awake.cell_cache_kib_max`, `cell_idle_timeout_ms_min`, `_max`), and the
 cross-field rules are repaired with a fixed result (an idle timeout not above
-`feed.cleanup_after_ms` returns to the node's value; an idle shrink not below
+`feed.cleanup_after_ms`, and a `cleanup_after_ms` not below the idle timeout,
+return to the node's value; an idle shrink not below
 the idle timeout or the idle close is turned off; an `idle_close_after_ms` not
 below the idle timeout is turned off; an `idle_cache_kib` not below `cache_kib`
 returns to the node's value, or the shrink is turned off; `locking_mode:
@@ -322,7 +323,10 @@ cell has, with either `cell_options_invalid`: stopping a serving cell for a
 bad answer, or dropping a good override for the node's values, would be worse.
 The invalid event carries `phase: :refresh` and `action: :keep`. A function
 that returns `nil` or `[]` is a valid answer: the cell goes back to the node's
-values. `awake.track_bytes` and the feed options are not per cell. The feed
+values. `track_bytes: false` sets the memory facts to nil at once and a memory
+budget (`awake.max_bytes`) keeps it on; `feed.cleanup_after_ms` moves a cleanup
+timer that waits, to what is left of the new time since the last call. The
+other feed options are not per cell. The feed
 reader of the sender keeps `feed.reader_cache_kib`: the cell issues no pragma
 on it, and `cache_kib` applies to the cell's own connection only.
 
