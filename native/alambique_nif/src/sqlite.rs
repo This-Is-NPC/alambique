@@ -1713,6 +1713,44 @@ fn sqlite_foreign_write<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64, mod
     )
 }
 
+/// The end of the committed log by the wal-index of a cell's own connection:
+/// `{:ok, {offset, salt1, salt2, 0, 0}}`, the offset past the frame `mxFrame`
+/// names, so that a scan of the WAL by path stops there. SQLite writes the
+/// header after the frames of a commit, and a commit that fails after its
+/// frame reached the file leaves a valid commit frame past it that is no
+/// transaction. `:none` for a connection that has no header to read.
+#[rustler::nif(schedule = "DirtyIo")]
+fn sqlite_wal_end<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64) -> Term<'a> {
+    let _t = crate::stats::SQLITE_CALLS.time();
+    if let Err(f) = check_user(env, &conn) {
+        return f.term(env);
+    }
+    reply(
+        env,
+        with_db(&conn, |db| {
+            let ctl = &conn.control;
+            if !ctl.key_ok(key) || ctl.expect_txn.load(Relaxed) != 0 {
+                return Err(Failure::Denied);
+            }
+            if !ctl.watched {
+                return Ok(atoms::none().encode(env));
+            }
+            let Some(h) = ctl.header(db) else {
+                return Err(Failure::Message(
+                    "the wal-index header is unreadable".into(),
+                ));
+            };
+            let [_, _, size_lo, size_hi] = h[3].to_ne_bytes();
+            let size = match u16::from_ne_bytes([size_lo, size_hi]) {
+                1 => 65536,
+                n => u64::from(n),
+            };
+            let offset = crate::wal::WAL_HEADER_SIZE + u64::from(h[4]) * (24 + size);
+            Ok((atoms::ok(), (offset, h[8], h[9], 0u32, 0u32)).encode(env))
+        }),
+    )
+}
+
 /// Test builds: runs the statement of `set_foreign_commit` on a separate
 /// connection of the same file, as another process would, right after the
 /// begin compared the wal-index header.

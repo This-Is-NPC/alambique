@@ -1043,7 +1043,10 @@ defmodule Alambique.Cell do
     started = System.monotonic_time()
     deadline = State.deadline(state)
 
-    case Replicator.encode(state.repl, state.repl_ctx, :batch, deadline: deadline) do
+    case Replicator.encode(state.repl, state.repl_ctx, :batch,
+           deadline: deadline,
+           conn: state.conn
+         ) do
       :none ->
         release(%{state | pending: [], unsent: false}, items)
 
@@ -1349,7 +1352,7 @@ defmodule Alambique.Cell do
   # whatever `sql: [orphan_frames:]` says.
   defp orphan(%State{conn: conn, unsent: false, pending: []} = state) when conn != nil do
     case Sqlite.foreign_write(conn) do
-      :none -> if Replicator.unreplicated?(state.repl), do: :frames, else: false
+      :none -> if Replicator.unreplicated?(state.repl, conn), do: :frames, else: false
       :advanced -> :frames
       _restarted_or_error -> :lost
     end

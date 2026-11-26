@@ -230,10 +230,10 @@ fn matching(name: *const c_char, sync: bool) -> Option<MutexGuard<'static, Optio
     let slot = FAULT.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: `name` is a NUL-terminated string from `file_opened`.
     let path = unsafe { CStr::from_ptr(name) }.to_bytes();
-    match slot.as_ref() {
-        Some(f) if f.path == path && (f.kind == Kind::Sync) == sync => Some(slot),
-        _ => None,
-    }
+    let for_this = slot
+        .as_ref()
+        .is_some_and(|f| f.path == path && (f.kind == Kind::Sync) == sync);
+    for_this.then_some(slot)
 }
 
 fn fire(slot: &mut Option<Fault>) -> c_int {
@@ -295,7 +295,7 @@ pub(crate) fn after_sync(name: *const c_char) -> Option<c_int> {
 /// `:sync`; the `skip` selected writes before it pass; `rc` is `:ioerr_write`,
 /// `:full` or `:ioerr_fsync`; it fires `times` times.
 #[rustler::nif]
-fn vfs_fault_arm(path: String, kind: Atom, skip: u64, rc: Atom, times: u64) -> Result<Atom, Atom> {
+fn vfs_fault_arm(path: String, kind: Atom, skip: u64, rc: Atom, times: u64) -> Atom {
     use fault_atoms as a;
     let kind = if kind == a::commit_frame() {
         Kind::CommitFrame
@@ -304,7 +304,7 @@ fn vfs_fault_arm(path: String, kind: Atom, skip: u64, rc: Atom, times: u64) -> R
     } else if kind == a::sync() {
         Kind::Sync
     } else {
-        return Err(rustler::types::atom::error());
+        return rustler::types::atom::error();
     };
     let rc = if rc == a::ioerr_write() {
         ffi::SQLITE_IOERR_WRITE
@@ -313,7 +313,7 @@ fn vfs_fault_arm(path: String, kind: Atom, skip: u64, rc: Atom, times: u64) -> R
     } else if rc == a::ioerr_fsync() {
         ffi::SQLITE_IOERR_FSYNC
     } else {
-        return Err(rustler::types::atom::error());
+        return rustler::types::atom::error();
     };
     let mut slot = FAULT.lock().unwrap_or_else(|e| e.into_inner());
     FIRED.store(0, Ordering::SeqCst);
@@ -326,7 +326,7 @@ fn vfs_fault_arm(path: String, kind: Atom, skip: u64, rc: Atom, times: u64) -> R
         page_at: None,
     });
     ARMED.store(true, Ordering::SeqCst);
-    Ok(rustler::types::atom::ok())
+    rustler::types::atom::ok()
 }
 
 /// Disarms the fault.

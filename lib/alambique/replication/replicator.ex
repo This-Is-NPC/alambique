@@ -193,7 +193,10 @@ defmodule Alambique.Replication.Replicator do
   restore.) `:none` means there was nothing
   new (`:batch` only). `kind` `:fence` claims the TXID with an empty segment.
 
-  Options: `:deadline`, for the page fetches of a lazy restore.
+  Options: `:deadline`, for the page fetches of a lazy restore; `:conn`, the
+  connection that owns the files: the WAL is read up to the end its wal-index
+  records (`Alambique.Sqlite.wal_end/1`), so that a commit SQLite rolled back
+  after its frame reached the file is not taken for a transaction.
   """
   @spec encode(t, Alambique.Replication.ctx(), :batch | :fence, keyword) ::
           {:ok, t, upload} | :none | {:error, term}
@@ -203,8 +206,9 @@ defmodule Alambique.Replication.Replicator do
     if kind == :batch, do: Fault.point(:repl_before_capture, %{cell: s.cell, txid: txid})
     ts = now(ctx)
 
-    with {:ok, s, touched} <- prepare_sums(s, ctx, kind, opts) do
-      case capture(s, kind, ts) do
+    with {:ok, s, touched} <- prepare_sums(s, ctx, kind, opts),
+         {:ok, wal_end} <- wal_end(opts[:conn]) do
+      case capture(s, kind, ts, wal_end) do
         :none ->
           :none
 
@@ -371,10 +375,10 @@ defmodule Alambique.Replication.Replicator do
 
   # TXID 1 is always the whole database, because LTX files that start at
   # TXID 1 are snapshots.
-  defp capture(%{txid: 0} = s, _kind, ts),
-    do: Native.capture_full(s.db_path, wal_path(s), s.page_size, 1, ts, nil)
+  defp capture(%{txid: 0} = s, _kind, ts, wal_end),
+    do: Native.capture_full(s.db_path, wal_path(s), s.page_size, 1, ts, wal_end)
 
-  defp capture(s, :batch, ts) do
+  defp capture(s, :batch, ts, wal_end) do
     Native.capture_incremental(
       s.db_path,
       wal_path(s),
@@ -383,11 +387,12 @@ defmodule Alambique.Replication.Replicator do
       s.sums,
       s.checksum,
       s.txid + 1,
-      ts
+      ts,
+      wal_end
     )
   end
 
-  defp capture(s, :fence, ts) do
+  defp capture(s, :fence, ts, _wal_end) do
     Native.capture_empty(
       s.db_path,
       wal_path(s),
@@ -517,7 +522,7 @@ defmodule Alambique.Replication.Replicator do
   def checkpoint(%__MODULE__{} = s, conn) do
     Fault.point(:repl_before_checkpoint, %{cell: s.cell, txid: s.txid})
 
-    with {:ok, false} <- pending(s),
+    with {:ok, false} <- pending(s, conn),
          :ok <- truncate(conn) do
       {:ok, %{s | wal_pos: @unpositioned}}
     else
@@ -530,13 +535,26 @@ defmodule Alambique.Replication.Replicator do
   Whether the WAL holds committed frames that no batch has carried yet. An
   unreadable WAL counts as holding them.
   """
-  @spec unreplicated?(t) :: boolean
-  def unreplicated?(%__MODULE__{} = s), do: pending(s) != {:ok, false}
+  @spec unreplicated?(t, Alambique.Sqlite.conn() | nil) :: boolean
+  def unreplicated?(%__MODULE__{} = s, conn \\ nil), do: pending(s, conn) != {:ok, false}
 
-  defp pending(s) do
-    case Native.wal_pending(wal_path(s), s.page_size, s.wal_pos) do
-      {:ok, bool} -> {:ok, bool}
-      {:error, reason} -> {:error, {:wal, reason}}
+  # Frames past the end the wal-index of `conn` records are no transaction.
+  defp pending(s, conn) do
+    with {:ok, wal_end} <- wal_end(conn) do
+      case Native.wal_pending(wal_path(s), s.page_size, s.wal_pos, wal_end) do
+        {:ok, bool} -> {:ok, bool}
+        {:error, reason} -> {:error, {:wal, reason}}
+      end
+    end
+  end
+
+  defp wal_end(nil), do: {:ok, nil}
+
+  defp wal_end(conn) do
+    case Alambique.Sqlite.wal_end(conn) do
+      {:ok, pos} -> {:ok, pos}
+      :none -> {:ok, nil}
+      {:error, reason} -> {:error, {:wal_end, reason}}
     end
   end
 

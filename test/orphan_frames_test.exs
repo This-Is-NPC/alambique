@@ -38,7 +38,8 @@ defmodule Alambique.OrphanFramesTest do
     assert unreplicated?(c)
   end
 
-  defp unreplicated?(c), do: Replicator.unreplicated?(:sys.get_state(pid(c)).repl)
+  defp unreplicated?(c),
+    do: in_cell(pid(c), &Replicator.unreplicated?(&1.repl, &1.conn))
 
   defp rows(c) do
     {:ok, %{rows: rows}} = Alambique.query(c.inst, c.cell, "SELECT n FROM t ORDER BY n")

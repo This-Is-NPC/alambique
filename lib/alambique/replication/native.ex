@@ -49,7 +49,10 @@ defmodule Alambique.Replication.Native do
           {min_txid :: integer, max_txid :: integer, timestamp :: integer, commit :: integer,
            pre_apply :: integer, page_size :: integer}
 
-  @doc "Segment for `txid` with the latest version of each page committed after `pos`, or `:none`."
+  @doc """
+  Segment for `txid` with the latest version of each page committed after `pos`
+  and before `end` (`sqlite_wal_end/2`; `nil` for the whole WAL), or `:none`.
+  """
   @spec capture_incremental(
           Path.t(),
           Path.t(),
@@ -58,10 +61,11 @@ defmodule Alambique.Replication.Native do
           sums,
           integer,
           pos_integer,
-          integer
+          integer,
+          wal_pos | nil
         ) ::
           captured | :none | error
-  def capture_incremental(_db, _wal, _page_size, _pos, _sums, _pre, _txid, _timestamp),
+  def capture_incremental(_db, _wal, _page_size, _pos, _sums, _pre, _txid, _timestamp, _end),
     do: nif_error()
 
   @doc "Segment for `txid` without pages."
@@ -90,9 +94,9 @@ defmodule Alambique.Replication.Native do
           captured | error
   def capture_replace(_db, _wal, _page_size, _pre, _txid, _timestamp), do: nif_error()
 
-  @doc "Whether committed frames exist after `pos`."
-  @spec wal_pending(Path.t(), pos_integer, wal_pos) :: {:ok, boolean} | error
-  def wal_pending(_wal, _page_size, _pos), do: nif_error()
+  @doc "Whether committed frames exist after `pos` and before `end` (`nil`: the end of the WAL)."
+  @spec wal_pending(Path.t(), pos_integer, wal_pos, wal_pos | nil) :: {:ok, boolean} | error
+  def wal_pending(_wal, _page_size, _pos, _end), do: nif_error()
 
   @doc """
   Page sums (a binary of little-endian 64-bit CRCs; `sums_new/1` makes the
@@ -203,6 +207,8 @@ defmodule Alambique.Replication.Native do
   def sqlite_wal_advanced(_conn), do: nif_error()
   @doc false
   def sqlite_foreign_write(_conn, _key, _mode), do: nif_error()
+  @doc false
+  def sqlite_wal_end(_conn, _key), do: nif_error()
   @doc false
   def sqlite_script(_conn, _sql), do: nif_error()
   @doc false

@@ -33,6 +33,10 @@ pub struct Args<'a> {
     pub pre: u64,
     pub txid: u64,
     pub timestamp: i64,
+    /// The end of the committed log by the wal-index, when the connection
+    /// that owns the files can say (`sqlite_wal_end`): frames past it are no
+    /// transaction. `None` takes the WAL file as it is.
+    pub end: Option<WalPos>,
 }
 
 /// Captures the committed WAL frames after `args.pos` as one segment with the
@@ -41,7 +45,7 @@ pub fn incremental(args: &Args) -> Result<Option<Output>> {
     if args.txid < 2 {
         return invalid("incremental segments start at txid 2; use a full segment for txid 1");
     }
-    let scan = wal::scan(args.wal_path, args.page_size, Some(args.pos), None)?;
+    let scan = wal::scan(args.wal_path, args.page_size, Some(args.pos), args.end)?;
     let Some(new_commit) = scan.commit else {
         return Ok(None);
     };
@@ -229,9 +233,9 @@ fn whole(args: &Args, wal_limit: Option<WalPos>, min_txid: u64) -> Result<Output
     })
 }
 
-/// True if committed frames exist after `pos`.
-pub fn pending(wal_path: &Path, page_size: u32, pos: WalPos) -> Result<bool> {
-    Ok(wal::scan(wal_path, page_size, Some(pos), None)?
+/// True if committed frames exist after `pos` (and before `end`).
+pub fn pending(wal_path: &Path, page_size: u32, pos: WalPos, end: Option<WalPos>) -> Result<bool> {
+    Ok(wal::scan(wal_path, page_size, Some(pos), end)?
         .commit
         .is_some())
 }
@@ -327,6 +331,7 @@ pub mod testing {
                     pre,
                     txid,
                     timestamp: 1000 + txid as i64,
+                    end: None,
                 }
             }
             let files = (db_path.as_path(), wal_path.as_path());
@@ -438,6 +443,7 @@ pub mod testing {
                 pre: 0,
                 txid: 1,
                 timestamp: 1,
+                end: None,
             };
             let whole = full(&args, None).unwrap();
             assert_eq!(whole.checksum, self.checksum);
@@ -551,6 +557,7 @@ mod tests {
                 pre: fold(&sums.to_vec()),
                 txid,
                 timestamp: 1000 + txid as i64,
+                end: None,
             }
         }
     }
@@ -720,6 +727,32 @@ mod tests {
         b.write(&dir.path().join("db-wal"));
         let s = full(&p.args(WalPos::default(), &Sums::default(), 1), Some(limit)).unwrap();
         assert_eq!(s.checksum, fold(&[page_crc(1, &pg(1))]));
+    }
+
+    #[test]
+    fn frames_past_the_wal_index_end_are_not_captured() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Paths::new(dir.path());
+        let mut b = WalBuilder::new(PS, (1, 2), false);
+        b.frame(1, 1, &pg(1));
+        let end = WalPos {
+            offset: b.bytes.len() as u64,
+            salt1: 1,
+            salt2: 2,
+            ..Default::default()
+        };
+        // A commit frame whose write failed after it reached the file: valid
+        // checksums and a commit mark, past the end the index records.
+        b.frame(1, 1, &pg(2));
+        b.write(&dir.path().join("db-wal"));
+        let snap = full(&p.args(WalPos::default(), &Sums::default(), 1), Some(end)).unwrap();
+
+        assert!(pending(&p.wal, PS, snap.pos, None).unwrap());
+        assert!(!pending(&p.wal, PS, snap.pos, Some(end)).unwrap());
+        let mut args = p.args(snap.pos, &snap.sums, 2);
+        assert!(incremental(&args).unwrap().is_some());
+        args.end = Some(end);
+        assert!(incremental(&args).unwrap().is_none());
     }
 
     #[test]

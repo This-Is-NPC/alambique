@@ -108,6 +108,7 @@ fn mk_args<'a>(
     pre: u64,
     txid: u64,
     timestamp: i64,
+    end: Option<PosTuple>,
 ) -> capture::Args<'a> {
     capture::Args {
         db_path: Path::new(db),
@@ -118,6 +119,7 @@ fn mk_args<'a>(
         pre,
         txid,
         timestamp,
+        end: end.map(pos_from),
     }
 }
 
@@ -135,12 +137,13 @@ fn capture_incremental<'a>(
     pre: u64,
     txid: u64,
     timestamp: i64,
+    end: Option<PosTuple>,
 ) -> Term<'a> {
     let _t = crate::stats::REPLICATION_CALLS.time();
     let run = || -> Result<Term<'a>, Error> {
         Ok(
             match capture::incremental(&mk_args(
-                &db, &wal, page_size, pos, &sums.0, pre, txid, timestamp,
+                &db, &wal, page_size, pos, &sums.0, pre, txid, timestamp, end,
             ))? {
                 Some(o) => output_term(env, o),
                 None => atoms::none().encode(env),
@@ -169,7 +172,7 @@ fn capture_empty<'a>(
         Ok(output_term(
             env,
             capture::empty(&mk_args(
-                &db, &wal, page_size, pos, &sums.0, pre, txid, timestamp,
+                &db, &wal, page_size, pos, &sums.0, pre, txid, timestamp, None,
             ))?,
         ))
     };
@@ -200,6 +203,7 @@ fn capture_full<'a>(
             0,
             txid,
             timestamp,
+            None,
         );
         Ok(output_term(env, capture::full(&a, limit.map(pos_from))?))
     };
@@ -230,17 +234,24 @@ fn capture_replace<'a>(
             pre,
             txid,
             timestamp,
+            None,
         );
         Ok(output_term(env, capture::replace(&a)?))
     };
     run().unwrap_or_else(|e| error_term(env, e))
 }
 
-/// True when committed frames exist after `pos`.
+/// True when committed frames exist after `pos` (and before `end`).
 #[rustler::nif(schedule = "DirtyIo")]
-fn wal_pending<'a>(env: Env<'a>, wal: String, page_size: u32, pos: PosTuple) -> Term<'a> {
+fn wal_pending<'a>(
+    env: Env<'a>,
+    wal: String,
+    page_size: u32,
+    pos: PosTuple,
+    end: Option<PosTuple>,
+) -> Term<'a> {
     let _t = crate::stats::REPLICATION_CALLS.time();
-    match capture::pending(Path::new(&wal), page_size, pos_from(pos)) {
+    match capture::pending(Path::new(&wal), page_size, pos_from(pos), end.map(pos_from)) {
         Ok(b) => (atoms::ok(), b).encode(env),
         Err(e) => error_term(env, e),
     }
