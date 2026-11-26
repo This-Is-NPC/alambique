@@ -57,13 +57,29 @@ about it, and where the evidence is.
   ETag is not pinned to the object that was staged.
 - `awake: [idle_close_after_ms:]` frees the memory SQLite and the Erlang
   allocator hold for the connection, but the resident memory of the node
-  falls by a fraction of it: the allocator keeps the free carriers. A cell
+  falls by a fraction of it: the allocator keeps the free carriers. Only the
+  page-cache blocks leave the process, and only with the page arena. A cell
   called about every `idle_close_after_ms` pays a reopen and a close on each
   call and gains nothing ([cost-of-a-cell.md](cost-of-a-cell.md)).
 - Options chosen with `cell_options` that an awake cell cannot take live:
   `sql: [locking_mode:]` applies at the next wake (a refresh that changes it
   is refused), and `lazy_restore: [mode:]` is read at the next restore
   ([how-to-operate-a-cell.md](how-to-operate-a-cell.md), step 13).
+- The page arena (`config :alambique, :page_arena`) works on Linux only. It
+  reserves an address range with `mmap` at load (4 GiB by default, address
+  space and not memory). When the system refuses the range (a low `ulimit -v`,
+  a kernel that counts address space), or on another system, the library loads
+  without the arena and the freed page-cache memory stays in the process:
+  `page_arena_state` is 2 or 3 and the cost page's figures for it do not
+  apply. When the range is full the BEAM's allocators serve the blocks
+  (`page_arena_fallbacks`). Blocks allocated by a helper thread of
+  `PRAGMA threads`, or through a shared cache (`cache=shared`), go to one
+  region all connections share and release less
+  ([cost-of-a-cell.md](cost-of-a-cell.md), section 5). The settings are read
+  when the library loads and cannot change while the node runs.
+- Each connection has its own page cache, so a cell cannot borrow the cache
+  that idle cells leave unused: a cell whose working set is above `cache_kib`
+  reads pages again. Raise `cache_kib` for it with `cell_options`.
 - A node of a version without page-hash sidecars does not know the `.pages`
   objects: its retention and the cleanup of a moved cell leave them in place
   until a version with sidecars sweeps them

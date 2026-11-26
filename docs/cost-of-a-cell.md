@@ -213,8 +213,7 @@ settings): check it after a deploy, because a setting that did not reach the
 load keeps the default. What the arena changes:
 
 - The bytes of the page caches are in `page_arena_in_use_bytes`, not in
-  `:erlang.memory/0`, `recon_alloc` or the `driver_alloc` allocator, which
-  held them before; the pages the arena keeps resident are in
+  `:erlang.memory/0`, `recon_alloc` or the `driver_alloc` allocator; the pages the arena keeps resident are in
   `page_arena_resident_bytes`. Add it to the memory you track.
   `sqlite_memory_used` still counts them, and the `page_arena_*` entries of
   the native stats say what was loaded (state, extent size, trim settings).
@@ -263,17 +262,17 @@ the arena's lock and the region's bookkeeping, about 0.1 to 0.25 µs; the first 
 about 0.5 µs a page. Extents of 16 KiB cost about 1.1 to 1.5 µs a miss, with
 no gain in what leaves; extents of 256 KiB differ from 64 KiB by less than
 the runs vary. At 350 awake cells with 512 KiB of page cache filled each, the
-memory of the process grows by:
+memory of the process grows by, per cell (the growth of the process divided by
+350; the range is two runs):
 
-| Cells | Pooled page cache of all connections | One cache per connection, arena off | Arena on |
-| --- | --- | --- | --- |
-| No idle handling | 735 to 748 MiB (2.1 MiB a cell) | 492 to 674 MiB | 569 to 664 MiB |
-| `idle_cache_after_ms` (shrink to 64 KiB) | 79 to 99 MiB | 92 to 93 MiB | 71 to 83 MiB |
-| `idle_close_after_ms` | 48 to 61 MiB | 41 to 46 MiB | 13 to 29 MiB |
+| Cells | Arena off | Arena on |
+| --- | --- | --- |
+| No idle handling | 1,440 to 1,970 KiB | 1,665 to 1,945 KiB |
+| `idle_cache_after_ms` (shrink to 64 KiB) | 270 KiB | 210 to 245 KiB |
+| `idle_close_after_ms` | 120 to 135 KiB | 40 to 85 KiB |
 
 The arena is what lets the memory an idle close frees leave the process; the
-growth of 350 awake cells is the same within the runs' spread. The pooled
-cache is a build of SQLite that the library refuses to load.
+growth of 350 awake cells is the same within the runs' spread.
 
 **`awake: [lookaside_bytes: ..., lookaside_count: ...]`.** The default is 512
 bytes by 16 slots, 8,192 bytes of memory on each connection; SQLite's own
@@ -340,7 +339,8 @@ lease, as an open idle cell). With the VM flags `+Mdai max +MMmcs 0` the
 resident memory fell by 9 KiB (cells of 0 notes, one run; -4 in the other) and
 13 to 14 KiB (cells of 2,000 notes). Plan for the Erlang and SQLite figures
 as what is freed for reuse inside the VM, not as memory returned to the
-system. The memory the budget (`awake.max_bytes`) counts for a closed cell is
+system, except the page-cache blocks, which the page arena (on by default)
+returns to the kernel. The memory the budget (`awake.max_bytes`) counts for a closed cell is
 what its schema and statements held at the close, which the reopen rebuilds,
 not 0.
 
