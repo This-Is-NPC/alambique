@@ -58,7 +58,8 @@ pub struct Arena {
     resident: AtomicU64,
     mapped: AtomicU64,
     regions: AtomicU64,
-    /// Free resident bytes the last trim could not release.
+    /// Free resident bytes the last trim looked for everywhere and could not
+    /// release.
     residue: AtomicU64,
     released: AtomicU64,
     trims: AtomicU64,
@@ -305,7 +306,11 @@ impl Arena {
             }
         }
         claims.clear();
-        self.residue.store(self.excess(), Relaxed);
+        // What is left is unreleasable only when the cycle looked everywhere; a
+        // cycle that spent its budget leaves the rest for the next one.
+        if budget > 0 {
+            self.residue.store(self.excess(), Relaxed);
+        }
         self.released.fetch_add((freed * self.page) as u64, Relaxed);
         self.trims.fetch_add(1, Relaxed);
         self.trim_ns_max
@@ -568,6 +573,25 @@ mod tests {
             total += trim(&a);
         }
         assert_eq!(total, before);
+        assert_eq!(a.resident_bytes(), 0);
+    }
+
+    #[test]
+    fn a_cycle_that_spends_its_budget_leaves_a_trim_due() {
+        let mut c = cfg();
+        c.max_trim = 16 * 4096;
+        let a = arena(c);
+        let (r, _) = a.open_region().unwrap();
+        let ps: Vec<_> = (0..14 * 10).map(|_| a.alloc(C4K, r)).collect();
+        for &p in &ps {
+            fill(p, strides()[C4K], 1);
+            // SAFETY: from `alloc`, not used afterwards.
+            unsafe { a.free(p) };
+        }
+        assert!(trim(&a) > 0);
+        // Most is still resident and releasable: the next cycle is due.
+        assert!(a.wants_trim());
+        while a.wants_trim() && trim(&a) > 0 {}
         assert_eq!(a.resident_bytes(), 0);
     }
 
