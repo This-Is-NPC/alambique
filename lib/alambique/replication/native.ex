@@ -382,7 +382,7 @@ defmodule Alambique.Replication.Native do
     @spec foreign_exec(Path.t(), String.t()) :: integer
     def foreign_exec(_path, _sql), do: nif_error()
     @doc false
-    @spec foreign_open(Path.t()) :: {:ok, reference} | sql_error
+    @spec foreign_open(Path.t()) :: {:ok, reference, 0} | sql_error
     def foreign_open(_path), do: nif_error()
     @doc false
     @spec set_foreign_commit(conn, Path.t(), String.t()) :: :ok
