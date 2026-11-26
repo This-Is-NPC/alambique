@@ -5,11 +5,14 @@
 This page is for contributors. The rules for contributors and coding agents
 are in [AGENTS.md](../AGENTS.md); the architecture is in [design.md](design.md).
 Development uses the versions pinned in `mise.toml`: Erlang 28.5, Elixir 1.20.4
-and Rust 1.97.1.
+and Rust 1.97.1. Run cargo from `native/alambique_nif`: its `.cargo/config.toml`
+builds SQLite with a page cache per connection, which the library refuses to
+load without, and cargo reads it only for a build started in that directory.
 
 ```sh
 mise run test            # default suite, no external services
 mise run test:native     # Rust unit tests of native/alambique_nif
+mise run test:page-arena-off  # the tests that depend on the page arena, with it off (the default suite runs with it on)
 mise run check:release-nif  # a release build of the NIF has none of the test-only NIFs (CI native job)
 mise run check           # the full gate: quick checks, clippy, docs links, default suite
 mise run check:static    # the same without the suite: what the CI gate job runs
@@ -77,6 +80,7 @@ suite runs in parts without coverage.
 | `coverage-run (i)` | one of N parts of the default suite: `mise run test:coverage:run -- --partitions N --slowest-modules 5 --export-coverage part-i` with `MIX_TEST_PARTITION=i` |
 | `coverage` | `mise run test:coverage:report`: sums the parts and fails below `ALAMBIQUE_COVERAGE_MIN` |
 | `native` | `mise run test:native`: the Rust unit tests of the NIF, then `mise run check:release-nif`: a release build without `test-panic` holds none of the test-only NIF names (one extra release build of the crate) |
+| `arena-off` | `mise run test:page-arena-off`: the tests of where SQLite's page-cache blocks live, with the page arena off; the default suite runs with it on (`config/config.exs`) |
 | `services` | `mise run test:seaweedfs` and `mise run test:litestream` against a SeaweedFS container |
 | `cluster (i)` | one of M parts of the failover properties on peer nodes: `mise run test:cluster -- --partitions M --slowest-modules 5` (`scripts/test-cluster`) with `MIX_TEST_PARTITION=i` |
 
@@ -197,6 +201,7 @@ are in its header (`bench/*.exs`). Tasks marked SeaweedFS start that container.
 - `bench:feed-handover`: the hand-over of the feed's rows by mode: query, build, copy, cell reductions, first write after a large batch, `reader_close`, files and dirty IO.
 - `bench:idle-close`: memory, descriptors and latency of idle cells with the connection open and closed.
 - `bench:options-refresh`: latency of `refresh_options/3` by callback, renewal gaps under a refresh storm, the time the busy marker is held, and a node-wide refresh against client latency.
+- `bench:page-arena`: what the page arena and per-connection caches give back and cost, by mode (the share of freed bytes that leave, hot latency during trims, misses, regrowth, lookaside, capacity).
 - `bench:query`: query thousands of cells cold and warm.
 - `bench:query-refresh`: refresh a large cached query replica after a small write.
 - `bench:schema`: create the same schema with one statement per call and with one script.

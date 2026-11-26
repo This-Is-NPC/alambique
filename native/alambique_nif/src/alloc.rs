@@ -3,6 +3,12 @@
 //! Rust allocations and SQLite's go through `enif_alloc`, so ERTS accounts
 //! for them (`:erlang.memory/0`, `recon_alloc`) and manages and releases
 //! their carriers. The counters in `stats` say which side allocated.
+//!
+//! The exception is the page-cache blocks of SQLite when the page arena is on
+//! (`arena`): they are in a range this library reserved, which ERTS does not
+//! see, and the pages of free blocks return to the kernel. Every connection
+//! has a page cache of its own (SQLite is built without memory management),
+//! and a thread-local names the connection whose call is running.
 
 use std::alloc::{GlobalAlloc, Layout};
 use std::cell::{Cell, RefCell};

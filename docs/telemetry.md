@@ -549,10 +549,22 @@ samples. Gauges go up and down. Sizes are bytes and times are nanoseconds.
 | `wal_frames_read` | counter | Valid WAL frames read by replication scans. |
 | `ltx_bytes_encoded` | counter | Size of the LTX files encoded. |
 | `ltx_bytes_decoded` | counter | Size of the LTX files opened for decoding (reading only a header decodes nothing). |
+| `page_arena_state` | gauge | The page arena: 0 off, 1 on, 2 asked for but the address range could not be reserved, 3 asked for but not supported (not Linux, or settings it cannot use). |
+| `page_arena_page_hdrsz` | gauge | Bytes SQLite adds to each page of a page cache. |
+| `page_arena_reserved_bytes`, `page_arena_extent_kib`, `page_arena_trim_after_kib`, `page_arena_keep_kib`, `page_arena_max_trim_kib` | gauges | The settings the library loaded with (`config :alambique, :page_arena`). Present only while the arena is on. |
+| `page_arena_in_use_bytes` | gauge | Bytes of page-cache blocks in use. Not in `:erlang.memory/0`. |
+| `page_arena_mapped_bytes` | gauge | Bytes of the reserved range cut into extents so far. |
+| `page_arena_resident_bytes` | gauge | Bytes of the range that are resident: in use, free and not yet released, and the unused rest of pages shared with blocks in use. |
+| `page_arena_unreleasable_bytes` | gauge | Free resident bytes that the last trim could not release, because their OS page also holds a block in use. |
+| `page_arena_regions` | gauge | Connections that own extents. |
+| `page_arena_released_bytes`, `page_arena_trims` | counters | Bytes returned to the kernel, and trims run. |
+| `page_arena_trim_ns_max` | gauge | The longest trim since the node started. |
+| `page_arena_fallbacks` | counter | Page-cache blocks the BEAM's allocators served because the range was full. |
 | `sqlite_memory_calls` | counter | Calls of `Alambique.Sqlite.memory/1`, which run on a regular scheduler and are not in `sqlite_calls`. |
 | `sqlite_calls`, `replication_calls`, `lazy_calls` | counters | Calls of the dirty NIFs of SQLite, of replication (capture, apply, merge, inspect) and of lazy restore. |
 | `sqlite_call_ns_total`, `replication_call_ns_total`, `lazy_call_ns_total` | counters | Wall time of those calls. Divide the difference by the difference in calls for the mean. |
 | `sqlite_call_ns_max`, `replication_call_ns_max`, `lazy_call_ns_max` | gauges | The longest call since the node started. |
 
 SQLite and the library allocate through the BEAM, so both also show in
-`:erlang.memory/0` and `recon_alloc`.
+`:erlang.memory/0` and `recon_alloc`, except the blocks of the page caches
+while the page arena is on: they are in `page_arena_in_use_bytes`.
