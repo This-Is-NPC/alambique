@@ -253,7 +253,8 @@ pub struct Lazy {
     inner: Mutex<Inner>,
     cond: Condvar,
     notify: Mutex<Option<Notify>>,
-    file: File,
+    /// Taken by `Drop`, which hands it to `retire`.
+    file: Option<File>,
 }
 
 impl Lazy {
@@ -268,6 +269,7 @@ impl Lazy {
             .create(true)
             .truncate(true)
             .open(path)?;
+        crate::stats::LAZY_PLANS.fetch_add(1, Ordering::Relaxed);
         Ok(Lazy {
             path: path.to_path_buf(),
             page_size,
@@ -299,8 +301,12 @@ impl Lazy {
             }),
             cond: Condvar::new(),
             notify: Mutex::new(None),
-            file,
+            file: Some(file),
         })
+    }
+
+    fn file(&self) -> &File {
+        self.file.as_ref().expect("file is taken only by drop")
     }
 
     fn inner(&self) -> MutexGuard<'_, Inner> {
@@ -475,7 +481,7 @@ impl Lazy {
         if let Some(p) = (1..=n).find(|&p| p != lock && g.map[p as usize - 1].file == NO_FILE) {
             return invalid(format!("no file holds page {p}"));
         }
-        self.file.set_len(n as u64 * self.page_size as u64)?;
+        self.file().set_len(n as u64 * self.page_size as u64)?;
         g.orig = n;
         g.pages = n;
         g.local = vec![0; (n as usize).div_ceil(64)];
@@ -632,7 +638,7 @@ impl Lazy {
         }
         if g.set_local(pgno) {
             if let Err(e) = self
-                .file
+                .file()
                 .write_all_at(page, (pgno as u64 - 1) * self.page_size as u64)
             {
                 // Not installed: leave the page missing.
@@ -942,9 +948,65 @@ impl Lazy {
 
 // Registry of the files the VFS serves lazily, by path.
 
+impl Drop for Lazy {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.take() {
+            retire(&self.path, file);
+        }
+        // After `retire`, so that a reader of the counters that sees the plan
+        // gone also sees its descriptor parked.
+        crate::stats::LAZY_PLANS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Main database files that SQLite has open, by path, and the descriptors
+/// whose close waits for them. The locks SQLite holds are POSIX locks, which
+/// belong to the process and not to a descriptor: closing any descriptor of
+/// the file drops all of them. So the descriptor of a plan is closed only
+/// when no SQLite file is open on the path, as SQLite itself defers closes.
+static OPEN: Mutex<Option<HashMap<PathBuf, (usize, Vec<File>)>>> = Mutex::new(None);
+
+/// A main database file at `key` was opened by SQLite.
+pub fn opened(key: &Path) {
+    let mut g = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    g.get_or_insert_with(HashMap::new)
+        .entry(key.to_path_buf())
+        .or_default()
+        .0 += 1;
+}
+
+/// A main database file at `key` was closed by SQLite (after its locks were
+/// released): the descriptors that waited for the last one are closed.
+pub fn closed(key: &Path) {
+    let waiting = {
+        let mut g = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(m) = g.as_mut() else { return };
+        let Some(entry) = m.get_mut(key) else { return };
+        entry.0 = entry.0.saturating_sub(1);
+        if entry.0 > 0 {
+            return;
+        }
+        m.remove(key).map(|e| e.1)
+    };
+    // Closed outside the lock.
+    if let Some(files) = waiting {
+        crate::stats::LAZY_FDS_PARKED.fetch_sub(files.len() as i64, Ordering::Relaxed);
+    }
+}
+
+/// Closes `file` of the plan for `path` now, or when SQLite's last open file
+/// on it closes.
+fn retire(path: &Path, file: File) {
+    let mut g = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(entry) = g.as_mut().and_then(|m| m.get_mut(&key(path))) {
+        entry.1.push(file);
+        crate::stats::LAZY_FDS_PARKED.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 static REGISTRY: Mutex<Option<HashMap<PathBuf, Arc<Lazy>>>> = Mutex::new(None);
 
-fn key(path: &Path) -> PathBuf {
+pub fn key(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
@@ -1573,6 +1635,39 @@ mod tests {
         assert!(lazy.is_complete());
         assert!(lazy.hashes_of(0).is_none());
         assert_eq!(lazy.covered(), vec![0]);
+    }
+
+    /// Descriptors of this process that point at `path`.
+    fn descriptors(path: &Path) -> usize {
+        std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter(|e| std::fs::read_link(e.as_ref().unwrap().path()).is_ok_and(|l| l == path))
+            .count()
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_descriptor_of_a_plan_stays_open_while_sqlite_has_the_file_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let lazy = Lazy::create(&path, PS, Duration::from_secs(1)).unwrap();
+        let key = key(&path);
+        assert_eq!(descriptors(&key), 1);
+
+        // Closing it now would drop the POSIX locks of SQLite's own
+        // descriptors on the file.
+        opened(&key);
+        opened(&key);
+        drop(lazy);
+        assert_eq!(descriptors(&key), 1);
+        closed(&key);
+        assert_eq!(descriptors(&key), 1);
+        closed(&key);
+        assert_eq!(descriptors(&key), 0);
+
+        // With no SQLite file open it closes at once.
+        drop(Lazy::create(&path, PS, Duration::from_secs(1)).unwrap());
+        assert_eq!(descriptors(&key), 0);
     }
 
     #[test]

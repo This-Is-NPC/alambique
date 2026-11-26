@@ -32,6 +32,9 @@ struct File {
     /// The name the file was opened with, for the faults of tests.
     #[cfg(feature = "test-panic")]
     name: *mut c_char,
+    /// Key of a main database file (`lazy::opened`), a `Box` raw pointer, or
+    /// null.
+    path: *mut std::path::PathBuf,
 }
 
 const HEADER: usize = size_of::<File>().next_multiple_of(16);
@@ -97,6 +100,7 @@ unsafe extern "C" fn x_open(
         {
             (*f).name = crate::test_panic::file_opened(name);
         }
+        (*f).path = ptr::null_mut();
         match (*base).xOpen {
             Some(open) => open(base, name, real(file), flags, out_flags),
             None => ffi::SQLITE_CANTOPEN,
@@ -116,7 +120,7 @@ unsafe extern "C" fn x_open(
         let path = (flags & ffi::SQLITE_OPEN_MAIN_DB != 0 && !name.is_null())
             .then(|| unsafe { CStr::from_ptr(name) }.to_str().ok())
             .flatten();
-        Ok(path.and_then(|p| lazy::lookup(Path::new(p))))
+        Ok(path.map(|p| (lazy::key(Path::new(p)), lazy::lookup(Path::new(p)))))
     });
     let Ok(lazy) = lazy else {
         // SAFETY: `real(file)` was opened above and has its method table.
@@ -130,8 +134,12 @@ unsafe extern "C" fn x_open(
     };
     // SAFETY: `file` is writable (see above); `IO_METHODS` is static.
     unsafe {
-        if let Some(lazy) = lazy {
-            (*f).lazy = Arc::into_raw(lazy);
+        if let Some((key, lazy)) = lazy {
+            lazy::opened(&key);
+            (*f).path = Box::into_raw(Box::new(key));
+            if let Some(lazy) = lazy {
+                (*f).lazy = Arc::into_raw(lazy);
+            }
         }
         (*f).base.pMethods = &IO_METHODS;
     }
@@ -153,6 +161,11 @@ unsafe extern "C" fn x_close(file: *mut ffi::sqlite3_file) -> c_int {
             (*f).base.pMethods = ptr::null();
             #[cfg(feature = "test-panic")]
             crate::test_panic::file_closed((*f).name);
+            // After the close: SQLite has released its locks by now.
+            if !(*f).path.is_null() {
+                lazy::closed(&Box::from_raw((*f).path));
+                (*f).path = ptr::null_mut();
+            }
             rc
         };
         crate::stats::FILES_OPEN.fetch_sub(1, Ordering::Relaxed);
