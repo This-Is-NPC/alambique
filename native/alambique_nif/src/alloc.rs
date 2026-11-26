@@ -10,6 +10,7 @@
 //! has a page cache of its own (SQLite is built without memory management),
 //! and a thread-local names the connection whose call is running.
 
+#[cfg(any(test, not(feature = "fuzzing")))]
 use std::alloc::{GlobalAlloc, Layout};
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -18,10 +19,12 @@ use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering::Relaxed};
 use std::sync::OnceLock;
 
 use libsqlite3_sys as ffi;
+#[cfg(not(any(test, feature = "fuzzing")))]
 use rustler::EnifAllocator;
 
 use crate::arena::{self, Arena};
 use crate::guard::guard;
+#[cfg(not(any(test, feature = "fuzzing")))]
 use crate::stats::shard;
 
 /// The BEAM's allocator, which unit tests (outside the BEAM) replace by a
@@ -243,9 +246,10 @@ fn arena_class(n: usize) -> Option<usize> {
 
 /// The global allocator of the NIF library (not in unit tests, which run
 /// outside the BEAM).
-#[cfg_attr(any(test, feature = "fuzzing"), allow(dead_code))]
+#[cfg(not(any(test, feature = "fuzzing")))]
 pub struct Counted;
 
+#[cfg(not(any(test, feature = "fuzzing")))]
 // SAFETY: both methods forward to `EnifAllocator` with the caller's arguments.
 unsafe impl GlobalAlloc for Counted {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
