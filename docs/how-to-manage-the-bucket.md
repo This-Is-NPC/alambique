@@ -20,6 +20,7 @@ Everything an instance writes is under its `prefix`. The main keys are:
 ```text
 <prefix>/cells/<cell>/0000/<min>-<max>.ltx   level-0 files, one per batch
 <prefix>/cells/<cell>/0001/<min>-<max>.ltx   merged files, one folder per level
+<prefix>/cells/<cell>/<level>/<min>-<max>.ltx.pages   page-hash sidecar (lazy_restore page_sidecar)
 <prefix>/cells/<cell>/chain                  bytes written since the last snapshot
 <prefix>/cells/<cell>/lease                  the lease of the cell
 <prefix>/feed/<shard>/<time>-<txid>-<cell>   feed objects
@@ -52,6 +53,9 @@ unless noted.
 | What a cell left where it moved from | the cleanup of the move | after `moved_grace_ms` (10 minutes), then the trash | `moved_grace_ms`; `mix alambique.cleanup` runs one cleanup now |
 | Entries of nodes that left or expired | the registry sweep | every hour | `registry: [sweep_ms: 3_600_000]` |
 
+A page-hash sidecar (`.ltx.pages`) is deleted with its object, in the same
+step, and retention marks a sidecar whose object is gone.
+
 Level-0 segments are never marked by the compactor. They stay until retention
 covers them, because a rewind to any point of the window applies them one by
 one ([design.md](design.md), section 9). A cell that nobody writes is not
@@ -72,6 +76,7 @@ needs. Only the library may delete or expire these objects:
 | Prefix or key | What breaks if it goes |
 | --- | --- |
 | `<prefix>/cells/<cell>/0000/` to `0009/` | A restore reads the newest snapshot and every file after it. A file missing from the middle fails the restore with `{:gap, txid}`, or loses the newest writes if it is among the last 16 ([design.md](design.md), section 6, "The tail"). A rule that expires "objects older than N days" deletes the snapshot a restore starts from. |
+| `<prefix>/cells/<cell>/<level>/*.ltx.pages` | Not needed for a restore, which reads a file whole when it has no sidecar. A rule that expires them costs that read at each wake of a lazy restore. The library deletes each with its file ([segment-format.md](segment-format.md)). |
 | `<prefix>/cells/<cell>/lease` | The lease object must never be deleted: its epoch only grows. Without it the next acquire starts at epoch 1 ([design.md](design.md), section 5), below the epochs of the files already written. A restore treats that as a regression ([design.md](design.md), section 9, "Epochs (R2)"). |
 | `<prefix>/cells/<cell>/chain`, `trashed`, `frozen`, `crashes` | `chain` holds the bytes written since the last snapshot, so that the next snapshot is due. `trashed` holds the newest anchor retention recorded. `frozen` keeps a cell from waking. `crashes` counts the crashes that quarantine a cell. The library writes them again, but a loss changes what the next pass does. |
 | `<prefix>/trash/` | The manifests of delayed deletions. A manifest that disappears before its objects leaves the objects in the store for ever. A manifest that expires before `deletion_grace_ms` makes the grace meaningless ([storage-compatibility.md](storage-compatibility.md)). |
