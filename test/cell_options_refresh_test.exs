@@ -265,6 +265,37 @@ defmodule Alambique.CellOptionsRefreshTest do
     end
   end
 
+  describe "the idle shrink" do
+    test "a pragma that fails leaves the cache full and is tried again", ctx do
+      inst =
+        start(ctx, awake: [cache_kib: 128, idle_cache_kib: 8, idle_cache_after_ms: 100])
+
+      test = self()
+
+      CrashPoints.arm(
+        :cell_before_shrink_pragma,
+        fn _, _ ->
+          send(test, :shrink_attempt)
+          {:error, :boom}
+        end,
+        times: :infinity
+      )
+
+      assert {:ok, _} = wake(inst, "c")
+      assert_receive :shrink_attempt, 5_000
+      assert_receive :shrink_attempt, 5_000
+
+      # Not marked shrunk: the facts say full and the next call restores nothing.
+      assert %{idle_cache: ref} = state(inst, "c")
+      assert is_reference(ref)
+      assert {:ok, %{cache: :full}} = Alambique.facts(inst, "c")
+      assert cache_size(inst, "c") == -128
+
+      CrashPoints.reset()
+      eventually(fn -> state(inst, "c").idle_cache == :shrunk and cache_size(inst, "c") == -8 end)
+    end
+  end
+
   describe "a closed connection" do
     test "stays closed and takes the new options when it opens again", ctx do
       inst = start(ctx, awake: [idle_close_after_ms: 100, cache_kib: 128])
