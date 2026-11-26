@@ -74,6 +74,29 @@ defmodule Alambique.LazyWholeModeTest do
     assert {_, %{result: :ok}} = await_event([:alambique, :replication, :hydrate], cell, 30_000)
   end
 
+  describe "per cell" do
+    defmodule Mode do
+      @moduledoc false
+      def options(_cell), do: [lazy_restore: [mode: :whole]]
+    end
+
+    test "a cell that asks for :whole reads its chain without a ranged read", ctx do
+      cell = seed(ctx, 200)
+      {_, counter} = counted = CountingStore.wrap(ctx.store)
+
+      inst =
+        start_instance(%{ctx | store: counted},
+          migrations: @schema,
+          lazy_restore: [min_bytes: 0],
+          cell_options: {Mode, :options}
+        )
+
+      assert {:ok, %{rows: [[200]]}} = Alambique.query(inst, cell, "SELECT count(*) FROM t")
+      assert CountingStore.count(counter, :get_range) == 0
+      assert drain([:alambique, :replication, :hydrate], cell) == []
+    end
+  end
+
   describe "the setting" do
     defp config(ctx, lazy_restore) do
       Config.build(
@@ -91,9 +114,15 @@ defmodule Alambique.LazyWholeModeTest do
     end
 
     test "is :ranged by default, :whole when the lazy restore is off or says so", ctx do
-      assert Config.lazy_mode(config(ctx, []), "c") == :ranged
-      assert Config.lazy_mode(config(ctx, mode: :whole), "c") == :whole
-      assert Config.lazy_mode(config(ctx, false), "c") == :whole
+      assert Config.lazy_mode(config(ctx, []), nil) == :ranged
+      assert Config.lazy_mode(config(ctx, mode: :whole), nil) == :whole
+      assert Config.lazy_mode(config(ctx, false), nil) == :whole
+    end
+
+    test "of a cell overrides the instance's, unless the lazy restore is off", ctx do
+      assert Config.lazy_mode(config(ctx, []), :whole) == :whole
+      assert Config.lazy_mode(config(ctx, mode: :whole), :ranged) == :ranged
+      assert Config.lazy_mode(config(ctx, false), :ranged) == :whole
     end
 
     test "must be :ranged or :whole", ctx do

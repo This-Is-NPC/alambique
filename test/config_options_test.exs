@@ -477,7 +477,8 @@ defmodule Alambique.ConfigOptionsTest do
           {:idle_cache_kib, 0, -1},
           {:idle_close_after_ms, nil, 0},
           {:idle_gc, false, 1},
-          {:idle_timeout_ms, 5, 0}
+          {:idle_timeout_ms, 5, 0},
+          {:lazy_restore_mode, :whole, :eager}
         ] do
       assert check.(key, good) == :ok
       assert {:error, message} = check.(key, bad)
@@ -492,7 +493,8 @@ defmodule Alambique.ConfigOptionsTest do
                :idle_close_after_ms,
                :idle_gc,
                :idle_timeout_ms,
-               :locking_mode
+               :locking_mode,
+               :lazy_restore_mode
              ]
   end
 

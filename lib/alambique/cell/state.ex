@@ -119,6 +119,7 @@ defmodule Alambique.Cell.State do
           | :idle_gc
           | :idle_timeout_ms
           | :locking_mode
+          | :lazy_restore_mode
         ) ::
           term
   def cell_opt(%__MODULE__{cell_opts: opts, config: config}, key) do

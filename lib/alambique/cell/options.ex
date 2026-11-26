@@ -71,7 +71,8 @@ defmodule Alambique.Cell.Options do
     end
   end
 
-  # The shape of the instance options: `idle_timeout_ms:` and `awake: [...]`,
+  # The shape of the instance options: `idle_timeout_ms:`, `awake: [...]` and
+  # `lazy_restore: [mode: ...]`,
   # the keys of `Config.cell_option_keys/0` and no others.
   defp validate(nil), do: {:ok, %{}}
 
@@ -79,12 +80,17 @@ defmodule Alambique.Cell.Options do
     with true <- Keyword.keyword?(value) or {:error, "must return a keyword list or nil"},
          {awake, top} = Keyword.pop(value, :awake, []),
          {sql, top} = Keyword.pop(top, :sql, []),
+         {lazy, top} = Keyword.pop(top, :lazy_restore, []),
          true <- Keyword.keyword?(awake) or {:error, ":awake must be a keyword list"},
          true <- Keyword.keyword?(sql) or {:error, ":sql must be a keyword list"},
+         true <- Keyword.keyword?(lazy) or {:error, ":lazy_restore must be a keyword list"},
          :ok <- known(top, [:idle_timeout_ms]),
          :ok <- known(awake, @awake_keys),
          :ok <- known(sql, [:locking_mode]),
-         flat = Keyword.take(top, [:idle_timeout_ms]) ++ awake ++ sql,
+         :ok <- known(lazy, [:mode]),
+         flat =
+           Keyword.take(top, [:idle_timeout_ms]) ++
+             awake ++ sql ++ for({:mode, mode} <- lazy, do: {:lazy_restore_mode, mode}),
          true <- Keyword.keys(flat) == Enum.uniq(Keyword.keys(flat)) or {:error, "repeats a key"},
          :ok <- check(flat) do
       {:ok, Map.new(flat)}
@@ -232,6 +238,7 @@ defmodule Alambique.Cell.Options do
   @spec node_value(Config.t(), atom) :: term
   def node_value(config, :idle_timeout_ms), do: config.idle_timeout_ms
   def node_value(config, :locking_mode), do: config.sql.locking_mode
+  def node_value(config, :lazy_restore_mode), do: Config.lazy_mode(config, nil)
   def node_value(config, key), do: Map.fetch!(config.awake, key)
 
   defp invalid(config, id, message, time) do

@@ -646,9 +646,10 @@ defmodule Alambique.Config do
   first statement). The one place that decides it; today it is the setting of
   the instance.
   """
-  @spec lazy_mode(t, String.t()) :: :ranged | :whole
-  def lazy_mode(%{lazy_restore: nil}, _cell), do: :whole
-  def lazy_mode(%{lazy_restore: %{mode: mode}}, _cell), do: mode
+  @spec lazy_mode(t, :ranged | :whole | nil) :: :ranged | :whole
+  def lazy_mode(%{lazy_restore: nil}, _cell_mode), do: :whole
+  def lazy_mode(%{lazy_restore: %{mode: mode}}, nil), do: mode
+  def lazy_mode(_config, cell_mode), do: cell_mode
 
   @doc "Replication context for the cell data in `location`."
   @spec repl_ctx(t, Location.t()) :: Replication.ctx()
@@ -1493,7 +1494,8 @@ defmodule Alambique.Config do
     :idle_close_after_ms,
     :idle_gc,
     :idle_timeout_ms,
-    :locking_mode
+    :locking_mode,
+    :lazy_restore_mode
   ]
 
   @doc false
@@ -1535,6 +1537,11 @@ defmodule Alambique.Config do
 
   def check_cell_option(:locking_mode, _),
     do: {:error, ":sql :locking_mode must be one of #{inspect(@locking_modes)}"}
+
+  def check_cell_option(:lazy_restore_mode, v) when v in [:ranged, :whole], do: :ok
+
+  def check_cell_option(:lazy_restore_mode, _),
+    do: {:error, ":lazy_restore_mode must be :ranged or :whole"}
 
   defp check_cell_option!(key, value) do
     with {:error, message} <- check_cell_option(key, value), do: bad!(message)

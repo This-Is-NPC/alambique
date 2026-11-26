@@ -14,8 +14,8 @@ defmodule Alambique.Cell.Hydration do
 
   # Options of `Replication.restore/5` for this cell.
   @spec restore_opts(State.t()) :: keyword
-  def restore_opts(%State{config: config, id: cell}) do
-    case Config.lazy_mode(config, cell) do
+  def restore_opts(%State{config: config} = state) do
+    case Config.lazy_mode(config, State.cell_opt(state, :lazy_restore_mode)) do
       :whole ->
         []
 

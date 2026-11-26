@@ -81,7 +81,8 @@ defmodule Alambique do
       `apply(module, function, [cell_id | extra_args])`, which returns a keyword
       list in the shape of these options, with only the per-cell keys:
       `idle_timeout_ms:`, `awake: [cache_kib:, idle_cache_after_ms:,
-      idle_cache_kib:, idle_close_after_ms:, idle_gc:]` and `sql: [locking_mode:]`.
+      idle_cache_kib:, idle_close_after_ms:, idle_gc:]`, `sql: [locking_mode:]` and
+      `lazy_restore: [mode:]` (`:ranged` or `:whole`, see `:lazy_restore`).
       A key that is absent keeps the node's value; `locking_mode: :exclusive` is
       dropped back to the node's value (an event says so) where the node's feed
       has `hand_over: :sender` or `:lazy_restore` is on, and `idle_close_after_ms`
