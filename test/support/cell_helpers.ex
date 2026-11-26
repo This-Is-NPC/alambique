@@ -229,6 +229,38 @@ defmodule Alambique.CellHelpers do
   end
 
   @doc """
+  What the native library counts of the connections that are open: the
+  connections and, with the page arena on, the regions they own.
+  """
+  def native_counts do
+    s = Alambique.NativeStats.read()
+    {s.connections_open, s[:page_arena_regions]}
+  end
+
+  @doc """
+  Waits until no connection is closing: one whose owner exited, or whose
+  reference was dropped, closes after the process or the test that made it,
+  so a test that reads the node's counters or memory would meet the close.
+  Returns `native_counts/0`, the baseline to compare against.
+  """
+  def native_quiet do
+    # A reference that only a heap holds is released by a collection.
+    for pid <- Process.list(), do: :erlang.garbage_collect(pid)
+
+    eventually(fn ->
+      counts = native_counts()
+      Process.sleep(30)
+      counts == native_counts() and balanced?(counts)
+    end)
+
+    native_counts()
+  end
+
+  # Every connection owns a region while the arena is on.
+  defp balanced?({connections, nil}) when is_integer(connections), do: true
+  defp balanced?({connections, regions}), do: connections == regions
+
+  @doc """
   Stops distribution and waits until the VM is not distributed. `Node.stop/0`
   returns while `net_kernel` is still going down: `node/0` keeps the old name
   and `Node.alive?/0` stays true, so the next test would see a node that

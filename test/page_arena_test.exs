@@ -9,12 +9,21 @@ defmodule Alambique.PageArenaTest do
   """
   use ExUnit.Case, async: false
 
-  import Alambique.CellHelpers, only: [eventually: 1]
+  import Alambique.CellHelpers, only: [eventually: 1, native_counts: 0, native_quiet: 0]
 
   alias Alambique.NativeStats
   alias Alambique.Sqlite
 
   @moduletag :tmp_dir
+
+  # The tests close connections through their owners and collections, which
+  # finish after the test: wait for the node's counters to be what they were,
+  # so the next test does not meet a close in flight.
+  setup do
+    base = native_quiet()
+    on_exit(fn -> eventually(fn -> native_counts() == base end) end)
+    :ok
+  end
 
   defp stats, do: NativeStats.read()
   defp arena?(stats), do: stats.page_arena_state == 1
@@ -61,11 +70,14 @@ defmodule Alambique.PageArenaTest do
     end
 
     :ok = Sqlite.close(conn)
-    closed = stats()
 
-    if arena?(closed) do
-      assert closed.page_arena_in_use_bytes == before.page_arena_in_use_bytes
-      assert closed.page_arena_regions == before.page_arena_regions
+    if arena?(before) do
+      assert eventually(fn ->
+               closed = stats()
+
+               closed.page_arena_in_use_bytes == before.page_arena_in_use_bytes and
+                 closed.page_arena_regions == before.page_arena_regions
+             end)
     end
   end
 
@@ -161,5 +173,22 @@ defmodule Alambique.PageArenaTest do
     after_loop = stats()
     if arena?(after_loop), do: assert(after_loop.page_arena_regions == before.page_arena_regions)
     assert after_loop.connections_open == before.connections_open
+  end
+
+  test "a connection whose owner exits is closed once the node is quiet", %{tmp_dir: dir} do
+    base = native_counts()
+
+    monitors =
+      for i <- 1..20 do
+        {_pid, ref} =
+          spawn_monitor(fn -> {:ok, _conn} = Sqlite.open(Path.join(dir, "o#{i}.db")) end)
+
+        ref
+      end
+
+    # Every owner is gone; the closes its exit starts may be in flight.
+    for ref <- monitors, do: assert_receive({:DOWN, ^ref, _, _, _}, 30_000)
+
+    assert native_quiet() == base
   end
 end
