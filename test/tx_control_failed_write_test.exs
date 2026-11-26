@@ -634,7 +634,7 @@ defmodule Alambique.TxControlFailedWriteTest do
       true
     else
       s = cstate(c)
-      s.feed_cleaned == s.feed_published
+      s.feed.cleaned == s.feed.published
     end
   catch
     :exit, _ -> true
@@ -653,7 +653,7 @@ defmodule Alambique.TxControlFailedWriteTest do
 
         eventually(fn ->
           s = cstate(c)
-          s.feed_published > 0 and s.feed_published == s.feed_sent and s.feed_backlog == 0
+          s.feed.published > 0 and s.feed.published == s.feed.sent and s.feed.backlog == 0
         end)
 
         orphan(c, 5)
@@ -688,7 +688,7 @@ defmodule Alambique.TxControlFailedWriteTest do
 
       eventually(fn ->
         s = cstate(c)
-        s.feed_published > 0 and s.feed_published == s.feed_sent and s.feed_backlog == 0
+        s.feed.published > 0 and s.feed.published == s.feed.sent and s.feed.backlog == 0
       end)
 
       orphan(c, 5)

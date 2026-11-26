@@ -93,36 +93,43 @@ defmodule Alambique.Cell.Wake do
 
   # The lease the router read just before the wake saves the first read when
   # it is of the location this wake locates.
-  defp take(%State{takeover: nil} = state, node_id),
+  defp take(%State{origin: %{takeover: nil}} = state, node_id),
     do: Lease.acquire(state.lease_ctx, state.id, node_id, seen: seen(state))
 
-  defp take(%State{takeover: takeover} = state, node_id) do
+  defp take(%State{origin: %{takeover: takeover}} = state, node_id) do
     Lease.take_over(state.lease_ctx, state.id, node_id,
       epoch: takeover.epoch,
       cause: takeover.reason
     )
   end
 
-  defp seen(%State{lease_seen: %{location: location, answer: answer}, location: location}),
-    do: answer
+  defp seen(%State{
+         location: location,
+         origin: %{lease_seen: %{location: location, answer: answer}}
+       }),
+       do: answer
 
   defp seen(_state), do: nil
 
   defp took_over(state, lease, previous),
-    do: %{state | lease: lease, takeover: Map.put(state.takeover, :previous, previous)}
+    do: %{
+      state
+      | lease: lease,
+        origin: %{state.origin | takeover: Map.put(state.origin.takeover, :previous, previous)}
+    }
 
   defp locate(state) do
     case Placement.locate(state.config, state.id, fresh: true) do
       {:ok, location} ->
-        trips = if state.lease_seen, do: state.lease_seen.trips, else: Metered.new()
+        trips = if state.origin.lease_seen, do: state.origin.lease_seen.trips, else: Metered.new()
 
         {:ok,
          %{
            state
            | location: location,
-             trips: trips,
              lease_ctx: meter(Config.lease_ctx(state.config, location), trips),
-             repl_ctx: meter(Config.repl_ctx(state.config, location), trips)
+             repl_ctx: meter(Config.repl_ctx(state.config, location), trips),
+             origin: %{state.origin | trips: trips}
          }}
 
       {:error, reason} ->
@@ -139,7 +146,7 @@ defmodule Alambique.Cell.Wake do
   @spec unmeter(State.t()) :: {State.t(), map, non_neg_integer}
   def unmeter(%State{location: nil} = state), do: {state, %{}, 0}
 
-  def unmeter(%State{trips: trips} = state) do
+  def unmeter(%State{origin: %{trips: trips}} = state) do
     state = %{
       state
       | lease_ctx: Config.lease_ctx(state.config, state.location),

@@ -93,18 +93,18 @@ defmodule Alambique.CellOptionsRefreshTest do
       inst = start(ctx, awake: [cache_kib: 128, idle_cache_kib: 8])
       Callbacks.set(fn _ -> [awake: [idle_cache_after_ms: 60_000]] end)
       assert {:ok, _} = wake(inst, "c")
-      assert %{idle_cache: old} = state(inst, "c")
+      assert %{idle: %{cache: old}} = state(inst, "c")
       assert is_reference(old)
 
       Callbacks.set(fn _ -> [awake: [idle_cache_after_ms: 70_000]] end)
       assert {:ok, :override, changed: [:idle_cache_after_ms]} = refresh(inst, "c")
-      assert %{idle_cache: new} = state(inst, "c")
+      assert %{idle: %{cache: new}} = state(inst, "c")
       assert is_reference(new) and new != old
       eventually(fn -> not timer_alive?(inst, "c", old) end)
 
       # The old message was queued before the cancel: it must do nothing.
       send(pid(inst, "c"), {:timeout, old, :idle_cache})
-      assert %{idle_cache: ^new} = :sys.get_state(pid(inst, "c"))
+      assert %{idle: %{cache: ^new}} = :sys.get_state(pid(inst, "c"))
       assert cache_size(inst, "c") == -128
     end
 
@@ -128,7 +128,7 @@ defmodule Alambique.CellOptionsRefreshTest do
 
       refs = fn ->
         s = state(inst, "c")
-        [s.idle_timer, s.idle_cache, s.idle_close]
+        [s.idle.timer, s.idle.cache, s.idle.close]
       end
 
       seen =
@@ -151,7 +151,7 @@ defmodule Alambique.CellOptionsRefreshTest do
     test "an override of nil turns a timer off and a value turns it on", ctx do
       inst = start(ctx, awake: [idle_cache_after_ms: 60_000, idle_close_after_ms: 120_000])
       assert {:ok, _} = wake(inst, "c")
-      assert %{idle_cache: cache, idle_close: close} = state(inst, "c")
+      assert %{idle: %{cache: cache, close: close}} = state(inst, "c")
       assert is_reference(cache) and is_reference(close)
 
       Callbacks.set(fn _ -> [awake: [idle_cache_after_ms: nil, idle_close_after_ms: nil]] end)
@@ -159,7 +159,7 @@ defmodule Alambique.CellOptionsRefreshTest do
       assert {:ok, :override, changed: [:idle_cache_after_ms, :idle_close_after_ms]} =
                refresh(inst, "c")
 
-      assert %{idle_cache: nil, idle_close: nil} = state(inst, "c")
+      assert %{idle: %{cache: nil, close: nil}} = state(inst, "c")
 
       eventually(fn ->
         not timer_alive?(inst, "c", cache) and not timer_alive?(inst, "c", close)
@@ -170,7 +170,7 @@ defmodule Alambique.CellOptionsRefreshTest do
       assert {:ok, :node, changed: [:idle_cache_after_ms, :idle_close_after_ms]} =
                refresh(inst, "c")
 
-      assert %{idle_cache: cache, idle_close: close} = state(inst, "c")
+      assert %{idle: %{cache: cache, close: close}} = state(inst, "c")
       assert is_reference(cache) and is_reference(close)
     end
 
@@ -210,7 +210,7 @@ defmodule Alambique.CellOptionsRefreshTest do
       assert {:ok, :override, changed: [:cache_kib, :idle_cache_after_ms]} =
                refresh(inst, "c")
 
-      assert %{idle_cache: :shrunk} = state(inst, "c")
+      assert %{idle: %{cache: :shrunk}} = state(inst, "c")
       assert cache_size(inst, "c") == -8
 
       assert {:ok, _} = wake(inst, "c")
@@ -225,7 +225,7 @@ defmodule Alambique.CellOptionsRefreshTest do
 
       Callbacks.set(fn _ -> [awake: [idle_cache_after_ms: nil]] end)
       assert {:ok, :override, changed: [:idle_cache_after_ms]} = refresh(inst, "c")
-      assert %{idle_cache: nil} = state(inst, "c")
+      assert %{idle: %{cache: nil}} = state(inst, "c")
       assert cache_size(inst, "c") == -128
     end
 
@@ -247,7 +247,7 @@ defmodule Alambique.CellOptionsRefreshTest do
 
       Callbacks.set(fn _ -> [awake: [idle_cache_after_ms: 50, idle_cache_kib: 4]] end)
       assert {:ok, :override, changed: [:idle_cache_kib]} = refresh(inst, "c")
-      assert %{idle_cache: :shrunk} = state(inst, "c")
+      assert %{idle: %{cache: :shrunk}} = state(inst, "c")
       assert cache_size(inst, "c") == -4
     end
 
@@ -260,7 +260,7 @@ defmodule Alambique.CellOptionsRefreshTest do
 
       Callbacks.set(fn _ -> [awake: [idle_cache_after_ms: 50, idle_gc: false]] end)
       assert {:ok, :override, changed: [:idle_gc]} = refresh(inst, "c")
-      assert %{idle_cache: :shrunk, last_active: ^last} = state(inst, "c")
+      assert %{last_active: ^last, idle: %{cache: :shrunk}} = state(inst, "c")
       assert cache_size(inst, "c") == -8
     end
   end
@@ -286,13 +286,13 @@ defmodule Alambique.CellOptionsRefreshTest do
       assert_receive :shrink_attempt, 5_000
 
       # Not marked shrunk: the facts say full and the next call restores nothing.
-      assert %{idle_cache: ref} = state(inst, "c")
+      assert %{idle: %{cache: ref}} = state(inst, "c")
       assert is_reference(ref)
       assert {:ok, %{cache: :full}} = Alambique.facts(inst, "c")
       assert cache_size(inst, "c") == -128
 
       CrashPoints.reset()
-      eventually(fn -> state(inst, "c").idle_cache == :shrunk and cache_size(inst, "c") == -8 end)
+      eventually(fn -> state(inst, "c").idle.cache == :shrunk and cache_size(inst, "c") == -8 end)
     end
   end
 
@@ -305,10 +305,10 @@ defmodule Alambique.CellOptionsRefreshTest do
       Callbacks.set(fn _ -> [awake: [cache_kib: 256, idle_close_after_ms: 5_000]] end)
 
       assert {:ok, :override, changed: [:cache_kib, :idle_close_after_ms]} = refresh(inst, "c")
-      assert %{conn: nil, idle_close: nil} = state(inst, "c")
+      assert %{conn: nil, idle: %{close: nil}} = state(inst, "c")
 
       assert {:ok, _} = wake(inst, "c")
-      assert %{conn: conn, idle_close: close} = state(inst, "c")
+      assert %{conn: conn, idle: %{close: close}} = state(inst, "c")
       assert conn != nil and is_reference(close)
       assert cache_size(inst, "c") == -256
     end
@@ -325,10 +325,10 @@ defmodule Alambique.CellOptionsRefreshTest do
     defp unchanged(inst, before) do
       now = state(inst, "c")
       assert now.cell_opts == before.cell_opts
-      assert now.idle_cache == before.idle_cache
-      assert now.idle_timer == before.idle_timer
-      assert timer_alive?(inst, "c", before.idle_timer)
-      assert timer_alive?(inst, "c", before.idle_cache)
+      assert now.idle.cache == before.idle.cache
+      assert now.idle.timer == before.idle.timer
+      assert timer_alive?(inst, "c", before.idle.timer)
+      assert timer_alive?(inst, "c", before.idle.cache)
       assert now.refresh == nil
       assert cache_size(inst, "c") == -128
       assert {:ok, _} = wake(inst, "c")
@@ -469,8 +469,8 @@ defmodule Alambique.CellOptionsRefreshTest do
       assert now.cell_opts == %{lazy_restore_mode: other}
       assert restore_opts.() == [] == (other == :whole)
       # Nothing live: the connection, the hydration and the timers are as they were.
-      assert {now.conn, now.hydrator, now.idle_timer, now.idle_cache} ==
-               {before.conn, before.hydrator, before.idle_timer, before.idle_cache}
+      assert {now.conn, now.hydrator, now.idle.timer, now.idle.cache} ==
+               {before.conn, before.hydrator, before.idle.timer, before.idle.cache}
     end
   end
 
@@ -503,17 +503,17 @@ defmodule Alambique.CellOptionsRefreshTest do
 
       eventually(fn ->
         s = state(inst, "c")
-        s.feed_published > 0 and is_reference(s.feed_cleanup)
+        s.feed.published > 0 and is_reference(s.feed.cleanup)
       end)
 
-      assert %{feed_cleaned: 0} = state(inst, "c")
+      assert %{feed: %{cleaned: 0}} = state(inst, "c")
       Callbacks.set(fn _ -> [feed: [cleanup_after_ms: 150]] end)
       assert {:ok, :override, changed: [:cleanup_after_ms]} = refresh(inst, "c")
 
       eventually(
         fn ->
           s = state(inst, "c")
-          s.feed_cleaned == s.feed_published
+          s.feed.cleaned == s.feed.published
         end,
         5_000
       )

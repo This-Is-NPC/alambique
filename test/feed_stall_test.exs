@@ -89,7 +89,7 @@ defmodule Alambique.FeedStallTest do
     for n <- 1..6, do: insert(inst, cell, n)
 
     pid = Alambique.Cell.whereis(Alambique.Config.fetch!(inst), cell)
-    assert %{feed_backlog: 2, feed_capped: true} = :sys.get_state(pid)
+    assert %{feed: %{backlog: 2, capped: true}} = :sys.get_state(pid)
 
     MemoryStore.remove(config, fault)
     eventually(fn -> ids(ctx) == Enum.to_list(1..6) end, 10_000)

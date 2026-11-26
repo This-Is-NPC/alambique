@@ -52,14 +52,14 @@ defmodule Alambique.FeedCleanupTest do
   defp published(inst, cell) do
     eventually(fn ->
       s = state(inst, cell)
-      (s.feed_published > 0 and s.feed_published == s.feed_sent and s.feed_backlog == 0) && s
+      (s.feed.published > 0 and s.feed.published == s.feed.sent and s.feed.backlog == 0) && s
     end)
   end
 
   defp cleaned(inst, cell) do
     eventually(fn ->
       s = state(inst, cell)
-      s.feed_published > 0 and s.feed_cleaned == s.feed_published and s
+      s.feed.published > 0 and s.feed.cleaned == s.feed.published and s
     end)
   end
 
@@ -95,7 +95,7 @@ defmodule Alambique.FeedCleanupTest do
 
   # Full collections of the traced cell until it has shrunk its cache.
   defp collections_until(:shrunk, pid) do
-    eventually(fn -> :sys.get_state(pid).idle_cache == :shrunk end)
+    eventually(fn -> :sys.get_state(pid).idle.cache == :shrunk end)
     drain_collections([])
   end
 
@@ -120,12 +120,12 @@ defmodule Alambique.FeedCleanupTest do
       before = segments(ctx)
 
       quiet()
-      assert %{feed_cleaned: 0} = state(inst, cell)
+      assert %{feed: %{cleaned: 0}} = state(inst, cell)
       assert segments(ctx) == before
       assert stored_rows(ctx, cell) == 1
 
       insert(inst, cell, 2)
-      assert %{feed_cleaned: cleaned} = state(inst, cell)
+      assert %{feed: %{cleaned: cleaned}} = state(inst, cell)
       assert cleaned > 0
       assert local_rows(inst, cell) == 1
       assert segments(ctx) == before + 1
@@ -144,7 +144,7 @@ defmodule Alambique.FeedCleanupTest do
       state = cleaned(inst, cell)
       eventually(fn -> stored_rows(ctx, cell) == 0 end)
       assert segments(ctx) == before + 1
-      assert state.feed_cleaned == state.feed_published
+      assert state.feed.cleaned == state.feed.published
 
       # Nothing is left to clean, so nothing more is uploaded.
       quiet()
@@ -159,11 +159,11 @@ defmodule Alambique.FeedCleanupTest do
       published(inst, cell)
 
       insert(inst, cell, 2)
-      assert %{feed_cleaned: 0} = state(inst, cell)
+      assert %{feed: %{cleaned: 0}} = state(inst, cell)
       assert local_rows(inst, cell) == 2
 
       state = cleaned(inst, cell)
-      assert state.feed_published >= 2
+      assert state.feed.published >= 2
       assert local_rows(inst, cell) == 0
     end
 
@@ -178,7 +178,7 @@ defmodule Alambique.FeedCleanupTest do
         {:ok, _} = Alambique.query(inst, cell, "SELECT 1")
       end
 
-      assert %{feed_cleaned: 0} = state(inst, cell)
+      assert %{feed: %{cleaned: 0}} = state(inst, cell)
       cleaned(inst, cell)
     end
   end
@@ -209,8 +209,8 @@ defmodule Alambique.FeedCleanupTest do
           s = state(inst, cell)
 
           f.txid == s.repl.txid and f.acked_txid == s.pipe.acked.txid and
-            f.feed_published == s.feed_published and f.feed_sent == s.feed_sent and
-            f.feed_cleaned == s.feed_cleaned and f.feed_backlog == s.feed_backlog and f
+            f.feed_published == s.feed.published and f.feed_sent == s.feed.sent and
+            f.feed_cleaned == s.feed.cleaned and f.feed_backlog == s.feed.backlog and f
         end)
 
       assert facts.feed_published > 0
@@ -240,7 +240,7 @@ defmodule Alambique.FeedCleanupTest do
       before = segments(ctx)
 
       insert(inst, cell, 2)
-      assert %{feed_cleaned: cleaned} = state(inst, cell)
+      assert %{feed: %{cleaned: cleaned}} = state(inst, cell)
       assert cleaned >= 1
       assert local_rows(inst, cell) == 1
       assert segments(ctx) == before + 1
@@ -353,7 +353,7 @@ defmodule Alambique.FeedCleanupTest do
 
       :sys.replace_state(pid, fn s ->
         {:ok, s} = Alambique.Feed.Publisher.cleanup(s)
-        %{s | unsent: true}
+        %{s | feed: %{s.feed | unsent: true}}
       end)
 
       send(pid, :flush)
@@ -500,7 +500,7 @@ defmodule Alambique.FeedCleanupTest do
         eventually(fn -> GatedStore.held(gate) != [] end)
 
         quiet()
-        assert %{feed_published: 0, feed_cleaned: 0} = state(inst, cell)
+        assert %{feed: %{published: 0, cleaned: 0}} = state(inst, cell)
         assert local_rows(inst, cell) == 1
 
         GatedStore.open(gate)
@@ -524,7 +524,7 @@ defmodule Alambique.FeedCleanupTest do
         state = cleaned(inst, cell)
 
         quiet()
-        assert state(inst, cell).feed_sent > state.feed_published
+        assert state(inst, cell).feed.sent > state.feed.published
         assert stored_rows(ctx, cell) == 1
         assert local_rows(inst, cell) == 1
         GatedStore.open(gate)
@@ -541,16 +541,16 @@ defmodule Alambique.FeedCleanupTest do
       [first] = GatedStore.held(gate)
       # The sender has the second batch while it waits for the first.
       insert(inst, cell, 2)
-      eventually(fn -> state(inst, cell).feed_sent == state(inst, cell).pipe.acked.txid end)
+      eventually(fn -> state(inst, cell).feed.sent == state(inst, cell).pipe.acked.txid end)
 
       # The report of the first batch makes the cell clean.
       GatedStore.release(gate, first)
-      eventually(fn -> state(inst, cell).feed_cleaned > 0 end)
+      eventually(fn -> state(inst, cell).feed.cleaned > 0 end)
       eventually(fn -> length(GatedStore.held(gate)) == 1 end)
 
       quiet()
 
-      assert %{feed_published: published, feed_cleaned: published, feed_sent: sent} =
+      assert %{feed: %{published: published, cleaned: published, sent: sent}} =
                state(inst, cell)
 
       assert sent > published
@@ -574,7 +574,7 @@ defmodule Alambique.FeedCleanupTest do
       end)
 
       quiet()
-      assert %{feed_cleaned: 0} = state(inst, cell)
+      assert %{feed: %{cleaned: 0}} = state(inst, cell)
       GatedStore.open(gate)
       cleaned(inst, cell)
     end
@@ -598,10 +598,10 @@ defmodule Alambique.FeedCleanupTest do
 
       eventually(fn -> length(GatedStore.held(gate)) == 2 end)
       GatedStore.release(gate, feed_key)
-      eventually(fn -> state(inst, cell).feed_published > 0 end)
+      eventually(fn -> state(inst, cell).feed.published > 0 end)
 
       quiet()
-      assert %{feed_cleaned: 0, pipe: %{queue: [_]}} = state(inst, cell)
+      assert %{pipe: %{queue: [_]}, feed: %{cleaned: 0}} = state(inst, cell)
       assert segments(ctx) == before
 
       GatedStore.open(gate)
@@ -624,7 +624,7 @@ defmodule Alambique.FeedCleanupTest do
       eventually(fn -> GatedStore.held(gate) != [] end)
 
       Process.sleep(3 * 300)
-      assert %{feed_cleaned: 0} = state(inst, cell)
+      assert %{feed: %{cleaned: 0}} = state(inst, cell)
       assert segments(ctx) == before
 
       GatedStore.open(gate)
@@ -654,24 +654,24 @@ defmodule Alambique.FeedCleanupTest do
 
       :sys.replace_state(pid, fn s ->
         {:ok, s} = Alambique.Feed.Publisher.cleanup(s)
-        %{s | unsent: true}
+        %{s | feed: %{s.feed | unsent: true}}
       end)
 
       send(pid, :flush)
-      assert %{unsent: true, pipe: %{flush_wanted: true, queue: [_]}} = state(inst, cell)
-      assert %{feed_cleaned: cleaned} = state(inst, cell)
+      assert %{pipe: %{flush_wanted: true, queue: [_]}, feed: %{unsent: true}} = state(inst, cell)
+      assert %{feed: %{cleaned: cleaned}} = state(inst, cell)
       assert cleaned > 0
       assert segments(ctx) == before
 
       GatedStore.open(gate)
       assert {:ok, _} = Task.await(write)
-      eventually(fn -> (s = state(inst, cell)).unsent == false and s.pipe.queue == [] end)
+      eventually(fn -> (s = state(inst, cell)).feed.unsent == false and s.pipe.queue == [] end)
 
       # The write's batch and the cleanup's: no third.
       quiet()
       assert segments(ctx) == before + 2
       assert stored_rows(ctx, cell) == 1
-      assert state(inst, cell).feed_cleaned == cleaned
+      assert state(inst, cell).feed.cleaned == cleaned
     end
 
     test "no cleanup while the lease is not valid", ctx do
@@ -684,7 +684,7 @@ defmodule Alambique.FeedCleanupTest do
       :sys.replace_state(pid, &%{&1 | lease: %{&1.lease | expires_at_ms: 0}})
 
       quiet()
-      assert %{feed_cleaned: 0} = :sys.get_state(pid)
+      assert %{feed: %{cleaned: 0}} = :sys.get_state(pid)
 
       :sys.replace_state(pid, &%{&1 | lease: lease})
       cleaned(inst, cell)
@@ -727,10 +727,10 @@ defmodule Alambique.FeedCleanupTest do
 
       inst = start(ctx, [cleanup: :idle], lazy_restore: lazy)
       assert {:ok, _} = Alambique.query(inst, cell, "SELECT 1")
-      eventually(fn -> state(inst, cell).feed_published > 0 end)
+      eventually(fn -> state(inst, cell).feed.published > 0 end)
 
       quiet()
-      assert %{feed_cleaned: 0, hydrator: hydrator} = state(inst, cell)
+      assert %{hydrator: hydrator, feed: %{cleaned: 0}} = state(inst, cell)
       assert hydrator != nil
 
       :atomics.put(gate, 1, 1)
@@ -751,12 +751,12 @@ defmodule Alambique.FeedCleanupTest do
       published(inst, cell)
       CrashPoints.arm(:feed_before_cleanup, :raise, times: 2)
 
-      eventually(fn -> state(inst, cell).feed_cleanup_failures >= 1 end)
+      eventually(fn -> state(inst, cell).feed.cleanup_failures >= 1 end)
       assert Process.alive?(cell_pid(inst, cell))
-      assert %{feed_cleaned: 0} = state(inst, cell)
+      assert %{feed: %{cleaned: 0}} = state(inst, cell)
 
       cleaned(inst, cell)
-      assert %{feed_cleanup_failures: 0} = state(inst, cell)
+      assert %{feed: %{cleanup_failures: 0}} = state(inst, cell)
       eventually(fn -> stored_rows(ctx, cell) == 0 end)
     end
   end
@@ -774,9 +774,9 @@ defmodule Alambique.FeedCleanupTest do
         published(inst, cell)
         pid = cell_pid(inst, cell)
 
-        shrunk = eventually(fn -> (s = :sys.get_state(pid)).idle_cache == :shrunk and s end)
-        assert shrunk.feed_published > 0
-        assert shrunk.feed_cleaned == shrunk.feed_published
+        shrunk = eventually(fn -> (s = :sys.get_state(pid)).idle.cache == :shrunk and s end)
+        assert shrunk.feed.published > 0
+        assert shrunk.feed.cleaned == shrunk.feed.published
       end
     end
 
@@ -822,8 +822,8 @@ defmodule Alambique.FeedCleanupTest do
       published(inst, cell)
       pid = cell_pid(inst, cell)
 
-      shrunk = eventually(fn -> (s = :sys.get_state(pid)).idle_cache == :shrunk and s end)
-      assert shrunk.feed_cleaned == shrunk.feed_published
+      shrunk = eventually(fn -> (s = :sys.get_state(pid)).idle.cache == :shrunk and s end)
+      assert shrunk.feed.cleaned == shrunk.feed.published
     end
   end
 

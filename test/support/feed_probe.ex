@@ -21,7 +21,7 @@ defmodule Alambique.FeedProbe do
   def published(inst, cell) do
     case Cell.whereis(Config.fetch!(inst), cell) do
       nil -> nil
-      pid -> :sys.get_state(pid).feed_published
+      pid -> :sys.get_state(pid).feed.published
     end
   catch
     :exit, _ -> nil

@@ -133,7 +133,7 @@ defmodule Alambique.FeedHandOverTest do
       assert Enum.map(records, & &1.position) ==
                for(n <- 0..9, do: {elem(hd(records).position, 0), n})
 
-      assert %State{feed_part: nil, feed_backlog: 0} = :sys.get_state(cell_pid(inst))
+      assert %State{feed: %{part: nil, backlog: 0}} = :sys.get_state(cell_pid(inst))
     end
 
     test "a message of a continuation that no longer exists is ignored", ctx do
@@ -143,17 +143,17 @@ defmodule Alambique.FeedHandOverTest do
 
       state = :sys.get_state(cell_pid(inst))
       tick = make_ref()
-      waiting = %{state | feed_tick: tick, feed_part: {state.feed_sent + 1, 4}}
+      waiting = %{state | feed: %{state.feed | tick: tick, part: {state.feed.sent + 1, 4}}}
 
       assert Publisher.continue(waiting, make_ref()) == waiting
 
-      assert %{feed_tick: nil} =
+      assert %{feed: %{tick: nil}} =
                in_cell(cell_pid(inst), fn _ -> Publisher.continue(waiting, tick) end)
 
       # Sent to a live cell it changes nothing.
       send(cell_pid(inst), {:feed_part, make_ref()})
-      assert %{feed_sent: sent, feed_part: nil} = :sys.get_state(cell_pid(inst))
-      assert sent == state.feed_sent
+      assert %{feed: %{sent: sent, part: nil}} = :sys.get_state(cell_pid(inst))
+      assert sent == state.feed.sent
     end
 
     test "a call in the mailbox is served between two pieces", ctx do
@@ -213,7 +213,7 @@ defmodule Alambique.FeedHandOverTest do
       # The cap keeps the second batch in the file.
       insert(inst, @cell, 2..11)
       assert :counters.get(pieces, 1) == 1
-      assert %{feed_capped: true} = :sys.get_state(cell_pid(inst))
+      assert %{feed: %{capped: true}} = :sys.get_state(cell_pid(inst))
 
       stop = Task.async(fn -> Alambique.hibernate(inst, @cell) end)
       eventually(fn -> :counters.get(pieces, 1) == 5 end)
