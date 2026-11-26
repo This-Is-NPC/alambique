@@ -50,6 +50,8 @@ defmodule Alambique.Sqlite do
   connection (`gated: true`), which also holds its secret.
   """
   @type conn :: reference | Handle.t()
+  @typedoc "A file kept held after `close_keep/1`."
+  @type kept :: reference
   @type row :: [integer | float | binary | nil]
 
   @doc """
@@ -105,6 +107,28 @@ defmodule Alambique.Sqlite do
   """
   @spec close(conn) :: :ok | {:error, term}
   def close(conn), do: Native.sqlite_close(ref(conn), key(conn))
+
+  @doc """
+  Closes the connection and keeps its file held for this process: a
+  read-write open of it by any other process is still refused
+  (`{:error, :held_by_cell}`) until `open/2` of the same process opens it
+  again, or `release/1` or the end of this process gives it back. Rules of
+  `close/1`. `{:error, :changed}` says the file is no longer the one that was
+  held; the connection is closed and nothing is kept then.
+  """
+  @spec close_keep(conn) :: {:ok, kept} | {:error, term}
+  def close_keep(conn), do: Native.sqlite_close_keep(ref(conn), key(conn))
+
+  @doc """
+  Whether the file at `path` is the one `kept` recorded at the close, with its
+  size and times: `:same`, `:changed` or `:missing`.
+  """
+  @spec kept_state(kept, Path.t()) :: :same | :changed | :missing
+  def kept_state(kept, path), do: Native.sqlite_kept_state(kept, path)
+
+  @doc "Gives back the file of `kept`; once however many times it is called."
+  @spec release(kept) :: :ok
+  def release(kept), do: Native.sqlite_kept_release(kept)
 
   @doc """
   Names `pid` as the process that runs statements on `conn`. The opener only,

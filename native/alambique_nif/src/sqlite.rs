@@ -37,7 +37,7 @@ mod atoms {
         connection_closed, argument_error, busy, disk_full,
         statement_timeout, result_too_large, not_authorized, multiple_statements, transaction_ended, cache_used,
         schema_used, stmt_used, lookaside_used, nul_in_statement, not_ddl, query_only, not_owner,
-        held_by_cell, foreign_write, none, advanced, restarted,
+        held_by_cell, foreign_write, none, advanced, restarted, missing, same, changed,
     }
 }
 
@@ -218,6 +218,23 @@ impl Conn {
             unsafe { close(db) };
         }
         self.release_held();
+    }
+
+    /// Closes the connection like `shut`, but leaves the file in the table of
+    /// `held` for the caller to keep. The file's name and identity, or `None`
+    /// when the connection is closed already or holds no file.
+    fn shut_keep(&self) -> Option<(held::FileId, String)> {
+        let id = self.held?;
+        interrupt(self);
+        let mut slot = self.db.write().unwrap_or_else(|e| e.into_inner());
+        let DbPtr(db) = slot.take()?;
+        let name = main_filename(db);
+        // SAFETY: the write lock waited for every user; the pointer is out of
+        // the slot, so nothing can use it again.
+        unsafe { close(db) };
+        // The table entry is the caller's now: `Conn` must not release it.
+        self.released.store(true, Relaxed);
+        name.map(|name| (id, name))
     }
 
     /// Gives the file back once the database is closed.
@@ -1071,6 +1088,20 @@ fn bind_one(s: *mut ffi::sqlite3_stmt, idx: c_int, term: Term) -> Result<c_int, 
     bind_value(s, idx, value)
 }
 
+/// The calling process as `held` names a keeper.
+fn owner(env: Env) -> held::Owner {
+    env.pid().encode(env).as_c_arg() as held::Owner
+}
+
+/// The file name of the main database of `db`.
+fn main_filename(db: *mut ffi::sqlite3) -> Option<String> {
+    // SAFETY: `db` is a live connection; the name is read at once.
+    unsafe {
+        let n = ffi::sqlite3_db_filename(db, c"main".as_ptr());
+        (!n.is_null()).then(|| CStr::from_ptr(n).to_string_lossy().into_owned())
+    }
+}
+
 /// Opens `path` (a file name or a `file:` URI). `readonly` opens an existing
 /// file for reading; otherwise the file is created when missing. `vfs` names
 /// a registered VFS, `None` is SQLite's default. `attach` allows `ATTACH`,
@@ -1120,6 +1151,11 @@ pub(crate) fn open<'a>(
         };
         let mut db: *mut ffi::sqlite3 = ptr::null_mut();
         held::clear_refused();
+        // A cell that closed its connection and kept the file opens it again.
+        let permit = (!readonly && gated)
+            .then(|| path.to_str().ok())
+            .flatten()
+            .and_then(|p| held::permit(std::path::Path::new(p), owner(env)));
         // SAFETY: `path` and `vfs` are NUL-terminated and outlive the call.
         let rc = unsafe {
             ffi::sqlite3_open_v2(
@@ -1129,6 +1165,7 @@ pub(crate) fn open<'a>(
                 vfs.as_ref().map_or(ptr::null(), |v| v.as_ptr()),
             )
         };
+        drop(permit);
         if rc != ffi::SQLITE_OK {
             let failure = if held::take_refused() {
                 Failure::HeldByCell
@@ -1147,15 +1184,11 @@ pub(crate) fn open<'a>(
         let held = if readonly {
             None
         } else {
-            // SAFETY: `db` is a live connection; the name is read at once.
-            let name = unsafe {
-                let n = ffi::sqlite3_db_filename(db, c"main".as_ptr());
-                (!n.is_null()).then(|| CStr::from_ptr(n).to_string_lossy().into_owned())
-            };
+            let name = main_filename(db);
             let id = name.and_then(|n| held::file_id(std::path::Path::new(&n)));
             let free = match id {
                 _ if held::bypassed() => true,
-                Some(id) if gated => held::hold(id),
+                Some(id) if gated => held::hold(id) || held::reclaim(id, owner(env)),
                 Some(id) => !held::is_held(id),
                 None => true,
             };
@@ -1254,6 +1287,77 @@ fn sqlite_close<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64) -> Term<'a>
         Ok(atoms::ok().encode(env))
     };
     reply(env, run())
+}
+
+/// A file that its cell closed and keeps held (`sqlite_close_keep`): the
+/// entry of the table of `held` stays until the cell opens the file again or
+/// this resource is released or dropped, so a cell that dies frees it.
+pub struct Kept {
+    stamp: held::Stamp,
+    token: u64,
+}
+
+#[rustler::resource_impl]
+impl Resource for Kept {}
+
+// ERTS runs `drop` from a C callback that rustler does not protect, so it
+// must not panic (design §2.1).
+impl Drop for Kept {
+    fn drop(&mut self) {
+        guard("kept_drop", (), || {
+            held::drop_kept(self.stamp.id(), self.token)
+        });
+    }
+}
+
+/// Closes the connection like `sqlite_close`, but the file stays held for its
+/// cell: `{:ok, kept}`, or `{:error, :changed}` when the file is no longer
+/// the one held (the connection is closed and the file released then). The opener only, with the secret, not while the
+/// transaction of the library is open, and only a connection that holds a
+/// file. The cell opens the file again with `sqlite_open`; `kept` records
+/// what the file looked like at the close (`sqlite_kept_state`).
+#[rustler::nif(schedule = "DirtyIo")]
+fn sqlite_close_keep<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64) -> Term<'a> {
+    let _t = crate::stats::SQLITE_CALLS.time();
+    let run = || -> Outcome<'a> {
+        check_opener(env, &conn)?;
+        let ctl = &conn.control;
+        if !ctl.key_ok(key) || ctl.expect_txn.load(Relaxed) != 0 {
+            return Err(Failure::Denied);
+        }
+        let (id, name) = conn.shut_keep().ok_or(Failure::Closed)?;
+        let token = new_token();
+        held::keep(id, owner(env), token);
+        // The file is not what the connection held (another process replaced
+        // it): closed and released, nothing to keep.
+        let Some(stamp) = held::Stamp::of(std::path::Path::new(&name)).filter(|s| s.id() == id)
+        else {
+            held::drop_kept(id, token);
+            return Ok((atoms::error(), atoms::changed()).encode(env));
+        };
+        Ok((atoms::ok(), ResourceArc::new(Kept { stamp, token })).encode(env))
+    };
+    reply(env, run())
+}
+
+/// Whether the file at `path` is the one `kept` recorded, untouched: `:same`,
+/// `:changed` (another file, size, or times) or `:missing`.
+#[rustler::nif(schedule = "DirtyIo")]
+fn sqlite_kept_state<'a>(env: Env<'a>, kept: ResourceArc<Kept>, path: String) -> Term<'a> {
+    let state = match held::Stamp::of(std::path::Path::new(&path)) {
+        None => atoms::missing(),
+        Some(s) if s == kept.stamp => atoms::same(),
+        Some(_) => atoms::changed(),
+    };
+    state.encode(env)
+}
+
+/// Gives the file back to every open: idempotent. Dropping the resource does
+/// the same.
+#[rustler::nif]
+fn sqlite_kept_release(kept: ResourceArc<Kept>) -> Atom {
+    held::drop_kept(kept.stamp.id(), kept.token);
+    atoms::ok()
 }
 
 /// The caller must be the opener of `conn`.
