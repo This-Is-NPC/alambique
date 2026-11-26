@@ -137,10 +137,14 @@ Fewer requests, or requests that run together, make the wake faster. Design
      arrive, not for the chain.
    - `lazy_restore: [mode: :whole]` (default `:ranged`) makes the cell read
      its whole chain before its first statement, as a restore does when the
-     chain is under `min_bytes`. The first call then waits for the whole
+     chain is under `min_bytes`: the store calls of a restore with
+     `lazy_restore: false` (the first range of each object, which says its
+     size, then the object). The first call then waits for the whole
      download and nothing is held later: no first write waits and no query
      waits for a page. Choose it when the cells are small enough to download
-     within the deadline of the first call. `verify_bytes` has no effect in it.
+     within the deadline of the first call. A cell can ask for it alone with
+     `lazy_restore: [mode: :whole]` in the result of `cell_options`.
+     `verify_bytes` has no effect in it.
    - `lazy_restore: [verify_writes:]` (default `true`) makes the first write
      after a lazy wake wait until the whole file is downloaded and its checksum
      matched. Set it to `false` only if first-write latency matters more than
