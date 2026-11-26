@@ -27,6 +27,7 @@ use crate::ltx::{
     get_uvarint, lock_pgno, page_crc, pages_added, trailer_post, valid_page_size, verify, Header,
     HEADER_SIZE, PAGE_FLAG_SIZE, PAGE_HEADER_SIZE, TRAILER_SIZE,
 };
+use crate::pages::{self, Hashes};
 use crate::sums::Sums;
 
 const NO_FILE: u32 = u32::MAX;
@@ -83,6 +84,10 @@ pub struct Staged {
     pub post_apply: u64,
     total: u64,
     entries: Vec<(u32, u64, u32)>,
+    /// File checksum of the trailer, and the hash of the bytes that are not
+    /// page frames (`pages::meta_hash`).
+    file_checksum: u64,
+    meta: pages::Hash,
 }
 
 /// Parses the header, the trailer and the page index of an LTX file from its
@@ -137,12 +142,21 @@ pub fn stage_file(
     if p != index.len() {
         return invalid("page index size mismatch");
     }
+    let meta = pages::meta_hash(&head[..HEADER_SIZE], &tail[size_at - index_len as usize..]);
     Ok(Ok(Staged {
         header,
         post_apply,
         total,
         entries,
+        file_checksum: u64::from_be_bytes(t[8..].try_into().unwrap()),
+        meta,
     }))
+}
+
+/// The frame of `len` bytes at `rel` in a fetched run.
+pub fn frame_of(data: &[u8], rel: u32, len: u32) -> Result<&[u8]> {
+    data.get(rel as usize..rel as usize + len as usize)
+        .ok_or_else(|| crate::error::Error::Invalid("frame outside the fetched data".into()))
 }
 
 /// Decompresses one page frame (page header, size prefix, LZ4 block). The
@@ -186,6 +200,11 @@ struct Inner {
     crc: Vec<u64>,
     /// Keyed hash of each page (see `Lazy::keyed`), recorded with `crc`.
     keyed: Vec<u64>,
+    /// Page hashes of the files that have a sidecar (`stage_hashes`), until
+    /// the plan is complete or a file's sidecar is dropped.
+    hashes: HashMap<u32, Arc<Hashes>>,
+    /// The files whose pages are checked against `hashes` as they arrive.
+    covered: HashSet<u32>,
     /// Pages without a base CRC: still to fetch.
     unknown: u32,
     /// The file each page came from once the plan is complete.
@@ -266,6 +285,8 @@ impl Lazy {
                 flags: Vec::new(),
                 crc: Vec::new(),
                 keyed: Vec::new(),
+                hashes: HashMap::new(),
+                covered: HashSet::new(),
                 unknown: 0,
                 owner: Vec::new(),
                 order: Vec::new(),
@@ -313,7 +334,97 @@ impl Lazy {
     // Planning
 
     pub fn stage(&self, idx: u32, staged: Staged) {
-        self.inner().staged.insert(idx, staged);
+        let mut g = self.inner();
+        g.hashes.remove(&idx);
+        g.covered.remove(&idx);
+        g.staged.insert(idx, staged);
+    }
+
+    /// Binds the sidecar `side` to the staged file `idx`, which lives at
+    /// `level` with TXIDs `min` to `max`: from now on the pages of that file
+    /// are checked against it before they are installed. The sidecar must
+    /// describe exactly the file staged: its level and TXIDs, page size, size,
+    /// file checksum, header, page index and trailer. Nothing is kept
+    /// otherwise.
+    pub fn stage_hashes(&self, idx: u32, side: &[u8], level: u8, min: u64, max: u64) -> Result<()> {
+        let p = pages::parse(side)?;
+        let mut g = self.inner();
+        let Some(s) = g.staged.get(&idx) else {
+            return invalid("file was not staged");
+        };
+        let same = p.level == level
+            && (p.min_txid, p.max_txid) == (min, max)
+            && (s.header.min_txid, s.header.max_txid) == (min, max)
+            && p.page_size == self.page_size
+            && p.object_size == s.total
+            && p.hashes.file_checksum == s.file_checksum
+            && p.meta == s.meta
+            && p.hashes
+                .pgnos()
+                .iter()
+                .copied()
+                .eq(s.entries.iter().map(|e| e.0));
+        if !same {
+            return invalid("page sidecar does not describe the file");
+        }
+        g.hashes.insert(idx, Arc::new(p.hashes));
+        g.covered.insert(idx);
+        Ok(())
+    }
+
+    /// The hashes the pages of `file` are checked against, if it is covered.
+    pub fn hashes_of(&self, file: u32) -> Option<Arc<Hashes>> {
+        self.inner().hashes.get(&file).cloned()
+    }
+
+    /// Checks the pages of a run of `file` against its sidecar, before any is
+    /// installed, one page in memory at a time. The first page that does not
+    /// match is `Some(pgno)`; a file without a sidecar has nothing to check.
+    pub fn check_hashes(
+        &self,
+        file: u32,
+        data: &[u8],
+        pages: &[(u32, u32, u32)],
+    ) -> Result<Option<u32>> {
+        let Some(hashes) = self.hashes_of(file) else {
+            return Ok(None);
+        };
+        for &(pgno, rel, len) in pages {
+            let page = decode_frame(frame_of(data, rel, len)?, pgno, self.page_size)?;
+            if !hashes.matches(pgno, &page) {
+                return Ok(Some(pgno));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The files whose pages were checked against a sidecar as they arrived.
+    pub fn covered(&self) -> Vec<u32> {
+        let mut v: Vec<u32> = self.inner().covered.iter().copied().collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// A page of `file` did not match its hash. Decides who is wrong from the
+    /// whole object `data`: `Err` when the object itself fails its file
+    /// checksum; `Ok(true)` when every page of the object matches the sidecar
+    /// (the ranged read was wrong); `Ok(false)` when the sidecar is wrong, in
+    /// which case the file stops being covered.
+    pub fn settle_hashes(&self, file: u32, data: &[u8]) -> Result<bool> {
+        let (_, _, frames) = verify(data)?;
+        let Some(hashes) = self.hashes_of(file) else {
+            return Ok(false);
+        };
+        let right = frames.iter().all(|&(pgno, start, len)| {
+            decode_frame(&data[start..start + len], pgno, self.page_size)
+                .is_ok_and(|page| hashes.matches(pgno, &page))
+        });
+        if !right {
+            let mut g = self.inner();
+            g.hashes.remove(&file);
+            g.covered.remove(&file);
+        }
+        Ok(right)
     }
 
     /// Applies the staged file `idx` to the map, as `dbsum::apply` would apply
@@ -562,6 +673,7 @@ impl Lazy {
             return;
         }
         g.owner = g.map.iter().map(|e| e.file).collect();
+        g.hashes = HashMap::new();
         g.map = Vec::new();
         g.sizes = HashMap::new();
         g.order = Vec::new();
@@ -1272,6 +1384,198 @@ mod tests {
                 d[n - 1] ^= 0xD8;
             }
         });
+    }
+
+    // Page hashes (the sidecar of `pages`).
+
+    /// Stages `file` from copies of its head and tail that `tamper` changes.
+    fn stage_tampered(
+        lazy: &Lazy,
+        idx: u32,
+        file: &[u8],
+        tamper: impl Fn(&mut Vec<u8>, &mut Vec<u8>),
+    ) {
+        let mut head = file[..HEADER_SIZE].to_vec();
+        let mut tail = file.to_vec();
+        tamper(&mut head, &mut tail);
+        let staged = stage_file(&head, &tail, file.len() as u64)
+            .unwrap()
+            .ok()
+            .unwrap();
+        lazy.stage(idx, staged);
+    }
+
+    /// A plan with `file` staged as file 0 and not applied yet.
+    fn lazy_with(file: &[u8]) -> (tempfile::TempDir, Lazy) {
+        let dir = tempfile::tempdir().unwrap();
+        let lazy = Lazy::create(&dir.path().join("db"), PS, Duration::from_secs(1)).unwrap();
+        stage_tampered(&lazy, 0, file, |_, _| {});
+        (dir, lazy)
+    }
+
+    fn index_at(tail: &[u8]) -> usize {
+        let at = tail.len() - TRAILER_SIZE - 8;
+        let len = u64::from_be_bytes(tail[at..at + 8].try_into().unwrap()) as usize;
+        at - len
+    }
+
+    #[test]
+    fn a_sidecar_of_the_file_covers_it() {
+        let (a, _) = files();
+        let (_dir, lazy) = lazy_with(&a);
+        lazy.stage_hashes(0, &pages::build(9, &a).unwrap(), 9, 1, 1)
+            .unwrap();
+        assert_eq!(lazy.covered(), vec![0]);
+        assert!(lazy.hashes_of(0).is_some());
+        // Staging again, as a rejected candidate is replaced, drops it.
+        stage_tampered(&lazy, 0, &a, |_, _| {});
+        assert!(lazy.covered().is_empty() && lazy.hashes_of(0).is_none());
+    }
+
+    #[test]
+    fn a_sidecar_that_differs_from_the_file_in_any_byte_it_binds_is_refused() {
+        let (a, b) = files();
+        let side = pages::build(9, &a).unwrap();
+        type Tamper = Box<dyn Fn(&mut Vec<u8>, &mut Vec<u8>)>;
+        let cases: Vec<(&str, Tamper)> = vec![
+            (
+                "timestamp",
+                Box::new(|h: &mut Vec<u8>, _: &mut Vec<u8>| h[39] ^= 1),
+            ),
+            (
+                "wal salt",
+                Box::new(|h: &mut Vec<u8>, _: &mut Vec<u8>| h[64] ^= 1),
+            ),
+            (
+                "node id",
+                Box::new(|h: &mut Vec<u8>, _: &mut Vec<u8>| h[75] ^= 1),
+            ),
+            (
+                "index entry",
+                Box::new(|_: &mut Vec<u8>, t: &mut Vec<u8>| {
+                    let at = index_at(t) + 2;
+                    t[at] ^= 1;
+                }),
+            ),
+            (
+                "file checksum",
+                Box::new(|_: &mut Vec<u8>, t: &mut Vec<u8>| *t.last_mut().unwrap() ^= 1),
+            ),
+        ];
+        for (what, tamper) in cases {
+            let (_dir, lazy) = lazy_with(&a);
+            stage_tampered(&lazy, 0, &a, tamper);
+            assert!(lazy.stage_hashes(0, &side, 9, 1, 1).is_err(), "{what}");
+            assert!(lazy.covered().is_empty(), "{what}");
+        }
+        let (_dir, lazy) = lazy_with(&a);
+        assert!(lazy.stage_hashes(0, &side, 0, 1, 1).is_err(), "level");
+        assert!(lazy.stage_hashes(0, &side, 9, 1, 2).is_err(), "txid range");
+        assert!(lazy.stage_hashes(1, &side, 9, 1, 1).is_err(), "not staged");
+        let other = pages::build(9, &b).unwrap();
+        assert!(lazy.stage_hashes(0, &other, 9, 1, 1).is_err(), "other file");
+        assert!(lazy.covered().is_empty());
+    }
+
+    /// Frames of `a` for `pgnos` as a fetched run, with the frame of page 3
+    /// taken from `evil` when given.
+    fn run_of(a: &[u8], evil: Option<&[u8]>, pgnos: &[u32]) -> (Vec<u8>, Vec<(u32, u32, u32)>) {
+        let (mut data, mut pages) = (Vec::new(), Vec::new());
+        for &p in pgnos {
+            let src = if p == 3 { evil.unwrap_or(a) } else { a };
+            let (_, start, len) = *verify(src).unwrap().2.iter().find(|f| f.0 == p).unwrap();
+            pages.push((p, data.len() as u32, len as u32));
+            data.extend_from_slice(&src[start..start + len]);
+        }
+        (data, pages)
+    }
+
+    #[test]
+    fn a_run_is_checked_whole_against_the_sidecar() {
+        let (a, _) = files();
+        let evil = ltx(
+            1,
+            6,
+            &(1..=6)
+                .map(|p| (p, if p == 3 { 2 } else { 1 }))
+                .collect::<Vec<_>>(),
+        );
+        let (_dir, lazy) = lazy_with(&a);
+        lazy.stage_hashes(0, &pages::build(9, &a).unwrap(), 9, 1, 1)
+            .unwrap();
+        let (data, pages) = run_of(&a, None, &[1, 2, 3, 4]);
+        assert_eq!(lazy.check_hashes(0, &data, &pages).unwrap(), None);
+        // Page 3 is wrong, after two that are right: the run is refused as
+        // a whole, and the caller installs none of it.
+        let (data, pages) = run_of(&a, Some(&evil), &[1, 2, 3, 4]);
+        assert_eq!(lazy.check_hashes(0, &data, &pages).unwrap(), Some(3));
+    }
+
+    #[test]
+    fn a_file_without_a_sidecar_has_nothing_to_check() {
+        let (a, _) = files();
+        let evil = ltx(
+            1,
+            6,
+            &(1..=6)
+                .map(|p| (p, if p == 3 { 2 } else { 1 }))
+                .collect::<Vec<_>>(),
+        );
+        let (_dir, lazy) = lazy_with(&a);
+        let (data, pages) = run_of(&a, Some(&evil), &[1, 2, 3]);
+        assert_eq!(lazy.check_hashes(0, &data, &pages).unwrap(), None);
+    }
+
+    #[test]
+    fn the_whole_object_says_whether_the_sidecar_or_the_range_was_wrong() {
+        let (a, _) = files();
+        let side = pages::build(9, &a).unwrap();
+
+        // The sidecar is right: the range was wrong, the file stays covered.
+        let (_dir, lazy) = lazy_with(&a);
+        lazy.stage_hashes(0, &side, 9, 1, 1).unwrap();
+        assert!(lazy.settle_hashes(0, &a).unwrap());
+        assert_eq!(lazy.covered(), vec![0]);
+
+        // One page hash of the sidecar is wrong (and sealed): it is dropped.
+        let mut bad = side[..side.len() - 16].to_vec();
+        bad[64 + 20 * 2 + 10] ^= 1;
+        let sealed = pages::seal(&bad);
+        bad.extend_from_slice(&sealed);
+        let (_dir, lazy) = lazy_with(&a);
+        lazy.stage_hashes(0, &bad, 9, 1, 1).unwrap();
+        assert!(!lazy.settle_hashes(0, &a).unwrap());
+        assert!(lazy.covered().is_empty() && lazy.hashes_of(0).is_none());
+        // Nothing left to compare against: the same answer.
+        assert!(!lazy.settle_hashes(0, &a).unwrap());
+
+        // The object itself is damaged: that is an error, not a verdict on
+        // the sidecar, which stays.
+        let (_dir, lazy) = lazy_with(&a);
+        lazy.stage_hashes(0, &side, 9, 1, 1).unwrap();
+        let mut damaged = a.clone();
+        damaged[HEADER_SIZE + 12] ^= 1;
+        assert!(lazy.settle_hashes(0, &damaged).is_err());
+        assert_eq!(lazy.covered(), vec![0]);
+    }
+
+    #[test]
+    fn a_complete_plan_frees_the_hashes_and_keeps_which_files_were_covered() {
+        let (a, _) = files();
+        let (_dir, lazy) = lazy_with(&a);
+        lazy.stage_hashes(0, &pages::build(9, &a).unwrap(), 9, 1, 1)
+            .unwrap();
+        lazy.apply(0).unwrap();
+        lazy.ready().unwrap();
+        while let Some(run) = lazy.next_batch(u64::MAX) {
+            for (i, (p, _, _)) in run.pages.iter().enumerate() {
+                let data = decode_frame(frame(&a, &run, i), *p, PS).unwrap();
+                lazy.install(*p, &data).unwrap();
+            }
+        }
+        assert!(lazy.is_complete());
+        assert!(lazy.hashes_of(0).is_none());
+        assert_eq!(lazy.covered(), vec![0]);
     }
 
     #[test]

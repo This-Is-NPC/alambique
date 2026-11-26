@@ -8,14 +8,14 @@ use std::time::Duration;
 
 use rustler::{Atom, Binary, Encoder, Env, LocalPid, OwnedEnv, Resource, ResourceArc, Term};
 
-use crate::error::Error;
 use crate::guard::guard;
 use crate::lazy::{self, Lazy, MissRequest, Run};
 use crate::{error_term, header_tuple, sums_term, wal, SumsRes};
 
 mod atoms {
     rustler::atoms! {
-        ok, error, none, page_miss, need_tail, missing, incomplete, checksum,
+        ok, error, none, page_miss, need_tail, missing, incomplete, checksum, page_hash, range,
+        dropped,
     }
 }
 
@@ -94,6 +94,51 @@ fn lazy_stage<'a>(
     }
 }
 
+/// Binds the page sidecar `side` of the staged file `idx` (level `level`,
+/// TXIDs `min` to `max`): its pages are checked against it from then on. An
+/// error leaves the file as it was, without a sidecar.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn lazy_stage_hashes<'a>(
+    env: Env<'a>,
+    lazy: ResourceArc<LazyRes>,
+    idx: u32,
+    side: Binary,
+    level: u8,
+    min: u64,
+    max: u64,
+) -> Term<'a> {
+    let _t = crate::stats::LAZY_CALLS.time();
+    match lazy.0.stage_hashes(idx, side.as_slice(), level, min, max) {
+        Ok(()) => atoms::ok().encode(env),
+        Err(e) => error_term(env, e),
+    }
+}
+
+/// The files whose pages are checked against a sidecar.
+#[rustler::nif]
+fn lazy_covered(lazy: ResourceArc<LazyRes>) -> Vec<u32> {
+    lazy.0.covered()
+}
+
+/// A page of `file` did not match its sidecar: `data` is the whole object.
+/// `:range` when the object agrees with the sidecar (the ranged read was
+/// wrong), `:dropped` when it does not (the file is no longer covered),
+/// `{:error, reason}` when the object fails its file checksum.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn lazy_settle_hashes<'a>(
+    env: Env<'a>,
+    lazy: ResourceArc<LazyRes>,
+    file: u32,
+    data: Binary,
+) -> Term<'a> {
+    let _t = crate::stats::LAZY_CALLS.time();
+    match lazy.0.settle_hashes(file, data.as_slice()) {
+        Ok(true) => atoms::range().encode(env),
+        Ok(false) => atoms::dropped().encode(env),
+        Err(e) => error_term(env, e),
+    }
+}
+
 /// Applies the staged file `idx` to the map.
 #[rustler::nif(schedule = "DirtyCpu")]
 fn lazy_apply<'a>(env: Env<'a>, lazy: ResourceArc<LazyRes>, idx: u32) -> Term<'a> {
@@ -136,7 +181,9 @@ fn lazy_set_whole(lazy: ResourceArc<LazyRes>, bytes: u64) -> Atom {
 
 /// Installs the pages of a fetched run of `file`. `data` starts at the run's
 /// offset; `pages` are `{pgno, offset in data, frame length}`. A run of the
-/// whole object must pass its file checksum first. Returns `{:ok, done}`.
+/// whole object must pass its file checksum first, and the pages of a file
+/// with a sidecar must all match it before any is installed
+/// (`{:error, {:page_hash, pgno}}`). Returns `{:ok, done}`.
 #[rustler::nif(schedule = "DirtyCpu")]
 fn lazy_deliver<'a>(
     env: Env<'a>,
@@ -150,13 +197,14 @@ fn lazy_deliver<'a>(
     if let Err(e) = l.verify_whole(file, data.as_slice()) {
         return error_term(env, e);
     }
+    match l.check_hashes(file, data.as_slice(), &pages) {
+        Ok(None) => {}
+        Ok(Some(pgno)) => return (atoms::error(), (atoms::page_hash(), pgno)).encode(env),
+        Err(e) => return error_term(env, e),
+    }
     let mut done = false;
     for (pgno, rel, len) in pages {
-        let frame = data
-            .as_slice()
-            .get(rel as usize..rel as usize + len as usize)
-            .ok_or_else(|| Error::Invalid("frame outside the fetched data".into()));
-        let installed = frame
+        let installed = lazy::frame_of(data.as_slice(), rel, len)
             .and_then(|f| lazy::decode_frame(f, pgno, l.page_size))
             .and_then(|page| l.install(pgno, &page));
         match installed {
