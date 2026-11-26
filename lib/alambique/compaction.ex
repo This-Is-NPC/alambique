@@ -253,12 +253,8 @@ defmodule Alambique.Compaction do
   defp merge_groups(state, groups), do: run_merges(state, groups, %{}, nil)
 
   defp run_merges(state, groups, running, failed) do
-    free? = failed == nil and groups != [] and map_size(running) < state.merge_concurrency
-    # The merges in flight count against `max_merges` as if they had finished.
-    room? = state.merges + map_size(running) < state.max_merges
-
     cond do
-      free? and room? and not expired?(state) ->
+      may_start?(state, groups, running, failed) ->
         [group | rest] = groups
         run_merges(state, rest, start_merge(state, group, running), failed)
 
@@ -274,6 +270,12 @@ defmodule Alambique.Compaction do
       true ->
         {:ok, state}
     end
+  end
+
+  defp may_start?(state, groups, running, failed) do
+    # The merges in flight count against `max_merges` as if they had finished.
+    failed == nil and groups != [] and map_size(running) < state.merge_concurrency and
+      state.merges + map_size(running) < state.max_merges and not expired?(state)
   end
 
   # A request past the deadline still gets one attempt (`Retry`), so the pass
@@ -313,10 +315,14 @@ defmodule Alambique.Compaction do
         if expired?(state) do
           run_merges(state, groups, running, failed || error)
         else
-          for {_ref, {task, _group}} <- running, do: Task.shutdown(task, :brutal_kill)
+          stop_merges(running)
           error
         end
     end
+  end
+
+  defp stop_merges(running) do
+    Enum.each(running, fn {_ref, {task, _group}} -> Task.shutdown(task, :brutal_kill) end)
   end
 
   # Runs in a process of its own; the result goes to `settle_merge/3`.
@@ -338,38 +344,39 @@ defmodule Alambique.Compaction do
         {:ok, outcome, bytes, held, level0_bytes(group, inputs)}
       end
 
-    case result do
-      {:ok, outcome, bytes, held, _level0} ->
-        Telemetry.span_stop(
-          [:compaction, :merge],
-          started,
-          %{
-            bytes: bytes,
-            inputs: length(group.inputs),
-            held: held,
-            fetched: length(group.inputs) - held
-          },
-          Map.put(meta, :result, outcome)
-        )
-
-      {:skip, reason} ->
-        Telemetry.span_stop(
-          [:compaction, :merge],
-          started,
-          %{bytes: 0, inputs: length(group.inputs)},
-          Map.merge(meta, %{result: :skipped, reason: reason})
-        )
-
-      {:error, reason} ->
-        Telemetry.span_stop(
-          [:compaction, :merge],
-          started,
-          %{bytes: 0, inputs: length(group.inputs)},
-          Map.merge(meta, %{result: :error, reason: reason})
-        )
-    end
-
+    merge_stop(result, started, meta, group)
     result
+  end
+
+  defp merge_stop({:ok, outcome, bytes, held, _level0}, started, meta, group) do
+    measurements = %{
+      bytes: bytes,
+      inputs: length(group.inputs),
+      held: held,
+      fetched: length(group.inputs) - held
+    }
+
+    Telemetry.span_stop(
+      [:compaction, :merge],
+      started,
+      measurements,
+      Map.put(meta, :result, outcome)
+    )
+  end
+
+  defp merge_stop({:skip, reason}, started, meta, group),
+    do: merge_stop_failed(started, meta, group, %{result: :skipped, reason: reason})
+
+  defp merge_stop({:error, reason}, started, meta, group),
+    do: merge_stop_failed(started, meta, group, %{result: :error, reason: reason})
+
+  defp merge_stop_failed(started, meta, group, outcome) do
+    Telemetry.span_stop(
+      [:compaction, :merge],
+      started,
+      %{bytes: 0, inputs: length(group.inputs)},
+      Map.merge(meta, outcome)
+    )
   end
 
   defp settle_merge(state, group, {:ok, outcome, bytes, _held, level0}),
@@ -505,9 +512,8 @@ defmodule Alambique.Compaction do
   end
 
   defp epoch_of_file(state, file) do
-    with {:ok, meta} <- Objects.head(state.ctx, file_key(file), state.deadline) do
-      {:ok, Objects.epoch_of(meta)}
-    else
+    case Objects.head(state.ctx, file_key(file), state.deadline) do
+      {:ok, meta} -> {:ok, Objects.epoch_of(meta)}
       {:error, :not_found} -> {:skip, :no_predecessor}
       {:error, _} = error -> error
     end
@@ -622,8 +628,11 @@ defmodule Alambique.Compaction do
 
   # The sidecar of an output (design §16), after the object. A key that
   # existed holds the same file only if its checksum says so.
-  defp sidecar(state, key, level, merged, info, owner),
-    do: Sidecar.write(state.ctx, key, level, merged, info, state.deadline, owner)
+  # `Sidecar.write/7` reports its own failures and never fails the caller.
+  defp sidecar(state, key, level, merged, info, owner) do
+    _ = Sidecar.write(state.ctx, key, level, merged, info, state.deadline, owner)
+    :ok
+  end
 
   # The output is the input of the next level; the inputs are done with.
   defp keep_merged(%{hold: nil}, _group, _inputs, _merged, _info), do: :ok
@@ -656,20 +665,18 @@ defmodule Alambique.Compaction do
     if head - state.from >= opts[:snapshot_interval_txids] do
       {:ok, true}
     else
-      case snapshot_ts(state, state.snapshot_key || hd(chain)) do
-        {:ok, ts} when ts != nil ->
-          if now(state.ctx) - ts >= opts[:snapshot_interval_ms],
-            do: {:ok, true},
-            else: ratio_due?(state)
-
-        {:ok, nil} ->
-          ratio_due?(state)
-
-        {:error, _} = error ->
-          error
-      end
+      aged?(state, snapshot_ts(state, state.snapshot_key || hd(chain)))
     end
   end
+
+  defp aged?(state, {:ok, ts}) when ts != nil do
+    if now(state.ctx) - ts >= state.opts[:snapshot_interval_ms],
+      do: {:ok, true},
+      else: ratio_due?(state)
+  end
+
+  defp aged?(state, {:ok, nil}), do: ratio_due?(state)
+  defp aged?(_state, {:error, _} = error), do: error
 
   # The bytes written since the newest snapshot against its size (design §9).
   defp ratio_due?(state) do
@@ -720,7 +727,8 @@ defmodule Alambique.Compaction do
     key = Keys.chain(state.ctx.prefix, state.cell)
     body = "#{snapshot_at}:#{snapshot_bytes}:#{bytes}"
     # A lost update only delays a snapshot; the age and TXID limits still hold.
-    Objects.put(state.ctx, key, body, :none, %{}, state.deadline)
+    _ = Objects.put(state.ctx, key, body, :none, %{}, state.deadline)
+    :ok
   end
 
   # Adds the level-0 bytes this pass merged to the count.
@@ -768,69 +776,67 @@ defmodule Alambique.Compaction do
 
   defp build_snapshot(state, chain, head) do
     started = System.monotonic_time()
-    key = Keys.snapshot(state.ctx.prefix, state.cell, head)
-    files = if state.snapshot_key, do: [%{key: state.snapshot_key} | chain], else: chain
     meta = %{cell: state.cell, txid: head}
 
-    result =
-      with {:ok, inputs, _held} <- fetch_all(state, files),
-           :ok <- check_epochs(inputs, 0),
-           {:ok, merged} <- merge(state, key, inputs),
-           {:ok, {_, _, ts, _, _, _}, _} <- ltx_info(merged) do
-        {_, _, last} = List.last(inputs)
-        epoch = Objects.epoch_of(last)
-        Fault.point(:compact_before_snapshot, %{cell: state.cell, txid: head})
-        info = %{epoch: epoch, data: Objects.data_of(last, head), ts: ts, created: now(state.ctx)}
-
-        case Objects.put_new(state.ctx, key, merged, info, state.deadline) do
-          :ok ->
-            Fault.point(:compact_after_snapshot, %{cell: state.cell, txid: head})
-            sidecar(state, key, Keys.snapshot_level(), merged, info, :ours)
-            keep_snapshot(state, key, ts, chain)
-            put_chain(state, head, byte_size(merged), 0)
-            thin_snapshots(state)
-            {:ok, :ok, byte_size(merged)}
-
-          :exists ->
-            sidecar(state, key, Keys.snapshot_level(), merged, info, :verify)
-            keep_snapshot(state, key, ts, chain)
-            {:ok, :exists, 0}
-
-          {:error, _} = error ->
-            error
-        end
-      end
-
-    case result do
+    case write_snapshot(state, chain, head) do
       {:ok, outcome, bytes} ->
-        Telemetry.span_stop(
-          [:compaction, :snapshot],
-          started,
-          %{bytes: bytes},
-          Map.put(meta, :result, outcome)
-        )
-
+        snapshot_stop(started, %{bytes: bytes}, Map.put(meta, :result, outcome))
         {:ok, %{state | snapshot: head, bytes: state.bytes + bytes}}
 
       {:skip, reason} ->
-        Telemetry.span_stop(
-          [:compaction, :snapshot],
-          started,
-          %{bytes: 0},
-          Map.merge(meta, %{result: :skipped, reason: reason})
-        )
-
+        snapshot_stop(started, %{bytes: 0}, Map.merge(meta, %{result: :skipped, reason: reason}))
         {:ok, %{state | skipped: [{reason, {:snapshot, head}} | state.skipped]}}
 
       {:error, reason} ->
-        Telemetry.span_stop(
-          [:compaction, :snapshot],
-          started,
-          %{bytes: 0},
-          Map.merge(meta, %{result: :error, reason: reason})
-        )
-
+        snapshot_stop(started, %{bytes: 0}, Map.merge(meta, %{result: :error, reason: reason}))
         {:error, reason}
+    end
+  end
+
+  defp snapshot_stop(started, measurements, meta),
+    do: Telemetry.span_stop([:compaction, :snapshot], started, measurements, meta)
+
+  defp write_snapshot(state, chain, head) do
+    key = Keys.snapshot(state.ctx.prefix, state.cell, head)
+    files = if state.snapshot_key, do: [%{key: state.snapshot_key} | chain], else: chain
+
+    with {:ok, inputs, _held} <- fetch_all(state, files),
+         :ok <- check_epochs(inputs, 0),
+         {:ok, merged} <- merge(state, key, inputs),
+         {:ok, {_, _, ts, _, _, _}, _} <- ltx_info(merged) do
+      {_, _, last} = List.last(inputs)
+      Fault.point(:compact_before_snapshot, %{cell: state.cell, txid: head})
+
+      info = %{
+        epoch: Objects.epoch_of(last),
+        data: Objects.data_of(last, head),
+        ts: ts,
+        created: now(state.ctx)
+      }
+
+      put_snapshot(state, {key, head, ts}, chain, merged, info)
+    end
+  end
+
+  defp put_snapshot(state, {key, head, ts}, chain, merged, info) do
+    level = Keys.snapshot_level()
+
+    case Objects.put_new(state.ctx, key, merged, info, state.deadline) do
+      :ok ->
+        Fault.point(:compact_after_snapshot, %{cell: state.cell, txid: head})
+        sidecar(state, key, level, merged, info, :ours)
+        keep_snapshot(state, key, ts, chain)
+        put_chain(state, head, byte_size(merged), 0)
+        thin_snapshots(state)
+        {:ok, :ok, byte_size(merged)}
+
+      :exists ->
+        sidecar(state, key, level, merged, info, :verify)
+        keep_snapshot(state, key, ts, chain)
+        {:ok, :exists, 0}
+
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -849,7 +855,8 @@ defmodule Alambique.Compaction do
          {:ok, older_ts} when older_ts != nil <- head_ts(state, older.key),
          true <- previous_ts - older_ts < keep,
          true <- within_window?(state, previous_ts) do
-      mark(state, [previous.key])
+      _ = mark(state, [previous.key])
+      :ok
     else
       _ -> :ok
     end
