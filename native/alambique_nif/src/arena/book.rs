@@ -121,12 +121,16 @@ impl Book {
     pub fn new(g: Geometry) -> Option<Book> {
         let mut slots = [0; CLASSES];
         let mut used_bytes = [0; CLASSES];
-        for (c, &stride) in g.strides.iter().enumerate() {
+        for ((slot, used), &stride) in slots
+            .iter_mut()
+            .zip(used_bytes.iter_mut())
+            .zip(g.strides.iter())
+        {
             if stride == 0 || !stride.is_multiple_of(8) {
                 return None;
             }
-            slots[c] = (g.extent_bytes / stride).max(1);
-            used_bytes[c] = round_up(slots[c] * stride, g.page);
+            *slot = (g.extent_bytes / stride).max(1);
+            *used = round_up(*slot * stride, g.page);
         }
         let ext_bytes = used_bytes.iter().copied().max()?.next_power_of_two();
         let max_ext = (g.reserved / ext_bytes).min(NONE as usize - 1);
@@ -230,35 +234,58 @@ impl Book {
         self.regions.len()
     }
 
-    fn head(&mut self, l: List) -> &mut u32 {
+    fn head(&mut self, l: List) -> Option<&mut u32> {
         match l {
-            List::Hot => &mut self.hot,
-            List::Cold => &mut self.cold,
-            List::Avail(r, c) => &mut self.regions[r as usize].avail[c],
+            List::Hot => Some(&mut self.hot),
+            List::Cold => Some(&mut self.cold),
+            List::Avail(r, c) => self.regions.get_mut(r as usize)?.avail.get_mut(c),
+        }
+    }
+
+    fn set_head(&mut self, l: List, e: u32) {
+        if let Some(h) = self.head(l) {
+            *h = e;
         }
     }
 
     fn push(&mut self, l: List, e: u32) {
-        let old = *self.head(l);
-        let x = &mut self.exts[e as usize];
+        let Some(old) = self.head(l).map(|h| *h) else {
+            return;
+        };
+        let Some(x) = self.exts.get_mut(e as usize) else {
+            return;
+        };
         x.prev = NONE;
         x.next = old;
         if old != NONE {
-            self.exts[old as usize].prev = e;
+            if let Some(o) = self.exts.get_mut(old as usize) {
+                o.prev = e;
+            }
         }
-        *self.head(l) = e;
+        self.set_head(l, e);
     }
 
-    fn remove(&mut self, l: List, e: u32) {
-        let (p, n) = (self.exts[e as usize].prev, self.exts[e as usize].next);
+    /// Takes extent `e` out of list `l`; false when there is no such extent.
+    fn remove(&mut self, l: List, e: u32) -> bool {
+        let Some(&Ext {
+            prev: p, next: n, ..
+        }) = self.exts.get(e as usize)
+        else {
+            return false;
+        };
         if p != NONE {
-            self.exts[p as usize].next = n;
+            if let Some(x) = self.exts.get_mut(p as usize) {
+                x.next = n;
+            }
         } else {
-            *self.head(l) = n;
+            self.set_head(l, n);
         }
         if n != NONE {
-            self.exts[n as usize].prev = p;
+            if let Some(x) = self.exts.get_mut(n as usize) {
+                x.prev = p;
+            }
         }
+        true
     }
 
     // Regions.
@@ -269,20 +296,21 @@ impl Book {
         let slot = match self.spare_regions.pop() {
             Some(s) => s,
             None if self.regions.len() < self.max_regions => {
+                let slot = u32::try_from(self.regions.len()).ok()?;
                 self.regions.push(Region {
                     id: 0,
                     live: false,
                     avail: [NONE; CLASSES],
                 });
-                (self.regions.len() - 1) as u32
+                slot
             }
             None => return None,
         };
         let id = self.next_id;
-        self.next_id += 1;
-        let r = &mut self.regions[slot as usize];
+        let r = self.regions.get_mut(slot as usize)?;
         r.id = id;
         r.live = true;
+        self.next_id += 1;
         self.open_regions += 1;
         Some((slot, id))
     }
@@ -291,26 +319,38 @@ impl Book {
     /// full ones follow when a slot is freed (`owner_of`).
     pub fn close_region(&mut self, slot: u32, id: u64) {
         let s = slot as usize;
-        if s == 0 || s >= self.regions.len() || !self.regions[s].live || self.regions[s].id != id {
+        if s == 0 || !self.regions.get(s).is_some_and(|r| r.live && r.id == id) {
             return;
         }
         for c in 0..CLASSES {
-            while self.regions[s].avail[c] != NONE {
-                let e = self.regions[s].avail[c];
-                self.remove(List::Avail(slot, c), e);
+            while let Some(e) = self
+                .regions
+                .get(s)
+                .and_then(|r| r.avail.get(c))
+                .copied()
+                .filter(|&e| e != NONE)
+            {
+                if !self.remove(List::Avail(slot, c), e) {
+                    // The list names no extent: drop it.
+                    self.set_head(List::Avail(slot, c), NONE);
+                    break;
+                }
                 self.adopt(e, c);
             }
         }
-        let r = &mut self.regions[s];
-        r.live = false;
-        r.id = 0;
+        if let Some(r) = self.regions.get_mut(s) {
+            r.live = false;
+            r.id = 0;
+        }
         self.spare_regions.push(slot);
         self.open_regions -= 1;
     }
 
     /// Region 0 takes extent `e` of class `c`, which is in no list.
     fn adopt(&mut self, e: u32, c: usize) {
-        let x = &mut self.exts[e as usize];
+        let Some(x) = self.exts.get_mut(e as usize) else {
+            return;
+        };
         x.owner = 0;
         x.owner_id = 0;
         self.push(List::Avail(0, c), e);
@@ -318,40 +358,49 @@ impl Book {
 
     /// The region slot that owns `e`, or 0 when its region has closed.
     fn owner_of(&self, e: u32) -> u32 {
-        let x = &self.exts[e as usize];
-        let r = &self.regions[x.owner as usize];
-        if r.live && r.id == x.owner_id {
-            x.owner
-        } else {
-            0
+        let Some(x) = self.exts.get(e as usize) else {
+            return 0;
+        };
+        match self.regions.get(x.owner as usize) {
+            Some(r) if r.live && r.id == x.owner_id => x.owner,
+            _ => 0,
         }
     }
 
     // Slots.
 
     fn fbit(&self, e: u32, slot: usize) -> bool {
-        self.free[e as usize * self.free_words + slot / 64] >> (slot % 64) & 1 == 1
+        self.free
+            .get(e as usize * self.free_words + slot / 64)
+            .is_some_and(|w| w >> (slot % 64) & 1 == 1)
     }
 
     fn set_fbit(&mut self, e: u32, slot: usize, on: bool) {
-        let w = &mut self.free[e as usize * self.free_words + slot / 64];
-        if on {
-            *w |= 1 << (slot % 64);
-        } else {
-            *w &= !(1 << (slot % 64));
+        let at = e as usize * self.free_words + slot / 64;
+        if let Some(w) = self.free.get_mut(at) {
+            if on {
+                *w |= 1 << (slot % 64);
+            } else {
+                *w &= !(1 << (slot % 64));
+            }
         }
     }
 
+    /// Whether the OS page is not resident; a page outside the table is not.
     fn rbit(&self, e: u32, page: usize) -> bool {
-        self.rel[e as usize * self.rel_words + page / 64] >> (page % 64) & 1 == 1
+        self.rel
+            .get(e as usize * self.rel_words + page / 64)
+            .is_none_or(|w| w >> (page % 64) & 1 == 1)
     }
 
     fn set_rbit(&mut self, e: u32, page: usize, on: bool) {
-        let w = &mut self.rel[e as usize * self.rel_words + page / 64];
-        if on {
-            *w |= 1 << (page % 64);
-        } else {
-            *w &= !(1 << (page % 64));
+        let at = e as usize * self.rel_words + page / 64;
+        if let Some(w) = self.rel.get_mut(at) {
+            if on {
+                *w |= 1 << (page % 64);
+            } else {
+                *w &= !(1 << (page % 64));
+            }
         }
     }
 
@@ -363,21 +412,23 @@ impl Book {
             Some(r) if r.live => region,
             _ => 0,
         };
-        let mut e = self.regions[r as usize].avail[class];
+        let mut e = self.regions.get(r as usize)?.avail.get(class).copied()?;
         if e == NONE {
             e = self.take_extent(class, r)?;
         }
         let words = self.free_words;
         let base = e as usize * words;
-        let slot = (0..words)
-            .find(|&w| self.free[base + w] != 0)
-            .map(|w| w * 64 + self.free[base + w].trailing_zeros() as usize)?;
+        let slot = (0..words).find_map(|w| {
+            let word = *self.free.get(base + w)?;
+            (word != 0).then(|| w * 64 + word.trailing_zeros() as usize)
+        })?;
+        let stride = *self.strides.get(class)?;
         self.set_fbit(e, slot, false);
-        self.exts[e as usize].free -= 1;
-        if self.exts[e as usize].free == 0 {
+        let x = self.exts.get_mut(e as usize)?;
+        x.free -= 1;
+        if x.free == 0 {
             self.remove(List::Avail(r, class), e);
         }
-        let stride = self.strides[class];
         let (from, to) = (slot * stride, slot * stride + stride - 1);
         for p in from / self.page..=to / self.page {
             if self.rbit(e, p) {
@@ -391,6 +442,10 @@ impl Book {
 
     /// An extent for `region`, from the hot pool, the cold pool or the range.
     fn take_extent(&mut self, class: usize, region: u32) -> Option<u32> {
+        // Everything that can fail comes before an extent leaves its pool.
+        let id = self.regions.get(region as usize)?.id;
+        let slots = *self.slots.get(class)?;
+        let (class_id, free) = (u8::try_from(class).ok()?, u32::try_from(slots).ok()?);
         let e = if self.hot != NONE {
             let e = self.hot;
             self.remove(List::Hot, e);
@@ -403,7 +458,7 @@ impl Book {
             if self.exts.len() >= self.max_ext {
                 return None;
             }
-            let e = self.exts.len() as u32;
+            let e = u32::try_from(self.exts.len()).ok()?;
             self.exts.push(Ext {
                 class: 0,
                 state: State::Cold,
@@ -418,26 +473,27 @@ impl Book {
             self.rel.resize(self.rel.len() + self.rel_words, u64::MAX);
             e
         };
-        let id = self.regions[region as usize].id;
-        let slots = self.slots[class];
-        let x = &mut self.exts[e as usize];
+        let x = self.exts.get_mut(e as usize)?;
         *x = Ext {
-            class: class as u8,
+            class: class_id,
             state: State::Owned,
             owner: region,
             owner_id: id,
-            free: slots as u32,
+            free,
             claimed: 0,
             prev: NONE,
             next: NONE,
         };
         for w in 0..self.free_words {
             let ones = slots.saturating_sub(w * 64).min(64);
-            self.free[e as usize * self.free_words + w] = if ones == 64 {
-                u64::MAX
-            } else {
-                (1u64 << ones) - 1
-            };
+            let at = e as usize * self.free_words + w;
+            if let Some(word) = self.free.get_mut(at) {
+                *word = if ones == 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << ones) - 1
+                };
+            }
         }
         self.push(List::Avail(region, class), e);
         Some(e)
@@ -445,14 +501,24 @@ impl Book {
 
     /// Frees the slot at `off`, which `alloc` returned.
     pub fn free(&mut self, off: usize) {
-        let e = (off >> self.shift) as u32;
-        debug_assert_eq!(self.exts[e as usize].state, State::Owned);
-        let class = self.exts[e as usize].class as usize;
-        let slot = (off & (self.extent_bytes() - 1)) / self.strides[class];
+        let Ok(e) = u32::try_from(off >> self.shift) else {
+            return;
+        };
+        let Some(x) = self.exts.get(e as usize) else {
+            return;
+        };
+        debug_assert_eq!(x.state, State::Owned);
+        let class = x.class as usize;
+        let (Some(&stride), Some(&slots)) = (self.strides.get(class), self.slots.get(class)) else {
+            return;
+        };
+        let slot = (off & (self.extent_bytes() - 1)) / stride;
         self.set_fbit(e, slot, true);
-        self.in_use -= self.strides[class] as u64;
+        self.in_use -= stride as u64;
         let r = self.owner_of(e);
-        let x = &mut self.exts[e as usize];
+        let Some(x) = self.exts.get_mut(e as usize) else {
+            return;
+        };
         x.free += 1;
         let (free, claimed) = (x.free, x.claimed);
         let was_listed = free > 1;
@@ -460,20 +526,23 @@ impl Book {
             x.owner = 0;
             x.owner_id = 0;
         }
-        if free as usize == self.slots[class] && claimed == 0 {
+        let owner = x.owner;
+        if free as usize == slots && claimed == 0 {
             if was_listed {
-                self.remove(List::Avail(self.exts[e as usize].owner, class), e);
+                self.remove(List::Avail(owner, class), e);
             }
             self.pool(e);
         } else if !was_listed {
-            self.push(List::Avail(self.exts[e as usize].owner, class), e);
+            self.push(List::Avail(owner, class), e);
         }
     }
 
     /// Puts a fully free extent in the pool its residency says.
     fn pool(&mut self, e: u32) {
         let hot = (0..self.pages_per_ext).any(|p| !self.rbit(e, p));
-        self.exts[e as usize].state = if hot { State::Hot } else { State::Cold };
+        if let Some(x) = self.exts.get_mut(e as usize) {
+            x.state = if hot { State::Hot } else { State::Cold };
+        }
         self.push(if hot { List::Hot } else { List::Cold }, e);
     }
 
@@ -491,7 +560,10 @@ impl Book {
             if self.cursor >= self.exts.len() {
                 self.cursor = 0;
             }
-            let (pages, done) = self.claim_ext(self.cursor as u32, out, left);
+            let Ok(cursor) = u32::try_from(self.cursor) else {
+                break;
+            };
+            let (pages, done) = self.claim_ext(cursor, out, left);
             left -= pages.min(left);
             // An extent that the budget or `out` stopped half way is the next
             // start.
@@ -507,23 +579,29 @@ impl Book {
 
     /// Pages claimed in extent `e`, and whether all of it was looked at.
     fn claim_ext(&mut self, e: u32, out: &mut Vec<Claim>, budget: usize) -> (usize, bool) {
-        let x = self.exts[e as usize];
+        let Some(&x) = self.exts.get(e as usize) else {
+            return (0, true);
+        };
         match x.state {
             State::Hot => {
                 let (first, end, n) = self.resident_span(e, 0, self.pages_per_ext);
+                let (Ok(first_page), Ok(end_page)) = (u32::try_from(first), u32::try_from(end))
+                else {
+                    return (0, true);
+                };
                 self.remove(List::Hot, e);
                 if n == 0 {
-                    self.exts[e as usize].state = State::Cold;
+                    self.set_state(e, State::Cold);
                     self.push(List::Cold, e);
                     return (0, true);
                 }
-                self.exts[e as usize].state = State::Trimming;
+                self.set_state(e, State::Trimming);
                 out.push(Claim {
                     ext: e,
                     first_slot: 0,
                     count: 0,
-                    first_page: first as u32,
-                    end_page: end as u32,
+                    first_page,
+                    end_page,
                     whole: true,
                     released: false,
                 });
@@ -534,9 +612,23 @@ impl Book {
         }
     }
 
+    fn set_state(&mut self, e: u32, state: State) {
+        if let Some(x) = self.exts.get_mut(e as usize) {
+            x.state = state;
+        }
+    }
+
     fn claim_runs(&mut self, e: u32, out: &mut Vec<Claim>, budget: usize) -> (usize, bool) {
-        let class = self.exts[e as usize].class as usize;
-        let (slots, stride) = (self.slots[class], self.strides[class]);
+        let Some(class) = self.exts.get(e as usize).map(|x| x.class as usize) else {
+            return (0, true);
+        };
+        let (Some(&slots), Some(&stride), Some(&used)) = (
+            self.slots.get(class),
+            self.strides.get(class),
+            self.used_bytes.get(class),
+        ) else {
+            return (0, true);
+        };
         let mut claimed_pages = 0;
         let mut s = 0;
         while s < slots {
@@ -554,29 +646,39 @@ impl Book {
             // Whole OS pages inside the run; the last slot also owns the
             // tail of the extent.
             let end_byte = if s + n == slots {
-                self.used_bytes[class]
+                used
             } else {
                 (s + n) * stride
             };
             let (from, to) = ((s * stride).div_ceil(self.page), end_byte / self.page);
             let (first, end, pages) = self.resident_span(e, from, to);
             if pages > 0 {
+                let (Ok(first_slot), Ok(count), Ok(first_page), Ok(end_page)) = (
+                    u32::try_from(s),
+                    u32::try_from(n),
+                    u32::try_from(first),
+                    u32::try_from(end),
+                ) else {
+                    return (claimed_pages, true);
+                };
                 for i in s..s + n {
                     self.set_fbit(e, i, false);
                 }
-                let owner = self.exts[e as usize].owner;
-                let x = &mut self.exts[e as usize];
-                x.free -= n as u32;
-                x.claimed += n as u32;
-                if x.free == 0 {
+                let Some(x) = self.exts.get_mut(e as usize) else {
+                    return (claimed_pages, true);
+                };
+                x.free -= count;
+                x.claimed += count;
+                let (owner, none_free) = (x.owner, x.free == 0);
+                if none_free {
                     self.remove(List::Avail(owner, class), e);
                 }
                 out.push(Claim {
                     ext: e,
-                    first_slot: s as u32,
-                    count: n as u32,
-                    first_page: first as u32,
-                    end_page: end as u32,
+                    first_slot,
+                    count,
+                    first_page,
+                    end_page,
                     whole: false,
                     released: false,
                 });
@@ -623,12 +725,19 @@ impl Book {
                 self.pool(e);
                 continue;
             }
-            let class = self.exts[e as usize].class as usize;
+            let Some(class) = self.exts.get(e as usize).map(|x| x.class as usize) else {
+                continue;
+            };
+            let Some(&slots) = self.slots.get(class) else {
+                continue;
+            };
             for i in c.first_slot..c.first_slot + c.count {
                 self.set_fbit(e, i as usize, true);
             }
             let r = self.owner_of(e);
-            let x = &mut self.exts[e as usize];
+            let Some(x) = self.exts.get_mut(e as usize) else {
+                continue;
+            };
             let was_listed = x.free > 0;
             x.free += c.count;
             x.claimed -= c.count;
@@ -637,7 +746,7 @@ impl Book {
                 x.owner_id = 0;
             }
             let (free, claimed, owner) = (x.free, x.claimed, x.owner);
-            if free as usize == self.slots[class] && claimed == 0 {
+            if free as usize == slots && claimed == 0 {
                 if was_listed {
                     self.remove(List::Avail(owner, class), e);
                 }
@@ -669,9 +778,9 @@ impl Book {
         }
         let (mut used, mut resident) = (0u64, 0u64);
         for (i, x) in self.exts.iter().enumerate() {
-            let e = i as u32;
+            let e = u32::try_from(i).unwrap();
             let slots = self.slots[x.class as usize];
-            let free = (0..slots).filter(|&s| self.fbit(e, s)).count() as u32;
+            let free = u32::try_from((0..slots).filter(|&s| self.fbit(e, s)).count()).unwrap();
             assert_eq!(free, x.free, "free count of extent {i}");
             let in_list = match x.state {
                 State::Owned => x.free > 0,
@@ -781,12 +890,15 @@ mod tests {
         for i in 0..steps {
             let r = next();
             if !r.is_multiple_of(3) || live.is_empty() {
-                let class = (r >> 8) as usize % CLASSES;
-                let region = regions[(r >> 16) as usize % regions.len()].0;
+                let class = usize::try_from(r >> 8).unwrap() % CLASSES;
+                let region = regions[usize::try_from(r >> 16).unwrap() % regions.len()].0;
                 let off = b.alloc(class, region).expect("room");
                 assert!(live.insert(off, class).is_none(), "slot handed out twice");
             } else {
-                let key = *live.keys().nth((r >> 8) as usize % live.len()).unwrap();
+                let key = *live
+                    .keys()
+                    .nth(usize::try_from(r >> 8).unwrap() % live.len())
+                    .unwrap();
                 b.free(key);
                 live.remove(&key);
             }
@@ -817,7 +929,7 @@ mod tests {
             }
         }
         let used: usize = live.values().map(|&c| b.stride(c)).sum();
-        assert_eq!(b.in_use() as usize, used);
+        assert_eq!(usize::try_from(b.in_use()).unwrap(), used);
         b.check();
         let mut spans: Vec<_> = live.iter().map(|(&o, &c)| (o, o + b.stride(c))).collect();
         spans.sort();
