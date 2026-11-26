@@ -312,6 +312,7 @@ defmodule Bench do
              compaction: false,
              idle_timeout_ms: 600_000,
              lease_ttl_ms: ttl_ms,
+             skew_margin_ms: 400,
              awake: [cache_kib: 128, idle_cache_after_ms: 300_000, idle_cache_kib: 8]
            ] ++ extra}
         ],
