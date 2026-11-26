@@ -1014,4 +1014,17 @@ defmodule Alambique.ConfigOptionsTest do
     bad.([advertise: "h", other: 1], ~r/unknown/)
     bad.(true, ~r/keyword list/)
   end
+
+  describe "deletion_grace_ms" do
+    test "defaults to the trash grace when absent and refuses an explicit nil", ctx do
+      assert Alambique.Config.build(base(ctx)).deletion_grace_ms ==
+               Alambique.Trash.default_grace_ms()
+
+      assert Alambique.Config.build(base(ctx, deletion_grace_ms: 7)).deletion_grace_ms == 7
+
+      assert_raise ArgumentError, ~r/:deletion_grace_ms must be a non-negative integer/, fn ->
+        Alambique.Config.build(base(ctx, deletion_grace_ms: nil))
+      end
+    end
+  end
 end
