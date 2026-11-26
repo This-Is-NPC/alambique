@@ -12,7 +12,7 @@
 //! operations account for.
 
 use std::collections::BTreeMap;
-use std::ffi::{c_void, OsStr};
+use std::ffi::{c_int, c_void, OsStr};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -207,15 +207,15 @@ pub fn attach_refused(spec: &[u8]) -> bool {
 }
 
 fn hex(b: u8) -> Option<u8> {
-    (b as char).to_digit(16).map(|d| d as u8)
+    (b as char).to_digit(16).and_then(|d| u8::try_from(d).ok())
 }
 
 /// Decodes `%HH` escapes. `%00` ends the text, as in SQLite.
 fn percent_decode(s: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(s.len());
     let mut i = 0;
-    while i < s.len() {
-        let escaped = match (s[i], s.get(i + 1), s.get(i + 2)) {
+    while let Some(&c) = s.get(i) {
+        let escaped = match (c, s.get(i + 1), s.get(i + 2)) {
             (b'%', Some(&h), Some(&l)) => hex(h).zip(hex(l)).map(|(h, l)| h << 4 | l),
             _ => None,
         };
@@ -226,12 +226,24 @@ fn percent_decode(s: &[u8]) -> Vec<u8> {
                 i += 3;
             }
             None => {
-                out.push(s[i]);
+                out.push(c);
                 i += 1;
             }
         }
     }
     out
+}
+
+/// `bytes` cut at the first `sep`: what is before it and what is after it
+/// (empty without one).
+fn split_at_byte(bytes: &[u8], sep: u8) -> (&[u8], &[u8]) {
+    match bytes.iter().position(|&b| b == sep) {
+        Some(at) => {
+            let (before, from_sep) = bytes.split_at(at);
+            (before, from_sep.get(1..).unwrap_or_default())
+        }
+        None => (bytes, &[]),
+    }
 }
 
 /// The path an `ATTACH` name opens and whether it opens it read-only
@@ -253,17 +265,11 @@ fn attach_target(spec: &[u8]) -> Option<(Vec<u8>, bool)> {
         None => rest,
     };
     let rest = rest.split(|&b| b == b'#').next().unwrap_or_default();
-    let (path, query) = match rest.iter().position(|&b| b == b'?') {
-        Some(at) => (&rest[..at], &rest[at + 1..]),
-        None => (rest, &rest[..0]),
-    };
+    let (path, query) = split_at_byte(rest, b'?');
     let mut mode_ro = false;
     let mut immutable = None;
     for pair in query.split(|&b| b == b'&') {
-        let (key, value) = match pair.iter().position(|&b| b == b'=') {
-            Some(at) => (&pair[..at], &pair[at + 1..]),
-            None => (pair, &pair[..0]),
-        };
+        let (key, value) = split_at_byte(pair, b'=');
         match percent_decode(key).as_slice() {
             b"mode" => mode_ro = percent_decode(value) == b"ro",
             b"immutable" if immutable.is_none() => {
@@ -307,46 +313,18 @@ fn ident(h: &[u32; HDR_WORDS]) -> Ident {
 /// # Safety
 /// `db` is a live connection.
 pub unsafe fn read_header(db: *mut ffi::sqlite3) -> Option<[u32; HDR_WORDS]> {
-    let mut file: *mut ffi::sqlite3_file = ptr::null_mut();
-    let mut region: *mut c_void = ptr::null_mut();
-    // SAFETY: by the contract; the database mutex keeps another thread from
-    // using the connection's file while the mapping is asked for.
-    let (rc, mapped) = unsafe {
-        let mutex = ffi::sqlite3_db_mutex(db);
-        ffi::sqlite3_mutex_enter(mutex);
-        let rc = ffi::sqlite3_file_control(
-            db,
-            c"main".as_ptr(),
-            ffi::SQLITE_FCNTL_FILE_POINTER,
-            &mut file as *mut _ as *mut c_void,
-        );
-        let mut mapped = ffi::SQLITE_ERROR;
-        if rc == ffi::SQLITE_OK && !file.is_null() && !(*file).pMethods.is_null() {
-            let methods = &*(*file).pMethods;
-            if methods.iVersion >= 2 {
-                if let Some(shm_map) = methods.xShmMap {
-                    // Region 0, without creating it: it exists while the WAL
-                    // of this connection is open.
-                    mapped = shm_map(file, 0, 32768, 0, &mut region);
-                }
-            }
-        }
-        ffi::sqlite3_mutex_leave(mutex);
-        (rc, mapped)
-    };
-    if rc != ffi::SQLITE_OK || mapped != ffi::SQLITE_OK || region.is_null() {
-        return None;
-    }
+    // SAFETY: by the contract.
+    let region = unsafe { map_header(db) }?;
     let base = region as *const u32;
     for attempt in 0..64 {
         // SAFETY: the region holds at least the two 48-byte headers and stays
         // mapped while the WAL of the connection is open.
-        let (a, b) = unsafe {
-            let a = copy(base);
-            fence(Ordering::Acquire);
-            let b = copy(base.add(HDR_WORDS));
-            (a, b)
-        };
+        let a = unsafe { copy(base) };
+        fence(Ordering::Acquire);
+        // SAFETY: as above.
+        let second = unsafe { base.add(HDR_WORDS) };
+        // SAFETY: as above.
+        let b = unsafe { copy(second) };
         // `isInit` is the first byte after `iChange`.
         if a == b && a[3].to_ne_bytes()[0] != 0 {
             return Some(a);
@@ -360,14 +338,68 @@ pub unsafe fn read_header(db: *mut ffi::sqlite3) -> Option<[u32; HDR_WORDS]> {
     None
 }
 
+/// Region 0 of the wal-index of `db`, without creating it: it exists while the
+/// WAL of this connection is open.
+///
+/// # Safety
+/// `db` is a live connection.
+unsafe fn map_header(db: *mut ffi::sqlite3) -> Option<*mut c_void> {
+    let mut file: *mut ffi::sqlite3_file = ptr::null_mut();
+    let mut region: *mut c_void = ptr::null_mut();
+    // SAFETY: by the contract.
+    let mutex = unsafe { ffi::sqlite3_db_mutex(db) };
+    // The database mutex keeps another thread from using the connection's
+    // file while the mapping is asked for.
+    // SAFETY: `mutex` is the live connection's own; it is left below.
+    unsafe { ffi::sqlite3_mutex_enter(mutex) };
+    // SAFETY: `db` is live and its mutex held; `file` is a valid out-pointer.
+    let rc = unsafe {
+        ffi::sqlite3_file_control(
+            db,
+            c"main".as_ptr(),
+            ffi::SQLITE_FCNTL_FILE_POINTER,
+            &mut file as *mut _ as *mut c_void,
+        )
+    };
+    let mut mapped = ffi::SQLITE_ERROR;
+    if rc == ffi::SQLITE_OK {
+        // SAFETY: `file` is the connection's file, and its mutex is held.
+        mapped = unsafe { map_region_zero(file, &mut region) };
+    }
+    // SAFETY: entered above.
+    unsafe { ffi::sqlite3_mutex_leave(mutex) };
+    (rc == ffi::SQLITE_OK && mapped == ffi::SQLITE_OK && !region.is_null()).then_some(region)
+}
+
+/// # Safety
+/// `file` is null or an open file of a live connection.
+unsafe fn map_region_zero(file: *mut ffi::sqlite3_file, region: &mut *mut c_void) -> c_int {
+    // SAFETY: by the contract.
+    let Some(f) = (unsafe { file.as_ref() }) else {
+        return ffi::SQLITE_ERROR;
+    };
+    // SAFETY: an open file points at the methods of its VFS.
+    let Some(methods) = (unsafe { f.pMethods.as_ref() }) else {
+        return ffi::SQLITE_ERROR;
+    };
+    let Some(shm_map) = methods.xShmMap.filter(|_| methods.iVersion >= 2) else {
+        return ffi::SQLITE_ERROR;
+    };
+    // SAFETY: the arguments are those of `xShmMap` for region 0 without
+    // creating it.
+    unsafe { shm_map(file, 0, 32768, 0, region) }
+}
+
 /// # Safety
 /// `p` points to `HDR_WORDS` readable words.
 unsafe fn copy(p: *const u32) -> [u32; HDR_WORDS] {
     let mut out = [0u32; HDR_WORDS];
     for (i, w) in out.iter_mut().enumerate() {
-        // SAFETY: by the contract; another process may be writing, which is
-        // why the read is volatile and the caller compares two copies.
-        *w = unsafe { p.add(i).read_volatile() };
+        // SAFETY: by the contract.
+        let q = unsafe { p.add(i) };
+        // SAFETY: another process may be writing, which is why the read is
+        // volatile and the caller compares two copies.
+        *w = unsafe { q.read_volatile() };
     }
     out
 }
@@ -467,7 +499,7 @@ impl Watch {
             return false;
         }
         let ok = header.as_ref().map(ident).filter(|id| {
-            id[0] == rec[0].wrapping_add(commits.wrapping_sub(s.commits_at) as u32)
+            id[0] == rec[0].wrapping_add((commits.wrapping_sub(s.commits_at) & 0xFFFF_FFFF) as u32)
                 && u64::from(id[1]) == frames
         });
         match ok {
