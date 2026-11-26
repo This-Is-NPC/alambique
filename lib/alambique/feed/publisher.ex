@@ -28,10 +28,11 @@ defmodule Alambique.Feed.Publisher do
   def try_stamp(%State{config: %{feed_capture: false}} = state), do: {:ok, state}
 
   def try_stamp(state) do
-    ts = max(State.now_ms(state), state.feed_floor)
+    ts = max(State.now_ms(state), state.feed.floor)
     txid = Replicator.next_txid(state.repl)
 
-    with :ok <- Capture.stamp(state.conn, txid, ts), do: {:ok, %{state | feed_floor: ts}}
+    with :ok <- Capture.stamp(state.conn, txid, ts),
+         do: {:ok, %{state | feed: %{state.feed | floor: ts}}}
   end
 
   # Cleanup (design §13): the rows of published batches are removed either in
@@ -45,8 +46,8 @@ defmodule Alambique.Feed.Publisher do
   """
   @spec wrap(State.t(), (Alambique.Tx.t() -> term)) :: (Alambique.Tx.t() -> term)
   def wrap(%State{config: %{feed: %{cleanup: mode}}} = state, fun) do
-    if mode in [:in_write, :idle_or_write] and state.feed_published != state.feed_cleaned do
-      {published, floor} = {state.feed_published, state.feed_floor}
+    if mode in [:in_write, :idle_or_write] and state.feed.published != state.feed.cleaned do
+      {published, floor} = {state.feed.published, state.feed.floor}
 
       fn tx ->
         Fault.point(:feed_before_cleanup, %{cell: state.id, txid: published})
@@ -62,25 +63,25 @@ defmodule Alambique.Feed.Publisher do
   @spec committed(State.t()) :: State.t()
   def committed(%State{config: %{feed: %{cleanup: mode}}} = state)
       when mode in [:in_write, :idle_or_write],
-      do: %{state | feed_cleaned: state.feed_published}
+      do: %{state | feed: %{state.feed | cleaned: state.feed.published}}
 
   def committed(state), do: state
 
   @doc "Whether published rows wait for a cleanup that runs outside user writes."
   @spec cleanup_due?(State.t()) :: boolean
   def cleanup_due?(%State{config: %{feed: %{cleanup: :in_write}}}), do: false
-  def cleanup_due?(state), do: state.feed_published > state.feed_cleaned
+  def cleanup_due?(state), do: state.feed.published > state.feed.cleaned
 
   @doc """
   Removes the published rows in a transaction of its own, up to
   `feed.cleanup_rows` of them but whole batches only: a batch that kept some
   of its rows would be published again under other record ids after a crash.
-  `feed_cleaned` advances only once the transaction committed. The cell must
+  `feed.cleaned` advances only once the transaction committed. The cell must
   send a batch afterwards: the deletion is a change of the file.
   """
   @spec cleanup(State.t()) :: {:ok, State.t()} | {:error, State.t()} | {:stop, term, State.t()}
   def cleanup(state) do
-    {from, published, floor} = {state.feed_cleaned, state.feed_published, state.feed_floor}
+    {from, published, floor} = {state.feed.cleaned, state.feed.published, state.feed.floor}
     rows = state.config.feed.cleanup_rows
 
     fun = fn tx ->
@@ -93,7 +94,7 @@ defmodule Alambique.Feed.Publisher do
     case Db.transaction(state.conn, Replicator.next_txid(state.repl), fun,
            select: state.config.feed
          ) do
-      {:ok, cut} -> {:ok, %{state | feed_cleaned: cut}}
+      {:ok, cut} -> {:ok, %{state | feed: %{state.feed | cleaned: cut}}}
       {:error, reason} -> if Db.fatal?(reason), do: {:stop, reason, state}, else: {:error, state}
     end
   end
@@ -105,7 +106,10 @@ defmodule Alambique.Feed.Publisher do
   def restore_floor(%State{config: %{feed_capture: false}} = state), do: state
 
   def restore_floor(state),
-    do: %{state | feed_floor: max(state.feed_floor, Capture.last_time(state.conn))}
+    do: %{
+      state
+      | feed: %{state.feed | floor: max(state.feed.floor, Capture.last_time(state.conn))}
+    }
 
   @doc "Hands over what the previous owner left unpublished (design §7, step 5)."
   @spec start(State.t()) :: State.t()
@@ -120,7 +124,7 @@ defmodule Alambique.Feed.Publisher do
   connection: nothing that is queued reads it.
 
   With `hand_over: :cell` a batch without rows (a cleanup, a change that is
-  not captured) leaves `feed_published` behind the acknowledged TXID, so the
+  not captured) leaves `feed.published` behind the acknowledged TXID, so the
   rows after the last batch handed over are looked for instead.
   """
   @spec settled?(State.t()) :: boolean
@@ -134,14 +138,14 @@ defmodule Alambique.Feed.Publisher do
   def delivered?(%State{config: %{feed_capture: false}}), do: true
 
   def delivered?(state) do
-    state.feed_backlog == 0 and not state.feed_capped and state.feed_part == nil and
-      state.feed_tick == nil and published?(state)
+    state.feed.backlog == 0 and not state.feed.capped and state.feed.part == nil and
+      state.feed.tick == nil and published?(state)
   end
 
-  defp published?(%State{feed_published: txid, pipe: %{acked: %{txid: txid}}}), do: true
+  defp published?(%State{pipe: %{acked: %{txid: txid}}, feed: %{published: txid}}), do: true
 
   defp published?(%State{config: %{feed: %{hand_over: :cell}}} = state) do
-    Capture.rows_from(state.conn, {state.feed_sent + 1, -1}, state.pipe.acked.txid, 1) ==
+    Capture.rows_from(state.conn, {state.feed.sent + 1, -1}, state.pipe.acked.txid, 1) ==
       {:ok, []}
   end
 
@@ -169,18 +173,18 @@ defmodule Alambique.Feed.Publisher do
       do: state
 
   # The next piece is on its way.
-  def after_ack(%State{feed_tick: tick} = state) when tick != nil, do: state
+  def after_ack(%State{feed: %{tick: tick}} = state) when tick != nil, do: state
 
   # `reader_close: :after_read`: the reader serves one range at a time, so no
   # other range is handed over until the sender reported this one.
-  def after_ack(%State{feed_reading: true} = state), do: state
+  def after_ack(%State{feed: %{reading: true}} = state), do: state
 
   # A batch that is partly with the sender takes no room: it must be finished.
-  def after_ack(%State{feed_backlog: backlog, feed_part: part} = state) do
+  def after_ack(%State{feed: %{backlog: backlog, part: part}} = state) do
     limit = state.config.feed.max_backlog_batches
 
     cond do
-      backlog >= limit and part == nil -> %{state | feed_capped: true}
+      backlog >= limit and part == nil -> %{state | feed: %{state.feed | capped: true}}
       State.lease_valid?(state) -> state |> hand_over(max(limit - backlog, 0)) |> next_piece()
       true -> state
     end
@@ -188,13 +192,15 @@ defmodule Alambique.Feed.Publisher do
 
   @doc "Hands over the next piece, when `ref` is the message the cell sent itself for it."
   @spec continue(State.t(), reference) :: State.t()
-  def continue(%State{feed_tick: ref} = state, ref), do: after_ack(%{state | feed_tick: nil})
+  def continue(%State{feed: %{tick: ref}} = state, ref),
+    do: after_ack(%{state | feed: %{state.feed | tick: nil}})
+
   def continue(state, _stale), do: state
 
   defp next_piece({state, true}) do
     ref = make_ref()
     send(self(), {:feed_part, ref})
-    %{state | feed_tick: ref}
+    %{state | feed: %{state.feed | tick: ref}}
   end
 
   defp next_piece({state, false}), do: state
@@ -214,11 +220,11 @@ defmodule Alambique.Feed.Publisher do
     if State.lease_valid?(state) do
       deadline = System.monotonic_time(:millisecond) + wait
 
-      case hand_over_all(%{state | feed_tick: nil}, deadline) do
-        {:ok, %{feed_backlog: backlog} = state} when backlog > 0 ->
+      case hand_over_all(%{state | feed: %{state.feed | tick: nil}}, deadline) do
+        {:ok, %{feed: %{backlog: backlog}} = state} when backlog > 0 ->
           Fault.point(:feed_before_stop_flush, %{cell: state.id, txid: state.pipe.acked.txid})
           ref = make_ref()
-          send(state.feed_pid, {:flush, ref})
+          send(state.feed.pid, {:flush, ref})
           await_flush(state, ref, deadline)
 
         {:ok, state} ->
@@ -249,7 +255,7 @@ defmodule Alambique.Feed.Publisher do
   defp await_flush(state, ref, deadline) do
     lease_left = state.lease.expires_at_ms - state.config.skew_margin_ms - State.now_ms(state)
     wait = min(deadline - System.monotonic_time(:millisecond), lease_left)
-    pid = state.feed_pid
+    pid = state.feed.pid
 
     receive do
       {:feed_flushed, ^ref} ->
@@ -267,21 +273,24 @@ defmodule Alambique.Feed.Publisher do
 
   defp give_up(state) do
     Logger.warning("Alambique stopped #{state.id} before its feed was published")
-    if state.feed_pid, do: Process.exit(state.feed_pid, :kill)
+    if state.feed.pid, do: Process.exit(state.feed.pid, :kill)
     state
   end
 
   @doc "Handles an object of `count` batches the sender published."
   @spec published(State.t(), pid, pos_integer, integer, pos_integer) :: State.t()
-  def published(%State{feed_pid: pid} = state, pid, txid, time, count) do
+  def published(%State{feed: %{pid: pid}} = state, pid, txid, time, count) do
     state = %{
       state
-      | feed_published: txid,
-        feed_floor: max(state.feed_floor, time),
-        feed_backlog: backlog(state, txid, count)
+      | feed: %{
+          state.feed
+          | published: txid,
+            floor: max(state.feed.floor, time),
+            backlog: backlog(state, txid, count)
+        }
     }
 
-    if state.feed_capped, do: after_ack(state), else: state
+    if state.feed.capped, do: after_ack(state), else: state
   end
 
   # A message of a sender that was replaced.
@@ -290,9 +299,9 @@ defmodule Alambique.Feed.Publisher do
   # With `hand_over: :sender` the cell does not know the batches: the backlog is
   # the TXIDs handed over and not published, empty ones included.
   defp backlog(%State{config: %{feed: %{hand_over: :sender}}} = state, txid, _count),
-    do: max(state.feed_sent - txid, 0)
+    do: max(state.feed.sent - txid, 0)
 
-  defp backlog(state, _txid, count), do: state.feed_backlog - count
+  defp backlog(state, _txid, count), do: state.feed.backlog - count
 
   @doc """
   Handles the report that the sender read up to `upto`. With `reader_close:
@@ -301,13 +310,13 @@ defmodule Alambique.Feed.Publisher do
   """
   @spec read_done(State.t(), pid, non_neg_integer) :: State.t()
   def read_done(
-        %State{feed_pid: pid, config: %{feed: %{reader_close: :after_read}}} = state,
+        %State{config: %{feed: %{reader_close: :after_read}}, feed: %{pid: pid}} = state,
         pid,
         _upto
       ),
-      do: after_ack(%{close_reader(state) | feed_reading: false})
+      do: state |> close_reader() |> set_feed(reading: false) |> after_ack()
 
-  def read_done(%State{feed_pid: pid, feed_sent: sent} = state, pid, upto) when upto >= sent,
+  def read_done(%State{feed: %{pid: pid, sent: sent}} = state, pid, upto) when upto >= sent,
     do: close_reader(state)
 
   def read_done(state, _pid, _upto), do: state
@@ -319,16 +328,16 @@ defmodule Alambique.Feed.Publisher do
   keep the checkpoint from finishing. Closing interrupts a running statement.
   """
   @spec close_reader(State.t()) :: State.t()
-  def close_reader(%State{feed_reader: nil} = state), do: state
+  def close_reader(%State{feed: %{reader: nil}} = state), do: state
 
-  def close_reader(%State{feed_reader: reader} = state) do
+  def close_reader(%State{feed: %{reader: reader}} = state) do
     with {:error, reason} <- Db.close(reader) do
       Logger.warning(
         "Alambique could not close the feed reader of #{state.id}: #{inspect(reason)}"
       )
     end
 
-    %{state | feed_reader: nil}
+    %{state | feed: %{state.feed | reader: nil}}
   end
 
   @doc """
@@ -337,46 +346,63 @@ defmodule Alambique.Feed.Publisher do
   follows the next commit.
   """
   @spec sender_down(State.t(), pid) :: State.t()
-  def sender_down(%State{feed_pid: pid, conn: nil} = state, pid), do: reset(state)
-  def sender_down(%State{feed_pid: pid} = state, pid), do: after_ack(reset(state))
+  def sender_down(%State{conn: nil, feed: %{pid: pid}} = state, pid), do: reset(state)
+  def sender_down(%State{feed: %{pid: pid}} = state, pid), do: after_ack(reset(state))
   def sender_down(state, _pid), do: state
 
-  defp reset(state),
+  defp reset(state) do
+    state
+    |> close_reader()
+    |> set_feed(
+      pid: nil,
+      sent: state.feed.published,
+      backlog: 0,
+      part: nil,
+      tick: nil,
+      reading: false
+    )
+  end
+
+  # Updates keys the feed state has.
+  defp set_feed(%State{feed: feed} = state, changes),
     do: %{
-      close_reader(state)
-      | feed_pid: nil,
-        feed_sent: state.feed_published,
-        feed_backlog: 0,
-        feed_part: nil,
-        feed_tick: nil,
-        feed_reading: false
+      state
+      | feed: Enum.reduce(changes, feed, fn {key, value}, acc -> %{acc | key => value} end)
     }
 
   # `hand_over: :sender`: the cell hands over the TXIDs, at most `room` of
   # them, and the sender reads the rows with the reader of the cell.
   defp hand_over(%State{config: %{feed: %{hand_over: :sender}}} = state, room) do
-    state = if alive?(state.feed_pid), do: state, else: reset(state)
+    state = if alive?(state.feed.pid), do: state, else: reset(state)
     acked = state.pipe.acked.txid
-    upto = if room == :all, do: acked, else: min(acked, state.feed_sent + room)
+    upto = if room == :all, do: acked, else: min(acked, state.feed.sent + room)
 
-    with true <- upto > state.feed_sent,
+    with true <- upto > state.feed.sent,
          {:ok, state} <- open_reader(state) do
-      Fault.point(:feed_before_publish, %{cell: state.id, txid: upto, sender: state.feed_pid})
-      state = if state.feed_pid, do: state, else: %{state | feed_pid: Sender.start(state)}
-      :ok = Sqlite.assign(state.feed_reader, state.feed_pid)
-      reader = Sqlite.ref(state.feed_reader)
-      send(state.feed_pid, {:range, state.feed_sent + 1, upto, reader})
+      Fault.point(:feed_before_publish, %{cell: state.id, txid: upto, sender: state.feed.pid})
+
+      state =
+        if state.feed.pid,
+          do: state,
+          else: %{state | feed: %{state.feed | pid: Sender.start(state)}}
+
+      :ok = Sqlite.assign(state.feed.reader, state.feed.pid)
+      reader = Sqlite.ref(state.feed.reader)
+      send(state.feed.pid, {:range, state.feed.sent + 1, upto, reader})
 
       {%{
          state
-         | feed_sent: upto,
-           feed_backlog: upto - state.feed_published,
-           feed_capped: upto < acked,
-           feed_reading: state.config.feed.reader_close == :after_read
+         | feed: %{
+             state.feed
+             | sent: upto,
+               backlog: upto - state.feed.published,
+               capped: upto < acked,
+               reading: state.config.feed.reader_close == :after_read
+           }
        }, false}
     else
       false ->
-        {%{state | feed_capped: false}, false}
+        {%{state | feed: %{state.feed | capped: false}}, false}
 
       {:error, reason} ->
         Logger.warning(
@@ -385,7 +411,7 @@ defmodule Alambique.Feed.Publisher do
 
         ref = make_ref()
         Process.send_after(self(), {:feed_part, ref}, @reader_retry_ms)
-        {%{state | feed_tick: ref}, false}
+        {%{state | feed: %{state.feed | tick: ref}}, false}
     end
   end
 
@@ -396,15 +422,20 @@ defmodule Alambique.Feed.Publisher do
   # message that names the rows. The room is the library's to apply: a batch
   # begun before takes none, and the rows of those over it are not sent.
   defp hand_over(%State{config: %{feed: %{hand_over: :native}}} = state, room) do
-    state = if alive?(state.feed_pid), do: state, else: reset(state)
-    state = if state.feed_pid, do: state, else: %{state | feed_pid: Sender.start(state)}
-    {txid, seq, resumed} = state.feed_part || {state.feed_sent + 1, -1, nil}
-    Fault.point(:feed_before_publish, %{cell: state.id, txid: txid, sender: state.feed_pid})
+    state = if alive?(state.feed.pid), do: state, else: reset(state)
+
+    state =
+      if state.feed.pid,
+        do: state,
+        else: %{state | feed: %{state.feed | pid: Sender.start(state)}}
+
+    {txid, seq, resumed} = state.feed.part || {state.feed.sent + 1, -1, nil}
+    Fault.point(:feed_before_publish, %{cell: state.id, txid: txid, sender: state.feed.pid})
     token = make_ref()
     plan = {state.config.feed.hand_over_rows, resumed, if(room == :all, do: nil, else: room)}
 
     state.conn
-    |> Capture.send_rows({txid, seq}, state.pipe.acked.txid, plan, state.feed_pid, token)
+    |> Capture.send_rows({txid, seq}, state.pipe.acked.txid, plan, state.feed.pid, token)
     |> sent_rows(state, token)
   end
 
@@ -412,10 +443,10 @@ defmodule Alambique.Feed.Publisher do
   # hand-over: whole batches as far as they fit, and the start or the middle
   # of the one the bound cuts. Returns the state and whether more rows follow
   # at once. At most `room` batches are started; the others wait for the
-  # sender (`feed_capped`).
+  # sender (`feed.capped`).
   defp hand_over(state, room) do
-    state = if alive?(state.feed_pid), do: state, else: reset(state)
-    position = state.feed_part || {state.feed_sent + 1, -1}
+    state = if alive?(state.feed.pid), do: state, else: reset(state)
+    position = state.feed.part || {state.feed.sent + 1, -1}
 
     {:ok, pieces, more?} =
       Pieces.read(
@@ -423,26 +454,29 @@ defmodule Alambique.Feed.Publisher do
         position,
         state.pipe.acked.txid,
         state.config.feed.hand_over_rows,
-        state.feed_part
+        state.feed.part
       )
 
     {pieces, cut?} = take_room(pieces, room)
 
     case pieces do
       [] ->
-        {%{state | feed_part: nil, feed_capped: false}, false}
+        {%{state | feed: %{state.feed | part: nil, capped: false}}, false}
 
       _ ->
         Fault.point(:feed_before_publish, %{
           cell: state.id,
           txid: hd(pieces).txid,
-          sender: state.feed_pid
+          sender: state.feed.pid
         })
 
-        state = if state.feed_pid, do: state, else: %{state | feed_pid: Sender.start(state)}
+        state =
+          if state.feed.pid,
+            do: state,
+            else: %{state | feed: %{state.feed | pid: Sender.start(state)}}
 
         send(
-          state.feed_pid,
+          state.feed.pid,
           {:batches, Enum.map(pieces, &Map.take(&1, [:txid, :ts, :changes, :partial]))}
         )
 
@@ -451,10 +485,10 @@ defmodule Alambique.Feed.Publisher do
   end
 
   defp sent_rows({:ok, [], _more?, _cut?}, state, _token),
-    do: {%{state | feed_part: nil, feed_capped: false}, false}
+    do: {%{state | feed: %{state.feed | part: nil, capped: false}}, false}
 
   defp sent_rows({:ok, batches, more?, cut?}, state, token) do
-    send(state.feed_pid, {:piece, token, Enum.map(batches, &piece_meta/1)})
+    send(state.feed.pid, {:piece, token, Enum.map(batches, &piece_meta/1)})
     {sent_native(state, batches, cut?), more? and not cut?}
   end
 
@@ -464,10 +498,10 @@ defmodule Alambique.Feed.Publisher do
   # Jason raises on such a name, which ends the sender of the other modes:
   # the cell hands everything over again.
   defp sent_rows({:error, :bad_table}, state, _token) do
-    unless state.feed_refused,
+    unless state.feed.refused,
       do: Logger.error("Alambique found a captured table name of #{state.id} that is not UTF-8")
 
-    {%{reset(state) | feed_refused: true}, true}
+    {state |> reset() |> set_feed(refused: true), true}
   end
 
   defp sent(state, pieces, cut?) do
@@ -475,10 +509,13 @@ defmodule Alambique.Feed.Publisher do
 
     %{
       state
-      | feed_part: if(last.partial, do: {last.txid, last.seq}),
-        feed_sent: if(last.partial, do: state.feed_sent, else: last.txid),
-        feed_backlog: state.feed_backlog + Enum.count(pieces, & &1.first),
-        feed_capped: cut?
+      | feed: %{
+          state.feed
+          | part: if(last.partial, do: {last.txid, last.seq}),
+            sent: if(last.partial, do: state.feed.sent, else: last.txid),
+            backlog: state.feed.backlog + Enum.count(pieces, & &1.first),
+            capped: cut?
+        }
     }
   end
 
@@ -491,29 +528,33 @@ defmodule Alambique.Feed.Publisher do
 
     part =
       if partial do
-        {_txid, _seq, n} = state.feed_part || {txid, seq, 0}
+        {_txid, _seq, n} = state.feed.part || {txid, seq, 0}
         {txid, seq, if(first, do: rows, else: n + rows)}
       end
 
     %{
       state
-      | feed_part: part,
-        feed_refused: false,
-        feed_sent: if(partial, do: state.feed_sent, else: txid),
-        feed_backlog:
-          state.feed_backlog + Enum.count(batches, fn {_, _, _, _, _, {first, _, _}} -> first end),
-        feed_capped: cut?
+      | feed: %{
+          state.feed
+          | part: part,
+            refused: false,
+            sent: if(partial, do: state.feed.sent, else: txid),
+            backlog:
+              state.feed.backlog +
+                Enum.count(batches, fn {_, _, _, _, _, {first, _, _}} -> first end),
+            capped: cut?
+        }
     }
   end
 
-  defp open_reader(%State{feed_reader: nil} = state) do
+  defp open_reader(%State{feed: %{reader: nil}} = state) do
     with {:ok, reader} <-
            Db.open_reader(
              state.path,
              state.config.feed.reader_cache_kib,
              Db.lookaside(state)
            ),
-         do: {:ok, %{state | feed_reader: reader}}
+         do: {:ok, %{state | feed: %{state.feed | reader: reader}}}
   end
 
   defp open_reader(state), do: {:ok, state}

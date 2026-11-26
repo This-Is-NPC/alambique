@@ -503,7 +503,7 @@ defmodule Bench do
   end
 
   defp idle?(state, :close), do: state.kept != nil
-  defp idle?(state, :shrink), do: state.idle_cache == :shrunk
+  defp idle?(state, :shrink), do: state.idle.cache == :shrunk
 
   defp wait_until(deadline, failure, fun) do
     cond do

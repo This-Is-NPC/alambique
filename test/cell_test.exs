@@ -48,21 +48,21 @@ defmodule Alambique.CellTest do
       assert {:ok, _} = put(inst, cell, 1)
       pid = Alambique.Cell.whereis(Alambique.Config.fetch!(inst), cell)
 
-      %{idle_timer: old} = :sys.get_state(pid)
+      %{idle: %{timer: old}} = :sys.get_state(pid)
       assert is_reference(old)
 
       # Replace the timer the way a re-arm does, then deliver the old message.
       :sys.replace_state(pid, fn state ->
-        :erlang.cancel_timer(state.idle_timer)
-        %{state | idle_timer: :erlang.start_timer(60_000, self(), :idle)}
+        :erlang.cancel_timer(state.idle.timer)
+        %{state | idle: %{state.idle | timer: :erlang.start_timer(60_000, self(), :idle)}}
       end)
 
-      %{idle_timer: current} = :sys.get_state(pid)
+      %{idle: %{timer: current}} = :sys.get_state(pid)
       refute current == old
       send(pid, {:timeout, old, :idle})
 
       # The stale message neither hibernates the cell nor arms a second timer.
-      assert %{idle_timer: ^current, mode: :serving} = :sys.get_state(pid)
+      assert %{mode: :serving, idle: %{timer: ^current}} = :sys.get_state(pid)
       refute_received {:telemetry, [:alambique, :cell, :hibernate], _, %{cell: ^cell}}
     end
   end
@@ -169,9 +169,9 @@ defmodule Alambique.CellTest do
       {inst, cell} = filled(ctx, cache_kib: 512)
       pid = Alambique.Cell.whereis(Alambique.Config.fetch!(inst), cell)
 
-      assert %{idle_cache: nil} = :sys.get_state(pid)
+      assert %{idle: %{cache: nil}} = :sys.get_state(pid)
       assert {:ok, %{rows: [[4000]]}} = Alambique.query(inst, cell, @scan)
-      assert %{idle_cache: nil} = :sys.get_state(pid)
+      assert %{idle: %{cache: nil}} = :sys.get_state(pid)
       assert cache_size(pid) == -512
     end
 

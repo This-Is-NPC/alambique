@@ -671,11 +671,11 @@ defmodule Alambique.TxControlPathsTest do
       eventually(fn ->
         s = state(c)
 
-        s.feed_published > 0 and s.feed_published == s.feed_sent and s.feed_backlog == 0 and
-          s.feed_cleaned == s.feed_published and s.pipe.queue == [] and s.pending == []
+        s.feed.published > 0 and s.feed.published == s.feed.sent and s.feed.backlog == 0 and
+          s.feed.cleaned == s.feed.published and s.pipe.queue == [] and s.pending == []
       end)
 
-      published = state(c).feed_published
+      published = state(c).feed.published
       GatedStore.hold(gate, ~r{/feed/})
       {:ok, _} = Alambique.execute(c.inst, c.cell, "INSERT INTO t VALUES (2)")
       GatedStore.hold(gate, ~r{/0000/})
@@ -704,7 +704,7 @@ defmodule Alambique.TxControlPathsTest do
 
             cell ->
               st = :sys.get_state(cell)
-              st.feed_published > c.published and st.feed_cleaned == st.feed_published
+              st.feed.published > c.published and st.feed.cleaned == st.feed.published
           end
         end)
 

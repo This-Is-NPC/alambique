@@ -608,7 +608,7 @@ defmodule Alambique.FeedTest do
       # wake has published it again.
       {:ok, _} = Alambique.query(inst, cell, "SELECT 1")
       pid = Alambique.Cell.whereis(Alambique.Config.fetch!(inst), cell)
-      eventually(fn -> :sys.get_state(pid).feed_published > 0 end)
+      eventually(fn -> :sys.get_state(pid).feed.published > 0 end)
       exec(inst, cell, "INSERT INTO _host_jobs VALUES (2)")
 
       assert {:ok, %{rows: [[0]]}} =

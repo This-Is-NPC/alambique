@@ -133,7 +133,7 @@ defmodule Bench do
 
     wait(fn ->
       s = :sys.get_state(pid)
-      s.feed_backlog == 0 and s.feed_published == s.pipe.acked.txid and s.feed_tick == nil
+      s.feed.backlog == 0 and s.feed.published == s.pipe.acked.txid and s.feed.tick == nil
     end)
   end
 

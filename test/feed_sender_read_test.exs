@@ -180,13 +180,13 @@ defmodule Alambique.FeedSenderReadTest do
         eventually(fn ->
           s = state(inst)
 
-          s.feed_cleaned > 0 and s.feed_backlog == 0 and s.feed_published == s.feed_sent and
-            s.feed_sent == s.pipe.acked.txid and s
+          s.feed.cleaned > 0 and s.feed.backlog == 0 and s.feed.published == s.feed.sent and
+            s.feed.sent == s.pipe.acked.txid and s
         end)
 
       # Batch 1 had the rows; the cleanup's batch had none and was reported all the same.
       assert s.pipe.acked.txid > 1
-      assert s.feed_reader == nil
+      assert s.feed.reader == nil
       insert(inst, @cell, [2])
       eventually(fn -> keys(records(ctx, "tail")) |> Enum.uniq() == [1, 2] end)
     end
@@ -208,14 +208,14 @@ defmodule Alambique.FeedSenderReadTest do
 
       # With one range at a time (`reader_close: :after_read`) the cap is reached
       # as the sender reports each read.
-      eventually(fn -> match?(%{feed_backlog: 2, feed_capped: true}, state(inst)) end)
+      eventually(fn -> match?(%{feed: %{backlog: 2, capped: true}}, state(inst)) end)
       GatedStore.open(gate)
 
       eventually(fn ->
         keys(records(%{ctx | store: ctx.store}, "cap")) |> Enum.uniq() == [1, 2, 3, 4, 5]
       end)
 
-      eventually(fn -> state(inst).feed_backlog == 0 end)
+      eventually(fn -> state(inst).feed.backlog == 0 end)
     end
 
     test "the reader is open while the sender reads and closed after", ctx do
@@ -223,10 +223,10 @@ defmodule Alambique.FeedSenderReadTest do
       gate = hold(:feed_after_read, self())
       insert(inst, @cell, [1])
       assert_receive {:held, :feed_after_read, _sender, _}, 5_000
-      assert %{feed_reader: reader} = state(inst)
+      assert %{feed: %{reader: reader}} = state(inst)
       assert reader != nil
       open(gate)
-      eventually(fn -> state(inst).feed_reader == nil end)
+      eventually(fn -> state(inst).feed.reader == nil end)
     end
   end
 
@@ -234,7 +234,7 @@ defmodule Alambique.FeedSenderReadTest do
     test "say when the reader is open and include its memory", ctx do
       inst = start(ctx, "facts", sender(reader_cache_kib: 64), name: :facts)
       insert(inst, @cell, 1..5)
-      eventually(fn -> state(inst).feed_reader == nil end)
+      eventually(fn -> state(inst).feed.reader == nil end)
       {:ok, _} = Alambique.query(inst, @cell, "SELECT 1")
       assert {:ok, %{feed_reader_open: false} = closed} = Alambique.facts(inst, @cell)
 
@@ -244,11 +244,11 @@ defmodule Alambique.FeedSenderReadTest do
       {:ok, _} = Alambique.query(inst, @cell, "SELECT 1")
       assert {:ok, %{feed_reader_open: true} = open} = Alambique.facts(inst, @cell)
 
-      {:ok, reader} = in_cell(pid(inst), fn st -> Sqlite.memory(st.feed_reader) end)
+      {:ok, reader} = in_cell(pid(inst), fn st -> Sqlite.memory(st.feed.reader) end)
       assert open.schema_used >= closed.schema_used + reader.schema_used
 
       open(gate)
-      eventually(fn -> state(inst).feed_reader == nil end)
+      eventually(fn -> state(inst).feed.reader == nil end)
       {:ok, _} = Alambique.query(inst, @cell, "SELECT 1")
       assert {:ok, %{feed_reader_open: false}} = Alambique.facts(inst, @cell)
     end
@@ -259,13 +259,13 @@ defmodule Alambique.FeedSenderReadTest do
       inst = start(ctx, "stop", sender(stop_publish_ms: 0), name: :stop)
       insert(inst, @cell, [1])
       eventually(fn -> keys(records(ctx, "stop")) == [1] end)
-      eventually(fn -> state(inst).feed_reader == nil end)
+      eventually(fn -> state(inst).feed.reader == nil end)
       baseline = files(ctx)
 
       gate = hold(:feed_after_read, self())
       insert(inst, @cell, [2])
       assert_receive {:held, :feed_after_read, held, _}, 5_000
-      assert state(inst).feed_reader != nil
+      assert state(inst).feed.reader != nil
       assert length(files(ctx)) > length(baseline)
 
       assert :ok = Alambique.hibernate(inst, @cell)
@@ -284,10 +284,10 @@ defmodule Alambique.FeedSenderReadTest do
       gate = hold(:feed_after_read, self())
       insert(inst, @cell, [1])
       assert_receive {:held, :feed_after_read, held, _}, 5_000
-      assert state(inst).feed_reader != nil
+      assert state(inst).feed.reader != nil
 
       Process.exit(held, :kill)
-      eventually(fn -> (s = state(inst)).feed_reader == nil and s end)
+      eventually(fn -> (s = state(inst)).feed.reader == nil and s end)
       open(gate)
       eventually(fn -> keys(records(ctx, "kills")) == [1] end)
 
@@ -316,7 +316,7 @@ defmodule Alambique.FeedSenderReadTest do
       gate = hold(:feed_after_read, self())
       insert(inst, @cell, 1..3)
       assert_receive {:held, :feed_after_read, _, _}, 5_000
-      assert state(inst).feed_reader != nil
+      assert state(inst).feed.reader != nil
 
       assert :ok = Alambique.checkpoint(inst, @cell)
       open(gate)
@@ -350,7 +350,7 @@ defmodule Alambique.FeedSenderReadTest do
       assert {:error, :busy} = Alambique.checkpoint(inst, @cell)
 
       :atomics.put(release, 1, 1)
-      eventually(fn -> state(inst).feed_reader == nil end)
+      eventually(fn -> state(inst).feed.reader == nil end)
 
       # The WAL may restart under the position the replicator kept.
       for id <- 4..6, do: insert(inst, @cell, [id])
@@ -381,7 +381,7 @@ defmodule Alambique.FeedSenderReadTest do
 
       config = Alambique.Config.fetch!(inst)
       insert(inst, @cell, 1..5)
-      eventually(fn -> state(inst).feed_reader == nil end)
+      eventually(fn -> state(inst).feed.reader == nil end)
       {:ok, _} = Alambique.query(inst, @cell, "SELECT 1")
       without = Admission.bytes(config)
 
@@ -391,12 +391,12 @@ defmodule Alambique.FeedSenderReadTest do
       s = state(inst)
       {:ok, _} = Alambique.query(inst, @cell, "SELECT 1")
 
-      {:ok, m} = in_cell(pid(inst), fn st -> Sqlite.memory(st.feed_reader) end)
+      {:ok, m} = in_cell(pid(inst), fn st -> Sqlite.memory(st.feed.reader) end)
       reader = m.cache_used + m.schema_used + m.stmt_used
       assert reader > 0
       assert Admission.bytes(config) >= without + reader
       open(gate)
-      eventually(fn -> state(inst).feed_reader == nil end)
+      eventually(fn -> state(inst).feed.reader == nil end)
       {:ok, _} = Alambique.query(inst, @cell, "SELECT 1")
       assert Admission.bytes(config) < without + reader
     end
@@ -449,7 +449,7 @@ defmodule Alambique.FeedSenderReadTest do
       assert length(Enum.filter(first, &String.ends_with?(&1, ".db"))) == 1
 
       eventually(fn -> keys(records(ctx, "taken")) |> Enum.uniq() == [1, 2, 3] end)
-      eventually(fn -> state(inst).feed_reader == nil end)
+      eventually(fn -> state(inst).feed.reader == nil end)
     end
   end
 
@@ -523,7 +523,7 @@ defmodule Alambique.FeedSenderReadTest do
       assert {:ok, _} = Alambique.query(inst, @cell, "SELECT 1")
       # The sender reads rows that are not on the disk yet.
       assert_receive :blocked, 10_000
-      assert %{feed_reader: reader, hydrator: hydrator} = state(inst)
+      assert %{hydrator: hydrator, feed: %{reader: reader}} = state(inst)
       assert reader != nil and hydrator != nil
       assert connections() == before + 2
 

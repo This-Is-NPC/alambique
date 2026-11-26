@@ -87,7 +87,7 @@ defmodule Alambique.IdleCloseTest do
       assert s.mode == :serving
       assert State.lease_valid?(s)
       assert is_reference(s.kept)
-      assert s.idle_close == nil
+      assert s.idle.close == nil
       assert db_files(file) == []
       assert wal(file) == 0
 
@@ -107,7 +107,7 @@ defmodule Alambique.IdleCloseTest do
       s = state(inst, cell)
       assert s.conn != nil
       assert s.kept == nil
-      assert is_reference(s.idle_close)
+      assert is_reference(s.idle.close)
       assert {:ok, %{cache: :full}} = Alambique.facts(inst, cell)
 
       assert {_, %{result: :ok, wal_dirty?: false}} =
@@ -165,8 +165,8 @@ defmodule Alambique.IdleCloseTest do
 
     # The close timer fires again after a call that did not close.
     defp rearm?(inst, cell) do
-      before = state(inst, cell).idle_close
-      eventually(fn -> state(inst, cell).idle_close != before end)
+      before = state(inst, cell).idle.close
+      eventually(fn -> state(inst, cell).idle.close != before end)
       true
     end
 
@@ -384,13 +384,13 @@ defmodule Alambique.IdleCloseTest do
         cell = unique_cell()
         assert {:ok, _} = insert(inst, cell, 1)
         await_closed(inst, cell)
-        assert state(inst, cell).feed_reader == nil
+        assert state(inst, cell).feed.reader == nil
         assert eventually(fn -> feed_keys(ctx, cell) == [1] end)
 
         assert {:ok, _} = insert(inst, cell, 2)
         assert eventually(fn -> feed_keys(ctx, cell) == [1, 2] end)
         await_closed(inst, cell)
-        assert state(inst, cell).feed_reader == nil
+        assert state(inst, cell).feed.reader == nil
         assert rows(inst, cell) == [1, 2]
       end
     end
@@ -402,10 +402,10 @@ defmodule Alambique.IdleCloseTest do
       assert eventually(fn -> feed_keys(ctx, cell) == [1] end)
       await_closed(inst, cell)
 
-      sender = state(inst, cell).feed_pid
+      sender = state(inst, cell).feed.pid
       assert is_pid(sender)
       Process.exit(sender, :kill)
-      eventually(fn -> state(inst, cell).feed_pid == nil end)
+      eventually(fn -> state(inst, cell).feed.pid == nil end)
       assert closed?(inst, cell)
 
       assert {:ok, _} = insert(inst, cell, 2)
@@ -417,12 +417,12 @@ defmodule Alambique.IdleCloseTest do
       inst = feed_start(ctx, [cleanup: :in_write, hand_over: :cell], 800)
       cell = unique_cell()
       assert {:ok, _} = insert(inst, cell, 1)
-      eventually(fn -> (s = state(inst, cell)).feed_published > 0 and s.pipe.queue == [] end)
+      eventually(fn -> (s = state(inst, cell)).feed.published > 0 and s.pipe.queue == [] end)
 
       # As after an acknowledgement with no valid lease: the batch is
       # acknowledged and its rows are in the file, but were never handed over.
       :sys.replace_state(pid(inst, cell), fn s ->
-        %{s | feed_sent: 0, feed_published: 0, feed_backlog: 0}
+        %{s | feed: %{s.feed | sent: 0, published: 0, backlog: 0}}
       end)
 
       for _ <- 1..3, do: assert(rearm?(inst, cell))
@@ -438,15 +438,15 @@ defmodule Alambique.IdleCloseTest do
       # The cleanup batch is acknowledged and carries no feed rows, so the
       # newest TXID published stays behind it.
       s = state(inst, cell)
-      assert s.pipe.acked.txid > s.feed_published
-      assert s.feed_cleaned == s.feed_published
+      assert s.pipe.acked.txid > s.feed.published
+      assert s.feed.cleaned == s.feed.published
     end
 
     test "reads the feed rows with the rules of a gated connection", ctx do
       inst = feed_start(ctx, [cleanup: :in_write, hand_over: :cell], 30_000)
       cell = unique_cell()
       assert {:ok, _} = insert(inst, cell, 1)
-      eventually(fn -> state(inst, cell).feed_published > 0 end)
+      eventually(fn -> state(inst, cell).feed.published > 0 end)
 
       # A plain read, allowed unarmed, by the process that runs the cell's
       # statements; any other process is refused.
@@ -470,7 +470,7 @@ defmodule Alambique.IdleCloseTest do
 
       cell = unique_cell()
       assert {:ok, _} = insert(inst, cell, 1)
-      eventually(fn -> (s = state(inst, cell)).feed_published > 0 and s.pipe.queue == [] end)
+      eventually(fn -> (s = state(inst, cell)).feed.published > 0 and s.pipe.queue == [] end)
 
       # The cleanup batch is the next segment: held, it is in flight when the
       # timer looks again.
@@ -484,7 +484,7 @@ defmodule Alambique.IdleCloseTest do
       GatedStore.open(gate)
       await_closed(inst, cell)
       s = state(inst, cell)
-      assert s.feed_cleaned == s.feed_published
+      assert s.feed.cleaned == s.feed.published
       assert rows(inst, cell) == [1]
     end
 
@@ -499,9 +499,9 @@ defmodule Alambique.IdleCloseTest do
       GatedStore.hold(gate, ~r{/feed/})
       assert {:ok, _} = insert(inst, cell, 1)
       eventually(fn -> GatedStore.held(gate) != [] end)
-      eventually(fn -> (s = state(inst, cell)).pipe.queue == [] and s.feed_backlog > 0 end)
+      eventually(fn -> (s = state(inst, cell)).pipe.queue == [] and s.feed.backlog > 0 end)
 
-      sender = state(inst, cell).feed_pid
+      sender = state(inst, cell).feed.pid
       Process.exit(sender, :kill)
       for _ <- 1..3, do: assert(rearm?(inst, cell))
       refute closed?(inst, cell)

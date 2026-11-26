@@ -244,7 +244,7 @@ defmodule Alambique.OrphanFramesTest do
 
         assert eventually(fn ->
                  state = :sys.get_state(pid(c))
-                 state.feed_published == state.feed_cleaned and not unreplicated?(c)
+                 state.feed.published == state.feed.cleaned and not unreplicated?(c)
                end)
 
         old = pid(c)
