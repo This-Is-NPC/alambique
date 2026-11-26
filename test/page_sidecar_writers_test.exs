@@ -93,7 +93,7 @@ defmodule Alambique.PageSidecarWritersTest do
 
     object = stored(env, k)
     deadline = System.monotonic_time(:millisecond) + 2_000
-    assert :ok = Sidecar.write(env.ctx, k, 0, object, %{epoch: 1, data: 1}, deadline, :ours)
+    assert :ok = Sidecar.write(env.ctx, {k, 0}, object, %{epoch: 1, data: 1}, deadline, :ours)
     assert sidecar(env, k) == other
   end
 
@@ -106,9 +106,9 @@ defmodule Alambique.PageSidecarWritersTest do
     info = %{epoch: 1, data: 1}
     :ok = env.mod.delete(env.cfg, Keys.sidecar(k))
 
-    assert :skipped = Sidecar.write(env.ctx, k, 0, other, info, deadline, :verify)
+    assert :skipped = Sidecar.write(env.ctx, {k, 0}, other, info, deadline, :verify)
     assert sidecar(env, k) == nil
-    assert :ok = Sidecar.write(env.ctx, k, 0, mine, info, deadline, :verify)
+    assert :ok = Sidecar.write(env.ctx, {k, 0}, mine, info, deadline, :verify)
     assert sidecar(env, k) == expected(env, 0, k)
   end
 

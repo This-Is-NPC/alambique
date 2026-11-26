@@ -63,6 +63,7 @@ defmodule Alambique.Trash do
   def prefix(location_prefix), do: "#{location_prefix}/trash/"
 
   @doc false
+  @spec children(Alambique.Config.t()) :: [Supervisor.child_spec()]
   def children(%{trash: %{reaper: false}}), do: []
 
   def children(config) do
@@ -271,6 +272,7 @@ defmodule Alambique.Trash do
   end
 
   @doc false
+  @spec reap_ctx(Alambique.Replication.ctx(), map, String.t()) :: summary
   def reap_ctx(ctx, settings, label \\ "location"),
     do: reap_location(ctx, settings, label, %{manifests: 0, objects: 0, errors: 0})
 
