@@ -2697,7 +2697,11 @@ mod tests {
             assert_eq!(kinds(sql), (statement, tail_ok), "{sql:?}");
         }
         let long = format!("SELECT 1; SELECT '{}'", "x".repeat(500));
-        let end = next(&long).1;
+        // The statement the first call prepared is finalized, or it would leak.
+        let (stmt, end) = next(&long);
+        if let Some(StmtPtr(s)) = stmt {
+            finalize(s);
+        }
         match refuse_tail(db, &long.as_bytes()[end..]) {
             Err(Failure::Multiple(tail)) => {
                 assert!(tail.len() <= TAIL_SHOWN + 3 && tail.ends_with("..."))

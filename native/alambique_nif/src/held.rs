@@ -536,6 +536,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "std::fs::copy calls copy_file_range, which Miri cannot run"
+    )]
     fn a_stamp_tells_a_changed_or_replaced_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cell.db");
