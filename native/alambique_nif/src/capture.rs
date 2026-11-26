@@ -356,6 +356,27 @@ pub mod testing {
         )
     }
 
+    /// The capture arguments of segment `txid` of a chain.
+    fn args<'a>(
+        (db_path, wal_path): (&'a Path, &'a Path),
+        pos: WalPos,
+        sums: &'a Sums,
+        pre: u64,
+        txid: u64,
+    ) -> Args<'a> {
+        Args {
+            db_path,
+            wal_path,
+            page_size: PS,
+            pos,
+            sums,
+            pre,
+            txid,
+            timestamp: 1000 + txid as i64,
+            end: None,
+        }
+    }
+
     impl Chain {
         /// Logs `initial`, takes the snapshot (TXID 1), then captures one
         /// segment per step. `tail` bytes of an uncommitted frame trail the
@@ -375,25 +396,6 @@ pub mod testing {
             }
             ok("write the wal", wal.write(&wal_path))?;
             let db_path = dir.join("db");
-            fn args<'a>(
-                (db_path, wal_path): (&'a Path, &'a Path),
-                pos: WalPos,
-                sums: &'a Sums,
-                pre: u64,
-                txid: u64,
-            ) -> Args<'a> {
-                Args {
-                    db_path,
-                    wal_path,
-                    page_size: PS,
-                    pos,
-                    sums,
-                    pre,
-                    txid,
-                    timestamp: 1000 + txid as i64,
-                    end: None,
-                }
-            }
             let files = (db_path.as_path(), wal_path.as_path());
             let snap = ok(
                 "snapshot",
@@ -550,62 +552,94 @@ pub mod testing {
         pub fn check_misuse(&self) -> std::result::Result<(), Failure> {
             let n = self.segments.len();
             let all: Vec<usize> = (0..n).collect();
-            let merged = |order: &[usize]| {
-                let inputs: Vec<&[u8]> = order
-                    .iter()
-                    .filter_map(|&i| self.segments.get(i))
-                    .map(Vec::as_slice)
-                    .collect();
-                merge(&inputs)
-            };
             for (i, &fence) in self.fence.iter().enumerate() {
                 let neutral = self.neutral(i)?;
-                // Segment i missing.
-                let order: Vec<usize> = all.iter().copied().filter(|&j| j != i).collect();
-                match self.apply_order("missing", &order) {
-                    Err((at, e)) => {
-                        assert!(refused(&e), "missing {i}: {e:?}");
-                        assert!(neutral || at == i, "missing {i}: {e:?} at {at}");
-                    }
-                    Ok(path) => {
-                        assert!(neutral || i + 1 == n, "missing {i} went through");
-                        if fence {
-                            let bytes = ok("read", std::fs::read(path))?;
-                            assert_eq!(bytes, self.pages.concat());
-                        }
-                    }
-                }
-                if i > 0 && i + 1 < n {
-                    assert!(merged(&order).is_err(), "merge skipped {i}");
-                }
-
-                // Segment i twice in a row.
-                let mut order = all.clone();
-                order.insert(i, i);
-                match self.apply_order("twice", &order) {
-                    Err((at, e)) => {
-                        assert!(refused(&e), "twice {i}: {e:?}");
-                        assert!(!neutral && at == i + 1, "twice {i}: {e:?} at {at}");
-                    }
-                    Ok(_) => assert!(neutral),
-                }
-                assert!(merged(&order).is_err());
-
-                // Segments i and i + 1 swapped.
+                self.check_missing(&all, i, fence, neutral)?;
+                self.check_twice(&all, i, neutral)?;
                 if i + 1 < n {
-                    let mut order = all.clone();
-                    order.swap(i, i + 1);
-                    let next = self.neutral(i + 1)?;
-                    match self.apply_order("swapped", &order) {
-                        Err((at, e)) => {
-                            assert!(refused(&e), "swapped {i}: {e:?}");
-                            assert!(neutral || at == i, "swapped {i}: {e:?} at {at}");
-                        }
-                        Ok(_) => assert!(neutral && next),
-                    }
-                    assert!(merged(&order).is_err());
+                    self.check_swapped(&all, i, neutral)?;
                 }
             }
+            Ok(())
+        }
+
+        /// Merges the segments of `order`, in that order.
+        fn merged(&self, order: &[usize]) -> Result<Vec<u8>> {
+            let inputs: Vec<&[u8]> = order
+                .iter()
+                .filter_map(|&i| self.segments.get(i))
+                .map(Vec::as_slice)
+                .collect();
+            merge(&inputs)
+        }
+
+        /// Segment `i` missing.
+        fn check_missing(
+            &self,
+            all: &[usize],
+            i: usize,
+            fence: bool,
+            neutral: bool,
+        ) -> std::result::Result<(), Failure> {
+            let n = all.len();
+            let order: Vec<usize> = all.iter().copied().filter(|&j| j != i).collect();
+            match self.apply_order("missing", &order) {
+                Err((at, e)) => {
+                    assert!(refused(&e), "missing {i}: {e:?}");
+                    assert!(neutral || at == i, "missing {i}: {e:?} at {at}");
+                }
+                Ok(path) => {
+                    assert!(neutral || i + 1 == n, "missing {i} went through");
+                    if fence {
+                        let bytes = ok("read", std::fs::read(path))?;
+                        assert_eq!(bytes, self.pages.concat());
+                    }
+                }
+            }
+            if i > 0 && i + 1 < n {
+                assert!(self.merged(&order).is_err(), "merge skipped {i}");
+            }
+            Ok(())
+        }
+
+        /// Segment `i` twice in a row.
+        fn check_twice(
+            &self,
+            all: &[usize],
+            i: usize,
+            neutral: bool,
+        ) -> std::result::Result<(), Failure> {
+            let mut order = all.to_vec();
+            order.insert(i, i);
+            match self.apply_order("twice", &order) {
+                Err((at, e)) => {
+                    assert!(refused(&e), "twice {i}: {e:?}");
+                    assert!(!neutral && at == i + 1, "twice {i}: {e:?} at {at}");
+                }
+                Ok(_) => assert!(neutral),
+            }
+            assert!(self.merged(&order).is_err());
+            Ok(())
+        }
+
+        /// Segments `i` and `i + 1` swapped.
+        fn check_swapped(
+            &self,
+            all: &[usize],
+            i: usize,
+            neutral: bool,
+        ) -> std::result::Result<(), Failure> {
+            let mut order = all.to_vec();
+            order.swap(i, i + 1);
+            let next = self.neutral(i + 1)?;
+            match self.apply_order("swapped", &order) {
+                Err((at, e)) => {
+                    assert!(refused(&e), "swapped {i}: {e:?}");
+                    assert!(neutral || at == i, "swapped {i}: {e:?} at {at}");
+                }
+                Ok(_) => assert!(neutral && next),
+            }
+            assert!(self.merged(&order).is_err());
             Ok(())
         }
     }
