@@ -6,7 +6,7 @@
 //! turn into a failure. The unit tests replay the seed corpus through them,
 //! so they also run under Miri.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::capture::testing::{ok, Chain, Failure, Step, Tx};
 use crate::dbsum::{self, fold};
@@ -100,6 +100,45 @@ pub fn ltx_decode(data: &[u8]) -> Result<(), Failure> {
     Ok(())
 }
 
+/// Whether `dbsum::apply` restores the chain into `reference` within the
+/// size cap.
+fn restorable(files: &[Vec<u8>], page_size: u32, reference: &Path) -> bool {
+    let (mut full, mut current) = (true, 0);
+    for file in files {
+        match Header::from_bytes(file) {
+            Ok(h) if u64::from(h.commit) * u64::from(h.page_size) <= MAX_DB_BYTES => {}
+            _ => full = false,
+        }
+        full = full
+            && match dbsum::apply(reference, file, current, page_size) {
+                Ok(applied) => {
+                    current = applied.post_apply;
+                    true
+                }
+                Err(_) => false,
+            };
+    }
+    full
+}
+
+/// Installs every page of the plan from its runs; false when a frame does
+/// not decode.
+fn fetch_all(plan: &lazy::Lazy, files: &[Vec<u8>], page_size: u32) -> Result<bool, Failure> {
+    while let Some(run) = plan.next_batch(1 << 16) {
+        for &(pgno, rel, len) in &run.pages {
+            let frame = frame_at(files, run.file, run.offset + u64::from(rel), len)
+                .ok_or_else(|| "a run points outside its file".to_string())?;
+            match lazy::decode_frame(frame, pgno, page_size) {
+                Ok(page) => {
+                    ok("a page of the plan", plan.install(pgno, &page))?;
+                }
+                Err(_) => return Ok(false),
+            }
+        }
+    }
+    Ok(true)
+}
+
 /// The lazy-restore plan over a chain of arbitrary files (a list of `u16`
 /// length and bytes): staging, applying, `ready` and the fetch of every page.
 /// A chain that `dbsum::apply` restores must give the same plan and bytes.
@@ -118,21 +157,7 @@ pub fn lazy_plan(data: &[u8]) -> Result<(), Failure> {
         return Ok(());
     };
     let reference = scratch("plan-ref.db");
-    let (mut full, mut current) = (true, 0);
-    for file in &files {
-        match Header::from_bytes(file) {
-            Ok(h) if u64::from(h.commit) * u64::from(h.page_size) <= MAX_DB_BYTES => {}
-            _ => full = false,
-        }
-        full = full
-            && match dbsum::apply(&reference, file, current, page_size) {
-                Ok(applied) => {
-                    current = applied.post_apply;
-                    true
-                }
-                Err(_) => false,
-            };
-    }
+    let full = restorable(&files, page_size, &reference);
 
     let path = scratch("plan.db");
     let planned = lazy::Lazy::create(&path, page_size, std::time::Duration::from_secs(1))
@@ -151,22 +176,7 @@ pub fn lazy_plan(data: &[u8]) -> Result<(), Failure> {
         });
     assert!(planned.is_some() || !full, "a restorable chain gets a plan");
     if let Some(plan) = planned {
-        let mut fetched = true;
-        'runs: while let Some(run) = plan.next_batch(1 << 16) {
-            for &(pgno, rel, len) in &run.pages {
-                let frame = frame_at(&files, run.file, run.offset + u64::from(rel), len)
-                    .ok_or_else(|| "a run points outside its file".to_string())?;
-                match lazy::decode_frame(frame, pgno, page_size) {
-                    Ok(page) => {
-                        ok("a page of the plan", plan.install(pgno, &page))?;
-                    }
-                    Err(_) => {
-                        fetched = false;
-                        break 'runs;
-                    }
-                }
-            }
-        }
+        let fetched = fetch_all(&plan, &files, page_size)?;
         if full && fetched {
             assert!(plan.is_complete());
             assert_eq!(
