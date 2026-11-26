@@ -451,10 +451,10 @@ defmodule Bench do
     end
   end
 
-  # A call refused for load (`:busy`, `:overloaded`) is tried again.
+  # A call refused for load (`:busy`, `:overloaded`, `:timeout`) is tried again.
   defp retry(fun, left \\ 200) do
     case fun.() do
-      {:error, reason} when reason in [:busy, :overloaded] and left > 0 ->
+      {:error, reason} when reason in [:busy, :overloaded, :timeout] and left > 0 ->
         Process.sleep(25)
         retry(fun, left - 1)
 
@@ -524,7 +524,11 @@ end
 
 case System.argv() do
   [name] ->
-    apply(Bench, String.to_atom(name), [])
+    try do
+      apply(Bench, String.to_atom(name), [])
+    after
+      Bench.clean()
+    end
 
   _ ->
     IO.puts(
