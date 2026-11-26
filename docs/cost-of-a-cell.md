@@ -237,7 +237,10 @@ a connection no slots: it saves their memory and sends every allocation of a
 statement to the allocator. SQLite splits the memory into large slots of
 `lookaside_bytes` and small ones of 128 bytes. Both are set, `lookaside_bytes`
 is a multiple of 8 from 16 up to 65,528, and `lookaside_bytes` times
-`lookaside_count` is at most 1 MiB. The feed reader takes the same value.
+`lookaside_count` is at most 1 MiB. The feed reader takes the same value. SQLite sets up its default lookaside
+while it opens the database, and the setting replaces it right after, so each
+open with a value of its own costs one more allocation and free of that memory
+(about 48,000 bytes at the default size).
 
 `idle_gc` (default `true`) makes the cell also collect its own garbage when the
 shrink happens. It returns the garbage of the last calls. With `cache_kib: 512`,
