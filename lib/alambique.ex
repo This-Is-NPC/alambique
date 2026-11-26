@@ -81,7 +81,8 @@ defmodule Alambique do
       `apply(module, function, [cell_id | extra_args])`, which returns a keyword
       list in the shape of these options, with only the per-cell keys:
       `idle_timeout_ms:`, `awake: [cache_kib:, idle_cache_after_ms:,
-      idle_cache_kib:, idle_close_after_ms:, idle_gc:, track_bytes:]`,
+      idle_cache_kib:, idle_close_after_ms:, idle_gc:, track_bytes:,
+      lookaside_bytes:, lookaside_count:]`,
       `sql: [locking_mode:]`, `lazy_restore: [mode:]` (`:ranged` or `:whole`, see
       `:lazy_restore`) and `feed: [cleanup_after_ms:]`.
       A key that is absent keeps the node's value; `locking_mode: :exclusive` is
@@ -1155,8 +1156,10 @@ defmodule Alambique do
   on an awake cell: the lock is taken when
   the connection opens, so a refresh that would change it is refused whole
   (`{:error, {:cell_options, message}}`) and the new value applies at the next
-  wake. `lazy_restore: [mode:]` is stored and listed in `changed`, and the cell
-  reads it at its next restore; nothing about a running cell changes.
+  wake. `lazy_restore: [mode:]` and the lookaside pair are stored and listed in
+  `changed`: the cell reads the mode at its next restore and the lookaside when
+  it opens its connection (a wake or a reopen); nothing about a running
+  connection changes.
   `awake: [track_bytes: false]` clears the memory facts of the cell (a budget,
   `:max_bytes`, keeps them on), and `feed: [cleanup_after_ms:]` moves a cleanup
   that is already waiting. The sender's reader keeps `:feed` `:reader_cache_kib`

@@ -598,6 +598,10 @@ At most `:concurrency` cells (default 8) are refreshed at a time. A cell that
 fails keeps its options and is listed in `failures` with its reason; `changed`
 counts the cells that got at least one new value.
 
+The lookaside pair (`awake: [lookaside_bytes:, lookaside_count:]`) is stored and
+listed in `changed`, and the cell uses it when its connection opens next, at a
+wake or a reopen after an idle close.
+
 A refresh is not a call to the cell: it does not keep it awake, does not give
 back a shrunk cache and does not open a closed connection (the next request
 that runs SQL does, with the new options). `[:alambique, :cell, :options,
