@@ -318,62 +318,64 @@ connection, and keeps its process, its lease and its renewals. It must be below
 Per cell, a close frees the page cache (up to `cache_kib`), the schema, the
 prepared statements and the open files of the connection (the database, its
 WAL and its WAL index). Measured with `mise run bench:idle-close` on 250 idle
-cells, per cell, open against closed:
+cells with the cell files on a disk and the page arena on (three runs; ranges
+are over them), per cell, open against closed:
 
 | | cells of 0 notes | cells of 2,000 notes |
 | --- | --- | --- |
-| SQLite memory in use | 77 KiB -> 0 | 354 KiB -> 0 |
-| Erlang memory (total) | 307 -> 222 KiB | 620 -> 256 KiB |
-| Allocator blocks in use | 228 -> 143 KiB | 541 -> 177 KiB |
-| Allocator carriers | 394 -> 378 KiB | 739 -> 674 KiB (two runs: -66, -121 KiB) |
-| RssAnon | no fall (-14 to +9 KiB) | 14 to 62 KiB lower |
+| RssAnon | 6 to 24 KiB lower | 320 to 336 KiB lower |
+| Erlang memory (total) | 277 -> 238 KiB | 310 -> 271 KiB |
+| SQLite memory in use | 38 -> 0 KiB | 316 -> 0 KiB |
+| Page arena, resident | 12 -> 1 KiB | 292 -> 1 KiB |
 | Open files | 4 -> 1 | 4 -> 1 |
 
-The memory SQLite and the Erlang allocator hold falls by the full amount, but
-the resident memory of the process falls by a fraction of it: the blocks are
-freed, and the carriers (the allocator's segments) stay with their free space,
-so the system sees little of it. The cell keeps its process (about 69 KiB of
-process memory per awake cell in these runs), its lease and one lease renewal
-request every third of `lease_ttl_ms` (0.09 per second per cell with a 30 s
-lease, as an open idle cell). With the VM flags `+Mdai max +MMmcs 0` the
-resident memory fell by 9 KiB (cells of 0 notes, one run; -4 in the other) and
-13 to 14 KiB (cells of 2,000 notes). Plan for the Erlang and SQLite figures
-as what is freed for reuse inside the VM, not as memory returned to the
-system, except the page-cache blocks, which the page arena (on by default)
-returns to the kernel. The memory the budget (`awake.max_bytes`) counts for a closed cell is
-what its schema and statements held at the close, which the reopen rebuilds,
-not 0.
+The page-cache blocks leave the process with the page arena: the resident
+memory of a cell with a cache full of pages falls by about that cache. What
+else a close frees (the schema, the statements, about 38 KiB per cell) goes
+back to the allocators of the BEAM, which keep their carriers, so the resident
+memory falls by little of it. The cell keeps its process (about 68 KiB of
+process memory per awake cell) and its lease, and renews it every third of
+`lease_ttl_ms` (0.09 to 0.10 per second per cell with a 30 s lease, as an open
+idle cell). The memory the budget (`awake.max_bytes`) counts for a closed cell
+is what its schema and statements held at the close, which the reopen
+rebuilds, not 0. With the VM flags `+Mdai max +MMmcs 0` the figures are in the
+same ranges.
 
 Per operation, on the same cells:
 
 | Operation | p50 | p99 |
 | --- | --- | --- |
-| Close (checkpoint, fsync, close), 0 notes (WAL of 12 KB) | 0.28 to 0.39 ms | 0.8 to 1.6 ms |
-| Close, 2,000 notes (WAL of 284 KB) | 0.6 to 0.67 ms | 15 to 29 ms |
-| Reopen (check of the files, open, pragmas) | 0.18 ms | 0.37 to 0.42 ms |
-| Reopen with the `-shm` file removed | 0.18 ms | 0.25 to 0.43 ms |
-| First call that runs SQL, closed | 0.22 to 0.25 ms | 0.47 to 0.57 ms |
-| The same call, open | 0.22 ms | 0.28 to 0.55 ms |
-| First call that needs no SQL (`position/3`) | 0.013 to 0.032 ms | 0.06 to 0.09 ms |
-| First call with frames in the WAL (`orphan_frames: :replicate`) | 0.39 to 0.53 ms | 0.6 to 3.3 ms |
-| First call after a hibernation, local file kept | 1.2 to 2.1 ms | 1.8 to 2.6 ms |
-| A call every `idle_close_after_ms` (each reopens and each pause closes) | 1.5 to 1.9 ms | 2.9 to 4.4 ms |
+| Reopen (check of the files, open, pragmas) | 0.28 to 0.30 ms | 0.43 to 0.51 ms; 70 to 131 ms in three of six runs |
+| Reopen with the `-shm` file removed | 0.28 to 0.29 ms | 0.43 to 0.51 ms |
+| First call that runs SQL, closed | 0.34 to 0.39 ms | 0.62 to 0.65 ms; 70 to 131 ms in three of six runs |
+| The same call, open | 0.32 to 0.58 ms | 0.5 to 0.9 ms |
+| First call that needs no SQL (`position/3`) | 0.025 to 0.038 ms | 0.09 to 0.13 ms |
+| First call with frames in the WAL (`orphan_frames: :replicate`) | 0.57 to 0.83 ms | 1.3 to 4.9 ms |
+| First call after a hibernation, local file kept | 1.5 to 2.4 ms | 2.3 to 4.0 ms |
+| Close, one cell at a time (checkpoint, fsync, close) | 0.4 to 11 ms | 1.1 ms to 9 s |
+| Close, 250 cells at the same time | 0.6 to 1.6 s | 12 to 22 s |
+| A call every `idle_close_after_ms` (each reopens and each pause closes) | 2.5 to 3.5 ms | 4.6 ms to 10 s |
 
 A close is one checkpoint (a `TRUNCATE` that copies the WAL into the database
-and syncs it), one close and, with `track_bytes`, one memory read before it;
-its tail grows with the WAL to copy. A reopen, on the first call that runs SQL,
-is a check of three files, one open (the pragmas, the WAL index rebuilt by the
-first connection) and the schema read by the first statement; it makes no
-request to the store and takes no lease. It runs inside the cell, so the cell
-serves nothing else while it runs, as it does not during a wake's open. A cell
-called about every `idle_close_after_ms` pays the reopen and the close on every
-call and saves nothing: set the value above the longest pause between calls
-you want served warm. A hibernation, which ends the process and gives the
-lease back, costs a wake (lease, store reads, the open) on the next call; a
-close costs only the reopen, so it fits the pauses of minutes, and the
-hibernation the pauses of hours. The option is off by default: the resident
-memory a small cell gives back is below what the cost of its reopens justifies
-for most instances.
+and syncs it), one close and, with `track_bytes`, one memory read before it.
+The sync is the cost: on a disk, cells that close together queue their syncs,
+so the close of each takes as long as the queue ahead of it, and the same
+queue is the tail of a reopen and of a call that finds the disk busy. Spread
+the closes (cells with different `idle_close_after_ms`, or traffic that does
+not stop at the same moment) where many cells go idle together. A reopen, on
+the first call that runs SQL, is a check of three files, one open (the
+pragmas, the WAL index rebuilt by the first connection) and the schema read by
+the first statement; it makes no request to the store and takes no lease. It
+runs inside the cell, so the cell serves nothing else while it runs, as it
+does not during a wake's open. A cell called about every `idle_close_after_ms`
+pays the reopen and the close on every call and saves nothing: set the value
+above the longest pause between calls you want served warm. A hibernation,
+which ends the process and gives the lease back, costs a wake (lease, store
+reads, the open) on the next call; a close costs only the reopen, so it fits
+the pauses of minutes, and the hibernation the pauses of hours. The option is
+off by default: a cell with no rows gives back 6 to 24 KiB of resident memory,
+which does not pay for its reopens; a cell with a few thousand rows gives back
+about 320 KiB.
 
 **`cell_options: {module, function}`.** Off by default. With it, each wake
 calls the function with the cell id, in a process of its own, and the cell

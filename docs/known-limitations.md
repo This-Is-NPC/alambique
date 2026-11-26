@@ -55,10 +55,14 @@ about it, and where the evidence is.
   sidecar write of that cell was under way; a crash or a failed write leaves
   it without one. A store whose ranged reads give no
   ETag is not pinned to the object that was staged.
-- `awake: [idle_close_after_ms:]` frees the memory SQLite and the Erlang
-  allocator hold for the connection, but the resident memory of the node
-  falls by a fraction of it: the allocator keeps the free carriers. Only the
-  page-cache blocks leave the process, and only with the page arena. A cell
+- `awake: [idle_close_after_ms:]` returns to the system what the page arena
+  holds for the connection (about 320 KiB for a cell of 2,000 notes), but
+  little of the rest: the schema and the statements (about 38 KiB per cell)
+  go back to the allocators of the BEAM, which keep their carriers, so a cell
+  with no rows gives back 6 to 24 KiB of resident memory. A close syncs the
+  database: on a disk, cells that close together queue their syncs (about 1 s
+  for the median of 250 cells closing at once, 12 to 22 s for the slowest),
+  and the queue is the tail of the calls that find the disk busy. A cell
   called about every `idle_close_after_ms` pays a reopen and a close on each
   call and gains nothing ([cost-of-a-cell.md](cost-of-a-cell.md)).
 - Options chosen with `cell_options` that an awake cell cannot take live:
