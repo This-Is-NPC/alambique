@@ -367,7 +367,7 @@ defmodule Alambique.IdleCloseTest do
       start_instance(ctx,
         migrations: @feed_schema,
         compaction: false,
-        feed: [window_ms: 60_000, cleanup: :idle, cleanup_after_ms: 200] ++ feed,
+        feed: Keyword.merge([window_ms: 60_000, cleanup: :idle, cleanup_after_ms: 200], feed),
         awake: [idle_close_after_ms: close]
       )
     end
@@ -393,6 +393,67 @@ defmodule Alambique.IdleCloseTest do
         assert state(inst, cell).feed_reader == nil
         assert rows(inst, cell) == [1, 2]
       end
+    end
+
+    test "a sender that dies while the cell is closed leaves the connection closed", ctx do
+      inst = feed_start(ctx, hand_over: :cell)
+      cell = unique_cell()
+      assert {:ok, _} = insert(inst, cell, 1)
+      assert eventually(fn -> feed_keys(ctx, cell) == [1] end)
+      await_closed(inst, cell)
+
+      sender = state(inst, cell).feed_pid
+      assert is_pid(sender)
+      Process.exit(sender, :kill)
+      eventually(fn -> state(inst, cell).feed_pid == nil end)
+      assert closed?(inst, cell)
+
+      assert {:ok, _} = insert(inst, cell, 2)
+      assert eventually(fn -> feed_keys(ctx, cell) == [1, 2] end)
+      assert rows(inst, cell) == [1, 2]
+    end
+
+    test "does not close while acknowledged rows were not handed over (hand_over: :cell)", ctx do
+      inst = feed_start(ctx, [cleanup: :in_write, hand_over: :cell], 800)
+      cell = unique_cell()
+      assert {:ok, _} = insert(inst, cell, 1)
+      eventually(fn -> (s = state(inst, cell)).feed_published > 0 and s.pipe.queue == [] end)
+
+      # As after an acknowledgement with no valid lease: the batch is
+      # acknowledged and its rows are in the file, but were never handed over.
+      :sys.replace_state(pid(inst, cell), fn s ->
+        %{s | feed_sent: 0, feed_published: 0, feed_backlog: 0}
+      end)
+
+      for _ <- 1..3, do: assert(rearm?(inst, cell))
+      refute closed?(inst, cell)
+    end
+
+    test "closes after a cleanup batch that has no rows (hand_over: :cell)", ctx do
+      inst = feed_start(ctx, hand_over: :cell)
+      cell = unique_cell()
+      assert {:ok, _} = insert(inst, cell, 1)
+      await_closed(inst, cell)
+
+      # The cleanup batch is acknowledged and carries no feed rows, so the
+      # newest TXID published stays behind it.
+      s = state(inst, cell)
+      assert s.pipe.acked.txid > s.feed_published
+      assert s.feed_cleaned == s.feed_published
+    end
+
+    test "reads the feed rows with the rules of a gated connection", ctx do
+      inst = feed_start(ctx, [cleanup: :in_write, hand_over: :cell], 30_000)
+      cell = unique_cell()
+      assert {:ok, _} = insert(inst, cell, 1)
+      eventually(fn -> state(inst, cell).feed_published > 0 end)
+
+      # A plain read, allowed unarmed, by the process that runs the cell's
+      # statements; any other process is refused.
+      query = fn s -> Alambique.Feed.Capture.rows_from(s.conn, {1, -1}, 100, 10) end
+      assert {:ok, [[_txid | _] | _]} = in_cell(pid(inst, cell), query)
+      conn = state(inst, cell).conn
+      assert Alambique.Feed.Capture.rows_from(conn, {1, -1}, 100, 10) == {:error, :not_owner}
     end
 
     test "waits for the rows of a published batch to be cleaned, in a batch that lands first",
