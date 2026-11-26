@@ -25,8 +25,9 @@ defmodule Alambique.CellHelpers do
   def install_commit_behind_back do
     Alambique.Fault.install(fn
       :db_before_commit, %{conn: conn} ->
-        if Process.delete(@commit_behind_back),
-          do: _ = Alambique.Replication.Native.commit_behind_back(conn)
+        _ =
+          if Process.delete(@commit_behind_back),
+            do: Alambique.Replication.Native.commit_behind_back(conn)
 
         :ok
 
@@ -335,7 +336,7 @@ defmodule Alambique.CellHelpers do
     {:ok, conn} = Alambique.Sqlite.open(path, readonly: true)
     {:ok, %{rows: rows}} = Alambique.Sqlite.run(conn, sql, [])
     :ok = Alambique.Sqlite.close(conn)
-    File.rm(path)
+    _ = File.rm(path)
     rows
   end
 end

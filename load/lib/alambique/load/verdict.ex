@@ -68,13 +68,14 @@ defmodule Alambique.Load.Verdict do
 
   @spec judge(map, map) :: result
   def judge(stats, limits) do
+    if stats.net_load_max > limits.max_net_load,
+      do: {:repeat, {:host_busy, stats.net_load_max}},
+      else: stats[:swap] |> swap_problem(limits) |> judge_within(stats, limits)
+  end
+
+  # `problem` is the swap verdict, `nil` when swap is fine.
+  defp judge_within(nil, stats, limits) do
     cond do
-      stats.net_load_max > limits.max_net_load ->
-        {:repeat, {:host_busy, stats.net_load_max}}
-
-      swap = swap_problem(stats[:swap], limits) ->
-        swap
-
       stats[:aborted] == :memory or stats.mem_mb_max >= limits.mem_limit_mb * limits.mem_fraction ->
         {:bad, :memory}
 
@@ -101,6 +102,8 @@ defmodule Alambique.Load.Verdict do
         :good
     end
   end
+
+  defp judge_within(problem, _stats, _limits), do: problem
 
   defp swap_problem(nil, _), do: nil
 

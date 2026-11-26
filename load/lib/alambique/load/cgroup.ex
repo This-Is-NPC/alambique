@@ -24,7 +24,7 @@ defmodule Alambique.Load.Cgroup do
   end
 
   @doc "Process memory in bytes from the `memory.current` value and the parsed `memory.stat`."
-  @spec process_bytes(integer, map) :: integer
+  @spec process_bytes(integer, map) :: number
   def process_bytes(current, stat), do: current - Map.get(stat, "shmem", 0)
 
   @doc "One reading: CPU time and throttling, memory in MiB."

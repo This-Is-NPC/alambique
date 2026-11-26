@@ -7,7 +7,7 @@ defmodule Alambique.BenchText do
   @doc "A text of exactly `bytes` bytes."
   @spec body(integer, pos_integer) :: binary
   def body(id, bytes) do
-    :rand.seed(:exsss, {id, 17, 99})
+    _ = :rand.seed(:exsss, {id, 17, 99})
     vocab = vocabulary()
 
     Stream.repeatedly(fn ->
@@ -28,7 +28,7 @@ defmodule Alambique.BenchText do
   defp vocabulary do
     case :persistent_term.get({__MODULE__, :vocab}, nil) do
       nil ->
-        :rand.seed(:exsss, {3, 1, 4})
+        _ = :rand.seed(:exsss, {3, 1, 4})
 
         vocab =
           List.to_tuple(
