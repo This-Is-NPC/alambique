@@ -35,17 +35,7 @@ defmodule Mix.Tasks.Alambique.Cleanup do
         strict: Cluster.switches() ++ [timeout: :integer, grace_ms: :integer]
       )
 
-    {cell, from} =
-      case rest do
-        [cell, from] ->
-          {cell, from}
-
-        _ ->
-          Mix.raise(
-            "usage: mix alambique.cleanup CELL LOCATION_ID --instance NAME --connect NODE"
-          )
-      end
-
+    {cell, from} = cell_and_location(rest)
     instance = Cluster.instance!(parsed)
     Mix.Task.run("app.config")
     via = Cluster.connect!(parsed)
@@ -67,4 +57,9 @@ defmodule Mix.Tasks.Alambique.Cleanup do
         Mix.raise("could not clean up #{cell} at #{from}: #{inspect(reason)}")
     end
   end
+
+  defp cell_and_location([cell, from]), do: {cell, from}
+
+  defp cell_and_location(_rest),
+    do: Mix.raise("usage: mix alambique.cleanup CELL LOCATION_ID --instance NAME --connect NODE")
 end

@@ -216,6 +216,7 @@ defmodule Alambique.Ops do
   end
 
   @doc false
+  @spec where(atom, String.t()) :: {:ok, String.t()} | {:error, term}
   def where(instance, cell) do
     with {:ok, location} <-
            Alambique.Placement.locate(Alambique.Config.fetch!(instance), cell, fresh: true),
@@ -235,6 +236,7 @@ defmodule Alambique.Ops do
   @doc false
   # `:erpc.call/5` that answers a failure as `{:error, _}`: the call itself
   # (`{:erpc, reason}`) or an exception raised on the node (`{:remote, text}`).
+  @spec call(node, module, atom, list, timeout) :: term
   def call(via, module, function, args, timeout) do
     :erpc.call(via, module, function, args, timeout)
   catch

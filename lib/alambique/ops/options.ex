@@ -40,9 +40,11 @@ defmodule Alambique.Ops.Options do
   ]
 
   @doc "Switches for `OptionParser`, to be merged with a task's own."
+  @spec switches() :: keyword
   def switches, do: @store_switches
 
   @doc "Loads the application and starts its dependencies, without starting any instance."
+  @spec boot() :: :ok
   def boot do
     Mix.Task.run("app.config")
     {:ok, _} = Application.ensure_all_started(:alambique)

@@ -198,7 +198,7 @@ defmodule Alambique.Replication.Replicator do
 
   Options: `:deadline`, for the page fetches of a lazy restore; `:conn`, the
   connection that owns the files: the WAL is read up to the end its wal-index
-  records (`Alambique.Sqlite.capture_incremental/9`), so that a commit SQLite rolled back
+  records (`Alambique.Sqlite.capture_incremental/5`), so that a commit SQLite rolled back
   after its frame reached the file is not taken for a transaction.
   """
   @spec encode(t, Alambique.Replication.ctx(), :batch, keyword) ::
@@ -420,12 +420,8 @@ defmodule Alambique.Replication.Replicator do
       conn,
       s.db_path,
       wal_path(s),
-      s.page_size,
-      s.wal_pos,
       s.sums,
-      s.checksum,
-      s.txid + 1,
-      ts
+      capture_opts(s, ts)
     )
   end
 
