@@ -913,7 +913,7 @@ defmodule Alambique.Cell do
       elapsed < after_ms ->
         {:noreply, arm_idle_close(state, after_ms - elapsed)}
 
-      not closable?(state) ->
+      not quiet?(state) ->
         {:noreply, arm_idle_close(state)}
 
       true ->
@@ -1030,12 +1030,16 @@ defmodule Alambique.Cell do
 
   # Nothing in flight, parked or waiting for the feed, so no message or call
   # that is already queued needs the connection: the feed sender, whose
-  # exit would read it, has nothing left to publish (`Publisher.settled?/1`).
-  defp closable?(%State{conn: conn} = state) do
+  # exit would read it, has nothing left to publish (`Publisher.delivered?/1`).
+  # A cleanup that is due is the close's own first step, so `quiet?/1` leaves
+  # it out and `closable?/1` does not.
+  defp quiet?(%State{conn: conn} = state) do
     conn != nil and idle?(state) and :atomics.get(state.load, Facts.slot(:admitted)) == 0 and
       state.parked == [] and state.hydrator == nil and not state.unsent and
-      Publisher.settled?(state) and State.lease_valid?(state)
+      Publisher.delivered?(state) and State.lease_valid?(state)
   end
+
+  defp closable?(state), do: quiet?(state) and not Publisher.cleanup_due?(state)
 
   # Idle close (`idle_close_after_ms`): checkpoint, close the connection and
   # keep the hold on the file. The cell stays the owner: lease, renewals,
