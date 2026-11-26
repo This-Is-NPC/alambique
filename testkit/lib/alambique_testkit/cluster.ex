@@ -275,7 +275,7 @@ defmodule AlambiqueTestkit.Cluster do
   def terminate(_reason, state) do
     for {_name, %{peer: peer, node: node}} <- state.peers, peer != nil do
       try do
-        if Process.whereis(:cover_server), do: :cover.flush(node)
+        _ = if Process.whereis(:cover_server), do: :cover.flush(node)
         :peer.stop(peer)
       catch
         _, _ -> :ok
@@ -319,7 +319,7 @@ defmodule AlambiqueTestkit.Cluster do
     }
 
     state = put_in(state.peers[name], config)
-    if Process.whereis(:cover_server), do: :cover.start(node)
+    _ = if Process.whereis(:cover_server), do: :cover.start(node)
     boot(state, config)
 
     for {other, %{peer: other_peer, node: other_node}} <- state.peers,
@@ -431,7 +431,7 @@ defmodule AlambiqueTestkit.Cluster do
   """
   @spec ensure_epmd!() :: :ok
   def ensure_epmd! do
-    System.cmd("epmd", ["-daemon"])
+    {_output, 0} = System.cmd("epmd", ["-daemon"])
     port = String.to_integer(System.get_env("ERL_EPMD_PORT", "4369"))
     await_epmd(port, System.monotonic_time(:millisecond) + 10_000)
   end
@@ -456,6 +456,8 @@ defmodule AlambiqueTestkit.Cluster do
       ensure_epmd!()
       {:ok, _} = Node.start(:"alambique_test_#{System.pid()}@127.0.0.1", name_domain: :longnames)
     end
+
+    :ok
   end
 
   defmodule Boot do
@@ -464,7 +466,7 @@ defmodule AlambiqueTestkit.Cluster do
 
     def start(instance_opts, collector, name, events) do
       {:ok, _} = Application.ensure_all_started(:alambique)
-      :logger.set_primary_config(:level, :error)
+      :ok = :logger.set_primary_config(:level, :error)
 
       :ok =
         :telemetry.attach_many(

@@ -104,7 +104,7 @@ defmodule Alambique.ReplicationHelpers do
 
   @doc "Creates a table before it is filled or dropped; operations on missing tables are no-ops."
   def safe_op(conn, {:fill, i} = op) do
-    run_op(conn, {:create, i})
+    _ = run_op(conn, {:create, i})
     run_op(conn, op)
   end
 

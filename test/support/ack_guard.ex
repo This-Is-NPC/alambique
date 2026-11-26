@@ -30,7 +30,7 @@ defmodule Alambique.AckGuard do
 
   @doc "Stops watching."
   def detach(%{id: id, log: log}) do
-    :telemetry.detach(id)
+    :ok = :telemetry.detach(id)
     :ets.delete(log)
     :ok
   end
