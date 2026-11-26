@@ -634,7 +634,9 @@ mod tests {
     use super::*;
 
     fn page(seed: u8) -> Vec<u8> {
-        (0..512).map(|i| seed.wrapping_add((i % 7) as u8)).collect()
+        (0..512)
+            .map(|i| seed.wrapping_add(u8::try_from(i % 7).unwrap()))
+            .collect()
     }
 
     #[test]
@@ -679,7 +681,7 @@ mod tests {
         };
         let mut e = Encoder::new(h).unwrap();
         for pgno in [2u32, 5, 9, 16] {
-            e.add_frame(pgno, &page(pgno as u8), &[0; UPSTREAM_PAYLOAD_LEN])
+            e.add_frame(pgno, &page((pgno & 0xff) as u8), &[0; UPSTREAM_PAYLOAD_LEN])
                 .unwrap();
         }
         let out = e.finish().unwrap();
@@ -700,7 +702,7 @@ mod tests {
         };
         let mut e = Encoder::new(h).unwrap();
         for pgno in 1..=6u32 {
-            e.add_frame(pgno, &page(pgno as u8), &[0; UPSTREAM_PAYLOAD_LEN])
+            e.add_frame(pgno, &page((pgno & 0xff) as u8), &[0; UPSTREAM_PAYLOAD_LEN])
                 .unwrap();
         }
         let out = e.finish().unwrap();
@@ -727,7 +729,9 @@ mod tests {
         };
         let mut e = Encoder::new(h.clone()).unwrap();
         let a = vec![1u8; 1024];
-        let b: Vec<u8> = (0..1024).map(|i| (i * 31 % 251) as u8).collect();
+        let b: Vec<u8> = (0..1024)
+            .map(|i| u8::try_from(i * 31 % 251).unwrap())
+            .collect();
         e.add_page(3, &a).unwrap();
         e.add_page(9, &b).unwrap();
         let out = e.finish().unwrap();
@@ -822,7 +826,7 @@ mod tests {
             };
             let mut e = Encoder::new(h).unwrap();
             for &p in pages {
-                let data = page(p as u8);
+                let data = page((p & 0xff) as u8);
                 // Frames are written directly: `add_page` refuses the gaps.
                 e.add_frame(p, &data, &lz4_flex::block::compress(&data))
                     .unwrap();
@@ -911,7 +915,7 @@ mod props {
                     .zip(kept)
                     .enumerate()
                     .filter(|(_, (_, keep))| snapshot || *keep)
-                    .map(|(i, (d, _))| (i as u32 + 1, d))
+                    .map(|(i, (d, _))| (u32::try_from(i).unwrap() + 1, d))
                     .collect();
                 File { header, pages }
             })

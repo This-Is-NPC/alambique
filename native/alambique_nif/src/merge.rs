@@ -86,7 +86,7 @@ mod tests {
     use crate::ltx::{page_crc, CHECKSUM_FLAG};
 
     fn pg(n: u32, fill: u8) -> Vec<u8> {
-        vec![fill.wrapping_add(n as u8); 512]
+        vec![fill.wrapping_add((n & 0xff) as u8); 512]
     }
 
     fn seg(
@@ -121,10 +121,9 @@ mod tests {
         let merged = dir.path().join("merged");
         let sum = |pages: &[Vec<u8>]| -> u64 {
             CHECKSUM_FLAG
-                | pages
-                    .iter()
-                    .enumerate()
-                    .fold(0, |a, (i, p)| a ^ page_crc(i as u32 + 1, p))
+                | pages.iter().enumerate().fold(0, |a, (i, p)| {
+                    a ^ page_crc(u32::try_from(i).unwrap() + 1, p)
+                })
         };
 
         let mut db: Vec<Vec<u8>> = (1..=3).map(|n| pg(n, 1)).collect();
@@ -312,10 +311,9 @@ mod props {
 
     fn sum(pages: &[Vec<u8>]) -> u64 {
         CHECKSUM_FLAG
-            | pages
-                .iter()
-                .enumerate()
-                .fold(0, |a, (i, p)| a ^ page_crc(i as u32 + 1, p))
+            | pages.iter().enumerate().fold(0, |a, (i, p)| {
+                a ^ page_crc(u32::try_from(i).unwrap() + 1, p)
+            })
     }
 
     /// Consecutive LTX files for the transactions (the first is a snapshot),
@@ -331,7 +329,7 @@ mod props {
             if n == 0 {
                 touched.extend(1..=*size);
             }
-            touched.extend(old as u32 + 1..=*size);
+            touched.extend(u32::try_from(old).unwrap() + 1..=*size);
             for &(pgno, fill) in writes {
                 let pgno = pgno % size + 1;
                 db[pgno as usize - 1] = vec![fill; PS];
@@ -339,7 +337,7 @@ mod props {
             }
             let post = sum(&db);
             let h = Header {
-                page_size: PS as u32,
+                page_size: u32::try_from(PS).unwrap(),
                 commit: *size,
                 min_txid: n as u64 + 1,
                 max_txid: n as u64 + 1,
@@ -375,10 +373,10 @@ mod props {
             let (chain, merged) = (dir.path().join("chain"), dir.path().join("merged"));
             let mut cur = 0;
             for f in &files {
-                cur = dbsum::apply(&chain, f, cur, PS as u32).unwrap().post_apply;
+                cur = dbsum::apply(&chain, f, cur, u32::try_from(PS).unwrap()).unwrap().post_apply;
             }
             let m = merge(&refs(&files)).unwrap();
-            let applied = dbsum::apply(&merged, &m, 0, PS as u32).unwrap();
+            let applied = dbsum::apply(&merged, &m, 0, u32::try_from(PS).unwrap()).unwrap();
             let last = states.last().unwrap();
             prop_assert_eq!(std::fs::read(&merged).unwrap(), last.concat());
             prop_assert_eq!(std::fs::read(&chain).unwrap(), last.concat());
