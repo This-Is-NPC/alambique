@@ -122,21 +122,23 @@ defmodule Alambique.Trash do
       if grace == 0 do
         delete_all(ctx, cell, keys, settings.concurrency, nil, deadline)
       else
-        due = now(ctx) + grace
-
-        keys
-        |> Enum.chunk_every(settings.batch_keys)
-        |> Enum.reduce_while({:ok, 0}, fn chunk, {:ok, n} ->
-          case put_manifest(ctx, cell, chunk, due, deadline) do
-            :ok -> {:cont, {:ok, n + length(chunk)}}
-            {:error, _} = error -> {:halt, error}
-          end
-        end)
+        put_manifests(ctx, cell, keys, {now(ctx) + grace, settings.batch_keys}, deadline)
       end
 
     emit_mark(started, cell, grace, result)
     result
   end
+
+  defp put_manifests(ctx, cell, keys, {due, batch_keys}, deadline) do
+    keys
+    |> Enum.chunk_every(batch_keys)
+    |> Enum.reduce_while({:ok, 0}, fn chunk, {:ok, n} ->
+      chunk_marked(put_manifest(ctx, cell, chunk, due, deadline), n, length(chunk))
+    end)
+  end
+
+  defp chunk_marked(:ok, n, size), do: {:cont, {:ok, n + size}}
+  defp chunk_marked({:error, _} = error, _n, _size), do: {:halt, error}
 
   defp put_manifest(ctx, cell, keys, due, deadline) do
     id = 8 |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
