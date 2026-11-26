@@ -496,6 +496,10 @@ defmodule Alambique.Cell do
 
     with :ok <- refresh_cache(state, next, changed) do
       {next, rearmed} = rearm(state, next, changed)
+
+      if :track_bytes in changed and not Facts.track_bytes?(next),
+        do: Facts.clear_memory(next.load)
+
       {:ok, next, changed, rearmed}
     end
   end
@@ -575,14 +579,25 @@ defmodule Alambique.Cell do
           end
       end
 
-    if :idle_close_after_ms in changed and state.conn != nil do
-      cancel_timer(state.idle_close)
-      next = %{next | idle_close: nil}
+    {next, rearmed} =
+      if :idle_close_after_ms in changed and state.conn != nil do
+        cancel_timer(state.idle_close)
+        next = %{next | idle_close: nil}
 
-      case State.cell_opt(next, :idle_close_after_ms) do
-        nil -> {next, rearmed + 1}
-        _ -> {arm_idle_close(next, left.(:idle_close_after_ms)), rearmed + 1}
+        case State.cell_opt(next, :idle_close_after_ms) do
+          nil -> {next, rearmed + 1}
+          _ -> {arm_idle_close(next, left.(:idle_close_after_ms)), rearmed + 1}
+        end
+      else
+        {next, rearmed}
       end
+
+    # The wait before a feed cleanup. A timer that waits out a failure keeps
+    # its backoff, and `:after_publish` waits for nothing.
+    if :cleanup_after_ms in changed and is_reference(state.feed_cleanup) and
+         state.feed_cleanup_failures == 0 and state.config.feed.cleanup != :after_publish do
+      cancel_timer(state.feed_cleanup)
+      {arm_cleanup(%{next | feed_cleanup: nil}, left.(:cleanup_after_ms)), rearmed + 1}
     else
       {next, rearmed}
     end
@@ -1046,7 +1061,7 @@ defmodule Alambique.Cell do
         {:noreply, arm_cleanup(state, wait)}
 
       not cleanup_ready?(state) ->
-        {:noreply, arm_cleanup(state, state.config.feed.cleanup_after_ms)}
+        {:noreply, arm_cleanup(state, State.cell_opt(state, :cleanup_after_ms))}
 
       true ->
         case cleanup(state) do
@@ -1224,7 +1239,7 @@ defmodule Alambique.Cell do
 
       {:error, state} ->
         %{retry_backoff_max_ms: max} = state.config.upload
-        base = state.config.feed.cleanup_after_ms
+        base = State.cell_opt(state, :cleanup_after_ms)
         failures = state.feed_cleanup_failures
         delay = min(base * Integer.pow(2, min(failures, 20)), max(max, base))
         {:ok, arm_cleanup(%{state | feed_cleanup_failures: failures + 1}, delay)}
@@ -1246,7 +1261,7 @@ defmodule Alambique.Cell do
 
   defp cleanup_quiet_left(state) do
     elapsed = System.monotonic_time(:millisecond) - state.last_active
-    max(state.config.feed.cleanup_after_ms - elapsed, 0)
+    max(State.cell_opt(state, :cleanup_after_ms) - elapsed, 0)
   end
 
   # A published batch has rows to remove. The timer carries its ref, so a
@@ -1255,7 +1270,7 @@ defmodule Alambique.Cell do
     delay =
       if state.config.feed.cleanup == :after_publish,
         do: 0,
-        else: state.config.feed.cleanup_after_ms
+        else: State.cell_opt(state, :cleanup_after_ms)
 
     arm_cleanup(state, delay)
   end

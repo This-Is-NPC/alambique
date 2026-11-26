@@ -347,16 +347,6 @@ defmodule Alambique.CellOptionsRefreshTest do
       unchanged(inst, before)
     end
 
-    test "track_bytes cannot be set per cell: the facts keep their numbers",
-         %{inst: inst, before: before} do
-      Callbacks.set(fn _ -> [awake: [track_bytes: false]] end)
-      assert {:error, {:cell_options, message}} = refresh(inst, "c")
-      assert message =~ "track_bytes"
-      unchanged(inst, before)
-      assert {:ok, %{cache_used: used}} = Alambique.facts(inst, "c")
-      assert is_integer(used)
-    end
-
     test "a pragma that fails changes no timer and no option", %{inst: inst, before: before} do
       Callbacks.set(fn _ ->
         [
@@ -385,6 +375,85 @@ defmodule Alambique.CellOptionsRefreshTest do
     assert {:error, {:cell_options, _}} = refresh(inst, "c")
     assert {:ok, _} = wake(inst, "c")
     assert state(inst, "c").cell_opts == %{}
+  end
+
+  describe "track_bytes" do
+    test "off clears the memory facts and on measures them again", ctx do
+      inst = start(ctx)
+      assert {:ok, _} = wake(inst, "c")
+      assert {:ok, %{cache_used: used}} = Alambique.facts(inst, "c")
+      assert is_integer(used)
+
+      Callbacks.set(fn _ -> [awake: [track_bytes: false]] end)
+      assert {:ok, :override, changed: [:track_bytes]} = refresh(inst, "c")
+
+      assert {:ok, %{cache_used: nil, schema_used: nil}} =
+               Alambique.facts(inst, "c")
+
+      assert {:ok, _} = wake(inst, "c")
+      assert {:ok, %{cache_used: nil}} = Alambique.facts(inst, "c")
+
+      Callbacks.set(fn _ -> [] end)
+      assert {:ok, :node, changed: [:track_bytes]} = refresh(inst, "c")
+      assert {:ok, %{cache_used: used, process_bytes: bytes}} = Alambique.facts(inst, "c")
+      assert is_integer(used) and is_integer(bytes)
+    end
+
+    test "off is a no-op under a memory budget", ctx do
+      inst = start(ctx, awake: [max_bytes: 500_000_000])
+      assert {:ok, _} = wake(inst, "c")
+      Callbacks.set(fn _ -> [awake: [track_bytes: false]] end)
+      assert {:ok, :override, changed: [:track_bytes]} = refresh(inst, "c")
+      assert {:ok, _} = wake(inst, "c")
+      assert {:ok, %{cache_used: used}} = Alambique.facts(inst, "c")
+      assert is_integer(used)
+    end
+  end
+
+  describe "cleanup_after_ms" do
+    test "not below the idle timeout goes back to the node's, at a wake and at a refresh", ctx do
+      inst = start(ctx)
+      Callbacks.set(fn _ -> [idle_timeout_ms: 4_000, feed: [cleanup_after_ms: 5_000]] end)
+      assert {:ok, _} = wake(inst, "c")
+      assert state(inst, "c").cell_opts == %{idle_timeout_ms: 4_000}
+
+      await_event(
+        [:alambique, :cell, :options, :repaired],
+        "c",
+        5_000,
+        &(&1.field == :cleanup_after_ms)
+      )
+
+      Callbacks.set(fn _ -> [feed: [cleanup_after_ms: 3_000]] end)
+      assert {:ok, :override, changed: [:idle_timeout_ms, :cleanup_after_ms]} = refresh(inst, "c")
+      assert state(inst, "c").cell_opts == %{cleanup_after_ms: 3_000}
+
+      Callbacks.set(fn _ -> [idle_timeout_ms: 2_000, feed: [cleanup_after_ms: 3_000]] end)
+      assert {:ok, _, changed: [:idle_timeout_ms, :cleanup_after_ms]} = refresh(inst, "c")
+      assert state(inst, "c").cell_opts == %{idle_timeout_ms: 2_000}
+    end
+
+    test "a shorter wait applies to a cleanup that is already waiting", ctx do
+      inst = start(ctx, feed: [cleanup_after_ms: 20_000])
+      assert {:ok, _} = Alambique.execute(inst, "c", "INSERT INTO t VALUES (1)")
+
+      eventually(fn ->
+        s = state(inst, "c")
+        s.feed_published > 0 and is_reference(s.feed_cleanup)
+      end)
+
+      assert %{feed_cleaned: 0} = state(inst, "c")
+      Callbacks.set(fn _ -> [feed: [cleanup_after_ms: 150]] end)
+      assert {:ok, :override, changed: [:cleanup_after_ms]} = refresh(inst, "c")
+
+      eventually(
+        fn ->
+          s = state(inst, "c")
+          s.feed_cleaned == s.feed_published
+        end,
+        5_000
+      )
+    end
   end
 
   describe "the node limits and rules" do
@@ -529,6 +598,16 @@ defmodule Alambique.CellOptionsRefreshTest do
                Alambique.refresh_options(inst, :all, concurrency: 2)
 
       assert :atomics.get(running, 2) == 2
+    end
+
+    test "validates :concurrency", ctx do
+      inst = start(ctx)
+
+      for bad <- [0, -1, :many] do
+        assert_raise ArgumentError, ~r/:concurrency must be a positive integer/, fn ->
+          Alambique.refresh_options(inst, :all, concurrency: bad)
+        end
+      end
     end
 
     test "has nothing to do on a node with no awake cell", ctx do

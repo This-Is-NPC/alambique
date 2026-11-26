@@ -478,7 +478,9 @@ defmodule Alambique.ConfigOptionsTest do
           {:idle_close_after_ms, nil, 0},
           {:idle_gc, false, 1},
           {:idle_timeout_ms, 5, 0},
-          {:lazy_restore_mode, :whole, :eager}
+          {:lazy_restore_mode, :whole, :eager},
+          {:track_bytes, false, 1},
+          {:cleanup_after_ms, 5, 0}
         ] do
       assert check.(key, good) == :ok
       assert {:error, message} = check.(key, bad)
@@ -488,13 +490,15 @@ defmodule Alambique.ConfigOptionsTest do
     assert Enum.sort(Alambique.Config.cell_option_keys()) ==
              [
                :cache_kib,
+               :cleanup_after_ms,
                :idle_cache_after_ms,
                :idle_cache_kib,
                :idle_close_after_ms,
                :idle_gc,
                :idle_timeout_ms,
                :lazy_restore_mode,
-               :locking_mode
+               :locking_mode,
+               :track_bytes
              ]
   end
 

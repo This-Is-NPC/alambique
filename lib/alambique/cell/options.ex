@@ -21,7 +21,8 @@ defmodule Alambique.Cell.Options do
     :idle_cache_after_ms,
     :idle_cache_kib,
     :idle_close_after_ms,
-    :idle_gc
+    :idle_gc,
+    :track_bytes
   ]
 
   @type info :: %{
@@ -79,8 +80,8 @@ defmodule Alambique.Cell.Options do
   end
 
   # The shape of the instance options: `idle_timeout_ms:`, `awake: [...]` and
-  # `lazy_restore: [mode: ...]`,
-  # the keys of `Config.cell_option_keys/0` and no others.
+  # `lazy_restore: [mode: ...]` and `feed: [cleanup_after_ms:]`, the keys of
+  # `Config.cell_option_keys/0` and no others.
   defp validate(nil), do: {:ok, %{}}
 
   defp validate(value) do
@@ -88,16 +89,20 @@ defmodule Alambique.Cell.Options do
          {awake, top} = Keyword.pop(value, :awake, []),
          {sql, top} = Keyword.pop(top, :sql, []),
          {lazy, top} = Keyword.pop(top, :lazy_restore, []),
+         {feed, top} = Keyword.pop(top, :feed, []),
          true <- Keyword.keyword?(awake) or {:error, ":awake must be a keyword list"},
          true <- Keyword.keyword?(sql) or {:error, ":sql must be a keyword list"},
          true <- Keyword.keyword?(lazy) or {:error, ":lazy_restore must be a keyword list"},
+         true <- Keyword.keyword?(feed) or {:error, ":feed must be a keyword list"},
          :ok <- known(top, [:idle_timeout_ms]),
          :ok <- known(awake, @awake_keys),
          :ok <- known(sql, [:locking_mode]),
          :ok <- known(lazy, [:mode]),
+         :ok <- known(feed, [:cleanup_after_ms]),
          flat =
            Keyword.take(top, [:idle_timeout_ms]) ++
-             awake ++ sql ++ for({:mode, mode} <- lazy, do: {:lazy_restore_mode, mode}),
+             awake ++
+             sql ++ feed ++ for({:mode, mode} <- lazy, do: {:lazy_restore_mode, mode}),
          true <- Keyword.keys(flat) == Enum.uniq(Keyword.keys(flat)) or {:error, "repeats a key"},
          :ok <- check(flat) do
       {:ok, Map.new(flat)}
@@ -148,7 +153,8 @@ defmodule Alambique.Cell.Options do
   # What the merge breaks is repaired with a fixed result, so that an
   # override never becomes invalid after the limits changed it.
   #
-  # 1. `idle_timeout_ms` not above `feed.cleanup_after_ms`: the node's value.
+  # 0. `cleanup_after_ms` not below `idle_timeout_ms`: the node's value.
+  # 1. `idle_timeout_ms` not above `cleanup_after_ms`: the node's value.
   # 2. `idle_cache_after_ms` not below `idle_timeout_ms`: the shrink is off.
   # 3. `idle_close_after_ms` not below `idle_timeout_ms`: the close is off.
   # 4. `idle_close_after_ms` with `locking_mode: :exclusive`: the close is
@@ -164,8 +170,12 @@ defmodule Alambique.Cell.Options do
   #    the combination for the node's own value).
   defp repair(config, id, override) do
     steps = [
+      {:cleanup_after_ms,
+       fn o ->
+         if value(config, o, :cleanup_after_ms) >= value(config, o, :idle_timeout_ms), do: :drop
+       end},
       {:idle_timeout_ms,
-       fn o -> if o[:idle_timeout_ms] <= config.feed.cleanup_after_ms, do: :drop end},
+       fn o -> if o[:idle_timeout_ms] <= value(config, o, :cleanup_after_ms), do: :drop end},
       {:idle_cache_after_ms,
        fn o ->
          with after_ms when not is_nil(after_ms) <- value(config, o, :idle_cache_after_ms),
@@ -232,6 +242,7 @@ defmodule Alambique.Cell.Options do
   # Steps 1 and 7 read the key they may drop; the others read the merged values.
   defp rule_applies?(:idle_timeout_ms, override), do: Map.has_key?(override, :idle_timeout_ms)
   defp rule_applies?(:locking_mode, override), do: Map.has_key?(override, :locking_mode)
+  defp rule_applies?(:cleanup_after_ms, override), do: Map.has_key?(override, :cleanup_after_ms)
   defp rule_applies?(_key, _override), do: true
 
   defp value(config, override, key) do
@@ -246,6 +257,7 @@ defmodule Alambique.Cell.Options do
   def node_value(config, :idle_timeout_ms), do: config.idle_timeout_ms
   def node_value(config, :locking_mode), do: config.sql.locking_mode
   def node_value(config, :lazy_restore_mode), do: Config.lazy_mode(config, nil)
+  def node_value(config, :cleanup_after_ms), do: config.feed.cleanup_after_ms
   def node_value(config, key), do: Map.fetch!(config.awake, key)
 
   defp invalid(config, id, message, time, phase) do
