@@ -104,28 +104,29 @@ defmodule Alambique.Feed.Record do
 
   defp decode_json(key, body, at) do
     case Jason.decode(body) do
-      {:ok, %{"cell" => cell, "txid" => txid, "records" => records} = object}
-      when is_binary(cell) and is_integer(txid) and is_list(records) ->
-        with {:ok, records} <- records(records, cell, txid, at),
-             {:ok, marker} <- marker(object, cell, txid, at) do
-          records ++ marker
-        else
-          {:error, reason} -> [rejected(key, reason, at)]
-        end
-
-      {:ok, %{"cell" => cell, "batches" => batches}} when is_binary(cell) and is_list(batches) ->
-        case group(batches, cell, at) do
+      {:ok, object} ->
+        case object_records(object, at) do
           {:ok, records} -> records
           {:error, reason} -> [rejected(key, reason, at)]
         end
-
-      {:ok, _} ->
-        [rejected(key, :bad_object, at)]
 
       {:error, _} ->
         [rejected(key, :invalid_json, at)]
     end
   end
+
+  defp object_records(%{"cell" => cell, "txid" => txid, "records" => records} = object, at)
+       when is_binary(cell) and is_integer(txid) and is_list(records) do
+    with {:ok, records} <- records(records, cell, txid, at),
+         {:ok, marker} <- marker(object, cell, txid, at),
+         do: {:ok, records ++ marker}
+  end
+
+  defp object_records(%{"cell" => cell, "batches" => batches}, at)
+       when is_binary(cell) and is_list(batches),
+       do: group(batches, cell, at)
+
+  defp object_records(_object, _at), do: {:error, :bad_object}
 
   defp group(batches, cell, at) do
     Enum.reduce_while(batches, {:ok, []}, fn

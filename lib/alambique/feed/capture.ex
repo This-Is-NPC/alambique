@@ -266,28 +266,12 @@ defmodule Alambique.Feed.Capture do
     captured = captured(columns, key, what)
     new = "#{key_json(key, "new")}, #{values_json(captured, "new")}"
 
-    # A key change is a delete plus an insert; any other update is an update.
-    # Each statement is emitted only if its record op is listed.
     update_body =
-      [
-        :delete in ops and
-          "#{insert} SELECT #{pending}, #{name}, 'delete', #{key_json(key, "old")}, NULL WHERE #{changed};",
-        case {:insert in ops, :update in ops} do
-          {true, true} ->
-            "#{insert} VALUES (#{pending}, #{name}, CASE WHEN #{changed} THEN 'insert' ELSE 'update' END, #{new});"
-
-          {true, false} ->
-            "#{insert} SELECT #{pending}, #{name}, 'insert', #{new} WHERE #{changed};"
-
-          {false, true} ->
-            "#{insert} SELECT #{pending}, #{name}, 'update', #{new} WHERE NOT (#{changed});"
-
-          {false, false} ->
-            false
-        end
-      ]
-      |> Enum.filter(& &1)
-      |> Enum.join("\n")
+      update_body(
+        %{insert: insert, pending: pending, name: name, key: key, new: new},
+        ops,
+        changed
+      )
 
     [
       :insert in ops and
@@ -302,6 +286,32 @@ defmodule Alambique.Feed.Capture do
     |> Enum.map(fn {suffix, event, condition, body} ->
       "CREATE TRIGGER #{ident(base <> suffix)} AFTER #{event} ON #{ident(table)}#{condition} BEGIN #{body} END;\n"
     end)
+  end
+
+  # A key change is a delete plus an insert; any other update is an update.
+  # Each statement is emitted only if its record op is listed.
+  defp update_body(sql, ops, changed) do
+    %{insert: insert, pending: pending, name: name, key: key, new: new} = sql
+
+    [
+      :delete in ops and
+        "#{insert} SELECT #{pending}, #{name}, 'delete', #{key_json(key, "old")}, NULL WHERE #{changed};",
+      case {:insert in ops, :update in ops} do
+        {true, true} ->
+          "#{insert} VALUES (#{pending}, #{name}, CASE WHEN #{changed} THEN 'insert' ELSE 'update' END, #{new});"
+
+        {true, false} ->
+          "#{insert} SELECT #{pending}, #{name}, 'insert', #{new} WHERE #{changed};"
+
+        {false, true} ->
+          "#{insert} SELECT #{pending}, #{name}, 'update', #{new} WHERE NOT (#{changed});"
+
+        {false, false} ->
+          false
+      end
+    ]
+    |> Enum.filter(& &1)
+    |> Enum.join("\n")
   end
 
   defp split({:ops, ops, what}), do: {what, ops}
