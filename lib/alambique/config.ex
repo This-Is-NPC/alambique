@@ -468,6 +468,10 @@ defmodule Alambique.Config do
     unless cell_options_invalid in [:fallback, :refuse],
       do: bad!(":cell_options_invalid must be :fallback or :refuse")
 
+    sql = sql(opts[:sql], op_timeout, feed, lazy_restore)
+    awake = awake!(opts[:awake], idle_timeout)
+    no_close_with_exclusive!(awake, sql)
+
     %{
       name: name,
       node_id: node_id,
@@ -501,11 +505,11 @@ defmodule Alambique.Config do
       compaction: compaction!(opts[:compaction]),
       retention: retention!(opts[:retention]),
       query: query,
-      sql: sql(opts[:sql], op_timeout, feed, lazy_restore),
+      sql: sql,
       routing: options!(:routing, opts[:routing], @routing_defaults),
       wake: wake!(opts[:wake], migrations, ttl, jitter),
       wal: wal!(opts[:wal]),
-      awake: awake!(opts[:awake], idle_timeout),
+      awake: awake,
       cell_options: cell_options,
       cell_options_timeout_ms: cell_options_timeout,
       cell_options_invalid: cell_options_invalid,
@@ -1236,6 +1240,15 @@ defmodule Alambique.Config do
     do: bad!(":sql locking_mode: :exclusive needs lazy_restore: false")
 
   defp locking_mode!(_mode, _feed, _lazy), do: :ok
+
+  # Closing the connection of an idle cell drops the lock an exclusive
+  # connection keeps for its life (and the cell would be open to every other
+  # process meanwhile), so the two do not go together.
+  defp no_close_with_exclusive!(%{idle_close_after_ms: close}, %{locking_mode: :exclusive})
+       when close != nil,
+       do: bad!(":awake :idle_close_after_ms does not work with :sql locking_mode: :exclusive")
+
+  defp no_close_with_exclusive!(_awake, _sql), do: :ok
 
   @doc false
   @spec default_statement_slots(pos_integer) :: pos_integer
