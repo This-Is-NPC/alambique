@@ -213,6 +213,55 @@ defmodule Alambique.PageSidecarRestoreTest do
     end
   end
 
+  # The frames of an LTX file by page number: header, then frames up to the
+  # zero page that ends them.
+  defp frames(<<_header::binary-size(100), rest::binary>>), do: scan(rest, %{})
+
+  defp scan(<<0::48, _::binary>>, acc), do: acc
+
+  defp scan(<<pgno::32, flags::16, n::32, payload::binary-size(n), rest::binary>>, acc),
+    do: scan(rest, Map.put(acc, pgno, <<pgno::32, flags::16, n::32, payload::binary>>))
+
+  defp object(env, lazy, file) do
+    {:ok, body, _etag, _meta} = env.mod.get(env.cfg, elem(lazy.files, file))
+    body
+  end
+
+  test "a valid frame of another version of the page, served for a range, is refused", %{env: env} do
+    {_result, lazy} = lazy_restore(env)
+    {_total, unknown} = Native.lazy_progress(lazy.handle)
+    {file, _offset, _len, [{pgno, _, _} | _]} = Native.lazy_next_batch(lazy.handle, 1_000_000)
+    own = object(env, lazy, file)
+
+    # The same page number from another file of the chain: it decodes, and it
+    # is not the page of this file.
+    foreign =
+      Enum.find_value(0..(@files - 1), fn other ->
+        with true <- other != file,
+             %{^pgno => frame} <- frames(object(env, lazy, other)),
+             true <- frame != frames(own)[pgno],
+             do: frame,
+             else: (_ -> nil)
+      end)
+
+    assert foreign, "no other file has a different page #{pgno}"
+
+    assert {:error, {:page_hash, ^pgno}} =
+             Native.lazy_deliver(lazy.handle, file, foreign, [{pgno, 0, byte_size(foreign)}])
+
+    assert {_, ^unknown} = Native.lazy_progress(lazy.handle)
+
+    # The whole object agrees with the sidecar: the range was the wrong one.
+    assert :range = Native.lazy_settle_hashes(lazy.handle, file, own)
+    assert file in Native.lazy_covered(lazy.handle)
+
+    # And the right frame of the right range is installed.
+    mine = frames(own)[pgno]
+    assert {:ok, _} = Native.lazy_deliver(lazy.handle, file, mine, [{pgno, 0, byte_size(mine)}])
+    assert {_, left} = Native.lazy_progress(lazy.handle)
+    assert left == unknown - 1
+  end
+
   test "a damaged read whose object fails its checksum fails as without a sidecar", %{env: env} do
     key = key(env, 1)
     {:ok, object, _etag, meta} = env.mod.get(env.cfg, key)
