@@ -9,10 +9,10 @@ defmodule Alambique.PageSidecarRestoreTest do
   import Alambique.CellHelpers, only: [capture: 1, await_event: 3]
   import Alambique.CompactionHelpers
 
-  alias Alambique.CountingStore
+  alias Alambique.{CountingStore, TracingStore}
   alias Alambique.Replication
   alias Alambique.Replication.{Hydrator, Keys, Lazy, Native}
-  alias AlambiqueTestkit.HostileStore
+  alias AlambiqueTestkit.{HostileStore, MemoryStore}
 
   @files 4
 
@@ -108,6 +108,31 @@ defmodule Alambique.PageSidecarRestoreTest do
 
     assert :ok = hydrate(lazy)
     assert Enum.sort(whole_reads(t.counter)) == Enum.map(1..@files, &key(env, &1))
+  end
+
+  test "the sidecars are read together, beside the edges, not one after another", %{env: env} do
+    # A request for a sidecar takes 300 ms. Read one file after the other, the
+    # four would take 1.2 s and the first page would wait for all of them.
+    MemoryStore.inject(env.cfg, kind: :latency, ms: 300, ops: [:get], key: ~r/\.pages$/)
+    {_, traced} = store = TracingStore.wrap(env.ctx.store)
+    {_result, lazy} = lazy_restore(env, ctx: %{env.ctx | store: store})
+    assert Native.lazy_covered(lazy.handle) == Enum.to_list(0..(@files - 1))
+
+    sidecars =
+      for {:get, key, _from, _to} = request <- TracingStore.trace(traced),
+          String.ends_with?(key, ".pages"),
+          do: request
+
+    assert length(sidecars) == @files
+
+    for a <- sidecars, b <- sidecars, a != b do
+      assert TracingStore.overlap?(a, b), "the sidecar requests ran one after the other"
+    end
+
+    # And beside the edges: the reads of the edges did not wait for them.
+    edges = for {:get_range, _key, _from, to} <- TracingStore.trace(traced), do: to
+    first_end = sidecars |> Enum.map(&elem(&1, 3)) |> Enum.min()
+    assert Enum.all?(edges, &(&1 < first_end))
   end
 
   describe "a bad sidecar falls back to the whole object" do
