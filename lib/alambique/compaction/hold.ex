@@ -52,7 +52,7 @@ defmodule Alambique.Compaction.Hold do
 
       if :ets.insert_new(table, row) do
         :ets.insert(table, {{:order, seq}, key})
-        :ets.update_counter(table, :total, bytes)
+        _ = :ets.update_counter(table, :total, bytes)
         evict(table, config.compaction.hold_bytes)
       end
     end
@@ -132,7 +132,8 @@ defmodule Alambique.Compaction.Hold do
     case :ets.take(table, key) do
       [{^key, seq, _meta, _body, bytes}] ->
         :ets.delete(table, {:order, seq})
-        :ets.update_counter(table, :total, -bytes)
+        _ = :ets.update_counter(table, :total, -bytes)
+        :ok
 
       [] ->
         :ok
