@@ -5,7 +5,9 @@ defmodule Alambique.FeedCleanupPropertiesTest do
   and released, feed puts that fail, lose their acknowledgement or are slow,
   quiet periods, kills and hibernations of one cell, and a write that cleans
   while an earlier batch is still unpublished, with the cleanup bounded or not
-  and the hand-over to the sender in pieces or not. Once the faults are
+  and the hand-over to the sender in pieces or not, by the cell, by the sender
+  or by the library, and a reader of the sender that closes after each read
+  or after a burst of them. Once the faults are
   cleared, the records of the feed, deduplicated by id, are the rows of the
   state restored from the store: every acknowledged write, each row once and
   in order, and no row that no write made. A repeated record is identical to
@@ -54,14 +56,15 @@ defmodule Alambique.FeedCleanupPropertiesTest do
     check all(
             cleanup <- member_of([:in_write, :idle, :after_publish, :idle_or_write]),
             pieces <- member_of([nil, 2, 3]),
-            hand_over <- member_of([:cell, :sender]),
+            hand_over <- member_of([:cell, :sender, :native]),
+            close <- member_of([:after_read, :after_burst]),
             rows <- member_of([nil, 1, 2, 5]),
             first <- integer(1..6),
             ops <- list_of(op(), min_length: 6, max_length: 16),
             max_runs: 20,
             max_shrinking_steps: 0
           ) do
-      scenario(ctx, runs, {cleanup, rows, pieces, hand_over}, [{:write, first} | ops])
+      scenario(ctx, runs, {cleanup, rows, pieces, {hand_over, close}}, [{:write, first} | ops])
     end
   end
 
@@ -75,7 +78,8 @@ defmodule Alambique.FeedCleanupPropertiesTest do
             rows <- member_of([nil, 1, 2]),
             first <- integer(1..6),
             pieces <- member_of([nil, 2, 3]),
-            hand_over <- member_of([:cell, :sender]),
+            hand_over <- member_of([:cell, :sender, :native]),
+            close <- member_of([:after_read, :after_burst]),
             ops <- list_of(op(), min_length: 6, max_length: 12),
             kill_at <- integer(0..12),
             crash_at <- integer(0..12),
@@ -87,7 +91,7 @@ defmodule Alambique.FeedCleanupPropertiesTest do
         |> List.insert_at(kill_at, :kill)
         |> List.insert_at(crash_at, :crash_in_cleanup)
 
-      scenario(ctx, runs, {cleanup, rows, pieces, hand_over}, [{:write, first} | ops])
+      scenario(ctx, runs, {cleanup, rows, pieces, {hand_over, close}}, [{:write, first} | ops])
     end
   end
 
@@ -150,7 +154,7 @@ defmodule Alambique.FeedCleanupPropertiesTest do
     n
   end
 
-  defp scenario(ctx, runs, {cleanup, rows, pieces, hand_over}, ops) do
+  defp scenario(ctx, runs, {cleanup, rows, pieces, {hand_over, close}}, ops) do
     :counters.add(runs, 1, 1)
     n = :counters.get(runs, 1)
     {:ok, gate} = GatedStore.start_link()
@@ -172,6 +176,7 @@ defmodule Alambique.FeedCleanupPropertiesTest do
           cleanup_rows: rows,
           hand_over_rows: pieces,
           hand_over: hand_over,
+          reader_close: if(hand_over == :sender, do: close),
           publish_retry_ms: 10,
           publish_retry_max_ms: 40,
           stop_publish_ms: 200,

@@ -18,7 +18,7 @@ defmodule Alambique.Feed.Sender do
   require Logger
 
   # How long the sender waits for the rows a piece announced.
-  @rows_wait_ms 5_000
+  @rows_wait_ms 1_000
 
   alias Alambique.{Fault, Telemetry}
   alias Alambique.Cell.State
