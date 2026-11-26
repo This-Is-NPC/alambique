@@ -15,7 +15,8 @@ use std::path::Path;
 use crate::bytes::Reader;
 use crate::error::{invalid, Error, Result};
 
-pub const WAL_HEADER_SIZE: u64 = 32;
+const WAL_HEADER_LEN: usize = 32;
+pub const WAL_HEADER_SIZE: u64 = WAL_HEADER_LEN as u64;
 const FRAME_HEADER_SIZE: usize = 24;
 const MAGIC_LE: u32 = 0x377f0682;
 const MAGIC_BE: u32 = 0x377f0683;
@@ -68,7 +69,7 @@ fn checksum(big_endian: bool, data: &[u8], mut s0: u32, mut s1: u32) -> (u32, u3
 }
 
 fn read_header(file: &File) -> Result<Option<WalHeader>> {
-    let mut b = [0u8; WAL_HEADER_SIZE as usize];
+    let mut b = [0u8; WAL_HEADER_LEN];
     match file.read_exact_at(&mut b, 0) {
         Ok(()) => {}
         Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Ok(None),
@@ -126,6 +127,127 @@ pub fn committed_frames(path: &Path) -> Result<u64> {
     Ok(end.saturating_sub(WAL_HEADER_SIZE) / (FRAME_HEADER_SIZE as u64 + u64::from(page_size)))
 }
 
+/// One frame whose salts and checksum chain are right.
+struct Frame<'a> {
+    pgno: u32,
+    db_size: u32,
+    /// The checksum chain after the frame.
+    sums: (u32, u32),
+    page: &'a [u8],
+}
+
+impl<'a> Frame<'a> {
+    /// The frame in `buf` (header and page), `None` when it is not the next
+    /// frame of the WAL of `hdr` after the checksums `prev`.
+    fn parse(buf: &'a [u8], hdr: &WalHeader, prev: (u32, u32)) -> Option<Frame<'a>> {
+        let (head, page) = buf.split_first_chunk::<FRAME_HEADER_SIZE>()?;
+        let mut r = Reader::new(head);
+        let front = r.array::<8>()?;
+        let (salt1, salt2, sum1, sum2) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?);
+        let mut f = Reader::new(&front);
+        let (pgno, db_size) = (f.u32()?, f.u32()?);
+        if salt1 != hdr.salt1 || salt2 != hdr.salt2 {
+            return None;
+        }
+        let (c0, c1) = checksum(hdr.big_endian, &front, prev.0, prev.1);
+        let sums = checksum(hdr.big_endian, page, c0, c1);
+        (sums == (sum1, sum2)).then_some(Frame {
+            pgno,
+            db_size,
+            sums,
+            page,
+        })
+    }
+}
+
+/// Where scanning starts: `from` when it is in this WAL generation, the first
+/// frame otherwise.
+fn resume_pos(hdr: &WalHeader, from: Option<WalPos>) -> WalPos {
+    from.filter(|p| p.offset >= WAL_HEADER_SIZE && p.salt1 == hdr.salt1 && p.salt2 == hdr.salt2)
+        .unwrap_or(WalPos {
+            offset: WAL_HEADER_SIZE,
+            salt1: hdr.salt1,
+            salt2: hdr.salt2,
+            cksum1: hdr.cksum1,
+            cksum2: hdr.cksum2,
+        })
+}
+
+/// The offset a limit allows; a limit from another WAL generation (different
+/// salts) allows nothing.
+fn limit_offset(hdr: &WalHeader, limit: Option<WalPos>) -> Option<u64> {
+    limit.map(|l| {
+        if l.salt1 == hdr.salt1 && l.salt2 == hdr.salt2 {
+            l.offset
+        } else {
+            0
+        }
+    })
+}
+
+/// The committed frames from `start` on, of frames of `frame_len` bytes,
+/// stopping at the first that is not the next of the WAL or at `limit`.
+fn read_frames(
+    file: &File,
+    hdr: &WalHeader,
+    start: WalPos,
+    limit: Option<u64>,
+    frame_len: usize,
+) -> Result<Scan> {
+    let mut buf = vec![0u8; frame_len];
+    let mut offset = start.offset;
+    let (mut s0, mut s1) = (start.cksum1, start.cksum2);
+    let mut pending: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+    let mut committed: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+    let mut commit = None;
+    let mut pos = start;
+
+    loop {
+        if limit.is_some_and(|l| offset >= l) {
+            break;
+        }
+        match file.read_exact_at(&mut buf, offset) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e.into()),
+        }
+        let Some(frame) = Frame::parse(&buf, hdr, (s0, s1)) else {
+            break;
+        };
+        (s0, s1) = frame.sums;
+        let (pgno, db_size, page) = (frame.pgno, frame.db_size, frame.page);
+        crate::stats::WAL_FRAMES_READ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        offset = offset
+            .checked_add(frame_len as u64)
+            .ok_or_else(|| Error::Invalid("wal offset overflows".into()))?;
+        if pgno == 0 {
+            break;
+        }
+        pending.insert(pgno, page.to_vec());
+        if db_size != 0 {
+            committed.append(&mut pending);
+            commit = Some(db_size);
+            pos = WalPos {
+                offset,
+                salt1: hdr.salt1,
+                salt2: hdr.salt2,
+                cksum1: s0,
+                cksum2: s1,
+            };
+        }
+    }
+
+    if let Some(c) = commit {
+        committed.retain(|pgno, _| *pgno <= c);
+    }
+    Ok(Scan {
+        pos,
+        first_offset: start.offset,
+        commit,
+        pages: committed,
+    })
+}
+
 /// Scans committed frames.
 ///
 /// With `from` set and its salts equal to the WAL header's, scanning resumes
@@ -160,97 +282,13 @@ pub fn scan(
         ));
     }
 
-    let resume = from
-        .filter(|p| p.offset >= WAL_HEADER_SIZE && p.salt1 == hdr.salt1 && p.salt2 == hdr.salt2);
-    let start = resume.unwrap_or(WalPos {
-        offset: WAL_HEADER_SIZE,
-        salt1: hdr.salt1,
-        salt2: hdr.salt2,
-        cksum1: hdr.cksum1,
-        cksum2: hdr.cksum2,
-    });
-
-    // A limit from another WAL generation (different salts) allows nothing.
-    let limit = limit.map(|l| {
-        if l.salt1 == hdr.salt1 && l.salt2 == hdr.salt2 {
-            l.offset
-        } else {
-            0
-        }
-    });
+    let start = resume_pos(&hdr, from);
+    let limit = limit_offset(&hdr, limit);
     let frame_len = usize::try_from(page_size)
         .ok()
         .and_then(|p| p.checked_add(FRAME_HEADER_SIZE))
         .ok_or_else(|| Error::Invalid(format!("wal page size {page_size} too large")))?;
-    let mut buf = vec![0u8; frame_len];
-    let mut offset = start.offset;
-    let (mut s0, mut s1) = (start.cksum1, start.cksum2);
-    let mut pending: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
-    let mut committed: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
-    let mut commit = None;
-    let mut pos = start;
-
-    loop {
-        if limit.is_some_and(|l| offset >= l) {
-            break;
-        }
-        match file.read_exact_at(&mut buf, offset) {
-            Ok(()) => {}
-            Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(e.into()),
-        }
-        let Some((head, page)) = buf.split_first_chunk::<FRAME_HEADER_SIZE>() else {
-            break;
-        };
-        let mut r = Reader::new(head);
-        let (Some(front), Some(salt1), Some(salt2), Some(sum1), Some(sum2)) =
-            (r.array::<8>(), r.u32(), r.u32(), r.u32(), r.u32())
-        else {
-            break;
-        };
-        let mut f = Reader::new(&front);
-        let (Some(pgno), Some(db_size)) = (f.u32(), f.u32()) else {
-            break;
-        };
-        if salt1 != hdr.salt1 || salt2 != hdr.salt2 {
-            break;
-        }
-        let (c0, c1) = checksum(hdr.big_endian, &front, s0, s1);
-        let (c0, c1) = checksum(hdr.big_endian, page, c0, c1);
-        if (c0, c1) != (sum1, sum2) {
-            break;
-        }
-        (s0, s1) = (c0, c1);
-        crate::stats::WAL_FRAMES_READ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        offset = offset
-            .checked_add(frame_len as u64)
-            .ok_or_else(|| Error::Invalid("wal offset overflows".into()))?;
-        if pgno == 0 {
-            break;
-        }
-        pending.insert(pgno, page.to_vec());
-        if db_size != 0 {
-            committed.append(&mut pending);
-            commit = Some(db_size);
-            pos = WalPos {
-                offset,
-                salt1: hdr.salt1,
-                salt2: hdr.salt2,
-                cksum1: s0,
-                cksum2: s1,
-            };
-        }
-    }
-
-    if let Some(c) = commit {
-        committed.retain(|pgno, _| *pgno <= c);
-    }
-    Ok(Scan {
-        pos,
-        first_offset: start.offset,
-        commit,
-        pages: committed,
-    })
+    read_frames(&file, &hdr, start, limit, frame_len)
 }
 
 /// Makes arbitrary bytes a valid WAL as far as the layout allows: magic,
