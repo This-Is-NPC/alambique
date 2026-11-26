@@ -99,7 +99,7 @@ fn output_term<'a>(env: Env<'a>, o: capture::Output) -> Term<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn mk_args<'a>(
+pub(crate) fn mk_args<'a>(
     db: &'a str,
     wal: &'a str,
     page_size: u32,
@@ -108,7 +108,7 @@ fn mk_args<'a>(
     pre: u64,
     txid: u64,
     timestamp: i64,
-    end: Option<PosTuple>,
+    end: Option<WalPos>,
 ) -> capture::Args<'a> {
     capture::Args {
         db_path: Path::new(db),
@@ -119,7 +119,7 @@ fn mk_args<'a>(
         pre,
         txid,
         timestamp,
-        end: end.map(pos_from),
+        end,
     }
 }
 
@@ -137,13 +137,12 @@ fn capture_incremental<'a>(
     pre: u64,
     txid: u64,
     timestamp: i64,
-    end: Option<PosTuple>,
 ) -> Term<'a> {
     let _t = crate::stats::REPLICATION_CALLS.time();
     let run = || -> Result<Term<'a>, Error> {
         Ok(
             match capture::incremental(&mk_args(
-                &db, &wal, page_size, pos, &sums.0, pre, txid, timestamp, end,
+                &db, &wal, page_size, pos, &sums.0, pre, txid, timestamp, None,
             ))? {
                 Some(o) => output_term(env, o),
                 None => atoms::none().encode(env),
@@ -241,17 +240,11 @@ fn capture_replace<'a>(
     run().unwrap_or_else(|e| error_term(env, e))
 }
 
-/// True when committed frames exist after `pos` (and before `end`).
+/// True when committed frames exist after `pos`.
 #[rustler::nif(schedule = "DirtyIo")]
-fn wal_pending<'a>(
-    env: Env<'a>,
-    wal: String,
-    page_size: u32,
-    pos: PosTuple,
-    end: Option<PosTuple>,
-) -> Term<'a> {
+fn wal_pending<'a>(env: Env<'a>, wal: String, page_size: u32, pos: PosTuple) -> Term<'a> {
     let _t = crate::stats::REPLICATION_CALLS.time();
-    match capture::pending(Path::new(&wal), page_size, pos_from(pos), end.map(pos_from)) {
+    match capture::pending(Path::new(&wal), page_size, pos_from(pos), None) {
         Ok(b) => (atoms::ok(), b).encode(env),
         Err(e) => error_term(env, e),
     }

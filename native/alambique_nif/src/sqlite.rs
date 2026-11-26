@@ -15,6 +15,7 @@ use std::time::Instant;
 use crate::guard::guard;
 use crate::held::{self, Verdict};
 use crate::stats::{CACHE_HITS, CACHE_MISSES, CONNECTIONS_OPEN};
+use crate::wal::{WalPos, WAL_HEADER_SIZE};
 
 use libsqlite3_sys as ffi;
 use rustler::{
@@ -1714,45 +1715,114 @@ fn sqlite_foreign_write<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64, mod
 }
 
 /// The end of the committed log by the wal-index of a cell's own connection:
-/// `{:ok, {offset, salt1, salt2, 0, 0}}`, the offset past the frame `mxFrame`
-/// names, so that a scan of the WAL by path stops there. SQLite writes the
-/// header after the frames of a commit, and a commit that fails after its
-/// frame reached the file leaves a valid commit frame past it that is no
-/// transaction. `:none` for a connection that has no header to read.
-#[rustler::nif(schedule = "DirtyIo")]
-fn sqlite_wal_end<'a>(env: Env<'a>, conn: ResourceArc<Conn>, key: u64) -> Term<'a> {
-    let _t = crate::stats::SQLITE_CALLS.time();
-    if let Err(f) = check_user(env, &conn) {
-        return f.term(env);
+/// the position past the frame `mxFrame` names, so that a scan of the WAL by
+/// path stops there. SQLite writes the header after the frames of a commit,
+/// and a commit that fails after its frame reached the file leaves a valid
+/// commit frame past it that is no transaction. `None` for a connection that
+/// has no header to read.
+fn wal_end_pos(ctl: &Control, db: *mut ffi::sqlite3) -> Result<Option<WalPos>, Failure> {
+    if !ctl.watched {
+        return Ok(None);
+    }
+    let Some(h) = ctl.header(db) else {
+        return Err(Failure::Message(
+            "the wal-index header is unreadable".into(),
+        ));
+    };
+    let [_, _, size_lo, size_hi] = h[3].to_ne_bytes();
+    let size = match u16::from_ne_bytes([size_lo, size_hi]) {
+        1 => 65536,
+        n => u64::from(n),
+    };
+    // SQLite keeps the salts as the raw bytes of the WAL header (it copies
+    // them with `memcpy`), so the native words are the file's big-endian
+    // values read in native order.
+    let salt = |w: u32| u32::from_be_bytes(w.to_ne_bytes());
+    Ok(Some(WalPos {
+        offset: WAL_HEADER_SIZE + u64::from(h[4]) * (24 + size),
+        salt1: salt(h[8]),
+        salt2: salt(h[9]),
+        cksum1: 0,
+        cksum2: 0,
+    }))
+}
+
+/// Runs `f` with the end of the log of `conn` (`wal_end_pos`), for the calls
+/// that read the WAL by path and must not read past it: one dirty call, the
+/// header is read inside it.
+fn with_wal_end<'a>(
+    env: Env<'a>,
+    conn: &ResourceArc<Conn>,
+    key: u64,
+    f: impl FnOnce(Option<WalPos>) -> Term<'a>,
+) -> Term<'a> {
+    if let Err(fail) = check_user(env, conn) {
+        return fail.term(env);
     }
     reply(
         env,
-        with_db(&conn, |db| {
+        with_db(conn, |db| {
             let ctl = &conn.control;
             if !ctl.key_ok(key) || ctl.expect_txn.load(Relaxed) != 0 {
                 return Err(Failure::Denied);
             }
-            if !ctl.watched {
-                return Ok(atoms::none().encode(env));
-            }
-            let Some(h) = ctl.header(db) else {
-                return Err(Failure::Message(
-                    "the wal-index header is unreadable".into(),
-                ));
-            };
-            let [_, _, size_lo, size_hi] = h[3].to_ne_bytes();
-            let size = match u16::from_ne_bytes([size_lo, size_hi]) {
-                1 => 65536,
-                n => u64::from(n),
-            };
-            let offset = crate::wal::WAL_HEADER_SIZE + u64::from(h[4]) * (24 + size);
-            // SQLite keeps the salts as the raw bytes of the WAL header (it
-            // copies them with `memcpy`), so the native words are the file's
-            // big-endian values read in native order.
-            let salt = |w: u32| u32::from_be_bytes(w.to_ne_bytes());
-            Ok((atoms::ok(), (offset, salt(h[8]), salt(h[9]), 0u32, 0u32)).encode(env))
+            Ok(f(wal_end_pos(ctl, db)?))
         }),
     )
+}
+
+/// `capture_incremental` of the files of `conn`, reading the WAL up to the
+/// end its wal-index records.
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(clippy::too_many_arguments)]
+fn sqlite_capture_incremental<'a>(
+    env: Env<'a>,
+    conn: ResourceArc<Conn>,
+    key: u64,
+    db: String,
+    wal: String,
+    page_size: u32,
+    pos: crate::PosTuple,
+    sums: ResourceArc<crate::SumsRes>,
+    pre: u64,
+    txid: u64,
+    timestamp: i64,
+) -> Term<'a> {
+    let _t = crate::stats::REPLICATION_CALLS.time();
+    with_wal_end(env, &conn, key, |end| {
+        let args = crate::mk_args(
+            &db, &wal, page_size, pos, &sums.0, pre, txid, timestamp, end,
+        );
+        match crate::capture::incremental(&args) {
+            Ok(Some(o)) => crate::output_term(env, o),
+            Ok(None) => atoms::none().encode(env),
+            Err(e) => crate::error_term(env, e),
+        }
+    })
+}
+
+/// `wal_pending` of the WAL of `conn`, up to the end its wal-index records.
+#[rustler::nif(schedule = "DirtyIo")]
+fn sqlite_wal_pending<'a>(
+    env: Env<'a>,
+    conn: ResourceArc<Conn>,
+    key: u64,
+    wal: String,
+    page_size: u32,
+    pos: crate::PosTuple,
+) -> Term<'a> {
+    let _t = crate::stats::REPLICATION_CALLS.time();
+    with_wal_end(env, &conn, key, |end| {
+        match crate::capture::pending(
+            std::path::Path::new(&wal),
+            page_size,
+            crate::pos_from(pos),
+            end,
+        ) {
+            Ok(b) => (atoms::ok(), b).encode(env),
+            Err(e) => crate::error_term(env, e),
+        }
+    })
 }
 
 /// Test builds: runs the statement of `set_foreign_commit` on a separate

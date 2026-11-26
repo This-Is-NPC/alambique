@@ -101,7 +101,7 @@ defmodule Alambique.NativeStatsTest do
     assert frames > 4
 
     before = stats()
-    assert {:ok, true} = Native.wal_pending(wal, 4096, {0, 0, 0, 0, 0}, nil)
+    assert {:ok, true} = Native.wal_pending(wal, 4096, {0, 0, 0, 0, 0})
     assert stats().wal_frames_read - before.wal_frames_read == frames
     Sqlite.close(conn)
   end

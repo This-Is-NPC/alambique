@@ -691,8 +691,9 @@ is that frames committed and not yet replicated imply a write in flight
   wal-index header is not written, and the file holds a frame with a commit
   mark and valid checksums past `mxFrame`. Every scan of the WAL by path (a
   batch, the first snapshot, the check for unreplicated frames) therefore
-  ends at the position `mxFrame` names, which the cell asks its connection
-  for (`Alambique.Sqlite.wal_end/1`, the same read of the header as above);
+  ends at the position `mxFrame` names, which the capture reads from the
+  header through the cell's connection in the same native call
+  (`Alambique.Sqlite.capture_incremental/9`, `wal_pending/4`);
   with the salts of another WAL generation nothing counts. The `-shm` file is
   not opened by path: closing any descriptor of a file drops the POSIX locks
   the process holds on it, and SQLite's shared-memory locks are among them.
