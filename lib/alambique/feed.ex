@@ -79,18 +79,7 @@ defmodule Alambique.Feed do
 
   def ctx(opts) when is_list(opts) do
     opts = Map.new(opts)
-
-    locations =
-      case opts do
-        %{locations: locations} ->
-          List.wrap(locations)
-
-        %{store: store, prefix: prefix} ->
-          [%Location{id: "default", store: store, prefix: prefix}]
-
-        _ ->
-          []
-      end
+    locations = option_locations(opts)
 
     ctx =
       %{
@@ -103,18 +92,33 @@ defmodule Alambique.Feed do
       |> Map.merge(Map.take(opts, [:clock, :shards, :settle_ms, :max_object_bytes, :timeout_ms]))
       |> Map.put(:locations, Enum.map(locations, &guarded/1))
 
-    valid? =
-      locations != [] and Enum.all?(locations, &Location.valid?/1) and
-        match?(
-          %{clock: {c, _}, shards: n, settle_ms: s, max_object_bytes: m, timeout_ms: t}
-          when is_atom(c) and is_integer(n) and n > 0 and is_integer(s) and s >= 0 and
-                 is_integer(m) and m > 0 and is_integer(t) and t > 0,
-          ctx
-        )
+    unless valid_ctx?(ctx, locations),
+      do: raise(ArgumentError, "invalid feed context: #{inspect(opts)}")
 
-    unless valid?, do: raise(ArgumentError, "invalid feed context: #{inspect(opts)}")
     ctx
   end
+
+  defp option_locations(%{locations: locations}), do: List.wrap(locations)
+
+  defp option_locations(%{store: store, prefix: prefix}),
+    do: [%Location{id: "default", store: store, prefix: prefix}]
+
+  defp option_locations(_opts), do: []
+
+  defp valid_ctx?(ctx, locations),
+    do: locations != [] and Enum.all?(locations, &Location.valid?/1) and valid_settings?(ctx)
+
+  defp valid_settings?(%{
+         clock: {c, _},
+         shards: n,
+         settle_ms: s,
+         max_object_bytes: m,
+         timeout_ms: t
+       })
+       when is_atom(c) and is_integer(s) and s >= 0,
+       do: Enum.all?([n, m, t], &(is_integer(&1) and &1 > 0))
+
+  defp valid_settings?(_ctx), do: false
 
   # A raw store given to `ctx/1` may raise or exit; the feed returns it as
   # `{:error, {:store_crashed, ...}}` like the instance's stores do.
@@ -253,28 +257,32 @@ defmodule Alambique.Feed do
 
     with {:ok, keys, _next} <-
            Retry.once(timeout, fn -> store.list(config, prefix, positions[id], limit) end) do
-      parsed =
-        keys
-        |> Enum.map(&{&1, Keys.parse(location.prefix, shard, &1)})
-        |> Enum.reject(fn {_key, parsed} -> parsed == nil end)
-
+      parsed = parse_keys(location, shard, keys)
       ready = Enum.take_while(parsed, fn {_key, p} -> p.time <= cutoff end)
-
-      bound =
-        with true <- length(keys) == limit and length(ready) == length(parsed),
-             {_key, last} when last != nil <- List.last(parsed) do
-          sort_key(last)
-        else
-          _ -> nil
-        end
+      full? = length(keys) == limit and length(ready) == length(parsed)
 
       items =
         for {key, p} <- ready,
             do: %{list: id, store: store, config: config, key: key, parsed: p, sort: sort_key(p)}
 
-      {:ok, %{items: items, bound: bound}}
+      {:ok, %{items: items, bound: bound(full?, parsed)}}
     end
   end
+
+  defp parse_keys(location, shard, keys) do
+    keys
+    |> Enum.map(&{&1, Keys.parse(location.prefix, shard, &1)})
+    |> Enum.reject(fn {_key, parsed} -> parsed == nil end)
+  end
+
+  defp bound(true, parsed) do
+    case List.last(parsed) do
+      {_key, last} when last != nil -> sort_key(last)
+      _ -> nil
+    end
+  end
+
+  defp bound(false, _parsed), do: nil
 
   defp sort_key(%{time: time, txid: txid, cell: cell}), do: {time, txid, cell}
 
@@ -307,13 +315,12 @@ defmodule Alambique.Feed do
         end
       end)
 
-    meta =
+    {deleted, meta} =
       case result do
-        {:ok, _} -> %{result: :ok}
-        {:error, reason} -> %{result: :error, reason: reason}
+        {:ok, count} -> {count, %{result: :ok}}
+        {:error, reason} -> {0, %{result: :error, reason: reason}}
       end
 
-    deleted = with {:ok, count} <- result, do: count, else: (_ -> 0)
     Telemetry.span_stop([:feed, :prune], started, %{deleted: deleted}, meta)
     result
   end
@@ -324,17 +331,15 @@ defmodule Alambique.Feed do
     with {:ok, keys, next} <-
            Retry.once(timeout, fn ->
              store.list(config, Keys.prefix(location.prefix, shard), start, 1000)
-           end) do
-      expired =
-        keys
-        |> Enum.map(&{&1, Keys.parse(location.prefix, shard, &1)})
-        |> Enum.take_while(fn {_key, parsed} -> parsed == nil or parsed.time < before end)
-
-      with {:ok, count} <- delete_all(store, config, expired, 0, timeout) do
-        if length(expired) == length(keys) and next != nil,
-          do: prune_page(location, shard, before, next, deleted + count, timeout),
-          else: {:ok, deleted + count}
-      end
+           end),
+         expired =
+           keys
+           |> Enum.map(&{&1, Keys.parse(location.prefix, shard, &1)})
+           |> Enum.take_while(fn {_key, parsed} -> parsed == nil or parsed.time < before end),
+         {:ok, count} <- delete_all(store, config, expired, 0, timeout) do
+      if length(expired) == length(keys) and next != nil,
+        do: prune_page(location, shard, before, next, deleted + count, timeout),
+        else: {:ok, deleted + count}
     end
   end
 
