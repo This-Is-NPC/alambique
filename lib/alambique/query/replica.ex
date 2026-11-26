@@ -33,8 +33,10 @@ defmodule Alambique.Query.Replica do
 
     ctx = Map.put(ctx, :missing_final, true)
 
+    req = %{ctx: ctx, dir: dir, cell: cell, key: key, target: target, deadline: deadline}
+
     result =
-      refresh(ctx, dir, {cell, key}, target, cached, deadline, %{
+      refresh(req, cached, %{
         max_age_ms: Keyword.get(opts, :max_age_ms, 0),
         attempts: config.query.restore_attempts,
         reflink: config.query.reflink
@@ -61,21 +63,25 @@ defmodule Alambique.Query.Replica do
   defp pick(entries, {:txid, n}), do: Enum.find(entries, &(&1.txid <= n))
   defp pick([], _target), do: nil
 
-  defp refresh(ctx, dir, cell_key, target, cached, deadline, %{max_age_ms: max_age_ms} = opts) do
+  defp refresh(req, cached, %{max_age_ms: max_age_ms} = opts) do
     cond do
       cached == nil or cached.txid == 0 ->
-        restore(ctx, dir, cell_key, target, deadline, opts.attempts)
+        restore(req, opts.attempts)
 
-      target == {:txid, cached.txid} or fresh?(cached, target, max_age_ms) ->
+      req.target == {:txid, cached.txid} or fresh?(cached, req.target, max_age_ms) ->
         use_cached(cached, :hit)
 
       true ->
-        case advance(ctx, dir, cell_key, target, cached, deadline, opts.reflink) do
-          {:ok, _, _, _} = ok -> ok
-          :unchanged -> use_cached(cached, :unchanged)
-          :fallback -> restore(ctx, dir, cell_key, target, deadline, opts.attempts)
-          {:error, _} = error -> error
-        end
+        refresh_cached(req, cached, opts)
+    end
+  end
+
+  defp refresh_cached(req, cached, opts) do
+    case advance(req, cached, opts.reflink) do
+      {:ok, _, _, _} = ok -> ok
+      :unchanged -> use_cached(cached, :unchanged)
+      :fallback -> restore(req, opts.attempts)
+      {:error, _} = error -> error
     end
   end
 
@@ -95,19 +101,21 @@ defmodule Alambique.Query.Replica do
   # Compaction or retention may delete files of a listing while it is being
   # read: the restore starts again from a fresh listing, `attempts` times in
   # all.
-  defp restore(ctx, dir, {cell, key}, target, deadline, attempts) do
-    with {:ok, tmp} <- Cache.tmp(dir, key) do
-      case Replication.restore(ctx, cell, tmp, target, timeout_ms: remaining(deadline)) do
-        {:ok, %{txid: txid, epoch: epoch, checksum: checksum, segments: segments}} ->
-          publish(dir, key, tmp, {txid, epoch, checksum}, target, :restore, segments)
+  defp restore(req, attempts) do
+    with {:ok, tmp} <- Cache.tmp(req.dir, req.key), do: restore_into(req, tmp, attempts)
+  end
 
-        {:error, reason} = error ->
-          _ = File.rm(tmp)
+  defp restore_into(req, tmp, attempts) do
+    restored =
+      Replication.restore(req.ctx, req.cell, tmp, req.target, timeout_ms: remaining(req.deadline))
 
-          if attempts > 1 and changed?(reason),
-            do: restore(ctx, dir, {cell, key}, target, deadline, attempts - 1),
-            else: error
-      end
+    case restored do
+      {:ok, %{txid: txid, epoch: epoch, checksum: checksum, segments: segments}} ->
+        publish(req, tmp, {txid, epoch, checksum}, :restore, segments)
+
+      {:error, reason} = error ->
+        _ = File.rm(tmp)
+        if attempts > 1 and changed?(reason), do: restore(req, attempts - 1), else: error
     end
   end
 
@@ -122,26 +130,20 @@ defmodule Alambique.Query.Replica do
   # file. A tail past a gap or a lower-epoch file ends the run (a pipeline in
   # flight, design §6, R3). Anything else unexpected returns `:fallback`, and
   # a full restore decides.
-  defp advance(ctx, dir, {cell, key}, target, cached, deadline, reflink?) do
+  defp advance(req, cached, reflink?) do
+    %{ctx: ctx, cell: cell} = req
     after_key = Keys.segment(ctx.prefix, cell, 0, cached.txid, cached.txid)
 
-    with {:ok, snapshot_keys, keys} <- list_levels(ctx, cell, after_key, deadline) do
+    with {:ok, snapshot_keys, keys} <- list_levels(ctx, cell, after_key, req.deadline) do
       {segments, snapshots} = Keys.parse(ctx.prefix, cell, snapshot_keys ++ keys)
+
       newest_snapshot = newest(snapshots)
-      limit = limit(target)
 
-      case Chain.run(Enum.sort_by(segments, & &1.min), cached.txid, limit) do
-        _ when newest_snapshot > cached.txid ->
-          :fallback
-
-        {[], false} when target == :latest ->
-          :unchanged
-
-        {chain, false} when chain != [] ->
-          apply_chain(ctx, dir, {cell, key}, target, cached, chain, deadline, reflink?)
-
-        _ ->
-          :fallback
+      case Chain.run(Enum.sort_by(segments, & &1.min), cached.txid, limit(req.target)) do
+        _ when newest_snapshot > cached.txid -> :fallback
+        {[], false} when req.target == :latest -> :unchanged
+        {chain, false} when chain != [] -> apply_chain(req, cached, chain, reflink?)
+        _ -> :fallback
       end
     end
   end
@@ -170,39 +172,37 @@ defmodule Alambique.Query.Replica do
   defp limit({:txid, n}), do: n
   defp limit(:latest), do: :infinity
 
-  defp apply_chain(ctx, dir, {cell, key}, target, cached, chain, deadline, reflink?) do
-    with {:ok, tmp} <- Cache.tmp(dir, key) do
-      apply_chain_into(tmp, ctx, dir, {cell, key}, target, cached, chain, deadline, reflink?)
+  defp apply_chain(req, cached, chain, reflink?) do
+    with {:ok, tmp} <- Cache.tmp(req.dir, req.key) do
+      apply_chain_into(tmp, req, cached, chain, reflink?)
     end
   end
 
-  defp apply_chain_into(tmp, ctx, dir, {cell, key}, target, cached, chain, deadline, reflink?) do
-    try do
-      with {:ok, page_size} <- page_size(cached.path),
-           {:ok, copy} <- Cache.clone(cached.path, tmp, reflink?),
-           {:ok, txid, epoch, checksum} <-
-             apply_segments(ctx, cell, tmp, chain, deadline, %{
-               checksum: cached.checksum,
-               page_size: page_size,
-               epoch: cached.epoch,
-               txid: cached.txid
-             }),
-           true <- target == :latest or txid == limit(target) or :fallback do
-        if txid == cached.txid do
-          :unchanged
-        else
-          Fault.point(:query_refresh_applied, %{cell: cell, txid: txid})
-          publish(dir, key, tmp, {txid, epoch, checksum}, target, {:refresh, copy}, length(chain))
-        end
+  defp apply_chain_into(tmp, req, cached, chain, reflink?) do
+    with {:ok, page_size} <- page_size(cached.path),
+         {:ok, copy} <- Cache.clone(cached.path, tmp, reflink?),
+         {:ok, txid, epoch, checksum} <-
+           apply_segments(req.ctx, req.cell, tmp, chain, req.deadline, %{
+             checksum: cached.checksum,
+             page_size: page_size,
+             epoch: cached.epoch,
+             txid: cached.txid
+           }),
+         true <- req.target == :latest or txid == limit(req.target) or :fallback do
+      if txid == cached.txid do
+        :unchanged
       else
-        :fallback -> :fallback
-        {:error, {:fetch, :not_found}} -> :fallback
-        {:error, {:fetch, reason}} -> {:error, reason}
-        {:error, _} -> :fallback
+        Fault.point(:query_refresh_applied, %{cell: req.cell, txid: txid})
+        publish(req, tmp, {txid, epoch, checksum}, {:refresh, copy}, length(chain))
       end
-    after
-      _ = File.rm(tmp)
+    else
+      :fallback -> :fallback
+      {:error, {:fetch, :not_found}} -> :fallback
+      {:error, {:fetch, reason}} -> {:error, reason}
+      {:error, _} -> :fallback
     end
+  after
+    _ = File.rm(tmp)
   end
 
   defp page_size(path) do
@@ -215,7 +215,15 @@ defmodule Alambique.Query.Replica do
   defp apply_segments(_ctx, _cell, _tmp, [], _deadline, state),
     do: {:ok, state.txid, state.epoch, state.checksum}
 
-  defp apply_segments(ctx, cell, tmp, [seg | rest], deadline, state) do
+  defp apply_segments(ctx, cell, tmp, [seg | rest] = segments, deadline, state) do
+    case apply_segment(ctx, cell, tmp, seg, deadline, state) do
+      {:ok, state} -> apply_segments(ctx, cell, tmp, rest, deadline, state)
+      :lower_epoch -> lower_epoch(segments, state)
+      other -> other
+    end
+  end
+
+  defp apply_segment(ctx, cell, tmp, seg, deadline, state) do
     with {:ok, body, meta} <- fetch(ctx, seg.key, deadline),
          epoch = Objects.epoch_of(meta),
          {:epoch, true} <- {:epoch, epoch >= state.epoch},
@@ -223,23 +231,19 @@ defmodule Alambique.Query.Replica do
          true <- (min == seg.min and max == seg.max) or :fallback,
          {:ok, _header, post} <- Native.apply_ltx(tmp, body, state.checksum, state.page_size) do
       Fault.point(:query_refresh_segment, %{cell: cell, txid: max})
-      state = %{state | checksum: post, epoch: epoch, txid: max}
-      apply_segments(ctx, cell, tmp, rest, deadline, state)
+      {:ok, %{state | checksum: post, epoch: epoch, txid: max}}
     else
-      {:epoch, false} ->
-        if Chain.tail?([seg | rest], [], state.txid),
-          do: {:ok, state.txid, state.epoch, state.checksum},
-          else: :fallback
-
-      :fallback ->
-        :fallback
-
-      {:error, {:fetch, _}} = error ->
-        error
-
-      {:error, _} ->
-        :fallback
+      {:epoch, false} -> :lower_epoch
+      :fallback -> :fallback
+      {:error, {:fetch, _}} = error -> error
+      {:error, _} -> :fallback
     end
+  end
+
+  defp lower_epoch(segments, state) do
+    if Chain.tail?(segments, [], state.txid),
+      do: {:ok, state.txid, state.epoch, state.checksum},
+      else: :fallback
   end
 
   defp fetch(ctx, key, deadline) do
@@ -253,20 +257,15 @@ defmodule Alambique.Query.Replica do
   # replicas it supersedes.
   # A write the disk refuses is an `{:error, :enospc}` (`:disk_full` to the
   # caller, design §6.2); the temporary file is left to the caller to remove.
-  defp publish(dir, cell, tmp, {txid, epoch, checksum}, target, source, segments) do
+  defp publish(req, tmp, {txid, epoch, checksum}, source, segments) do
+    %{dir: dir, key: cell} = req
     final = Cache.path(dir, cell, txid, epoch, checksum)
 
     with :ok <- Fault.check(:query_publish, %{cell: cell, path: tmp}),
          :ok <- Cache.sync(tmp),
          :ok <- File.rename(tmp, final),
          {:ok, %{size: bytes}} <- File.stat(final) do
-      superseded =
-        for entry <- Cache.entries(dir, cell),
-            entry.path != final,
-            target == :latest or entry.txid == txid,
-            do: entry
-
-      Cache.remove(superseded)
+      supersede(req, final, txid)
       replica = %{path: final, txid: txid, bytes: bytes}
 
       case source do
@@ -278,6 +277,16 @@ defmodule Alambique.Query.Replica do
         _ = File.rm(tmp)
         error
     end
+  end
+
+  defp supersede(%{dir: dir, key: cell, target: target}, final, txid) do
+    superseded =
+      for entry <- Cache.entries(dir, cell),
+          entry.path != final,
+          target == :latest or entry.txid == txid,
+          do: entry
+
+    Cache.remove(superseded)
   end
 
   defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 1)

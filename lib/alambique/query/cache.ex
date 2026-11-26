@@ -165,22 +165,25 @@ defmodule Alambique.Query.Cache do
   @spec trim(Path.t(), non_neg_integer, non_neg_integer) ::
           {non_neg_integer, non_neg_integer}
   def trim(dir, max_bytes, stale_tmp_seconds) do
-    now = System.os_time(:second)
-    files = scan(dir)
-
-    {stale, live} =
-      Enum.split_with(files, &(stale_tmp?(&1, now, stale_tmp_seconds) or &1.unknown?))
-
+    {stale, live} = scan(dir) |> split_stale(stale_tmp_seconds)
     Enum.each(stale, &File.rm(&1.path))
-    # Replicas being built count against the bound, but only finished ones
-    # can be evicted.
-    {building, live} = Enum.split_with(live, & &1.tmp?)
-    total = Enum.sum_by(live ++ building, & &1.size)
-    {evicted, remaining} = evict(Enum.sort_by(live, & &1.mtime), total, max_bytes)
+    {evicted, remaining} = evict_oldest(live, max_bytes)
     Enum.each(evicted, &remove([&1]))
 
     Enum.each(cell_dirs(dir), &File.rmdir/1)
     {length(stale) + length(evicted), remaining}
+  end
+
+  # Replicas being built count against the bound, but only finished ones can
+  # be evicted.
+  defp evict_oldest(live, max_bytes) do
+    total = Enum.sum_by(live, & &1.size)
+    live |> Enum.reject(& &1.tmp?) |> Enum.sort_by(& &1.mtime) |> evict(total, max_bytes)
+  end
+
+  defp split_stale(files, stale_tmp_seconds) do
+    now = System.os_time(:second)
+    Enum.split_with(files, &(stale_tmp?(&1, now, stale_tmp_seconds) or &1.unknown?))
   end
 
   defp stale_tmp?(file, now, seconds), do: file.tmp? and now - file.mtime > seconds

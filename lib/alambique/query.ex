@@ -123,50 +123,64 @@ defmodule Alambique.Query do
     %{ctx: %{store: {store, store_config}, prefix: location_prefix}} = target
     base = "#{location_prefix}/cells/"
 
+    page = %{
+      target: target,
+      store: store,
+      store_config: store_config,
+      base: base,
+      prefix: prefix,
+      page_size: page_size,
+      timeout: timeout
+    }
+
     Stream.resource(
       fn -> {:start, nil} end,
       fn
-        :done ->
-          {:halt, :done}
-
-        {:start, start_after} ->
-          started = System.monotonic_time()
-          deadline = Retry.deadline_in(timeout)
-
-          result =
-            Retry.run(target.ctx, deadline, fn ->
-              case store.list(store_config, base <> prefix, start_after, page_size) do
-                {:ok, keys, next} -> {:ok, keys, next}
-                {:error, reason} -> {:retry, reason}
-              end
-            end)
-
-          case result do
-            {:ok, keys, next} ->
-              ids = keys |> Enum.map(&cell_of(&1, base)) |> Enum.reject(&is_nil/1) |> Enum.dedup()
-
-              Telemetry.span_stop(
-                [:query, :list],
-                started,
-                %{keys: length(keys), cells: length(ids)},
-                %{
-                  result: :ok
-                }
-              )
-
-              {ids, continue(next, ids, base)}
-
-            {:error, reason} ->
-              Telemetry.span_stop([:query, :list], started, %{keys: 0, cells: 0}, %{
-                result: :error,
-                reason: reason
-              })
-
-              raise ListError, reason: reason
-          end
+        :done -> {:halt, :done}
+        {:start, start_after} -> list_page(page, start_after)
       end,
       fn _ -> :ok end
     )
+  end
+
+  defp list_page(page, start_after) do
+    started = System.monotonic_time()
+
+    case fetch_keys(page, start_after) do
+      {:ok, keys, next} ->
+        ids = keys |> Enum.map(&cell_of(&1, page.base)) |> Enum.reject(&is_nil/1) |> Enum.dedup()
+
+        Telemetry.span_stop(
+          [:query, :list],
+          started,
+          %{keys: length(keys), cells: length(ids)},
+          %{
+            result: :ok
+          }
+        )
+
+        {ids, continue(next, ids, page.base)}
+
+      {:error, reason} ->
+        Telemetry.span_stop([:query, :list], started, %{keys: 0, cells: 0}, %{
+          result: :error,
+          reason: reason
+        })
+
+        raise ListError, reason: reason
+    end
+  end
+
+  defp fetch_keys(page, start_after) do
+    deadline = Retry.deadline_in(page.timeout)
+    prefix = page.base <> page.prefix
+
+    Retry.run(page.target.ctx, deadline, fn ->
+      case page.store.list(page.store_config, prefix, start_after, page.page_size) do
+        {:ok, keys, next} -> {:ok, keys, next}
+        {:error, reason} -> {:retry, reason}
+      end
+    end)
   end
 
   defp continue(nil, _ids, _base), do: :done
@@ -223,9 +237,10 @@ defmodule Alambique.Query do
     timeout = Keyword.get(opts, :timeout_ms, config.query.timeout_ms)
     target = Keyword.get(opts, :at, :latest)
     opts = Keyword.put(opts, :gate, gate)
+    query = %{sql: sql, params: params, target: target, opts: opts}
 
     work = fn {cell, location} ->
-      {cell, query_cell(config, location, cell, sql, params, target, timeout, opts)}
+      {cell, query_cell(config, location, cell, query, timeout)}
     end
 
     config.query_supervisor
@@ -332,13 +347,13 @@ defmodule Alambique.Query do
     Telemetry.span_stop([:query, :trim], started, %{deleted: deleted, bytes: bytes}, %{})
   end
 
-  defp query_cell(config, location, cell, sql, params, target, timeout, opts) do
+  defp query_cell(config, location, cell, query, timeout) do
     started = System.monotonic_time()
     deadline = Retry.deadline_in(timeout)
 
     result =
       try do
-        run_cell(config, location, cell, sql, params, target, deadline, opts, 2)
+        run_cell(config, location, cell, query, deadline, 2)
       rescue
         exception -> {:error, {:raised, exception}}
       catch
@@ -364,23 +379,24 @@ defmodule Alambique.Query do
     result
   end
 
-  defp run_cell(_config, _location, cell, _sql, _params, _target, _deadline, _opts, _tries)
-       when not is_binary(cell),
-       do: {:error, :invalid_cell}
+  defp run_cell(_config, _location, cell, _query, _deadline, _tries) when not is_binary(cell),
+    do: {:error, :invalid_cell}
 
-  defp run_cell(config, location, cell, sql, params, target, deadline, opts, tries) do
+  defp run_cell(config, location, cell, query, deadline, tries) do
     Inflight.run(config, cell, :query, fn ->
-      read_cell(config, location, cell, sql, params, target, deadline, opts, tries)
+      read_cell(config, location, cell, query, deadline, tries)
     end)
   end
 
-  defp read_cell(config, location, cell, sql, params, target, deadline, opts, tries) do
+  defp read_cell(config, location, cell, query, deadline, tries) do
+    %{sql: sql, params: params, target: target, opts: opts} = query
+
     with {:ok, location} <- place(config, location, cell),
          {:ok, replica} <- Replica.ensure(config, location, cell, target, deadline, opts) do
       case read(config, replica, sql, params, deadline, opts[:gate]) do
         # An eviction removed the file between choosing and opening it.
         {:error, :gone} when tries > 1 ->
-          read_cell(config, location, cell, sql, params, target, deadline, opts, tries - 1)
+          read_cell(config, location, cell, query, deadline, tries - 1)
 
         {:error, :gone} ->
           {:error, :evicted}
