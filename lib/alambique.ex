@@ -307,13 +307,10 @@ defmodule Alambique do
       default 10 000; more give `{:error, :busy}`, never passed; a call whose
       caller gave up before the cell reached it is not run). The memory of the awake
       cells is bounded by `:cache_kib` (page cache of each cell's SQLite
-      connection, `PRAGMA cache_size`, default 512 KiB; SQLite's own default
+      connection, `PRAGMA cache_size`, a hard limit of that connection, default 512 KiB; SQLite's own default
       is 2 000) and by `:max_bytes` (default `nil`, no budget). A cell can
       set `:cache_kib`, `:idle_cache_after_ms`, `:idle_cache_kib`,
-      `:idle_close_after_ms` and `:idle_gc` through `:cell_options`. SQLite's page caches share one pool, so
-      a cell's `:cache_kib` is a share of the node's pool, not an
-      isolated cap: one cell with a large value can push out the pages of the
-      others. `:cell_cache_kib_max` (default `nil`, no limit; in KiB, and at
+      `:idle_close_after_ms` and `:idle_gc` through `:cell_options`. `:cell_cache_kib_max` (default `nil`, no limit; in KiB, and at
       most `:max_bytes` when that is set) and `:cell_idle_timeout_ms_min` and
       `:cell_idle_timeout_ms_max` (default `nil`) clamp the values a cell
       chose, and the node's own `:cache_kib` and `:idle_timeout_ms` must be
@@ -353,10 +350,11 @@ defmodule Alambique do
       below `:idle_timeout_ms`) makes an awake cell that has had no call for
       that long lower its page cache to `:idle_cache_kib` (default 64, `0`
       keeps no page; below `:cache_kib` when the shrink is on). The next call
-      gives it `:cache_kib` back. SQLite's page cache is one pool for the
-      whole process, so a shrunk cell lowers what the awake cells may hold in
-      total by `:cache_kib - :idle_cache_kib`, and the pages freed are the
-      least recently used ones of the node, not necessarily its own. The cost
+      gives it `:cache_kib` back. Each connection has a page cache of its own,
+      so the shrink evicts that cell's pages at once, and a cell with fewer
+      cached pages than `:idle_cache_kib` evicts nothing. The memory goes back
+      to the allocators of the BEAM; `config :alambique, :page_arena`
+      (docs/cost-of-a-cell.md) returns it to the system. The cost
       is cold pages: the first call after a shrink reads its pages again, and
       a cell called a little less often than `:idle_cache_after_ms` meets a
       cold cache on every call. `:idle_gc` (default `true`) makes the cell
