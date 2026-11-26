@@ -9,7 +9,8 @@ defmodule Alambique.Replication.Retry do
   alias Alambique.Store.{Breaker, Phase}
 
   @doc "Monotonic deadline `ms` from now."
-  def deadline_in(ms), do: System.monotonic_time(:millisecond) + ms
+  @spec deadline_in(integer) :: integer
+  def deadline_in(ms) when is_integer(ms), do: System.monotonic_time(:millisecond) + ms
 
   @doc """
   Calls `fun` until it returns something other than `{:retry, reason}`. A
