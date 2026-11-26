@@ -259,7 +259,7 @@ returned, in a map of a few words, not a copy of the configuration. A function
 that does not return, raises or returns an invalid override costs one
 timeout (or less) and one telemetry event per wake of that cell, and the cell
 then serves with the node's options (or refuses the wake, with
-`cell_options_invalid: :refuse`). Until page caches are per connection, a
+`cell_options_invalid: :refuse`). The page caches share one pool, so a
 cell's own `cache_kib` is a share of the node's pool, not an isolated cap, so
 raising it for one cell does not make the node hold more than the pool
 allows. `awake.cell_cache_kib_max` bounds what a cell may ask for.
@@ -284,7 +284,7 @@ A per-cell `migrations` function costs the same per wake, bounded by
 round costs at most the listed cells times that timeout when the function does
 not return.
 
-**`awake: [track_bytes: ...]`. On by default. Every awake cell measures the
+**`awake: [track_bytes: ...]`.** On by default. Every awake cell measures the
 bytes SQLite holds for its connections and the memory of its process, which
 `Alambique.cells/2` and `Alambique.facts/2` report. A measurement is about
 3.6 µs of the cell, at the end of its wake, after each call, after an idle

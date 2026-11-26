@@ -310,8 +310,8 @@ defmodule Alambique do
       connection, `PRAGMA cache_size`, default 512 KiB; SQLite's own default
       is 2 000) and by `:max_bytes` (default `nil`, no budget). A cell can
       set `:cache_kib`, `:idle_cache_after_ms`, `:idle_cache_kib`,
-      `:idle_close_after_ms` and `:idle_gc` through `:cell_options`. Until the page caches are per
-      connection, a cell's `:cache_kib` is a share of the node's pool, not an
+      `:idle_close_after_ms` and `:idle_gc` through `:cell_options`. SQLite's page caches share one pool, so
+      a cell's `:cache_kib` is a share of the node's pool, not an
       isolated cap: one cell with a large value can push out the pages of the
       others. `:cell_cache_kib_max` (default `nil`, no limit; in KiB, and at
       most `:max_bytes` when that is set) and `:cell_idle_timeout_ms_min` and
@@ -1143,16 +1143,16 @@ defmodule Alambique do
   shape or times out, or a page cache the cell cannot set, changes nothing:
   the cell keeps the options it has (also with `cell_options_invalid:
   :refuse`) and the answer is `{:error, {:cell_options, message}}`. The same
-  limits and repairs as at a wake apply. `:track_bytes` and the feed options
-  `sql: [locking_mode:]` cannot change on an awake cell: the lock is taken when
+  limits and repairs as at a wake apply. `sql: [locking_mode:]` cannot change
+  on an awake cell: the lock is taken when
   the connection opens, so a refresh that would change it is refused whole
   (`{:error, {:cell_options, message}}`) and the new value applies at the next
   wake. `lazy_restore: [mode:]` is stored and listed in `changed`, and the cell
   reads it at its next restore; nothing about a running cell changes.
   `awake: [track_bytes: false]` clears the memory facts of the cell (a budget,
   `:max_bytes`, keeps them on), and `feed: [cleanup_after_ms:]` moves a cleanup
-  that is already waiting. The other feed options are not per cell: the sender's
-  reader keeps `:feed` `:reader_cache_kib`, because the cell issues no pragma on it.
+  that is already waiting. The sender's reader keeps `:feed` `:reader_cache_kib`
+  (not per cell), because the cell issues no pragma on it.
 
   Emits `[:alambique, :cell, :options, :refresh]`. Option `:timeout`
   (milliseconds, default the longer of `:call_timeout_ms` and twice

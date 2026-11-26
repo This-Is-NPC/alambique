@@ -80,7 +80,8 @@ All keys of a cell live under its location's prefix (§18). For cell `c`:
 `cells/<c>/lease` holds the lease (§5). `cells/<c>/0000/` holds level-0 segments
 (§6), other levels hold compacted segments (§9), and `0009/` holds snapshots
 from TXID 1 (§6). Markers and counters (`frozen`, `crashes`, `trashed`, `chain`,
-`replicas`) sit beside them (§9, §10, §21). `trash/`, `schema/`, `nodes/` and
+`replicas`) sit beside them (§9, §10, §21). A page-hash sidecar, `<key>.pages`, sits
+beside a segment or snapshot (§16). `trash/`, `schema/`, `nodes/` and
 `feed/` hold manifests, the schema index, the node registry and the change feed.
 
 TXIDs are 16 hex digits. Litestream's replica layout lists only the level
@@ -337,8 +338,8 @@ other feed options are not per cell. The feed
 reader of the sender keeps `feed.reader_cache_kib`: the cell issues no pragma
 on it, and `cache_kib` applies to the cell's own connection only.
 
-Until the page caches are per connection, a per-cell `cache_kib` is a share of
-the node's pool, not an isolated cap.
+The page caches of the connections share one pool, so a per-cell `cache_kib` is
+a share of the node's pool, not an isolated cap.
 
 A per-cell `migrations` function is bounded the same way: it runs in a
 monitored process and is waited for at most `wake.migrations_timeout_ms`
