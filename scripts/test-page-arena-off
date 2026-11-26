@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Runs the tests that depend on where SQLite's page-cache blocks live with the
+# page arena off. The default suite runs with it on (config/config.exs).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+ALAMBIQUE_PAGE_ARENA=0 exec mix test \
+  test/native_options_test.exs test/native_stats_test.exs \
+  test/sqlite_memory_test.exs test/page_arena_test.exs "$@"

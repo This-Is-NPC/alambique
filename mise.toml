@@ -61,6 +61,10 @@ run = "scripts/install-hooks"
 description = "Run the default test suite (no external services)"
 run = "mix test"
 
+[tasks."test:page-arena-off"]
+description = "Run the tests of where SQLite's page-cache blocks live with the page arena off (the default suite runs with it on)"
+run = "scripts/test-page-arena-off"
+
 [tasks."test:native"]
 description = "Run the Rust unit tests of the native crate"
 run = "scripts/test-native"
