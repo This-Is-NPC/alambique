@@ -583,20 +583,29 @@ defmodule Alambique do
       hand-over. A smaller bound shortens the wait of a call and adds queries
       on the cell's file. A cell that stops hands over everything without
       serving calls, within `:stop_publish_ms`. With `hand_over: :sender` it
-      bounds each read of the sender, with the same meaning. The option is of
-      the instance.
+      bounds each read of the sender, with the same meaning; with `:native`,
+      each call of the library. The option is of the instance.
     * `:hand_over` - who reads the captured rows of acknowledged batches
       (default `:cell`). `:cell`: the cell, in its own process. `:sender`: the
       cell hands over only the range of TXIDs and the feed sender reads the rows
       through a second, read-only connection to the cell's file, which the cell
       opens and always closes before its own connection. It takes the read off
       the cell and costs an open connection, its page cache and two open files
-      while the sender reads. Ids and objects are the same. With `:sender`,
-      `:max_backlog_batches` counts TXIDs, not batches. The option is of the
-      instance. See `docs/how-to-consume-the-change-feed.md`.
+      while the sender reads. `:native`: the cell calls the library, which reads
+      the rows on the cell's own connection and builds the text of their records
+      outside the cell's heap, and the sender only puts it; the cell still waits
+      for the read, but builds and copies no term. Ids and objects are the same.
+      With `:sender`, `:max_backlog_batches` counts TXIDs, not batches. The
+      option is of the instance. See `docs/how-to-consume-the-change-feed.md`.
     * `:reader_cache_kib` - page cache of the sender's reader in KiB (default
-      64, only with `hand_over: :sender`; refused with `:cell`). Counted in
-      `:awake` `:max_bytes` while the reader is open.
+      64, only with `hand_over: :sender`; refused with `:cell` and `:native`).
+      Counted in `:awake` `:max_bytes` while the reader is open.
+    * `:reader_close` - when the sender's reader is closed (only with
+      `hand_over: :sender`; refused with the others). `:after_read`: after each
+      range the sender read, and only one range is handed over at a time, so
+      the reader is opened once per range and holds no file between ranges.
+      `:after_burst`: once nothing more is handed over than what was read, so
+      ranges that follow each other share the reader. Default `:after_burst`.
     * `:shards` - prefixes the feed of each location is spread over (default
       16, at most 1 000). It is fixed for as long as the feed exists: consumers
       must use the same value, and a cell changes shard when it changes.
