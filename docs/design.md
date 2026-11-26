@@ -820,7 +820,8 @@ is that frames committed and not yet replicated imply a write in flight
 A waking cell with no reusable local file (§7) can serve before its file is
 downloaded. `lazy_restore: false` turns this off, and `lazy_restore: [mode:
 :whole]` makes a cell read its whole chain before its first statement (the
-full restore of §6, with no hydrator and no gate to wait for); `Config.lazy_mode/2`
+full restore of §6, with its store calls and with no hydrator and no gate to
+wait for); `Config.lazy_mode/2`
 is the one place that decides the mode: the instance's, or the one the cell
 sets for itself through `cell_options` (§7). The two gates are
 `lazy_restore: [verify_writes:, verify_reads:]`:
