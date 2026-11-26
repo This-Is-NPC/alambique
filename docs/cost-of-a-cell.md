@@ -274,7 +274,10 @@ for each timer whose time changed, and one telemetry event. A refresh with no
 function configured is answered in the cell without a spawn. A cell that is not
 awake costs one lease read and nothing else: it is not woken. Callers that ask
 while a resolve runs wait for it and share the next one, so a burst of `k`
-calls costs two resolves, not `k`.
+calls costs two resolves, not `k`. `refresh_options(instance, :all)` is one
+such refresh per awake cell on the node, `:concurrency` at a time (default 8),
+plus one registry read of the ids; its callbacks add to the load of the function
+for that time.
 
 A per-cell `migrations` function costs the same per wake, bounded by
 `wake.migrations_timeout_ms`. The sweeper calls it once per listed cell, so a
