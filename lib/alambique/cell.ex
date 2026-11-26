@@ -537,21 +537,21 @@ defmodule Alambique.Cell do
   defp refresh_cache(%State{conn: nil}, _next, _changed), do: :ok
 
   defp refresh_cache(%State{idle: %{cache: :shrunk}} = state, next, changed) do
-    cond do
-      State.cell_opt(next, :idle_cache_after_ms) == nil ->
-        set_cache(state, State.cell_opt(next, :cache_kib))
-
-      :idle_cache_kib in changed ->
-        set_cache(state, State.cell_opt(next, :idle_cache_kib))
-
-      true ->
-        :ok
+    if State.cell_opt(next, :idle_cache_after_ms) == nil do
+      set_cache(state, State.cell_opt(next, :cache_kib))
+    else
+      case kib_changed?(changed) do
+        true -> set_cache(state, State.cell_opt(next, :idle_cache_kib))
+        false -> :ok
+      end
     end
   end
 
   defp refresh_cache(state, next, changed) do
     if :cache_kib in changed, do: set_cache(state, State.cell_opt(next, :cache_kib)), else: :ok
   end
+
+  defp kib_changed?(changed), do: :idle_cache_kib in changed
 
   # Only the pragma runs native code, so only it holds the marker.
   defp set_cache(state, kib) do
@@ -1005,11 +1005,18 @@ defmodule Alambique.Cell do
     do: stop_serving(state, reason, {:error, reason})
 
   defp write_failed(state, from, reason) do
-    cond do
-      Sqlite.wal_advanced?(state.conn) -> orphaned_write(state, from, reason)
-      # A commit of no frames whose `query_only` failed.
-      Db.fatal?(reason) -> stop_serving(state, reason, {:error, reason})
-      true -> {:reply, {:error, reason}, state}
+    case Sqlite.wal_advanced?(state.conn) do
+      false -> write_failed_clean(state, reason)
+      _ -> orphaned_write(state, from, reason)
+    end
+  end
+
+  # No frames were left. A commit of no frames whose `query_only` failed stops
+  # the cell.
+  defp write_failed_clean(state, reason) do
+    case Db.fatal?(reason) do
+      true -> stop_serving(state, reason, {:error, reason})
+      false -> {:reply, {:error, reason}, state}
     end
   end
 
@@ -1187,20 +1194,13 @@ defmodule Alambique.Cell do
     idle = State.cell_opt(state, :idle_timeout_ms)
     elapsed = System.monotonic_time(:millisecond) - state.last_active
 
-    busy? = not idle?(state) or :atomics.get(state.load, Layout.slot(:admitted)) != 0
-
-    cond do
-      elapsed < idle ->
-        {:noreply, arm_idle(state, idle - elapsed)}
-
-      busy? ->
-        {:noreply, arm_idle(state, idle)}
-
-      true ->
-        case hibernate(state, :idle, :infinity) do
-          {:ok, state, _released} -> {:stop, :normal, %{state | mode: :stopped}}
-          {:stop, reason, state} -> stop_serving(state, reason)
-        end
+    if elapsed < idle do
+      {:noreply, arm_idle(state, idle - elapsed)}
+    else
+      case busy?(state) do
+        true -> {:noreply, arm_idle(state, idle)}
+        false -> hibernate_idle(state)
+      end
     end
   end
 
@@ -1268,6 +1268,13 @@ defmodule Alambique.Cell do
   end
 
   defp info(_message, state), do: {:noreply, state}
+
+  defp hibernate_idle(state) do
+    case hibernate(state, :idle, :infinity) do
+      {:ok, state, _released} -> {:stop, :normal, %{state | mode: :stopped}}
+      {:stop, reason, state} -> stop_serving(state, reason)
+    end
+  end
 
   defp cleanup_then_close(state) do
     case cleanup_if_due(state) do
@@ -1551,6 +1558,8 @@ defmodule Alambique.Cell do
   # Commit
 
   defp idle?(state), do: state.pending == [] and state.pipe.queue == []
+
+  defp busy?(state), do: not idle?(state) or :atomics.get(state.load, Layout.slot(:admitted)) != 0
 
   # Makes a read wait for the open batch when it has items, else for the newest
   # batch with a user write; its release implies that every earlier write is
