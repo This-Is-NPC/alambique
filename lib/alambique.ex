@@ -1149,15 +1149,85 @@ defmodule Alambique do
   (milliseconds, default the longer of `:call_timeout_ms` and twice
   `:cell_options_timeout_ms` plus `:routing` `:slack_ms`, as a refresh may wait
   for the one before it).
+
+  With `:all` in place of the cell, it refreshes every cell awake on this
+  node (run it on each node of a cluster), at most `:concurrency` at a time
+  (default 8), and returns `{:ok, summary}`: `cells` (awake when listed),
+  `refreshed`, `changed` (refreshed with at least one new value), `asleep`
+  (stopped meanwhile), `failed` and `failures` (`%{cell, reason}`). A cell
+  that fails keeps its options and does not stop the others.
   """
-  @spec refresh_options(instance, cell, keyword) ::
-          {:ok, :node | :override, changed: [atom]} | {:ok, :asleep} | {:error, term}
-  def refresh_options(instance, cell, opts \\ []) do
+  @spec refresh_options(instance, cell | :all, keyword) ::
+          {:ok, :node | :override, changed: [atom]}
+          | {:ok, :asleep}
+          | {:ok, map}
+          | {:error, term}
+  def refresh_options(instance, cell, opts \\ [])
+
+  def refresh_options(instance, :all, opts) do
+    [concurrency: concurrency, timeout: timeout] =
+      opts |> Keyword.validate!(concurrency: 8, timeout: nil) |> Enum.sort()
+
+    unless is_integer(concurrency) and concurrency > 0,
+      do:
+        raise(
+          ArgumentError,
+          ":concurrency must be a positive integer, got: #{inspect(concurrency)}"
+        )
+
+    config = Config.fetch!(instance)
+    timeout = refresh_timeout(config, timeout)
+    ids = Registry.select(config.registry, [{{:"$1", :_, :_}, [], [:"$1"]}])
+
+    results =
+      Task.async_stream(ids, &{&1, Router.refresh_local(config, &1, timeout)},
+        max_concurrency: concurrency,
+        ordered: false,
+        timeout: timeout + config.routing.slack_ms,
+        on_timeout: :kill_task,
+        zip_input_on_exit: true
+      )
+
+    {:ok, Enum.reduce(results, refreshed_summary(), &count_refresh/2)}
+  end
+
+  def refresh_options(instance, cell, opts) do
     [timeout: timeout] = opts |> Keyword.validate!(timeout: nil) |> Enum.sort()
     config = Config.fetch!(instance)
+    Router.call(instance, cell, :refresh_options, refresh_timeout(config, timeout))
+  end
+
+  # A refresh may wait for the one before it, so it can take two callbacks.
+  defp refresh_timeout(config, timeout) do
     callback = config.cell_options_timeout_ms || 0
-    timeout = timeout || max(config.call_timeout_ms, 2 * callback + config.routing.slack_ms)
-    Router.call(instance, cell, :refresh_options, timeout)
+    timeout || max(config.call_timeout_ms, 2 * callback + config.routing.slack_ms)
+  end
+
+  defp refreshed_summary,
+    do: %{cells: 0, refreshed: 0, changed: 0, asleep: 0, failed: 0, failures: []}
+
+  defp count_refresh({:ok, {_cell, {:ok, :asleep}}}, acc),
+    do: %{acc | cells: acc.cells + 1, asleep: acc.asleep + 1}
+
+  defp count_refresh({:ok, {_cell, {:ok, _source, changed: changed}}}, acc) do
+    %{
+      acc
+      | cells: acc.cells + 1,
+        refreshed: acc.refreshed + 1,
+        changed: acc.changed + if(changed == [], do: 0, else: 1)
+    }
+  end
+
+  defp count_refresh({:ok, {cell, {:error, reason}}}, acc), do: failed_refresh(acc, cell, reason)
+  defp count_refresh({:exit, {cell, reason}}, acc), do: failed_refresh(acc, cell, reason)
+
+  defp failed_refresh(acc, cell, reason) do
+    %{
+      acc
+      | cells: acc.cells + 1,
+        failed: acc.failed + 1,
+        failures: [%{cell: cell, reason: reason} | acc.failures]
+    }
   end
 
   @doc """

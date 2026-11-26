@@ -489,6 +489,56 @@ defmodule Alambique.CellOptionsRefreshTest do
     end
   end
 
+  describe "every cell awake on the node" do
+    test "refreshes each one and counts the changed and the failed", ctx do
+      inst = start(ctx, awake: [cache_kib: 128])
+      cells = for i <- 1..5, do: "c#{i}"
+      for cell <- cells, do: assert({:ok, _} = wake(inst, cell))
+
+      Callbacks.set(fn
+        "c1" -> raise "boom"
+        "c2" -> []
+        _ -> [awake: [cache_kib: 64]]
+      end)
+
+      assert {:ok, summary} = Alambique.refresh_options(inst, :all, concurrency: 2)
+
+      assert %{cells: 5, refreshed: 4, changed: 3, asleep: 0, failed: 1} = summary
+      assert [%{cell: "c1", reason: {:cell_options, message}}] = summary.failures
+      assert message =~ "boom"
+      for cell <- ["c3", "c4", "c5"], do: assert(cache_size(inst, cell) == -64)
+      assert cache_size(inst, "c2") == -128
+      # The place of each call in the admission count was given back.
+      for cell <- cells, do: assert(admitted(inst, cell) == 0)
+    end
+
+    test "runs at most :concurrency callbacks at a time", ctx do
+      inst = start(ctx)
+      for i <- 1..6, do: assert({:ok, _} = wake(inst, "c#{i}"))
+      running = :atomics.new(2, [])
+
+      Callbacks.set(fn _ ->
+        now = :atomics.add_get(running, 1, 1)
+        if now > :atomics.get(running, 2), do: :atomics.put(running, 2, now)
+        Process.sleep(100)
+        :atomics.sub(running, 1, 1)
+        []
+      end)
+
+      assert {:ok, %{cells: 6, refreshed: 6, failed: 0}} =
+               Alambique.refresh_options(inst, :all, concurrency: 2)
+
+      assert :atomics.get(running, 2) == 2
+    end
+
+    test "has nothing to do on a node with no awake cell", ctx do
+      inst = start(ctx)
+
+      assert {:ok, %{cells: 0, refreshed: 0, changed: 0, asleep: 0, failed: 0, failures: []}} =
+               Alambique.refresh_options(inst, :all)
+    end
+  end
+
   describe "a cell that is not awake" do
     test "is not woken, and no lease is written", ctx do
       inst = start(ctx)
