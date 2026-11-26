@@ -1147,7 +1147,9 @@ defmodule Alambique do
   `sql: [locking_mode:]` cannot change on an awake cell: the lock is taken when
   the connection opens, so a refresh that would change it is refused whole
   (`{:error, {:cell_options, message}}`) and the new value applies at the next
-  wake. `awake: [track_bytes: false]` clears the memory facts of the cell (a budget,
+  wake. `lazy_restore: [mode:]` is stored and listed in `changed`, and the cell
+  reads it at its next restore; nothing about a running cell changes.
+  `awake: [track_bytes: false]` clears the memory facts of the cell (a budget,
   `:max_bytes`, keeps them on), and `feed: [cleanup_after_ms:]` moves a cleanup
   that is already waiting. The other feed options are not per cell: the sender's
   reader keeps `:feed` `:reader_cache_kib`, because the cell issues no pragma on it.

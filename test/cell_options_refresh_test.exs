@@ -451,6 +451,29 @@ defmodule Alambique.CellOptionsRefreshTest do
     end
   end
 
+  describe "lazy_restore mode" do
+    test "is stored for the next restore and applies nothing now", ctx do
+      inst = start(ctx)
+      node_mode = Config.lazy_mode(Config.fetch!(inst), nil)
+      other = if node_mode == :whole, do: :ranged, else: :whole
+      restore_opts = fn -> in_cell(pid(inst, "c"), &Alambique.Cell.Hydration.restore_opts/1) end
+
+      assert {:ok, _} = wake(inst, "c")
+      before = state(inst, "c")
+      assert restore_opts.() == [] == (node_mode == :whole)
+
+      Callbacks.set(fn _ -> [lazy_restore: [mode: other]] end)
+      assert {:ok, :override, changed: [:lazy_restore_mode]} = refresh(inst, "c")
+
+      now = state(inst, "c")
+      assert now.cell_opts == %{lazy_restore_mode: other}
+      assert restore_opts.() == [] == (other == :whole)
+      # Nothing live: the connection, the hydration and the timers are as they were.
+      assert {now.conn, now.hydrator, now.idle_timer, now.idle_cache} ==
+               {before.conn, before.hydrator, before.idle_timer, before.idle_cache}
+    end
+  end
+
   describe "cleanup_after_ms" do
     test "not below the idle timeout goes back to the node's, at a wake and at a refresh", ctx do
       inst = start(ctx)
