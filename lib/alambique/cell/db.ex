@@ -2,6 +2,7 @@ defmodule Alambique.Cell.Db do
   @moduledoc false
   # SQLite access of a cell: connection setup, statements and transactions.
 
+  alias Alambique.Cell.State
   alias Alambique.{Fault, Sqlite, Tx}
   alias Alambique.Feed.Capture
 
@@ -67,8 +68,7 @@ defmodule Alambique.Cell.Db do
   """
   @spec lookaside(map) :: {non_neg_integer, non_neg_integer} | nil
   def lookaside(%Alambique.Cell.State{} = state) do
-    case {Alambique.Cell.State.cell_opt(state, :lookaside_bytes),
-          Alambique.Cell.State.cell_opt(state, :lookaside_count)} do
+    case {State.cell_opt(state, :lookaside_bytes), State.cell_opt(state, :lookaside_count)} do
       {nil, _} -> nil
       {bytes, count} -> {bytes, count}
     end

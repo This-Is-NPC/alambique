@@ -748,8 +748,14 @@ defmodule Alambique do
   must be loaded on every node of the cluster, as in a release.
   """
 
+  alias Alambique.Cell.Facts
+  alias Alambique.Cell.Local
   alias Alambique.{Config, Drain, Lease, Membership, Placement, Replica, Router, Schema, Tx}
+  alias Alambique.Relocate.Cleanup
+  alias Alambique.Replica.Read
   alias Alambique.Replication.Retry
+  alias Alambique.Schema.Sweeper
+  alias Alambique.Store.Breaker
 
   @type instance :: atom
   @type cell :: String.t()
@@ -838,7 +844,7 @@ defmodule Alambique do
         Router.call(instance, cell, request, opts[:timeout])
 
       {{:bounded, ms}, _} ->
-        Alambique.Replica.Read.query(
+        Read.query(
           Config.fetch!(instance),
           cell,
           sql,
@@ -1071,9 +1077,9 @@ defmodule Alambique do
   `:concurrency`, `:rate`, `:page_size` and `:timeout_ms`, overriding the
   instance's `:sweeper` settings.
   """
-  @spec sweep(instance, keyword) :: {:ok, Alambique.Schema.Sweeper.summary()} | {:error, term}
+  @spec sweep(instance, keyword) :: {:ok, Sweeper.summary()} | {:error, term}
   def sweep(instance, opts \\ []),
-    do: Alambique.Schema.Sweeper.run(Config.fetch!(instance), opts)
+    do: Sweeper.run(Config.fetch!(instance), opts)
 
   @doc """
   Runs one scrub round (design §6.1) now: restores sampled cells without
@@ -1465,7 +1471,7 @@ defmodule Alambique do
             }
           }
         }
-  def breaker_status(instance), do: Alambique.Store.Breaker.statuses(Config.fetch!(instance))
+  def breaker_status(instance), do: Breaker.statuses(Config.fetch!(instance))
 
   @doc """
   Makes this node a member of the instance (design §8): other nodes can choose
@@ -1586,7 +1592,7 @@ defmodule Alambique do
   @spec cleanup_moved(instance, cell, Alambique.Location.t() | String.t(), keyword) ::
           {:ok, map} | {:error, term}
   def cleanup_moved(instance, cell, from, opts \\ []),
-    do: Alambique.Relocate.Cleanup.run(Config.fetch!(instance), cell, from, opts)
+    do: Cleanup.run(Config.fetch!(instance), cell, from, opts)
 
   @doc """
   Freezes the cell: it hibernates now and refuses to wake until `unfreeze/3`
@@ -2042,12 +2048,12 @@ defmodule Alambique do
     with :ok <- Placement.validate_id(config, cell) do
       local =
         case Alambique.Cell.find(config, cell) do
-          {pid, load} -> Map.put(Alambique.Cell.Facts.read(load, pid), :local_process, true)
+          {pid, load} -> Map.put(Facts.read(load, pid), :local_process, true)
           nil -> %{local_process: false}
         end
 
       file =
-        case File.stat(Alambique.Cell.Local.db_path(config, cell)) do
+        case File.stat(Local.db_path(config, cell)) do
           {:ok, %{size: size}} -> size
           {:error, _} -> nil
         end

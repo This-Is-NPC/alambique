@@ -4,6 +4,7 @@ defmodule Alambique.Cell.State do
   # `:serving` while it answers calls, and `:stopped` once it has given up the
   # lease or lost it, so that `terminate/2` has nothing left to do.
 
+  alias Alambique.Cell.Options
   alias Alambique.Replication.Retry
 
   @enforce_keys [:config, :id, :path]
@@ -138,7 +139,7 @@ defmodule Alambique.Cell.State do
   def cell_opt(%__MODULE__{cell_opts: opts, config: config}, key) do
     case opts do
       %{^key => value} -> value
-      _ -> Alambique.Cell.Options.node_value(config, key)
+      _ -> Options.node_value(config, key)
     end
   end
 
