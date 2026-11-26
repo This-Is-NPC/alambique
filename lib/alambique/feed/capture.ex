@@ -11,6 +11,7 @@ defmodule Alambique.Feed.Capture do
   # DDL.
 
   alias Alambique.Cell.Db
+  alias Alambique.Sqlite
 
   @feed "_alambique_feed"
   @state "_alambique_feed_state"
@@ -367,6 +368,11 @@ defmodule Alambique.Feed.Capture do
     end
   end
 
+  @rows_sql """
+  SELECT txid, ts, tbl, op, key, vals, seq FROM #{@feed}
+  WHERE txid >= ?1 AND txid <= ?3 AND (txid > ?1 OR seq > ?2) ORDER BY txid, seq LIMIT ?4
+  """
+
   @doc """
   Captured rows of stamped batches in commit order, from the position
   `{txid, seq}` (the rows of `txid` with a `seq` above it, then those of the
@@ -376,18 +382,41 @@ defmodule Alambique.Feed.Capture do
   """
   @spec rows_from(term, {pos_integer, integer}, non_neg_integer, pos_integer | nil) ::
           {:ok, [list]} | {:error, term}
-  def rows_from(conn, {txid, seq}, upto, limit) do
-    sql = """
-    SELECT txid, ts, tbl, op, key, vals, seq FROM #{@feed}
-    WHERE txid >= ?1 AND txid <= ?3 AND (txid > ?1 OR seq > ?2) ORDER BY txid, seq LIMIT ?4
-    """
-
-    case Db.run(conn, sql, [txid, seq, upto, limit || -1]) do
+  def rows_from(conn, position, upto, limit) do
+    case Db.run(conn, @rows_sql, rows_params(position, upto, limit)) do
       {:ok, %{rows: rows}} -> {:ok, rows}
       {:error, "no such table" <> _} -> {:ok, []}
       {:error, _} = error -> error
     end
   end
+
+  @doc """
+  The query of `rows_from/4`, with the text of the records built by the
+  library and sent to `pid` as `{:rows, token, [binary]}` (`Sqlite.feed_rows/6`).
+  `bound` is the most rows (one more is read, to know that rows are left),
+  `resumed` the `n` of the next row when the first
+  batch goes on one cut before, `room` the batches that may begin (`nil`: all).
+  Returns the batches as `{txid, ts, rows, last_seq, bytes, {first, partial,
+  rewind}}`, whether rows were left, and whether `room` ended the read.
+  """
+  @spec send_rows(
+          term,
+          {pos_integer, integer},
+          non_neg_integer,
+          {pos_integer | nil, non_neg_integer | nil, non_neg_integer | nil},
+          pid,
+          reference
+        ) :: {:ok, [Sqlite.feed_batch()], boolean, boolean} | {:error, term}
+  def send_rows(conn, position, upto, {bound, _, _} = plan, pid, token) do
+    params = rows_params(position, upto, bound && bound + 1)
+
+    case Sqlite.feed_rows(conn, @rows_sql, params, plan, pid, token) do
+      {:error, "no such table" <> _} -> {:ok, [], false, false}
+      other -> other
+    end
+  end
+
+  defp rows_params({txid, seq}, upto, limit), do: [txid, seq, upto, limit || -1]
 
   @doc "Latest time any batch of this cell took, from the rows left and the saved state."
   @spec last_time(term) :: non_neg_integer

@@ -38,7 +38,7 @@ mod atoms {
         connection_closed, argument_error, busy, disk_full,
         statement_timeout, result_too_large, not_authorized, multiple_statements, transaction_ended, cache_used,
         schema_used, stmt_used, lookaside_used, nul_in_statement, not_ddl, query_only, not_owner,
-        held_by_cell, foreign_write, none, advanced, restarted,
+        held_by_cell, foreign_write, none, advanced, restarted, bad_table, sender_gone,
     }
 }
 
@@ -301,6 +301,10 @@ enum Failure {
     ForeignWrite,
     /// The `COMMIT` ran and the `PRAGMA query_only = ON` after it failed.
     QueryOnly(Box<Failure>),
+    /// A captured table name that is not UTF-8 (`feed_rows`).
+    BadTable,
+    /// The process that was to receive the rows had ended (`feed_rows`).
+    SenderGone,
 }
 
 impl Failure {
@@ -326,6 +330,8 @@ impl Failure {
             Failure::HeldByCell => atoms::held_by_cell().encode(env),
             Failure::ForeignWrite => atoms::foreign_write().encode(env),
             Failure::QueryOnly(inner) => (atoms::query_only(), inner.reason(env)).encode(env),
+            Failure::BadTable => atoms::bad_table().encode(env),
+            Failure::SenderGone => atoms::sender_gone().encode(env),
         }
     }
 }
@@ -838,6 +844,10 @@ fn all_rows<'a>(
         }
     }
 }
+
+// The call that reads the feed's rows and sends their JSON to a process.
+#[path = "feed_rows.rs"]
+mod feed_rows;
 
 /// A length for SQLite, which takes an `int`.
 fn c_len(len: usize) -> Result<c_int, Failure> {

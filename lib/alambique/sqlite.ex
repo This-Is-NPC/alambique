@@ -175,6 +175,45 @@ defmodule Alambique.Sqlite do
     end
   end
 
+  @typedoc """
+  A batch of the rows `feed_rows/6` read: `{txid, ts, rows, last_seq, bytes,
+  {first, partial, rewind}}`.
+  """
+  @type feed_batch ::
+          {pos_integer, integer, pos_integer, integer, non_neg_integer,
+           {boolean, boolean, boolean}}
+
+  @typedoc "`{bound, resumed, room}` of `feed_rows/6`."
+  @type feed_plan :: {pos_integer | nil, non_neg_integer | nil, non_neg_integer | nil}
+
+  @doc """
+  Runs `sql`, a `SELECT txid, ts, tbl, op, key, vals, seq` of the change
+  feed's rows in order of `txid, seq`, and sends the text of the records of
+  those rows to `pid` as `{:rows, token, [binary]}`, one binary per batch (the
+  text `Alambique.Feed.Record` splices, built by the library and never
+  decoded). Returns `{:ok, batches, more, cut}`: `more` when the `bound` on
+  rows left some, `cut` when `room` ended the read: a batch that would begin
+  after `room` others is not read (`nil`: no limit). `resumed` is the `n` of the
+  next row when the first batch goes on one that an earlier call cut, `nil`
+  when it starts. `{:error, :sender_gone}` when `pid` no longer exists,
+  `{:error, :bad_table}` for a table name that is not UTF-8. Nothing is sent
+  when no row was read. The process that runs statements on `conn` only.
+  """
+  @spec feed_rows(conn, iodata, list, feed_plan, pid, reference) ::
+          {:ok, [feed_batch], boolean, boolean} | {:error, term}
+  def feed_rows(conn, sql, params, {bound, resumed, room}, pid, token) do
+    Native.sqlite_feed_rows(
+      ref(conn),
+      IO.iodata_to_binary(sql),
+      params,
+      bound,
+      resumed,
+      room,
+      pid,
+      token
+    )
+  end
+
   @doc "User statements running now on the node (`:max_concurrent` of `run/4`)."
   @spec user_statements() :: non_neg_integer
   def user_statements, do: Native.sqlite_user_statements()
