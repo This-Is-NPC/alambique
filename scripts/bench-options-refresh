@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Runs the options-refresh benchmark, bounded by `timeout`. Argument: number of
+# cells of the node-wide pass (default 1000). ALAMBIQUE_BENCH_TIMEOUT: seconds
+# (default 600).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+MIX_ENV=test exec timeout "${ALAMBIQUE_BENCH_TIMEOUT:-600}" mix run bench/options_refresh.exs "$@"
