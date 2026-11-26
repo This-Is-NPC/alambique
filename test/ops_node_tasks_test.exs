@@ -19,7 +19,7 @@ defmodule Alambique.OpsNodeTasksTest do
     if started? do
       AlambiqueTestkit.Cluster.ensure_epmd!()
       name = :"ops_node_tasks_#{System.unique_integer([:positive])}@127.0.0.1"
-      {:ok, _} = Node.start(name, :longnames)
+      {:ok, _} = Node.start(name, name_domain: :longnames)
     end
 
     cookie = Node.get_cookie()

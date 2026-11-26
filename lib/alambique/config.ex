@@ -326,7 +326,8 @@ defmodule Alambique.Config do
             max_result_rows: pos_integer,
             max_result_bytes: pos_integer,
             max_concurrent_statements: pos_integer,
-            orphan_frames: :stop | :replicate
+            orphan_frames: :stop | :replicate,
+            locking_mode: :normal | :exclusive
           },
           replicas:
             %{
