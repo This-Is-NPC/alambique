@@ -245,7 +245,7 @@ mod tests {
 
     fn page(pgno: u32, fill: u8) -> Vec<u8> {
         (0..512)
-            .map(|i| fill.wrapping_add((i % 13) as u8) ^ pgno as u8)
+            .map(|i| fill.wrapping_add(u8::try_from(i % 13).unwrap()) ^ (pgno & 0xff) as u8)
             .collect()
     }
 
@@ -262,7 +262,7 @@ mod tests {
         };
         let mut enc = Encoder::new(h).unwrap();
         for p in 1..=3 {
-            enc.add_page(p, &page(p, p as u8)).unwrap();
+            enc.add_page(p, &page(p, (p & 0xff) as u8)).unwrap();
         }
         enc.finish().unwrap()
     }
