@@ -5,7 +5,7 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 
 use crate::dbsum::{self, fold};
-use crate::error::{invalid, Result};
+use crate::error::{fit, invalid, Error, Result};
 use crate::ltx::{lock_pgno, page_crc, Encoder, Header, CHECKSUM_FLAG, HEADER_FLAG_NO_CHECKSUM};
 use crate::sums::Sums;
 use crate::wal::{self, WalPos};
@@ -67,7 +67,7 @@ pub fn incremental(args: &Args) -> Result<Option<Output>> {
         return Ok(None);
     };
     let pre = args.pre;
-    let old_commit = args.sums.len() as u32;
+    let old_commit: u32 = fit(args.sums.len(), "page count")?;
     let lock = lock_pgno(args.page_size);
 
     // A copy-on-write clone: only the chunks of the changed pages are copied.
@@ -75,13 +75,16 @@ pub fn incremental(args: &Args) -> Result<Option<Output>> {
     sums.resize(new_commit as usize);
     let mut acc = pre & !CHECKSUM_FLAG;
     // Pages dropped by a shrinking commit.
+    let outside = || Error::Invalid("page outside the page sums".into());
     for pgno in new_commit + 1..=old_commit {
-        acc ^= args.sums.get(pgno as usize - 1);
+        acc ^= args.sums.get(index(pgno)).ok_or_else(outside)?;
     }
     for (&pgno, data) in &scan.pages {
         let new = page_crc(pgno, data);
-        acc ^= sums.get(pgno as usize - 1) ^ new;
-        sums.set(pgno as usize - 1, new);
+        acc ^= sums.get(index(pgno)).ok_or_else(outside)? ^ new;
+        if !sums.set(index(pgno), new) {
+            return Err(outside());
+        }
     }
     for pgno in old_commit + 1..=new_commit {
         if pgno != lock && !scan.pages.contains_key(&pgno) {
@@ -125,7 +128,7 @@ pub fn empty(args: &Args) -> Result<Output> {
         return invalid("an empty segment cannot be txid 1; use a full segment");
     }
     let checksum = args.pre;
-    let commit = args.sums.len() as u32;
+    let commit: u32 = fit(args.sums.len(), "page count")?;
     let header = Header {
         page_size: args.page_size,
         commit,
@@ -147,6 +150,11 @@ pub fn empty(args: &Args) -> Result<Output> {
     })
 }
 
+/// The position of page `pgno` (1-based) in the page sums.
+fn index(pgno: u32) -> usize {
+    (pgno as usize).saturating_sub(1)
+}
+
 /// Page `pgno` of a snapshot: the WAL version, or the database file's.
 fn snapshot_page<'a>(
     scan: &'a wal::Scan,
@@ -160,8 +168,12 @@ fn snapshot_page<'a>(
     }
     match db {
         Some(f) if pgno <= db_pages => {
-            let ps = buf.len() as u64;
-            f.read_exact_at(buf, (pgno as u64 - 1) * ps)?;
+            let ps: u64 = fit(buf.len(), "page size")?;
+            let at = u64::from(pgno)
+                .checked_sub(1)
+                .and_then(|p| p.checked_mul(ps))
+                .ok_or_else(|| Error::Invalid("page offset out of range".into()))?;
+            f.read_exact_at(buf, at)?;
             Ok(buf)
         }
         _ => invalid(format!(
@@ -203,7 +215,7 @@ fn whole(
     live: Option<&dyn DbFile>,
 ) -> Result<Output> {
     let scan = wal::scan(args.wal_path, args.page_size, None, wal_limit)?;
-    let ps = args.page_size as u64;
+    let ps = u64::from(args.page_size);
     let opened;
     let db: Option<&dyn DbFile> = match live {
         Some(f) => Some(f),
@@ -219,7 +231,7 @@ fn whole(
         },
     };
     let db_pages = match db {
-        Some(f) => (f.len()? / ps) as u32,
+        Some(f) => fit(f.len()? / ps, "page count")?,
         None => 0,
     };
     let commit = scan.commit.unwrap_or(db_pages);
@@ -227,8 +239,8 @@ fn whole(
 
     // The checksum goes into the header, so the pages are read twice: once to
     // compute it and once to encode them.
-    let mut buf = vec![0u8; ps as usize];
-    let mut sums = Vec::with_capacity(commit as usize);
+    let mut buf = vec![0u8; fit::<usize, _>(ps, "page size")?];
+    let mut sums = Vec::with_capacity(fit(commit, "page count")?);
     for pgno in 1..=commit {
         sums.push(if pgno == lock {
             0
@@ -848,8 +860,8 @@ mod tests {
             .unwrap();
         let chunks = (pages as usize).div_ceil(256);
         assert_eq!(inc.sums.shared_chunks(&old), chunks - 1);
-        assert_eq!(old.get(4), 5);
-        assert_eq!(inc.sums.get(4), page_crc(5, &pg(5)));
+        assert_eq!(old.get(4), Some(5));
+        assert_eq!(inc.sums.get(4), Some(page_crc(5, &pg(5))));
         assert_eq!(inc.checksum, fold(&old.to_vec()) ^ 5 ^ page_crc(5, &pg(5)));
     }
 

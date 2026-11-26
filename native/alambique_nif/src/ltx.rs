@@ -14,7 +14,7 @@
 
 use crate::bytes::Reader;
 use crate::crc::Crc64;
-use crate::error::{invalid, Error, Result};
+use crate::error::{fit, invalid, Error, Result};
 
 pub const MAGIC: &[u8; 4] = b"LTX1";
 pub const HEADER_SIZE: usize = 100;
@@ -26,10 +26,10 @@ pub const HEADER_FLAG_NO_CHECKSUM: u32 = 1 << 1;
 const RESERVED_PRE: usize = 80;
 const RESERVED_POST: usize = 88;
 pub(crate) const PAGE_FLAG_SIZE: u16 = 1;
-const PENDING_BYTE: u64 = 0x4000_0000;
+const PENDING_BYTE: u32 = 0x4000_0000;
 
 pub fn lock_pgno(page_size: u32) -> u32 {
-    (PENDING_BYTE / page_size as u64) as u32 + 1
+    PENDING_BYTE.checked_div(page_size).map_or(0, |n| n + 1)
 }
 
 pub fn valid_page_size(ps: u32) -> bool {
@@ -168,10 +168,10 @@ pub struct Trailer {
 
 fn put_uvarint(out: &mut Vec<u8>, mut v: u64) {
     while v >= 0x80 {
-        out.push(v as u8 | 0x80);
+        out.push((v & 0x7f) as u8 | 0x80);
         v >>= 7;
     }
-    out.push(v as u8);
+    out.push((v & 0x7f) as u8);
 }
 
 pub(crate) fn get_uvarint(data: &[u8], pos: &mut usize) -> Result<u64> {
@@ -253,16 +253,14 @@ impl Encoder {
     pub fn add_page(&mut self, pgno: u32, data: &[u8]) -> Result<()> {
         self.check_page(pgno, data.len())?;
         let compressed = lz4_flex::block::compress(data);
-        self.add_frame(pgno, data, &compressed);
-        Ok(())
+        self.add_frame(pgno, data, &compressed)
     }
 
     /// Adds a page whose LZ4 block `compressed` is already known to decompress
     /// to `data`, so merging does not compress again.
     pub fn add_compressed(&mut self, pgno: u32, data: &[u8], compressed: &[u8]) -> Result<()> {
         self.check_page(pgno, data.len())?;
-        self.add_frame(pgno, data, compressed);
-        Ok(())
+        self.add_frame(pgno, data, compressed)
     }
 
     fn check_page(&self, pgno: u32, len: usize) -> Result<()> {
@@ -291,12 +289,12 @@ impl Encoder {
 
     /// Writes a frame with an already compressed payload. The file checksum
     /// covers the payload length but not its bytes.
-    fn add_frame(&mut self, pgno: u32, data: &[u8], compressed: &[u8]) {
+    fn add_frame(&mut self, pgno: u32, data: &[u8], compressed: &[u8]) -> Result<()> {
         let offset = self.out.len() as u64;
         let mut head = [0u8; PAGE_HEADER_SIZE + 4];
         head[0..4].copy_from_slice(&pgno.to_be_bytes());
         head[4..6].copy_from_slice(&PAGE_FLAG_SIZE.to_be_bytes());
-        head[6..10].copy_from_slice(&(compressed.len() as u32).to_be_bytes());
+        head[6..10].copy_from_slice(&fit::<u32, _>(compressed.len(), "page size")?.to_be_bytes());
         self.out.extend_from_slice(&head);
         self.out.extend_from_slice(compressed);
         self.hash.update(&head);
@@ -304,6 +302,7 @@ impl Encoder {
         self.index
             .push((pgno, offset, self.out.len() as u64 - offset));
         self.prev_pgno = pgno;
+        Ok(())
     }
 
     pub fn finish(mut self) -> Result<Vec<u8>> {
@@ -367,7 +366,10 @@ impl<'a> Decoder<'a> {
         header.validate()?;
         crate::stats::add(&crate::stats::LTX_BYTES_DECODED, data.len());
         let mut hash = Crc64::default();
-        hash.update(&data[..HEADER_SIZE]);
+        let head = data
+            .first_chunk::<HEADER_SIZE>()
+            .ok_or_else(|| Error::Invalid("short header".into()))?;
+        hash.update(head);
         let lock = lock_pgno(header.page_size);
         Ok(Decoder {
             data,
@@ -379,6 +381,33 @@ impl<'a> Decoder<'a> {
             lock,
             prev_pgno: 0,
         })
+    }
+
+    /// The checks of a page header that is not the end marker; the page is now
+    /// the last one read.
+    fn check_page_header(&mut self, pgno: u32, flags: u16) -> Result<()> {
+        if pgno == 0 {
+            return invalid("page number required");
+        }
+        if flags & !PAGE_FLAG_SIZE != 0 {
+            return invalid("invalid page header flags");
+        }
+        if flags & PAGE_FLAG_SIZE == 0 {
+            return invalid("legacy page frames (LZ4 frame format) are not supported");
+        }
+        if pgno > self.header.commit || pgno == self.lock {
+            return invalid(format!("page {pgno} not allowed here"));
+        }
+        // Pages ascend, so none repeats; a snapshot replaces the database and
+        // has every page.
+        if pgno <= self.prev_pgno {
+            return invalid(format!("page {pgno} out of order"));
+        }
+        if self.header.is_snapshot() && pgno != next_snapshot_page(self.prev_pgno, self.lock) {
+            return invalid(format!("snapshot page {pgno} out of sequence"));
+        }
+        self.prev_pgno = pgno;
+        Ok(())
     }
 
     /// Reads the next page into `buf` (page-size bytes) and returns its number,
@@ -404,34 +433,14 @@ impl<'a> Decoder<'a> {
             self.at_end_of_pages = true;
             return Ok(None);
         }
-        if pgno == 0 {
-            return invalid("page number required");
-        }
-        if flags & !PAGE_FLAG_SIZE != 0 {
-            return invalid("invalid page header flags");
-        }
-        if flags & PAGE_FLAG_SIZE == 0 {
-            return invalid("legacy page frames (LZ4 frame format) are not supported");
-        }
-        if pgno > self.header.commit || pgno == self.lock {
-            return invalid(format!("page {pgno} not allowed here"));
-        }
-        // Pages ascend, so none repeats; a snapshot replaces the database and
-        // has every page.
-        if pgno <= self.prev_pgno {
-            return invalid(format!("page {pgno} out of order"));
-        }
-        if self.header.is_snapshot() && pgno != next_snapshot_page(self.prev_pgno, self.lock) {
-            return invalid(format!("snapshot page {pgno} out of sequence"));
-        }
-        self.prev_pgno = pgno;
+        self.check_page_header(pgno, flags)?;
         let size_bytes = self
             .data
             .get(self.pos..)
             .and_then(|d| d.first_chunk::<4>())
             .ok_or_else(|| truncated("page size"))?;
         self.hash.update(size_bytes);
-        let n = u32::from_be_bytes(*size_bytes) as usize;
+        let n = fit::<usize, _>(u32::from_be_bytes(*size_bytes), "page size")?;
         self.pos += 4;
         let payload = self
             .data
@@ -450,18 +459,8 @@ impl<'a> Decoder<'a> {
         Ok(Some(pgno))
     }
 
-    /// Verifies the page index, trailer and file checksum. Call after
-    /// `next_page` returned `None`.
-    pub fn finish(mut self) -> Result<Trailer> {
-        if !self.at_end_of_pages {
-            return invalid("page block not fully read");
-        }
-        if self.header.is_snapshot()
-            && self.prev_pgno != last_snapshot_page(self.header.commit, self.lock)
-        {
-            return invalid("snapshot is missing pages");
-        }
-        let index_start = self.pos;
+    /// Checks the page index against the pages read; returns where it ends.
+    fn check_index(&self) -> Result<usize> {
         let mut p = self.pos;
         let mut entries = 0usize;
         loop {
@@ -480,6 +479,22 @@ impl<'a> Decoder<'a> {
         if entries != self.frames.len() {
             return invalid("page index has fewer entries than pages");
         }
+        Ok(p)
+    }
+
+    /// Verifies the page index, trailer and file checksum. Call after
+    /// `next_page` returned `None`.
+    pub fn finish(mut self) -> Result<Trailer> {
+        if !self.at_end_of_pages {
+            return invalid("page block not fully read");
+        }
+        if self.header.is_snapshot()
+            && self.prev_pgno != last_snapshot_page(self.header.commit, self.lock)
+        {
+            return invalid("snapshot is missing pages");
+        }
+        let index_start = self.pos;
+        let mut p = self.check_index()?;
         let entries_len = (p - index_start) as u64;
         let size_field = self
             .data
@@ -573,13 +588,13 @@ pub type Frame = (u32, usize, usize);
 pub fn verify(data: &[u8]) -> Result<(Header, Trailer, Vec<Frame>)> {
     let mut dec = Decoder::new(data)?;
     let header = dec.header.clone();
-    let mut buf = vec![0u8; header.page_size as usize];
+    let mut buf = vec![0u8; fit::<usize, _>(header.page_size, "page size")?];
     let mut frames = Vec::new();
     while dec.next_page(&mut buf)?.is_some() {
         let Some(&(pgno, start, len)) = dec.frames.last() else {
             return invalid("page frame not recorded");
         };
-        frames.push((pgno, start as usize, len as usize));
+        frames.push((pgno, fit(start, "frame offset")?, fit(len, "frame length")?));
     }
     let trailer = dec.finish()?;
     Ok((header, trailer, frames))
@@ -637,7 +652,8 @@ mod tests {
         let mut e = Encoder::new(h).unwrap();
         for seed in [1, 2] {
             let data = page(seed);
-            e.add_frame(2, &data, &lz4_flex::block::compress(&data));
+            e.add_frame(2, &data, &lz4_flex::block::compress(&data))
+                .unwrap();
         }
         let out = e.finish().unwrap();
         assert!(verify(&out).is_err(), "page 2 twice, page 3 never");
@@ -663,7 +679,8 @@ mod tests {
         };
         let mut e = Encoder::new(h).unwrap();
         for pgno in [2u32, 5, 9, 16] {
-            e.add_frame(pgno, &page(pgno as u8), &[0; UPSTREAM_PAYLOAD_LEN]);
+            e.add_frame(pgno, &page(pgno as u8), &[0; UPSTREAM_PAYLOAD_LEN])
+                .unwrap();
         }
         let out = e.finish().unwrap();
         let (_, t) = peek(&out).unwrap();
@@ -683,7 +700,8 @@ mod tests {
         };
         let mut e = Encoder::new(h).unwrap();
         for pgno in 1..=6u32 {
-            e.add_frame(pgno, &page(pgno as u8), &[0; UPSTREAM_PAYLOAD_LEN]);
+            e.add_frame(pgno, &page(pgno as u8), &[0; UPSTREAM_PAYLOAD_LEN])
+                .unwrap();
         }
         let out = e.finish().unwrap();
         let (_, t) = peek(&out).unwrap();
@@ -806,7 +824,8 @@ mod tests {
             for &p in pages {
                 let data = page(p as u8);
                 // Frames are written directly: `add_page` refuses the gaps.
-                e.add_frame(p, &data, &lz4_flex::block::compress(&data));
+                e.add_frame(p, &data, &lz4_flex::block::compress(&data))
+                    .unwrap();
             }
             e.finish().unwrap()
         };
