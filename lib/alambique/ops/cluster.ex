@@ -3,6 +3,7 @@ defmodule Alambique.Ops.Cluster do
   # Joining a running cluster from a Mix task (design §10).
 
   @doc "Switches shared by the tasks that talk to nodes."
+  @spec switches() :: keyword
   def switches, do: [instance: :string, connect: :string, cookie: :string]
 
   @doc "The instance name, from `--instance`."

@@ -341,15 +341,23 @@ defmodule Alambique.Sqlite do
   frames past it are no transaction (a commit frame whose write failed after
   it reached the file). The header is read in the same native call.
   """
-  def capture_incremental(conn, db, wal, page_size, pos, sums, pre, txid, timestamp) do
-    opts = %{page_size: page_size, pos: pos, pre: pre, txid: txid, timestamp: timestamp}
-    Native.sqlite_capture_incremental(ref(conn), key(conn), db, wal, sums, opts)
-  end
+  @spec capture_incremental(
+          conn,
+          Path.t(),
+          Path.t(),
+          Native.sums(),
+          Native.capture_opts()
+        ) ::
+          Native.captured() | :none | Native.error()
+  def capture_incremental(conn, db, wal, sums, opts),
+    do: Native.sqlite_capture_incremental(ref(conn), key(conn), db, wal, sums, opts)
 
   @doc """
   `Alambique.Replication.Native.wal_pending/3` of the WAL of a cell's own
   connection, up to the end its wal-index records.
   """
+  @spec wal_pending(conn, Path.t(), pos_integer, Native.wal_pos()) ::
+          {:ok, boolean} | Native.error()
   def wal_pending(conn, wal, page_size, pos),
     do: Native.sqlite_wal_pending(ref(conn), key(conn), wal, page_size, pos)
 
@@ -359,7 +367,7 @@ defmodule Alambique.Sqlite do
   opened and closed, which would drop the locks SQLite holds on it.
   """
   @spec capture_full(conn, Path.t(), pos_integer, pos_integer, integer, term) ::
-          Alambique.Replication.Native.captured() | Alambique.Replication.Native.error()
+          Native.captured() | Native.error()
   def capture_full(conn, wal, page_size, txid, timestamp, limit) do
     opts = %{page_size: page_size, txid: txid, timestamp: timestamp, limit: limit}
     Native.sqlite_capture_full(ref(conn), key(conn), wal, opts)
