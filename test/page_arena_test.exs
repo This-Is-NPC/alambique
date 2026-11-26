@@ -144,9 +144,11 @@ defmodule Alambique.PageArenaTest do
     # The task ended: its connection closes with its opener, and the
     # reference is collected with the task's heap.
     if arena?(held) do
+      # `held` was read with the connection open, where little is free: wait
+      # for the close first, then for the trim it wakes.
+      assert eventually(fn -> native_counts() == base end)
       assert eventually(fn -> excess(stats()) <= 1_000_000 end)
-      # The region closes before the trim that released the memory.
-      assert native_counts() == base
+      assert stats().page_arena_released_bytes - held.page_arena_released_bytes >= 4_000_000
     end
   end
 
@@ -162,9 +164,11 @@ defmodule Alambique.PageArenaTest do
     :erlang.garbage_collect()
 
     if arena?(held) do
+      # `held` was read with the connection open, where little is free: wait
+      # for the close first, then for the trim it wakes.
+      assert eventually(fn -> native_counts() == base end)
       assert eventually(fn -> excess(stats()) <= 1_000_000 end)
-      # The region closes before the trim that released the memory.
-      assert native_counts() == base
+      assert stats().page_arena_released_bytes - held.page_arena_released_bytes >= 4_000_000
     end
   end
 
