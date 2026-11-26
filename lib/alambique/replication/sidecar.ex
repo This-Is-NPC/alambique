@@ -60,18 +60,18 @@ defmodule Alambique.Replication.Sidecar do
   end
 
   defp replace(ctx, skey, side, meta, deadline) do
-    case Objects.fetch_optional(ctx, skey, deadline) do
-      {:ok, ^side, _} ->
+    case Alambique.Store.get_capped(ctx.store, skey, ctx.max_object_bytes) do
+      {:ok, ^side, _etag, _meta} ->
         :ok
 
-      {:ok, _stale, %{"etag" => etag}} ->
+      {:ok, _stale, etag, _meta} ->
         with :exists <- Objects.put(ctx, skey, side, {:if_match, etag}, meta, deadline), do: :ok
 
-      :none ->
+      {:error, :not_found} ->
         with :exists <- Objects.put(ctx, skey, side, :if_none_match, meta, deadline), do: :ok
 
-      other ->
-        other
+      {:error, _} = error ->
+        error
     end
   end
 

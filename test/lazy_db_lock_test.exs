@@ -65,7 +65,7 @@ defmodule Alambique.LazyDbLockTest do
       end)
 
     assert_receive :hydrated, 10_000
-    {:ok, conn} = Sqlite.open(path)
+    {:ok, conn} = Sqlite.open(path, vfs: :alambique)
     on_exit(fn -> Sqlite.close(conn) end)
     assert {:ok, %{rows: [[_]]}} = Sqlite.run(conn, "SELECT count(*) FROM kv", [])
     assert lock_state(path) == "held"

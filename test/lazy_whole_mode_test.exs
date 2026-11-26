@@ -55,13 +55,20 @@ defmodule Alambique.LazyWholeModeTest do
     {inst, counter}
   end
 
-  test "whole mode reads the chain without a ranged read", ctx do
+  # A full restore reads the first range of each object, which is the whole
+  # object when it is small, and nothing by range after it. A lazy restore
+  # reads the edges and then the pages it needs.
+  defp one_range_each(counter) do
+    ranges = counter |> CountingStore.keys(:get_range) |> Enum.frequencies()
+    ranges != %{} and Enum.all?(ranges, fn {_key, n} -> n == 1 end)
+  end
+
+  test "whole mode reads each object once, with no page read by range", ctx do
     cell = seed(ctx, 200)
     {inst, counter} = counted(ctx, min_bytes: 0, mode: :whole)
 
     assert {:ok, %{rows: [[200]]}} = Alambique.query(inst, cell, "SELECT count(*) FROM t")
-    assert CountingStore.count(counter, :get_range) == 0
-    assert CountingStore.count(counter, :get) > 0
+    assert one_range_each(counter)
     assert drain([:alambique, :replication, :hydrate], cell) == []
   end
 
@@ -70,7 +77,7 @@ defmodule Alambique.LazyWholeModeTest do
     {inst, counter} = counted(ctx, min_bytes: 0)
 
     assert {:ok, %{rows: [[200]]}} = Alambique.query(inst, cell, "SELECT count(*) FROM t")
-    assert CountingStore.count(counter, :get_range) > 0
+    refute one_range_each(counter)
     assert {_, %{result: :ok}} = await_event([:alambique, :replication, :hydrate], cell, 30_000)
   end
 
@@ -80,7 +87,7 @@ defmodule Alambique.LazyWholeModeTest do
       def options(_cell), do: [lazy_restore: [mode: :whole]]
     end
 
-    test "a cell that asks for :whole reads its chain without a ranged read", ctx do
+    test "a cell that asks for :whole reads each object once", ctx do
       cell = seed(ctx, 200)
       {_, counter} = counted = CountingStore.wrap(ctx.store)
 
@@ -92,7 +99,7 @@ defmodule Alambique.LazyWholeModeTest do
         )
 
       assert {:ok, %{rows: [[200]]}} = Alambique.query(inst, cell, "SELECT count(*) FROM t")
-      assert CountingStore.count(counter, :get_range) == 0
+      assert one_range_each(counter)
       assert drain([:alambique, :replication, :hydrate], cell) == []
     end
   end
