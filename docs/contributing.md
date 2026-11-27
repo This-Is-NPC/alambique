@@ -72,9 +72,10 @@ request to `master` and on every push to `master`, and it takes its tool
 versions from `mise.toml`. A new push to a pull request cancels the run of the
 older commit.
 
-`ci` is the aggregate job: it passes when these jobs passed. Every test runs
-once: the default suite runs with coverage, split into parts, and the cluster
-suite runs in parts without coverage.
+`ci` is the aggregate job: it passes when these jobs passed. Each test
+runs once, except the page-arena tests, which `arena-off` runs again with the
+arena off: the default suite runs with coverage, split into parts, and the
+cluster suite runs in parts without coverage.
 
 | Job | What it runs |
 | --- | --- |
