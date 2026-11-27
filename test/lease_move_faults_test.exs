@@ -183,13 +183,13 @@ defmodule Alambique.LeaseMoveFaultsTest do
   ]
   @valid Map.new(@fields, fn {key, good, _bad} -> {key, good} end)
 
+  test "a lease object with every field decodes", %{store: store, prefix: prefix, ctx: ctx} do
+    {:ok, _} = MemoryStore.put(store, lease_key(prefix, "c"), Jason.encode!(@valid), :none, %{})
+
+    assert {:ok, %Lease{cell: "c", epoch: 1, seq: 1}} = Lease.read(ctx, "c")
+  end
+
   describe "a lease object that does not decode" do
-    test "decodes with every field", %{store: store, prefix: prefix, ctx: ctx} do
-      {:ok, _} = MemoryStore.put(store, lease_key(prefix, "c"), Jason.encode!(@valid), :none, %{})
-
-      assert {:ok, %Lease{cell: "c", epoch: 1, seq: 1}} = Lease.read(ctx, "c")
-    end
-
     for {name, body} <-
           [{"json that is not a map", "[1, 2]"}] ++
             for(
