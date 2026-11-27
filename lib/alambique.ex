@@ -84,7 +84,8 @@ defmodule Alambique do
       idle_cache_kib:, idle_close_after_ms:, idle_gc:, track_bytes:,
       lookaside_bytes:, lookaside_count:]`,
       `sql: [locking_mode:]`, `lazy_restore: [mode:]` (`:ranged` or `:whole`, see
-      `:lazy_restore`) and `feed: [cleanup_after_ms:]`.
+      `:lazy_restore`; it cannot turn lazy restore on when the instance has
+      `lazy_restore: false`) and `feed: [cleanup_after_ms:]`.
       A key that is absent keeps the node's value; `locking_mode: :exclusive` is
       dropped back to the node's value (an event says so) where the node's feed
       has `hand_over: :sender` or `:lazy_restore` is on, and `idle_close_after_ms`
@@ -98,8 +99,7 @@ defmodule Alambique do
       most `:cell_options_timeout_ms`. Nothing is stored: every wake asks again,
       on whichever node wakes the cell, so a cell that moves or restarts gets
       the same options from the same function. A change applies at the next
-      wake, or at once with `refresh_options/3`. Set it only when every node runs a version that knows it: an older
-      node stops at boot with `unknown options [:cell_options]`. The
+      wake, or at once with `refresh_options/3`. The
       `awake` limits `:cell_cache_kib_max`, `:cell_idle_timeout_ms_min` and
       `:cell_idle_timeout_ms_max` clamp what a cell may choose.
     * `:cell_options_timeout_ms` - how long a wake or a refresh waits for `:cell_options`
@@ -311,7 +311,7 @@ defmodule Alambique do
       connection, `PRAGMA cache_size`, a hard limit of that connection, default 512 KiB; SQLite's own default
       is 2 000) and by `:max_bytes` (default `nil`, no budget). A cell can
       set `:cache_kib`, `:idle_cache_after_ms`, `:idle_cache_kib`,
-      `:idle_close_after_ms`, `:idle_gc`, `:lookaside_bytes` and
+      `:idle_close_after_ms`, `:idle_gc`, `:track_bytes`, `:lookaside_bytes` and
       `:lookaside_count` through `:cell_options`. `:cell_cache_kib_max` (default `nil`, no limit; in KiB, and at
       most `:max_bytes` when that is set) and `:cell_idle_timeout_ms_min` and
       `:cell_idle_timeout_ms_max` (default `nil`) clamp the values a cell
