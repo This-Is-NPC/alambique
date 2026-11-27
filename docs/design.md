@@ -1069,38 +1069,25 @@ edges, each reserved in the budget of the restore at the most a sidecar may be
 `GET` made when the walk reaches it.
 
 Measured with `mise run bench:sidecar` and `bench:lazy` (4 schedulers, the
-in-memory store, and a local SeaweedFS in a container; 4 KiB pages of random
-rows, so the objects do not compress):
+in-memory store; 4 KiB pages of random rows, so the objects do not compress):
 
-- Size: 381 140 bytes for a 66 MB object, 5 062 580 bytes for 861 MB of
-  objects (one 861 MB snapshot file): 0.57 to 0.59 % of the object, 20 bytes
-  per page.
-- Per commit, 300 commits of one row with a 1 000 byte value: the
-  acknowledgment takes 63 µs (p50, p99 137 µs) without a sidecar and 65 µs
-  (p99 115 µs) with one written after it; with the put of the store at 20 ms,
-  21.4 ms and 20.8 ms. The sidecar written before the acknowledgment (what
-  `Replicator.sync/3` does by default) takes 87 µs and 41.8 ms: one more
-  `PUT` of latency. The store sees two puts per commit instead of one.
-- Per wake, 861 MB, memory store: the plan takes 14 ms without a sidecar and
-  17 ms with one (the `GET` of 5 MB), the first query 869 and 689 ms, and the
-  complete file 6.76 s and 1.89 s, because the 861 MB are not read again. With
-  20 ms added to every request: 7.55 s and 2.91 s. On the local SeaweedFS the
-  complete file ranged from 9.8 to 22.7 s without and 2.5 to 22.0 s with: that
-  store varied more from run to run (its full restore, 7.7 to 25.4 s) than the
-  sidecar changes it, so no figure is claimed for it.
-- The `GET`s together, 66 MB in 20 files that all have a sidecar, memory store
-  with 20 ms added to every request, three runs each: the plan took 1.32 to
-  1.33 s with a `GET` made when the walk reached each file, and 925 to 948 ms
-  with them made together; the first query 1.54 to 1.57 s and 1.17 to 1.19 s;
-  the complete file 1.61 to 1.65 s and 1.24 to 1.26 s. With no added latency
-  the plan went from 3 to 4 ms to 8 to 14 ms: starting the reads costs a few
-  milliseconds. With one covered file of 861 MB the gain is one request
-  (981 against 1 000 ms, 20 ms added). The local SeaweedFS answers in less than
-  a millisecond and showed no difference beyond its variation (plan 86 to 94
-  ms before, 65 to 100 ms after).
-- Not isolated: the CPU of the hash. With the sidecar on, the 861 MB file
-  was fetched, decoded, hashed and installed in 1.89 s of hydration in the
-  memory store, an upper bound of the CPU of those steps on four schedulers.
+- Size: 20 bytes per page, 0.58 % of the object (381 140 bytes for a 66 MB
+  object, 5 062 580 bytes for 861 MB).
+- Per commit of one row with a 1 000 byte value: the acknowledgment takes
+  63 µs (p50, p99 137 µs) without a sidecar and 65 µs (p99 115 µs) with one
+  written after it; with the put of the store at 20 ms, 21.4 ms and 20.8 ms.
+  The sidecar written before the acknowledgment (what `Replicator.sync/3` does
+  by default) takes 87 µs and 41.8 ms: one more `PUT` of latency. The store
+  sees two puts per commit instead of one.
+- Per wake of an 861 MB cell, one `GET` of 5 MB: the plan takes 14 ms without
+  a sidecar and 17 ms with one, and the file is not read again after the
+  download (the covered file is not read whole).
+- Making the `GET`s together, for 66 MB in 20 files that all have a sidecar
+  and 20 ms added to every request: the plan takes about 0.93 s, against about
+  1.33 s with a `GET` made when the walk reaches each file. With no added
+  latency starting the reads costs a few milliseconds. With one covered file
+  the gain is one request.
+- Not isolated: the CPU of the hash, which is inside the hydration time.
 
 **Deleting.** Trash, retention, compaction and the cleanup of a moved cell
 delete a sidecar with its object: `Keys.data_keys/3` returns the sidecars among

@@ -197,9 +197,8 @@ returns the pages of free blocks to the kernel (`madvise` with
 cell, and cannot change while the node runs. Set them in `config/config.exs`,
 which a release carries in its `sys.config`. A release started with
 `bin/<app> start` loads the library before it reads `config/runtime.exs`, so
-the arena settings there are ignored: that was observed with a release whose
-`runtime.exs` set `enabled: false` and whose arena was on (`bin/<app> eval`
-and `mix run` read it earlier). For example:
+the arena settings there are ignored (`bin/<app> eval` and `mix run` read it
+earlier). For example:
 
 ```elixir
 config :alambique, :page_arena,
@@ -265,35 +264,34 @@ what the library loaded with logs a warning naming the keys and emits
   connections are used: under 100 bytes per extent and 48 bytes per connection.
 
 Costs, measured on a 4-vCPU Linux VM with 250 connections of about 1 MiB of
-page cache, two runs each:
+page cache:
 
 | What | Arena off | Arena on (64 KiB extents) |
 | --- | --- | --- |
-| Share of the bytes a shrink frees that leave the process, with 50, 75 and 90% of the connections shrunk to `idle_cache_kib` 64 or 0, filled in turns or one at a time | 0 to 3% | 98 to 101% |
+| Share of the bytes a shrink frees that leave the process, with 50, 75 and 90% of the connections shrunk to `idle_cache_kib` 64 or 0, filled in turns or one at a time | about 0% | about 100% |
 | p99 of a hot connection's point read, while the other connections are shrunk to nothing and refilled in bulk (without that load: 41 µs) | 55 µs | 43 µs |
-| Longest trim (on the trim thread) | none | 1.1 to 1.9 ms |
-| One page miss of a cache the file does not fit in | 0.77 to 0.90 µs | 0.89 to 1.16 µs |
+| Longest trim (on the trim thread) | none | under 2 ms |
+| One page miss of a cache the file does not fit in | about 0.8 µs | about 1.0 µs |
 | First scan of a 16 MiB file after the cache was released (32 MiB cache, 3,900 pages) | 5.0 ms | 9.2 ms |
 | Memory growth over 20 shrinks and refills of one connection | none | none |
 
 The default extent is 64 KiB. All sizes release the same share, so the size
 is chosen by what a page miss costs: 16 KiB costs about 25% more per miss than
-64 KiB, and 256 KiB costs the same within the runs' spread. A page miss costs
+64 KiB, and 256 KiB costs the same as 64 KiB. A page miss costs
 the arena's lock and the region's bookkeeping, about 0.1 to 0.25 µs; the first scan after a release also pays one page fault per OS page,
-about 0.5 µs a page. Extents of 16 KiB cost about 1.1 to 1.5 µs a miss, with
-no gain in what leaves; extents of 256 KiB differ from 64 KiB by less than
-the runs vary. At 350 awake cells with 512 KiB of page cache filled each, the
-memory of the process grows by, per cell (the growth of the process divided by
-350; the range is two runs):
+about 0.5 µs a page. Extents of 16 KiB cost about 1.3 µs a miss, with
+no gain in what leaves. At 350 awake cells with 512 KiB of page cache filled
+each, the memory of the process grows by, per cell (the growth of the process
+divided by 350):
 
 | Cells | Arena off | Arena on |
 | --- | --- | --- |
-| No idle handling | 1,440 to 1,970 KiB | 1,665 to 1,945 KiB |
-| `idle_cache_after_ms` (shrink to 64 KiB) | 270 KiB | 210 to 245 KiB |
-| `idle_close_after_ms` | 120 to 135 KiB | 40 to 85 KiB |
+| No idle handling | about 1,700 KiB | about 1,800 KiB |
+| `idle_cache_after_ms` (shrink to 64 KiB) | 270 KiB | about 230 KiB |
+| `idle_close_after_ms` | about 130 KiB | about 60 KiB |
 
 The arena is what lets the memory an idle close frees leave the process; the
-growth of 350 awake cells is the same within the runs' spread.
+growth of 350 awake cells with no idle handling changes by little with it.
 
 **`awake: [lookaside_bytes: ..., lookaside_count: ...]`.** The default is 512
 bytes by 16 slots, 8,192 bytes of memory on each connection; SQLite's own
@@ -339,12 +337,12 @@ connection, and keeps its process, its lease and its renewals. It must be below
 Per cell, a close frees the page cache (up to `cache_kib`), the schema, the
 prepared statements and the open files of the connection (the database, its
 WAL and its WAL index). Measured with `mise run bench:idle-close` on 250 idle
-cells with the cell files on a disk and the page arena on (three runs; ranges
-are over them), per cell, open against closed:
+cells with the cell files on a disk and the page arena on, per cell, open
+against closed:
 
 | | cells of 0 notes | cells of 2,000 notes |
 | --- | --- | --- |
-| RssAnon | 6 to 24 KiB lower | 320 to 336 KiB lower |
+| RssAnon | about 15 KiB lower | about 330 KiB lower |
 | Erlang memory (total) | 277 -> 238 KiB | 310 -> 271 KiB |
 | SQLite memory in use | 38 -> 0 KiB | 316 -> 0 KiB |
 | Page arena, resident | 12 -> 1 KiB | 292 -> 1 KiB |

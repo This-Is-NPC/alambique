@@ -133,10 +133,9 @@ Fewer requests, or requests that run together, make the wake faster. Design
      reported by `[:alambique, :replication, :sidecar]` and costs only the
      whole read of that object at a wake), `80 + 20 × pages` bytes stored (0.6 % of an object of 4 KiB pages) for each, and one `GET` of that
      size for each covered file at a wake, made together for the files of the
-     chain and beside the reads of their edges (with 20 files and 20 ms per
-     request the plan took 0.93 s instead of 1.33 s). The download of an 861 MB cell took
-     1.89 s instead of 6.76 s in the memory store, because the covered file is
-     not read again (design §16 has the measurements and their limits). Reading uses a sidecar whenever one
+     chain and beside the reads of their edges. The covered file is not read
+     again, so a wake saves the transfer of its bytes (design §16 has the
+     costs per operation and their limits). Reading uses a sidecar whenever one
      exists, so turn it on for the writers first. Writes still wait for the end
      of the download (`verify_writes`): the sidecar vouches for pages as they
      arrive, not for the chain.
@@ -148,7 +147,9 @@ Fewer requests, or requests that run together, make the wake faster. Design
      download and nothing is held later: no first write waits and no query
      waits for a page. Choose it when the cells are small enough to download
      within the deadline of the first call. A cell can ask for it alone with
-     `lazy_restore: [mode: :whole]` in the result of `cell_options`.
+     `lazy_restore: [mode: :whole]` in the result of `cell_options`. A cell
+     cannot turn lazy restore on this way when the instance has
+     `lazy_restore: false`.
      `verify_bytes` has no effect in it.
    - `lazy_restore: [verify_writes:]` (default `true`) makes the first write
      after a lazy wake wait until the whole file is downloaded and its checksum
