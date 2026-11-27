@@ -4,7 +4,8 @@ name: CI
 # passes only when every job below passed, so it keeps its name when jobs are
 # added. Tool versions come from mise.toml; nothing here lists a version.
 #
-# Every test runs once. The default suite runs with coverage, split into
+# Each test runs once, except the page-arena tests, which `arena-off` runs
+# again with the arena off. The default suite runs with coverage, split into
 # parts that run side by side; the cluster suite runs in parts without
 # coverage; `gate` only checks statically.
 #
