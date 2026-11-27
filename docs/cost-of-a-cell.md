@@ -211,6 +211,21 @@ config :alambique, :page_arena,
   max_trim_kib: 4096
 ```
 
+| Key | Default | Accepted values |
+| --- | --- | --- |
+| `enabled` | `true` | `true` or `false` |
+| `reserved_mib` | 4096 | an integer from 64 up to 1,048,576 |
+| `extent_kib` | 64 | a multiple of 4 up to 1,024 |
+| `trim_after_kib` | 1,024 | an integer, 0 or more |
+| `keep_kib` | 4,096 | an integer, 0 or more |
+| `max_trim_kib` | 4,096 | a positive integer |
+| `max_regions` | 65,536 | a positive integer: the connections that get extents of their own; the others share one region, and a value of 1 shares one for all |
+| `trim_idle_ms` | 30,000 | a positive integer: how long the trim thread waits for a wake-up before it looks anyway |
+
+A key outside this list raises `ArgumentError` ("unknown :page_arena
+settings") when the library loads, and so does a value outside the accepted
+ones, naming the key and the value.
+
 `Alambique.NativeStats.read/0` reports what the library loaded with
 (`page_arena_state`, `page_arena_extent_kib` and the other `page_arena_*`
 settings): check it after a deploy, because a setting that did not reach the
