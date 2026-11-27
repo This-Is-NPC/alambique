@@ -34,11 +34,11 @@ description = "Run the fast checks of the pre-push hook: incremental warnings-as
 run = "scripts/quick-check"
 
 [tasks.check]
-description = "Run the full gate: quick checks, clippy, docs links, then the default suite (ALAMBIQUE_CHECK_CLUSTER=1 and ALAMBIQUE_CHECK_COVERAGE=1 add the heavy checks; CI runs the suite in the coverage and cluster parts instead)"
+description = "Run the full gate: quick checks, clippy, cargo-deny and the Mix audits, Credo, Dialyzer and the cycle check, docs links, then the default suite (ALAMBIQUE_CHECK_CLUSTER=1 and ALAMBIQUE_CHECK_COVERAGE=1 add the heavy checks; CI runs the suite in the coverage and cluster parts instead)"
 run = "scripts/check"
 
 [tasks."check:static"]
-description = "Run the gate without the default suite, the static part the CI gate job runs: forced warnings-as-errors compile, format checks, clippy and docs links"
+description = "Run the gate without the default suite, the static part the CI gate job runs: forced warnings-as-errors compile, format checks, clippy, cargo-deny and the Mix audits, Credo, Dialyzer, the cycle check and docs links"
 env = { ALAMBIQUE_CHECK_TESTS = "0" }
 run = "scripts/check"
 

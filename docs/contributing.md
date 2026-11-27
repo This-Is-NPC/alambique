@@ -14,8 +14,11 @@ mise run test            # default suite, no external services
 mise run test:native     # Rust unit tests of native/alambique_nif
 mise run test:page-arena-off  # the tests that depend on the page arena, with it off (the default suite runs with it on)
 mise run check:release-nif  # a release build of the NIF has none of the test-only NIFs (CI native job)
-mise run check           # the full gate: quick checks, clippy, docs links, default suite
+mise run check           # the full gate: quick checks, clippy, supply chain, Elixir static analysis, docs links, default suite
 mise run check:static    # the same without the suite: what the CI gate job runs
+mise run check:deny      # cargo-deny on the NIF and fuzz crates
+mise run check:audit     # mix deps.audit and mix hex.audit
+mise run check:elixir    # Credo --strict, Dialyzer and the compile-connected cycle check
 mise run check:quick     # the fast checks of the pre-push hook
 mise run check:links     # relative links and anchors of README.md, CHANGELOG.md, AGENTS.md and docs/
 mise run check:readme    # release-please markers in README.md
@@ -157,7 +160,15 @@ order:
 6. `mise run test`, the default suite
 
 `mise run check:static` runs steps 1 to 5 only: it is the `gate` job, because
-CI runs the suite in the coverage parts. Run `mise run check` by hand when you
+CI runs the suite in the coverage parts. The job keeps the Dialyzer PLTs in its
+cached `_build`, so only a change of dependencies or tool versions rebuilds them.
+
+Every step fails on any finding. Fix a finding in the code: the configuration
+has no per-site suppressions (`#[allow]`, `#[expect]`, `credo:disable`,
+`@dialyzer` ignores, an ignore file) and no baseline. To turn off or narrow a
+lint that is wrong for this code base, change it for the whole crate or
+project, in `[lints.clippy]` of the NIF's `Cargo.toml`, `clippy.toml` or
+`.credo.exs`, and write the reason next to the change. Run `mise run check` by hand when you
 want the whole result on your machine; a loaded machine
 makes timing tests in the suite fail, so rerun the failing file before
 suspecting your change. `ALAMBIQUE_CHECK_CLUSTER=1` adds `mise run
