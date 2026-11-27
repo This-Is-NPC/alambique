@@ -30,7 +30,9 @@ defmodule Alambique.AckGuard do
 
   @doc "Stops watching."
   def detach(%{id: id, log: log}) do
-    :ok = :telemetry.detach(id)
+    # A guard of `attach_peers/1` has no handler here: `watch/1` attached it on
+    # the peers.
+    _ = :telemetry.detach(id)
     :ets.delete(log)
     :ok
   end
