@@ -170,14 +170,36 @@ defmodule Alambique.LeaseMoveFaultsTest do
     end
   end
 
+  # Every required field of a lease, with a value of the right type and one of
+  # the wrong type.
+  @fields [
+    {"cell", "c", 1},
+    {"epoch", 1, "1"},
+    {"owner", "a", 1},
+    {"token", "t", 1},
+    {"seq", 1, "1"},
+    {"expires_at_ms", 1, "1"},
+    {"released", true, "true"}
+  ]
+  @valid Map.new(@fields, fn {key, good, _bad} -> {key, good} end)
+
   describe "a lease object that does not decode" do
-    for {name, body} <- [
-          {"json that is not a map", "[1, 2]"},
-          {"a field of the wrong type",
-           ~s({"cell":"c","epoch":"1","owner":"a","token":"t","seq":1,"expires_at_ms":1,"released":true})},
-          {"a field that is missing",
-           ~s({"cell":"c","epoch":1,"owner":"a","token":"t","seq":1,"expires_at_ms":1})}
-        ] do
+    test "decodes with every field", %{store: store, prefix: prefix, ctx: ctx} do
+      {:ok, _} = MemoryStore.put(store, lease_key(prefix, "c"), Jason.encode!(@valid), :none, %{})
+
+      assert {:ok, %Lease{cell: "c", epoch: 1, seq: 1}} = Lease.read(ctx, "c")
+    end
+
+    for {name, body} <-
+          [{"json that is not a map", "[1, 2]"}] ++
+            for(
+              {key, _good, bad} <- @fields,
+              do: {"a #{key} of the wrong type", Jason.encode!(Map.put(@valid, key, bad))}
+            ) ++
+            for(
+              {key, _good, _bad} <- @fields,
+              do: {"a missing #{key}", Jason.encode!(Map.delete(@valid, key))}
+            ) do
       test "#{name} is corrupt", %{store: store, prefix: prefix, ctx: ctx} do
         {:ok, _} = MemoryStore.put(store, lease_key(prefix, "c"), unquote(body), :none, %{})
 
