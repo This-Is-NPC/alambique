@@ -1323,11 +1323,11 @@ defmodule Alambique.Cell do
     end
   end
 
-  # What a cleanup needs besides the rows: a cell that answers, with a valid
-  # lease and a complete file, and a pipeline that takes a batch. The idle
-  # modes also want no call waiting or uploading.
+  # What a cleanup needs besides the rows, in a serving cell (every caller
+  # matched `mode: :serving`): a valid lease, a complete file and a pipeline
+  # that takes a batch. The idle modes also want no call waiting or uploading.
   defp cleanup_ready?(state) do
-    state.mode == :serving and State.lease_valid?(state) and not Hydration.hydrating?(state) and
+    State.lease_valid?(state) and not Hydration.hydrating?(state) and
       if state.config.feed.cleanup == :after_publish,
         do: not Pipe.full?(state.pipe),
         else: idle?(state) and :atomics.get(state.load, Layout.slot(:admitted)) == 0
