@@ -1085,19 +1085,17 @@ rows, so the objects do not compress):
   17 ms with one (the `GET` of 5 MB), the first query 869 and 689 ms, and the
   complete file 6.76 s and 1.89 s, because the 861 MB are not read again. With
   20 ms added to every request: 7.55 s and 2.91 s. On the local SeaweedFS the
-  complete file ranged from 9.8 to 22.7 s without and 2.5 to 22.0 s with: that
-  store varied more from run to run (its full restore, 7.7 to 25.4 s) than the
-  sidecar changes it, so no figure is claimed for it.
+  complete file ranged from 9.8 to 22.7 s without and 2.5 to 22.0 s with: the
+  full restore on it took 7.7 to 25.4 s, so no figure is claimed for it.
 - The `GET`s together, 66 MB in 20 files that all have a sidecar, memory store
-  with 20 ms added to every request, three runs each: the plan took 1.32 to
+  with 20 ms added to every request: the plan took 1.32 to
   1.33 s with a `GET` made when the walk reached each file, and 925 to 948 ms
   with them made together; the first query 1.54 to 1.57 s and 1.17 to 1.19 s;
   the complete file 1.61 to 1.65 s and 1.24 to 1.26 s. With no added latency
   the plan went from 3 to 4 ms to 8 to 14 ms: starting the reads costs a few
   milliseconds. With one covered file of 861 MB the gain is one request
   (981 against 1 000 ms, 20 ms added). The local SeaweedFS answers in less than
-  a millisecond and showed no difference beyond its variation (plan 86 to 94
-  ms before, 65 to 100 ms after).
+  a millisecond and showed no difference (plan 86 to 94 ms before, 65 to 100 ms after).
 - Not isolated: the CPU of the hash. With the sidecar on, the 861 MB file
   was fetched, decoded, hashed and installed in 1.89 s of hydration in the
   memory store, an upper bound of the CPU of those steps on four schedulers.

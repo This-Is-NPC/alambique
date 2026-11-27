@@ -156,9 +156,7 @@ checksum is the one of the file the writer holds.
 Deleting an object deletes its sidecar in the same manifest, and objects sort
 before their sidecars (`x.ltx` before `x.ltx.pages`). A sidecar whose file is
 not in the listing is an orphan: retention marks it with the deletion grace.
-A version of Alambique without sidecars does not know the name: its retention
-and cleanup of a moved cell leave the sidecars in place, and a version with
-them sweeps what is left.
+The cleanup of a moved cell removes the sidecars with their files.
 
 ### Deviations from upstream
 
