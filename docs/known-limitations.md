@@ -84,10 +84,6 @@ about it, and where the evidence is.
 - Each connection has its own page cache, so a cell cannot borrow the cache
   that idle cells leave unused: a cell whose working set is above `cache_kib`
   reads pages again. Raise `cache_kib` for it with `cell_options`.
-- A node of a version without page-hash sidecars does not know the `.pages`
-  objects: its retention and the cleanup of a moved cell leave them in place
-  until a version with sidecars sweeps them
-  ([segment-format.md](segment-format.md)).
 
 ## Load measurements
 
