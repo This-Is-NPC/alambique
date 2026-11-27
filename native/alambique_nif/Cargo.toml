@@ -31,7 +31,9 @@ unsafe_op_in_unsafe_fn = "deny"
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 
 # Thresholds (cognitive complexity, lines, arguments) and the test exemptions
-# are in clippy.toml.
+# are in clippy.toml. `as_conversions` and `arithmetic_side_effects` stay off:
+# most of their findings here are lossless conversions and arithmetic within
+# the page and frame sizes; the two cast lints below catch lossy conversions.
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"
 missing_safety_doc = "deny"
