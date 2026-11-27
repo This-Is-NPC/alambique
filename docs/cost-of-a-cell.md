@@ -268,30 +268,31 @@ page cache:
 
 | What | Arena off | Arena on (64 KiB extents) |
 | --- | --- | --- |
-| Share of the bytes a shrink frees that leave the process, with 50, 75 and 90% of the connections shrunk to `idle_cache_kib` 64 or 0, filled in turns or one at a time | about 0% | about 100% |
+| Share of the bytes a shrink frees that leave the process, with 50, 75 and 90% of the connections shrunk to `idle_cache_kib` 64 or 0, filled in turns or one at a time | 0 to 3% | 98 to 101% |
 | p99 of a hot connection's point read, while the other connections are shrunk to nothing and refilled in bulk (without that load: 41 µs) | 55 µs | 43 µs |
-| Longest trim (on the trim thread) | none | under 2 ms |
-| One page miss of a cache the file does not fit in | about 0.8 µs | about 1.0 µs |
+| Longest trim (on the trim thread) | none | 1.1 to 1.9 ms |
+| One page miss of a cache the file does not fit in | 0.77 to 0.90 µs | 0.89 to 1.16 µs |
 | First scan of a 16 MiB file after the cache was released (32 MiB cache, 3,900 pages) | 5.0 ms | 9.2 ms |
 | Memory growth over 20 shrinks and refills of one connection | none | none |
 
 The default extent is 64 KiB. All sizes release the same share, so the size
 is chosen by what a page miss costs: 16 KiB costs about 25% more per miss than
-64 KiB, and 256 KiB costs the same as 64 KiB. A page miss costs
+64 KiB, and 256 KiB costs about the same as 64 KiB. A page miss costs
 the arena's lock and the region's bookkeeping, about 0.1 to 0.25 µs; the first scan after a release also pays one page fault per OS page,
-about 0.5 µs a page. Extents of 16 KiB cost about 1.3 µs a miss, with
-no gain in what leaves. At 350 awake cells with 512 KiB of page cache filled
-each, the memory of the process grows by, per cell (the growth of the process
-divided by 350):
+about 0.5 µs a page. Extents of 16 KiB cost about 1.1 to 1.5 µs a miss, with
+no gain in what leaves; extents of 256 KiB show no measurable difference from
+64 KiB. At 350 awake cells with 512 KiB of page cache filled each, the
+memory of the process grows by, per cell (the growth of the process divided by
+350):
 
 | Cells | Arena off | Arena on |
 | --- | --- | --- |
-| No idle handling | about 1,700 KiB | about 1,800 KiB |
-| `idle_cache_after_ms` (shrink to 64 KiB) | 270 KiB | about 230 KiB |
-| `idle_close_after_ms` | about 130 KiB | about 60 KiB |
+| No idle handling | 1,440 to 1,970 KiB | 1,665 to 1,945 KiB |
+| `idle_cache_after_ms` (shrink to 64 KiB) | 270 KiB | 210 to 245 KiB |
+| `idle_close_after_ms` | 120 to 135 KiB | 40 to 85 KiB |
 
 The arena is what lets the memory an idle close frees leave the process; the
-growth of 350 awake cells with no idle handling changes by little with it.
+growth of 350 awake cells is about the same with and without it.
 
 **`awake: [lookaside_bytes: ..., lookaside_count: ...]`.** The default is 512
 bytes by 16 slots, 8,192 bytes of memory on each connection; SQLite's own
@@ -342,7 +343,7 @@ against closed:
 
 | | cells of 0 notes | cells of 2,000 notes |
 | --- | --- | --- |
-| RssAnon | about 15 KiB lower | about 330 KiB lower |
+| RssAnon | 6 to 24 KiB lower | 320 to 336 KiB lower |
 | Erlang memory (total) | 277 -> 238 KiB | 310 -> 271 KiB |
 | SQLite memory in use | 38 -> 0 KiB | 316 -> 0 KiB |
 | Page arena, resident | 12 -> 1 KiB | 292 -> 1 KiB |
